@@ -1,0 +1,4 @@
+- Every issue must include explicit testing requirements in its acceptance criteria. Specify which edge cases the worker should test.
+- Use table-driven tests where applicable.
+- Include full function signatures and struct definitions, not just descriptions.
+- Specify which packages to import and which existing helpers to reuse.

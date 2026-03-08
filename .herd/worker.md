@@ -1,0 +1,5 @@
+- Every function must have unit tests covering edge cases.
+- Use table-driven tests where applicable.
+- Use testify/assert and testify/require, not raw if/t.Fatal.
+- Run go test ./... before considering the task complete.
+- Run go vet ./... and fix any issues.
