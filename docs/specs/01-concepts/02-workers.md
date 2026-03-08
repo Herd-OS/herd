@@ -79,6 +79,21 @@ The full issue body is passed through verbatim — it is not summarized, reforma
 
 `herd worker exec` handles the full lifecycle: reading the issue, creating the worker branch, invoking the agent (which commits as it works), and pushing. Workers don't open PRs — the Integrator handles that after consolidating all worker branches into the batch branch.
 
+## Commit Attribution
+
+Worker commits attribute both the human who initiated the work and HerdOS. The dispatching user's git identity (name and email) is passed to the worker workflow as inputs, captured at dispatch time from `git config`.
+
+- **Author**: the dispatching user (the person who ran `herd plan` or `herd dispatch`)
+- **Co-author**: HerdOS, via a `Co-authored-by` trailer
+
+```
+Add CSS custom properties for theming (#42)
+
+Co-authored-by: herd-os[bot] <ID+herd-os[bot]@users.noreply.github.com>
+```
+
+The worker sets `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` from the workflow inputs, then instructs the agent to include the `Co-authored-by` trailer in every commit message. See [GitHub App](../02-github/06-github-app.md) for details on the bot identity and avatar.
+
 ## Concurrency
 
 Multiple workers can run simultaneously — that's the whole point. Each worker operates on its own branch, isolated from others.

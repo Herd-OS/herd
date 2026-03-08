@@ -49,6 +49,7 @@ monitor:
 # PR settings
 pull_requests:
   auto_merge: false               # Disabled by default — human reviews batch PRs
+  co_author: true                 # Add Co-authored-by: herd-os[bot] trailer to worker commits
 ```
 
 ## Configuration Fields
@@ -108,6 +109,7 @@ These are populated by `herd init` from the git remote URL. They can be overridd
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `auto_merge` | boolean | false | Auto-merge batch PRs after agent review passes |
+| `co_author` | boolean | true | Add `Co-authored-by: herd-os[bot]` trailer to worker commits |
 
 Branch naming conventions (`herd/worker/<issue>-<slug>`, `herd/batch/<milestone>-<slug>`) and the PR title prefix (`[herd]`) are hardcoded and not configurable.
 
