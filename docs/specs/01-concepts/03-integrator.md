@@ -316,6 +316,10 @@ By default, the batch PR is created for **human review**. The reviewer sees the 
 
 When a human approves the batch PR, the Integrator detects the `pull_request_review` event and merges the PR automatically (if CI passes). The human's job is to review and approve — the system handles the merge. No extra click needed.
 
+### Externally merged PRs
+
+If a human (or another tool) merges the batch PR directly instead of just approving it, the Integrator handles this gracefully. The `pull_request: closed` event fires regardless of who merged the PR, so the Integrator's post-merge steps (closing issues via API, closing the milestone, cleaning up branches) still run normally. This is not an error — the merge result is the same.
+
 ### Auto-merge (skip human review)
 
 When `auto_merge` is enabled in `.herdos.yml`, the batch PR is merged automatically after agent review passes and CI passes — no human approval needed. This is opt-in for users who trust their pipeline and want a fully autonomous workflow.
