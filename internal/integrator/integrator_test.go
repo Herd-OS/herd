@@ -16,7 +16,7 @@ import (
 // --- Mock Platform ---
 
 type mockPlatform struct {
-	issues     *mockIssueService
+	issues     platform.IssueService
 	prs        *mockPRService
 	workflows  *mockWorkflowService
 	repo       *mockRepoService
@@ -74,6 +74,7 @@ func (m *mockIssueService) AddComment(_ context.Context, _ int, _ string) error 
 type mockPRService struct {
 	listResult []*platform.PullRequest
 	created    *platform.PullRequest
+	merged     bool
 }
 
 func (m *mockPRService) Create(_ context.Context, title, body, head, base string) (*platform.PullRequest, error) {
@@ -88,7 +89,8 @@ func (m *mockPRService) Update(_ context.Context, _ int, _, _ *string) (*platfor
 	return nil, nil
 }
 func (m *mockPRService) Merge(_ context.Context, _ int, _ platform.MergeMethod) (*platform.MergeResult, error) {
-	return nil, nil
+	m.merged = true
+	return &platform.MergeResult{Merged: true}, nil
 }
 func (m *mockPRService) UpdateBranch(_ context.Context, _ int) error { return nil }
 func (m *mockPRService) AddComment(_ context.Context, _ int, _ string) error { return nil }

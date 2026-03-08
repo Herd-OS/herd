@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/git"
@@ -283,11 +282,6 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		TierComplete:    true,
 		DispatchedCount: dispatched,
 	}, nil
-}
-
-// Review runs an agent review on the batch PR. Stub — implemented in review.go.
-func Review(_ context.Context, _ platform.Platform, _ agent.Agent, _ *config.Config, _ ReviewParams) (*ReviewResult, error) {
-	return &ReviewResult{}, nil
 }
 
 // buildTiersFromIssues parses issue front matter to build a DAG and compute tiers.

@@ -63,6 +63,7 @@ type ExecResult struct {
 type ReviewOptions struct {
 	AcceptanceCriteria []string
 	RepoRoot           string
+	SystemPrompt       string
 }
 
 type ReviewResult struct {

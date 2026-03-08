@@ -140,8 +140,9 @@ func newIntegratorReviewCmd() *cobra.Command {
 
 			ag := claude.New(cfg.Agent.Binary, cfg.Agent.Model)
 			cwd, _ := os.Getwd()
+			g := git.New(cwd)
 
-			result, err := integrator.Review(cmd.Context(), client, ag, cfg, integrator.ReviewParams{
+			result, err := integrator.Review(cmd.Context(), client, ag, g, cfg, integrator.ReviewParams{
 				RunID:    runID,
 				RepoRoot: cwd,
 			})
