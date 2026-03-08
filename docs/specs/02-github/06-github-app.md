@@ -56,6 +56,12 @@ The GitHub App generates installation tokens for API calls. This removes the dep
 4. Commits are co-authored by herd-os[bot]
 ```
 
+## Branch Protection
+
+The GitHub App must be able to merge PRs after human approval (or without approval when `auto_merge: true`). This requires the App to be added to the branch protection rule's **bypass list** in the repository settings.
+
+This also solves a key workflow constraint: since the Integrator (via the App) opens the batch PR, the human user is not the PR author and can approve their own work. If a human opened the PR instead, branch protection rules requiring approval would block them from approving it.
+
 ## Setup
 
 ### Creating the App
