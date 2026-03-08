@@ -55,8 +55,11 @@ See [docs/getting-started.md](docs/getting-started.md) for the full setup guide.
 |---------|-------------|
 | `herd init` | Set up a repo for HerdOS (config, labels, workflows) |
 | `herd config list\|get\|set\|edit` | View and manage configuration |
-
-More commands (`plan`, `dispatch`, `status`, `batch`) are coming soon.
+| `herd plan [description]` | Plan and decompose work into issues |
+| `herd dispatch [issue\|--batch\|--all]` | Dispatch workers to execute issues |
+| `herd status [--batch\|--watch\|--json]` | Show system status |
+| `herd batch list\|show\|cancel` | Manage batches |
+| `herd runner list` | List self-hosted runners |
 
 ## Documentation
 
@@ -71,7 +74,7 @@ Anyone who's tried to coordinate multiple AI agents knows the feeling — it's l
 
 ## Status
 
-In active development. Foundation is complete — core orchestration commands are next.
+In active development. Planning, dispatch, and monitoring commands are functional. Worker execution and the Integrator are next.
 
 ## License
 

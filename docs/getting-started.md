@@ -65,10 +65,78 @@ Customize how each HerdOS role behaves in your project by editing files in `.her
 
 These files are created empty by `herd init`. Add your project-specific instructions and commit them — they're shared across your team.
 
+## Planning Work
+
+Decompose a feature into tasks with an interactive agent session:
+
+```bash
+herd plan "Add user authentication"
+```
+
+The agent asks clarifying questions, then produces a decomposition with tasks, dependencies, and tier assignments. You can confirm, reject, or edit the plan in `$EDITOR`.
+
+To plan without auto-dispatching Tier 0:
+
+```bash
+herd plan --no-dispatch "Add user authentication"
+```
+
+Preview what would be created:
+
+```bash
+herd plan --dry-run "Add user authentication"
+```
+
+## Dispatching Workers
+
+After planning, Tier 0 tasks are dispatched automatically. To manually dispatch:
+
+```bash
+# Dispatch a single issue
+herd dispatch 42
+
+# Dispatch all ready issues in a batch
+herd dispatch --batch 5
+
+# Dispatch across all batches
+herd dispatch --all
+
+# Override concurrency limit
+herd dispatch --batch 5 --ignore-limit
+```
+
+## Monitoring Progress
+
+```bash
+# Overview of all batches and active workers
+herd status
+
+# Detailed view of a specific batch
+herd status --batch 5
+
+# Auto-refreshing dashboard
+herd status --watch
+
+# Machine-readable output
+herd status --json
+
+# Runner status
+herd status --runners
+```
+
+## Managing Batches
+
+```bash
+# List active batches
+herd batch list
+
+# Show detailed issue status for a batch
+herd batch show 5
+
+# Cancel a batch (stops workers, labels issues as failed, closes milestone)
+herd batch cancel 5
+```
+
 ## Next Steps
 
-Once initialized, you're ready to plan and dispatch work. These features are coming in the next milestone:
-
-- `herd plan` — decompose a feature into tasks
-- `herd dispatch` — send tasks to workers
-- `herd status` — monitor progress
+Worker execution and the Integrator (merge consolidation, agent review) are coming in the next milestone.
