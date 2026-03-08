@@ -36,6 +36,8 @@ func NewRootCmd() *cobra.Command {
 
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newInitCmd())
+	root.AddCommand(newPlanCmd())
+	root.AddCommand(newDispatchCmd())
 
 	// Override the help function to support --help-all
 	defaultHelp := root.HelpFunc()

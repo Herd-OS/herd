@@ -31,22 +31,22 @@ type TaskSpec struct {
 }
 
 type Plan struct {
-	BatchName string        `json:"batch_name"`
-	Tasks     []PlannedTask `json:"tasks"`
+	BatchName string        `json:"batch_name" yaml:"batch_name"`
+	Tasks     []PlannedTask `json:"tasks" yaml:"tasks"`
 }
 
 type PlannedTask struct {
-	Title                   string   `json:"title"`
-	Description             string   `json:"description"`
-	ImplementationDetails   string   `json:"implementation_details"`
-	AcceptanceCriteria      []string `json:"acceptance_criteria"`
-	Scope                   []string `json:"scope"`
-	Conventions             []string `json:"conventions"`
-	ContextFromDependencies []string `json:"context_from_dependencies"`
-	Complexity              string   `json:"complexity"`              // "low", "medium", "high"
-	Type                    string   `json:"type"`                    // "feature", "bugfix" (default: "feature")
-	RunnerLabel             string   `json:"runner_label"`            // Runner label override; empty = use config default
-	DependsOn               []int    `json:"depends_on"`             // Indices into the Tasks slice
+	Title                   string   `json:"title" yaml:"title"`
+	Description             string   `json:"description" yaml:"description"`
+	ImplementationDetails   string   `json:"implementation_details" yaml:"implementation_details"`
+	AcceptanceCriteria      []string `json:"acceptance_criteria" yaml:"acceptance_criteria"`
+	Scope                   []string `json:"scope" yaml:"scope"`
+	Conventions             []string `json:"conventions" yaml:"conventions"`
+	ContextFromDependencies []string `json:"context_from_dependencies" yaml:"context_from_dependencies"`
+	Complexity              string   `json:"complexity" yaml:"complexity"`       // "low", "medium", "high"
+	Type                    string   `json:"type" yaml:"type"`                   // "feature", "bugfix" (default: "feature")
+	RunnerLabel             string   `json:"runner_label" yaml:"runner_label"`   // Runner label override; empty = use config default
+	DependsOn               []int    `json:"depends_on" yaml:"depends_on"`      // Indices into the Tasks slice
 }
 
 type ExecResult struct {
