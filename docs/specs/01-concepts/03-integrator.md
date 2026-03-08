@@ -184,15 +184,22 @@ Batch **Add JWT authentication** — 5 tasks across 2 tiers.
 - `herd/worker/46-add-auth-dependencies` (1 commit)
 
 No-op workers (issues where the work was already done) are omitted from this list.
-
----
-
-Closes #42, #43, #44, #45, #46
 ```
 
-The `Closes #N` references at the bottom use GitHub's native auto-close mechanism — when the PR merges, all listed issues are automatically closed.
-
 The title prefix `[herd]` is hardcoded.
+
+### Issue Closure
+
+The Integrator **explicitly closes issues via the Platform API** after the batch PR merges — it does not rely on GitHub's `Closes #N` auto-close syntax. This is intentional:
+
+1. **Portability.** Auto-close keywords vary across platforms (GitHub, GitLab, Gitea have different syntax and behavior). Explicit API calls work identically everywhere.
+2. **Reliability.** GitHub's keyword parsing is fragile with formatting variations (comma-separated lists, squash merges collapsing commit messages, etc.). API calls are deterministic.
+3. **Control.** The Integrator can verify each issue's final state, add a closing comment with a summary, and handle edge cases (e.g., fix issues added during review cycles).
+
+After confirming the batch PR merge, the Integrator:
+1. Lists all issues in the batch milestone
+2. Closes each issue via `IssueService.Update(number, {State: "closed"})`
+3. Closes the milestone via `MilestoneService.Update(number, {State: "closed"})`
 
 ## Agent Review
 
@@ -280,7 +287,7 @@ After all fix workers in a cycle complete and are consolidated, the Integrator t
 
 **Safety valve:** If a single review cycle finds more than 10 issues, the Integrator does not create fix workers. Instead, it comments on the PR with all issues found and escalates to the user. This prevents a confused or overzealous agent from generating dozens of fix workers in one pass.
 
-Fix issues are closed by the same `Closes #N` mechanism when the batch PR merges — the Integrator adds them to the PR body as they're created.
+Fix issues are closed by the Integrator via the Platform API after the batch PR merges, along with all other issues in the milestone.
 
 ### Interaction with auto-merge
 
