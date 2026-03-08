@@ -32,29 +32,46 @@ workflow_dispatch ──▶   1. Checkout batch branch
 
 ## Worker Execution
 
-The core of a worker is `herd worker exec <issue>`, which invokes the configured agent in headless mode with a carefully constructed prompt:
+The core of a worker is `herd worker exec <issue>`, which invokes the configured agent in headless mode with a carefully constructed prompt.
+
+### Worker System Prompt
+
+The issue body is the primary input. It contains everything the worker needs: the task description, implementation details, conventions, context from dependencies, acceptance criteria, and file scope. The Planner front-loads all of this so the worker can usually execute immediately without a lengthy research phase.
+
+The worker system prompt wraps the issue body with execution instructions:
 
 ```
 You are a HerdOS worker executing a task.
 
 ## Task
-<issue title and body>
 
-## Acceptance Criteria
-<parsed from issue body>
+<issue title>
 
-## Before You Start
-- Check if the acceptance criteria are already satisfied by existing code. If so, report that no changes are needed and exit successfully without making any commits.
+<full issue body — includes Task, Implementation Details, Conventions,
+Context from Dependencies, Acceptance Criteria, and Files to Modify
+sections as written by the Planner>
 
-## Constraints
-- Only modify files relevant to this task
-- Commit your changes with clear messages referencing issue #<number>
-- If you cannot complete the task, exit with a non-zero status and include the reason in your output
+## Instructions
 
-## Scope (only included if scope is non-empty in the issue front matter)
-- Focus on these files/directories: <scope list>
-- Do not modify files outside this scope
+- The issue body is your primary source of context. Start there.
+- If the issue includes Implementation Details, Conventions, or Context
+  from Dependencies sections, follow them closely — the Planner wrote
+  them specifically for you.
+- If the issue lacks information you need, explore the codebase to fill
+  the gaps. But prefer what the issue says over what you infer.
+- Check if the acceptance criteria are already satisfied by existing
+  code. If so, report that no changes are needed and exit successfully
+  without making any commits.
+- Focus on files listed in the Scope or Files to Modify sections. You
+  may modify other files if necessary to satisfy acceptance criteria.
+- Commit your changes with clear messages referencing issue #<number>.
+- Do not add features, refactor code, or make improvements beyond
+  what is specified in the issue.
+- If you cannot complete the task, exit with a non-zero status and
+  include the reason in your output.
 ```
+
+The full issue body is passed through verbatim — it is not summarized, reformatted, or truncated. The Implementation Details, Conventions, and Context from Dependencies sections are written by the Planner specifically for the worker.
 
 `herd worker exec` handles the full lifecycle: reading the issue, creating the worker branch, invoking the agent (which commits as it works), and pushing. Workers don't open PRs — the Integrator handles that after consolidating all worker branches into the batch branch.
 
