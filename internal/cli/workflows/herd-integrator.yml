@@ -1,0 +1,35 @@
+name: HerdOS Integrator
+on:
+  workflow_run:
+    workflows: ["HerdOS Worker"]
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  integrate:
+    runs-on: [self-hosted, herd-worker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Consolidate, advance, and review
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          herd integrator consolidate --run-id ${{ github.event.workflow_run.id }}
+          herd integrator advance --run-id ${{ github.event.workflow_run.id }}
+          herd integrator review --run-id ${{ github.event.workflow_run.id }}

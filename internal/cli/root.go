@@ -35,6 +35,7 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVar(&showAll, "help-all", false, "Show all commands including internal ones")
 
 	root.AddCommand(newConfigCmd())
+	root.AddCommand(newInitCmd())
 
 	// Override the help function to support --help-all
 	defaultHelp := root.HelpFunc()
