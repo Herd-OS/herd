@@ -131,28 +131,3 @@ func (s *repositoryService) GetBranchSHA(ctx context.Context, name string) (stri
 	return ref.GetObject().GetSHA(), nil
 }
 
-// PullRequestService stubs — not implemented until M3 (Worker & Integrator).
-
-var errNotImpl = fmt.Errorf("not implemented")
-
-type pullRequestService struct{ c *Client }
-
-func (s *pullRequestService) Create(_ context.Context, _, _, _, _ string) (*platform.PullRequest, error) {
-	return nil, errNotImpl
-}
-func (s *pullRequestService) Get(_ context.Context, _ int) (*platform.PullRequest, error) {
-	return nil, errNotImpl
-}
-func (s *pullRequestService) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
-	return nil, errNotImpl
-}
-func (s *pullRequestService) Update(_ context.Context, _ int, _, _ *string) (*platform.PullRequest, error) {
-	return nil, errNotImpl
-}
-func (s *pullRequestService) Merge(_ context.Context, _ int, _ platform.MergeMethod) (*platform.MergeResult, error) {
-	return nil, errNotImpl
-}
-func (s *pullRequestService) UpdateBranch(_ context.Context, _ int) error { return errNotImpl }
-func (s *pullRequestService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
-	return errNotImpl
-}
