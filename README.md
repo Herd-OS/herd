@@ -4,6 +4,8 @@
 
 # Herd
 
+*Herd your agents.*
+
 GitHub-native orchestration for agentic development systems.
 
 ## The Problem
@@ -62,6 +64,10 @@ More commands (`plan`, `dispatch`, `status`, `batch`) are coming soon.
 - [Getting Started](docs/getting-started.md)
 - [Configuration](docs/configuration.md)
 - [Design Specs](docs/specs/) (internal)
+
+## Why a Cat?
+
+Anyone who's tried to coordinate multiple AI agents knows the feeling — it's like herding cats. Each agent is powerful on its own, but getting them to work together without stepping on each other? That's the hard part. Herd tames the chaos.
 
 ## Status
 
