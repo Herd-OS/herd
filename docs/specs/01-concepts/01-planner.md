@@ -119,6 +119,10 @@ The agent is launched as a subprocess. HerdOS doesn't implement its own chat loo
 
 **Why a file, not stdout?** The agent's stdout is mixed with conversation output, formatting, and UI elements. Parsing structured JSON from that stream is fragile. Writing to a known file path is reliable, works the same way across all agents, and keeps `herd` to a single code path.
 
+## Role Instructions
+
+If `.herd/planner.md` exists in the repository, its contents are appended to the planner's system prompt. This is convention-based — no configuration is needed. Drop the file in `.herd/` and it gets picked up automatically. Use this to provide project-specific planning guidance: preferred decomposition patterns, naming conventions, architectural constraints, or any other context that should inform every planning session.
+
 ## Planning System Prompt
 
 The agent receives a system prompt that includes:

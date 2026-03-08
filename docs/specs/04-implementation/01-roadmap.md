@@ -26,6 +26,7 @@ A complete, self-healing orchestration system for a single repository.
 
 ### Core Features
 
+- Role instruction files (`.herd/planner.md`, `.herd/worker.md`, `.herd/integrator.md`, `.herd/monitor.md`) — each ships with the milestone that implements its role
 - GitHub Issues with `herd/*` labels as work tracking layer
 - DAG-based tier execution (parallel within tier, sequential between tiers)
 - Batch branch consolidation with single batch PR per batch

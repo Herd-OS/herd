@@ -63,41 +63,41 @@ func TestDetectOwnerRepoInvalidRemote(t *testing.T) {
 
 func TestEnsureGitignoreCreatesFile(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, ensureGitignore(dir, ".herd/"))
+	require.NoError(t, ensureGitignore(dir, ".herd/state/"))
 
 	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	require.NoError(t, err)
-	assert.Equal(t, ".herd/\n", string(content))
+	assert.Equal(t, ".herd/state/\n", string(content))
 }
 
 func TestEnsureGitignoreAppendsToExisting(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("bin/\n"), 0644))
-	require.NoError(t, ensureGitignore(dir, ".herd/"))
+	require.NoError(t, ensureGitignore(dir, ".herd/state/"))
 
 	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	require.NoError(t, err)
-	assert.Equal(t, "bin/\n.herd/\n", string(content))
+	assert.Equal(t, "bin/\n.herd/state/\n", string(content))
 }
 
 func TestEnsureGitignoreIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("bin/\n.herd/\n"), 0644))
-	require.NoError(t, ensureGitignore(dir, ".herd/"))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("bin/\n.herd/state/\n"), 0644))
+	require.NoError(t, ensureGitignore(dir, ".herd/state/"))
 
 	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	require.NoError(t, err)
-	assert.Equal(t, "bin/\n.herd/\n", string(content))
+	assert.Equal(t, "bin/\n.herd/state/\n", string(content))
 }
 
 func TestEnsureGitignoreNoTrailingNewline(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("bin/"), 0644))
-	require.NoError(t, ensureGitignore(dir, ".herd/"))
+	require.NoError(t, ensureGitignore(dir, ".herd/state/"))
 
 	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	require.NoError(t, err)
-	assert.Equal(t, "bin/\n.herd/\n", string(content))
+	assert.Equal(t, "bin/\n.herd/state/\n", string(content))
 }
 
 func TestInstallWorkflows(t *testing.T) {
@@ -145,6 +145,53 @@ func TestWorkflowFiles(t *testing.T) {
 	assert.Contains(t, files, "herd-worker.yml")
 	assert.Contains(t, files, "herd-monitor.yml")
 	assert.Contains(t, files, "herd-integrator.yml")
+}
+
+func TestCreateRoleInstructionFiles(t *testing.T) {
+	dir := t.TempDir()
+	herdDir := filepath.Join(dir, ".herd")
+	require.NoError(t, os.MkdirAll(herdDir, 0755))
+
+	require.NoError(t, createRoleInstructionFiles(herdDir))
+
+	for _, name := range RoleInstructionFiles() {
+		path := filepath.Join(herdDir, name)
+		info, err := os.Stat(path)
+		require.NoError(t, err, "%s should exist", name)
+		assert.Equal(t, int64(0), info.Size(), "%s should be empty", name)
+	}
+}
+
+func TestCreateRoleInstructionFilesDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	herdDir := filepath.Join(dir, ".herd")
+	require.NoError(t, os.MkdirAll(herdDir, 0755))
+
+	// Write custom content to planner.md
+	custom := []byte("Always write thorough tests.")
+	require.NoError(t, os.WriteFile(filepath.Join(herdDir, "planner.md"), custom, 0644))
+
+	require.NoError(t, createRoleInstructionFiles(herdDir))
+
+	// planner.md should keep custom content
+	content, err := os.ReadFile(filepath.Join(herdDir, "planner.md"))
+	require.NoError(t, err)
+	assert.Equal(t, custom, content)
+
+	// Other files should still be created
+	for _, name := range []string{"worker.md", "integrator.md", "monitor.md"} {
+		_, err := os.Stat(filepath.Join(herdDir, name))
+		assert.NoError(t, err, "%s should exist", name)
+	}
+}
+
+func TestRoleInstructionFiles(t *testing.T) {
+	files := RoleInstructionFiles()
+	assert.Len(t, files, 4)
+	assert.Contains(t, files, "planner.md")
+	assert.Contains(t, files, "worker.md")
+	assert.Contains(t, files, "integrator.md")
+	assert.Contains(t, files, "monitor.md")
 }
 
 // setupTestGitRepo creates a temp git repo with the given remote URL.

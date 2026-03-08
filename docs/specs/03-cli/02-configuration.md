@@ -122,8 +122,9 @@ Branch naming conventions (`herd/worker/<issue>-<slug>`, `herd/batch/<milestone>
 
 2. **Create configuration**
    - Write `.herdos.yml` with defaults
-   - Create `.herd/` runtime directory (for plan files and other transient data)
-   - Add `.herd/` to `.gitignore`
+   - Create `.herd/` directory (tracked in git) with role instruction files: `planner.md`, `worker.md`, `integrator.md`, `monitor.md` (empty, created only if they don't already exist)
+   - Create `.herd/state/` subdirectory for local runtime state (plan JSON and other transient data)
+   - Add `.herd/state/` to `.gitignore`
    - Prompt for customization (model, max workers, etc.)
 
 3. **Set up GitHub labels**
@@ -212,6 +213,19 @@ Configuration can be overridden via environment variables:
 | `HERD_TIMEOUT` | `workers.timeout_minutes` |
 
 Environment variables take precedence over `.herdos.yml`. This is useful for CI or when running with different settings temporarily.
+
+## Role Instruction Files
+
+Each HerdOS role can receive project-specific instructions via convention-based files in the `.herd/` directory:
+
+| File | Appended to |
+|------|-------------|
+| `.herd/planner.md` | Planner's system prompt |
+| `.herd/worker.md` | Worker's system prompt |
+| `.herd/integrator.md` | Integrator's agent prompts (review and conflict resolution) |
+| `.herd/monitor.md` | Monitor's agent prompt |
+
+No configuration is needed — if the file exists, its contents are appended to the corresponding role's prompt. These files are checked into version control and shared across the team. The `.herd/` directory itself is tracked in git; only `.herd/state/` is gitignored (for transient data like plan JSON files). Empty instruction files are created by `herd init`.
 
 ## Multiple Repos
 

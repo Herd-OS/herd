@@ -34,6 +34,10 @@ workflow_dispatch ──▶   1. Checkout batch branch
 
 The core of a worker is `herd worker exec <issue>`, which invokes the configured agent in headless mode with a carefully constructed prompt.
 
+### Role Instructions
+
+If `.herd/worker.md` exists in the repository, its contents are appended to the worker's system prompt. This is convention-based — no configuration is needed. Drop the file in `.herd/` and it gets picked up automatically. Use this to provide project-specific worker guidance: coding standards, forbidden patterns, testing requirements, or other constraints that every worker should follow.
+
 ### Worker System Prompt
 
 The issue body is the primary input. It contains everything the worker needs: the task description, implementation details, conventions, context from dependencies, acceptance criteria, and file scope. The Planner front-loads all of this so the worker can usually execute immediately without a lengthy research phase.

@@ -65,15 +65,18 @@ func runInit(skipLabels, skipWorkflows bool) error {
 		fmt.Println(display.Success(config.ConfigFile + " already exists"))
 	}
 
-	// 3. Create .herd/ directory
+	// 3. Create .herd/ directory with role instruction files
 	herdDir := filepath.Join(dir, ".herd")
 	if err := os.MkdirAll(herdDir, 0755); err != nil {
 		return fmt.Errorf("creating .herd/: %w", err)
 	}
-	if err := ensureGitignore(dir, ".herd/"); err != nil {
+	if err := ensureGitignore(dir, ".herd/state/"); err != nil {
 		return fmt.Errorf("updating .gitignore: %w", err)
 	}
-	fmt.Println(display.Success("Created .herd/ directory"))
+	if err := createRoleInstructionFiles(herdDir); err != nil {
+		return err
+	}
+	fmt.Println(display.Success("Created .herd/ directory with role instruction files"))
 
 	// 4. Create labels
 	if !skipLabels {
@@ -273,6 +276,23 @@ func installWorkflows(dir string) error {
 		fmt.Println(display.Success("Installed " + name))
 	}
 
+	return nil
+}
+
+// RoleInstructionFiles returns the list of role instruction filenames created by init.
+func RoleInstructionFiles() []string {
+	return []string{"planner.md", "worker.md", "integrator.md", "monitor.md"}
+}
+
+func createRoleInstructionFiles(herdDir string) error {
+	for _, name := range RoleInstructionFiles() {
+		p := filepath.Join(herdDir, name)
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			if err := os.WriteFile(p, []byte{}, 0644); err != nil {
+				return fmt.Errorf("creating .herd/%s: %w", name, err)
+			}
+		}
+	}
 	return nil
 }
 

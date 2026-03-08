@@ -201,6 +201,10 @@ After confirming the batch PR merge, the Integrator:
 2. Closes each issue via `IssueService.Update(number, {State: "closed"})`
 3. Closes the milestone via `MilestoneService.Update(number, {State: "closed"})`
 
+## Role Instructions
+
+If `.herd/integrator.md` exists in the repository, its contents are appended to the Integrator's agent prompts (both the review prompt and the conflict-resolution prompt). This is convention-based — no configuration is needed. Drop the file in `.herd/` and it gets picked up automatically. Use this to provide project-specific review guidance: areas requiring extra scrutiny, known fragile code paths, or merge policies.
+
 ## Agent Review
 
 When all tiers are complete and the batch PR is opened, the Integrator dispatches an agent to review the consolidated changes. The agent:
