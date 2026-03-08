@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" width="360" alt="Herd">
+  <img src="assets/logo.png" width="260" alt="Herd">
 </p>
 
 # Herd
