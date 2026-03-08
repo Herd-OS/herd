@@ -119,6 +119,10 @@ The agent is launched as a subprocess. HerdOS doesn't implement its own chat loo
 
 **Why a file, not stdout?** The agent's stdout is mixed with conversation output, formatting, and UI elements. Parsing structured JSON from that stream is fragile. Writing to a known file path is reliable, works the same way across all agents, and keeps `herd` to a single code path.
 
+## Role Instructions
+
+If `.herd/planner.md` exists in the repository, its contents are appended to the planner's system prompt. This is convention-based — no configuration is needed. Drop the file in `.herd/` and it gets picked up automatically. Use this to provide project-specific planning guidance: preferred decomposition patterns, naming conventions, architectural constraints, or any other context that should inform every planning session.
+
 ## Planning System Prompt
 
 The agent receives a system prompt that includes:
@@ -143,23 +147,56 @@ The agent produces a structured plan that `herd` can parse:
   "tasks": [
     {
       "title": "Add auth dependencies",
-      "description": "Add bcrypt and jsonwebtoken to package.json",
-      "acceptance_criteria": ["bcrypt is in dependencies", "jsonwebtoken is in dependencies"],
-      "scope": ["package.json"],
+      "description": "Add bcrypt and jsonwebtoken to package.json as production dependencies.",
+      "implementation_details": "Run `npm install bcrypt jsonwebtoken` and `npm install -D @types/bcrypt @types/jsonwebtoken`. Verify both appear in the `dependencies` section of package.json (not devDependencies).",
+      "acceptance_criteria": [
+        "bcrypt is in dependencies (not devDependencies)",
+        "jsonwebtoken is in dependencies (not devDependencies)",
+        "@types/bcrypt and @types/jsonwebtoken are in devDependencies",
+        "npm install runs without errors",
+        "No other dependencies are modified"
+      ],
+      "scope": ["package.json", "package-lock.json"],
+      "conventions": [],
+      "context_from_dependencies": [],
       "complexity": "low",
       "depends_on": []
     },
     {
       "title": "Create User model with password hashing",
-      "description": "Create a User model in src/models/user.ts with bcrypt password hashing",
-      "acceptance_criteria": ["User model exists", "Passwords are hashed with bcrypt", "Model exports cleanly"],
-      "scope": ["src/models/user.ts"],
+      "description": "Create a User model in src/models/user.ts with bcrypt password hashing, following the existing model pattern in the codebase.",
+      "implementation_details": "Create `src/models/user.ts` with a User class/interface. Fields: id (UUID), email (string, unique), passwordHash (string), createdAt (Date), updatedAt (Date). Add a static `hashPassword(plain: string): Promise<string>` method using bcrypt with 12 salt rounds. Add an instance method `verifyPassword(plain: string): Promise<boolean>`. Follow the existing model pattern in `src/models/` — use the same ORM setup, export style, and naming conventions already in the codebase.",
+      "acceptance_criteria": [
+        "User model exists at src/models/user.ts",
+        "Fields: id, email, passwordHash, createdAt, updatedAt",
+        "hashPassword uses bcrypt with 12 salt rounds",
+        "verifyPassword compares against stored hash",
+        "Model is exported from src/models/index.ts",
+        "Unit tests in tests/models/user.test.ts cover hash and verify"
+      ],
+      "scope": ["src/models/user.ts", "src/models/index.ts", "tests/models/user.test.ts"],
+      "conventions": [
+        "Follow existing model pattern in src/models/ (same ORM, export style)",
+        "Use 12 salt rounds for bcrypt (industry standard)"
+      ],
+      "context_from_dependencies": [
+        "Task 0 adds bcrypt and jsonwebtoken to package.json — these are available as imports"
+      ],
       "complexity": "medium",
       "depends_on": [0]
     }
   ]
 }
 ```
+
+Each task includes:
+- `description` — what to build (the "what")
+- `implementation_details` — how to build it (the "how"), including exact file paths, function signatures, algorithms, data formats. This is the core of making issues self-contained.
+- `acceptance_criteria` — concrete, verifiable checks (the "done")
+- `conventions` — project-specific patterns the worker must follow
+- `context_from_dependencies` — information from dependency issues that this task needs, inlined to avoid cross-referencing. The Planner already knows what each task produces — it should tell downstream tasks explicitly.
+
+The `implementation_details`, `conventions`, and `context_from_dependencies` fields are new. They encode the research the Planner has already done, so workers don't repeat it.
 
 The agent writes this JSON to the output file specified in the system prompt (`.herd/plans/<plan-id>.json`). `herd` reads and parses it after the agent exits.
 
@@ -184,6 +221,119 @@ Good decomposition is critical. The Planner should produce tasks that:
 - **Are right-sized** — not so large that a worker struggles, not so small that overhead dominates
 
 The interactive session is key — the agent can ask questions, clarify requirements, and propose alternatives before committing to a plan.
+
+### Self-Contained Issues
+
+**The Planner does the thinking, the Worker does the typing.**
+
+Every issue must be self-contained — a worker with zero context beyond the issue body and the repository should be able to execute it without exploring the codebase for context. This is not optional. Workers run in fresh, isolated sessions with no memory of prior work.
+
+The Planner pays the research cost once during the interactive planning session. It reads the codebase, understands the architecture, identifies patterns and conventions, and encodes all of that into the issue. Every worker benefits from this upfront investment.
+
+**Why this matters for cost:** A vague issue like "Create the Platform interface" forces the worker agent to explore the codebase, grep through files, read documentation, and infer patterns — burning tokens on research the Planner already did. A well-written issue with exact signatures, file paths, and conventions lets the agent go straight to implementation.
+
+#### What every issue must include
+
+1. **Exact file paths.** Not "create a config module" but "create `internal/config/config.go`, `internal/config/defaults.go`, `internal/config/validate.go`."
+
+2. **Implementation details.** If the task involves implementing an interface, include the exact signatures. If it involves a specific algorithm, describe it. If there's a data format, show it. The worker should not be designing — it should be implementing a specification written by the Planner.
+
+3. **Patterns and conventions.** If the codebase uses specific patterns (error handling, naming, struct layout, test style), state them explicitly. Examples:
+   - "Use `var _ Interface = (*Impl)(nil)` for compile-time interface checks"
+   - "Stub methods return `errors.New(\"not implemented\")`, not panic"
+   - "Tests use `github.com/stretchr/testify/assert` and `require`"
+   - "Use table-driven tests for validation rules"
+
+4. **Context from related issues.** If this issue depends on types or functions created by another issue, include those types inline. Don't say "use the Issue type from #4" — paste the type definition. Repetition across issues is fine and expected. The cost of a few extra tokens in the issue body is trivial compared to the cost of the worker exploring the codebase to find the type.
+
+5. **Concrete acceptance criteria.** Not "tests pass" but "unit tests cover: loading valid config, missing file error, default values for omitted fields, env var overrides, validation of each field constraint."
+
+#### Example: bad vs good
+
+**Bad:**
+```markdown
+## Task
+Create the Platform interface and GitHub client scaffold.
+
+## Acceptance Criteria
+- [ ] All interfaces from the spec are defined
+- [ ] GitHub client connects and works
+- [ ] Stubs for unimplemented methods
+```
+
+**Good:**
+```markdown
+## Task
+Define the Platform interface and all sub-service interfaces in
+`internal/platform/platform.go`. Define all platform-agnostic types in
+`internal/platform/types.go`. Scaffold the GitHub implementation in
+`internal/platform/github/client.go` with a working client constructor
+and stub methods.
+
+## Implementation Details
+
+### `internal/platform/platform.go`
+
+Define these interfaces:
+
+    type Platform interface {
+        Issues() IssueService
+        PullRequests() PullRequestService
+        Workflows() WorkflowService
+        Labels() LabelService
+        Milestones() MilestoneService
+        Runners() RunnerService
+        Repository() RepositoryService
+    }
+
+    type IssueService interface {
+        Create(ctx context.Context, title, body string, labels []string, milestone *int) (*Issue, error)
+        Get(ctx context.Context, number int) (*Issue, error)
+        List(ctx context.Context, filters IssueFilters) ([]*Issue, error)
+        // ... all methods ...
+    }
+
+### `internal/platform/types.go`
+
+Define these types:
+
+    type Issue struct {
+        Number    int
+        Title     string
+        Body      string
+        // ... all fields ...
+    }
+
+### `internal/platform/github/client.go`
+
+Auth strategy: try GITHUB_TOKEN env var → GH_TOKEN env var →
+`gh auth token` CLI output as fallback.
+
+Use `github.com/google/go-github/v68` and `golang.org/x/oauth2`.
+
+### Conventions
+
+- Add compile-time interface check: `var _ platform.Platform = (*Client)(nil)`
+- Stub methods return `errors.New("not implemented")`, not panic
+- Only `RepositoryService.GetInfo()` needs a real implementation
+- Delete the placeholder `doc.go` when adding real files
+
+## Related Issues
+
+- #5 (Agent interface) follows the same patterns
+
+## Acceptance Criteria
+
+- [ ] All 7 service interfaces defined with exact method signatures
+- [ ] All platform types defined (Issue, PullRequest, Run, Runner, etc.)
+- [ ] GitHub client authenticates via GITHUB_TOKEN → GH_TOKEN → gh auth
+- [ ] RepositoryService.GetInfo() returns real data from GitHub API
+- [ ] All other methods return "not implemented" error
+- [ ] Compile-time check passes
+- [ ] `go vet ./...` clean
+```
+
+The second version takes more effort to write during planning, but produces a worker that can execute immediately without any research phase.
 
 ## Relationship to Other Components
 

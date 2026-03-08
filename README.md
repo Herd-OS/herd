@@ -28,9 +28,44 @@ herd plan "Add user authentication"
 
 Workers execute in parallel where possible, tier by tier. If a worker fails, the Monitor detects it and retries automatically. The system is self-healing — you can walk away after `herd plan` and come back to a reviewed PR.
 
+## Quick Start
+
+```bash
+# Build and install (requires Go 1.26+)
+git clone https://github.com/Herd-OS/herd.git
+cd herd && make build
+sudo cp bin/herd /usr/local/bin/
+
+# Initialize a repository
+cd /path/to/your/repo
+herd init
+
+# View and customize configuration
+herd config list
+herd config set workers.max_concurrent 5
+```
+
+See [docs/getting-started.md](docs/getting-started.md) for the full setup guide.
+
+## Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `herd init` | Set up a repo for HerdOS (config, labels, workflows) |
+| `herd config list\|get\|set\|edit` | View and manage configuration |
+
+More commands (`plan`, `dispatch`, `status`, `batch`) are coming soon.
+
+## Documentation
+
+- [Installation](docs/installation.md)
+- [Getting Started](docs/getting-started.md)
+- [Configuration](docs/configuration.md)
+- [Design Specs](docs/specs/) (internal)
+
 ## Status
 
-In development. Design specs are available in [`docs/specs/`](docs/specs/).
+In active development. Foundation is complete — core orchestration commands are next.
 
 ## License
 

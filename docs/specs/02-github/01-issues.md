@@ -47,24 +47,67 @@ herd:
 ## Task
 
 Create a theme toggle component that switches between light and dark mode.
+The component should be a React functional component using the existing
+design system button styles.
+
+## Implementation Details
+
+Create `src/components/ThemeToggle.tsx`:
+
+- React functional component using `useState` and `useEffect`
+- Read initial theme from `localStorage.getItem('theme')`, default to `'light'`
+- On toggle, set `document.documentElement.dataset.theme` to `'light'` or `'dark'`
+- Persist to `localStorage.setItem('theme', newTheme)` on every toggle
+- Use the existing `<Button>` component from `src/components/Button.tsx` for the toggle
+  (already exported, accepts `onClick` and `children` props)
+- Display a sun icon (☀️) when dark mode is active, moon icon (🌙) when light mode is active
+
+Add the export to `src/components/index.ts`:
+
+    export { ThemeToggle } from './ThemeToggle';
+
+### Conventions
+
+- Follow the existing component pattern in src/components/ (functional components,
+  named exports, no default exports)
+- CSS custom properties for theming are already defined in src/styles/theme.css
+  (issue #42 added `--bg-color`, `--text-color`, `--border-color` for both
+  `[data-theme="light"]` and `[data-theme="dark"]` selectors)
+
+### Context from Dependencies
+
+- Issue #42 (Add CSS custom properties) defined these custom properties:
+  `--bg-color`, `--text-color`, `--border-color`, `--accent-color` on both
+  `[data-theme="light"]` and `[data-theme="dark"]` selectors in
+  `src/styles/theme.css`. This component sets the `data-theme` attribute
+  that activates them.
+- Issue #43 (Create theme context) created `src/context/ThemeContext.tsx`
+  which exports `useTheme()` hook returning `{ theme, toggleTheme }`.
+  Use this hook instead of managing state locally.
 
 ## Acceptance Criteria
 
-- [ ] Component renders a toggle button
-- [ ] Clicking toggles between `data-theme="light"` and `data-theme="dark"` on `<html>`
-- [ ] Current theme is persisted to localStorage
-- [ ] Component is exported from the components index
-
-## Context
-
-This is part of the dark mode feature. The CSS custom properties are already defined
-(see issue #42). This component consumes them.
+- [ ] Component renders a toggle button using the existing Button component
+- [ ] Clicking toggles `data-theme` attribute on `<html>` between "light" and "dark"
+- [ ] Current theme is persisted to localStorage under key "theme"
+- [ ] Initial render reads from localStorage (or defaults to "light")
+- [ ] Component is exported from src/components/index.ts
+- [ ] Uses the useTheme() hook from ThemeContext (created by issue #43)
 
 ## Files to Modify
 
 - `src/components/ThemeToggle.tsx` (create)
 - `src/components/index.ts` (add export)
 ```
+
+The key sections are:
+
+- **Task** — what to build (concise summary)
+- **Implementation Details** — how to build it: exact file paths, function signatures, algorithms, data structures, which existing code to use. This section makes the issue self-contained.
+- **Conventions** — project-specific patterns the worker must follow (discovered by the Planner during its exploration of the codebase)
+- **Context from Dependencies** — information from issues this task depends on, inlined so the worker doesn't need to read other issues. The Planner knows what each dependency produces — it encodes that knowledge here.
+- **Acceptance Criteria** — concrete, verifiable checks
+- **Files to Modify** — explicit list of files to create or edit
 
 ### Front Matter Fields
 
@@ -121,7 +164,7 @@ Workers parse the front matter to understand their task. The human-readable sect
 | `blocked` | `failed` | Batch cancelled (`herd batch cancel`) |
 | `in-progress` | `failed` | Batch cancelled (`herd batch cancel`) |
 | `done` | `failed` | Batch cancelled (`herd batch cancel`) |
-| `done` | (closed) | Batch PR merged (GitHub auto-closes via `Closes #N`) |
+| `done` | (closed) | Batch PR merged (Integrator closes issues via API) |
 
 ## Manual Issues
 

@@ -184,15 +184,26 @@ Batch **Add JWT authentication** — 5 tasks across 2 tiers.
 - `herd/worker/46-add-auth-dependencies` (1 commit)
 
 No-op workers (issues where the work was already done) are omitted from this list.
-
----
-
-Closes #42, #43, #44, #45, #46
 ```
 
-The `Closes #N` references at the bottom use GitHub's native auto-close mechanism — when the PR merges, all listed issues are automatically closed.
-
 The title prefix `[herd]` is hardcoded.
+
+### Issue Closure
+
+The Integrator **explicitly closes issues via the Platform API** after the batch PR merges — it does not rely on GitHub's `Closes #N` auto-close syntax. This is intentional:
+
+1. **Portability.** Auto-close keywords vary across platforms (GitHub, GitLab, Gitea have different syntax and behavior). Explicit API calls work identically everywhere.
+2. **Reliability.** GitHub's keyword parsing is fragile with formatting variations (comma-separated lists, squash merges collapsing commit messages, etc.). API calls are deterministic.
+3. **Control.** The Integrator can verify each issue's final state, add a closing comment with a summary, and handle edge cases (e.g., fix issues added during review cycles).
+
+After confirming the batch PR merge, the Integrator:
+1. Lists all issues in the batch milestone
+2. Closes each issue via `IssueService.Update(number, {State: "closed"})`
+3. Closes the milestone via `MilestoneService.Update(number, {State: "closed"})`
+
+## Role Instructions
+
+If `.herd/integrator.md` exists in the repository, its contents are appended to the Integrator's agent prompts (both the review prompt and the conflict-resolution prompt). This is convention-based — no configuration is needed. Drop the file in `.herd/` and it gets picked up automatically. Use this to provide project-specific review guidance: areas requiring extra scrutiny, known fragile code paths, or merge policies.
 
 ## Agent Review
 
@@ -280,7 +291,7 @@ After all fix workers in a cycle complete and are consolidated, the Integrator t
 
 **Safety valve:** If a single review cycle finds more than 10 issues, the Integrator does not create fix workers. Instead, it comments on the PR with all issues found and escalates to the user. This prevents a confused or overzealous agent from generating dozens of fix workers in one pass.
 
-Fix issues are closed by the same `Closes #N` mechanism when the batch PR merges — the Integrator adds them to the PR body as they're created.
+Fix issues are closed by the Integrator via the Platform API after the batch PR merges, along with all other issues in the milestone.
 
 ### Interaction with auto-merge
 
@@ -304,6 +315,10 @@ By default, the batch PR is created for **human review**. The reviewer sees the 
 ### After human approval
 
 When a human approves the batch PR, the Integrator detects the `pull_request_review` event and merges the PR automatically (if CI passes). The human's job is to review and approve — the system handles the merge. No extra click needed.
+
+### Externally merged PRs
+
+If a human (or another tool) merges the batch PR directly instead of just approving it, the Integrator handles this gracefully. The `pull_request: closed` event fires regardless of who merged the PR, so the Integrator's post-merge steps (closing issues via API, closing the milestone, cleaning up branches) still run normally. This is not an error — the merge result is the same.
 
 ### Auto-merge (skip human review)
 

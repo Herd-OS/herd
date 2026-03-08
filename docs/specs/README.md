@@ -35,6 +35,7 @@ Start with the overview, then read sections in order. Files within each section 
 | 3 | [runners.md](02-github/03-runners.md) | Self-hosted runner setup and scaling | Draft |
 | 4 | [events.md](02-github/04-events.md) | Event-driven architecture: triggers and event types | Draft |
 | 5 | [permissions.md](02-github/05-permissions.md) | Security model and access control | Draft |
+| 6 | [github-app.md](02-github/06-github-app.md) | GitHub App: bot identity, attribution, auth | Draft |
 
 ### 03 — CLI
 

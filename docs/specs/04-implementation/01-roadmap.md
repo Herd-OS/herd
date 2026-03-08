@@ -26,6 +26,8 @@ A complete, self-healing orchestration system for a single repository.
 
 ### Core Features
 
+- GitHub App for bot identity (`herd-os[bot]`) and commit co-authorship
+- Role instruction files (`.herd/planner.md`, `.herd/worker.md`, `.herd/integrator.md`, `.herd/monitor.md`) — each ships with the milestone that implements its role
 - GitHub Issues with `herd/*` labels as work tracking layer
 - DAG-based tier execution (parallel within tier, sequential between tiers)
 - Batch branch consolidation with single batch PR per batch
@@ -47,6 +49,17 @@ A complete, self-healing orchestration system for a single repository.
   - `docs/runners.md` — self-hosted runner setup and scaling guide
   - `docs/examples.md` — example workflows: planning with design mockups, multi-tier features, bug fixes, CI failure recovery
   - Example `.herdos.yml` files for common setups (solo dev, small team, CI-heavy repo)
+
+### Documentation Process
+
+Each milestone ends with a documentation pass:
+
+1. **User-facing docs** (`docs/`) — create or update guides covering the features shipped in that milestone. These are the public docs that may be published to a website. Written for end users, not contributors.
+2. **README.md** — update to reflect current capabilities. Not historical — just what's available now: installation, quickstart, feature summary.
+
+Documentation is not deferred to a final milestone. It ships with the code it describes.
+
+The `docs/specs/` directory remains internal design documents for planning and is not user-facing.
 
 ### Testing
 
