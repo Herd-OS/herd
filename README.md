@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" width="200" alt="Herd">
+</p>
+
 # Herd
 
 GitHub-native orchestration for agentic development systems.
