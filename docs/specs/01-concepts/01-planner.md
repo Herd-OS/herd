@@ -217,8 +217,9 @@ Good decomposition is critical. The Planner should produce tasks that:
 
 - **Are independent** where possible — workers shouldn't block each other
 - **Have clear boundaries** — each task touches a specific set of files
+- **Cannot produce merge conflicts with parallel tasks** — if two tasks in the same tier might modify the same file, they must be combined into a single task or made sequential (one depends on the other). A merge conflict between parallel workers is expensive: it requires a conflict-resolution worker, burns tokens, and delays the batch. The Planner should prevent this by design.
 - **Include acceptance criteria** — the worker knows when it's done
-- **Are right-sized** — not so large that a worker struggles, not so small that overhead dominates
+- **Are right-sized** — not so large that a worker struggles, not so small that overhead dominates. Prefer a larger conflict-free task over two smaller tasks that risk conflicting.
 
 The interactive session is key — the agent can ask questions, clarify requirements, and propose alternatives before committing to a plan.
 
