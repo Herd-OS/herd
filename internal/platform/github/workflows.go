@@ -105,5 +105,6 @@ func mapRun(r *gh.WorkflowRun) *platform.Run {
 		Status:     r.GetStatus(),
 		Conclusion: r.GetConclusion(),
 		URL:        r.GetHTMLURL(),
+		CreatedAt:  r.GetCreatedAt().Time,
 	}
 }

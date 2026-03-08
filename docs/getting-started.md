@@ -137,6 +137,33 @@ herd batch show 5
 herd batch cancel 5
 ```
 
-## Next Steps
+## What Happens After Dispatch
 
-Worker execution and the Integrator (merge consolidation, agent review) are coming in the next milestone.
+Once workers are dispatched, the system runs autonomously via GitHub Actions:
+
+1. **Workers execute** — Each worker reads its assigned issue, runs your agent in headless mode on a self-hosted runner, and pushes changes to a worker branch (`herd/worker/<number>-<slug>`). If no changes are needed, the worker marks the issue as done without pushing.
+
+2. **Integrator consolidates** — When a worker completes, the Integrator merges its branch into the batch branch (`herd/batch/<number>-<slug>`) and deletes the worker branch.
+
+3. **Integrator advances** — After consolidation, the Integrator checks if the current tier is complete. If so, it unblocks and dispatches the next tier. When all tiers are done, it opens a single batch PR against `main`.
+
+4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. If issues are found, the Integrator creates fix issues and dispatches fix workers. This cycle repeats up to `review_max_fix_cycles` times.
+
+5. **Monitor patrols** — A cron-triggered Action detects stale workers (in-progress with no active run), failed issues (auto-redispatches with exponential backoff), and stuck PRs (open longer than `max_pr_age_hours`). It escalates to `notify_users` when retries are exhausted.
+
+6. **You review and merge** — The batch PR arrives with a summary table of all tasks and their tiers. If `pull_requests.auto_merge` is true and the agent review passed, it merges automatically.
+
+### Role Instruction Files
+
+Customize agent behavior for each role by editing files in `.herd/`:
+
+- **`.herd/worker.md`** — Appended to the worker's system prompt (e.g., "use table-driven tests", "follow project coding standards")
+- **`.herd/integrator.md`** — Appended to the integrator's review prompt (e.g., "be strict about error handling")
+
+These are loaded automatically when the respective role runs.
+
+### Failure Handling
+
+- **Worker failure** — The issue is labeled `herd/status:failed` and the Monitor is triggered immediately for fast escalation
+- **Tier stuck** — If any issue in a tier fails, the tier is stuck and the next tier won't be dispatched until the failure is resolved (manually or by the Monitor's auto-redispatch)
+- **Review safety valve** — If a single agent review finds more than 10 issues, fix workers are not created (to prevent runaway invocations). The PR is flagged for manual intervention.

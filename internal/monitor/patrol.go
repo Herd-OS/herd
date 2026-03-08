@@ -1,0 +1,188 @@
+package monitor
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/issues"
+	"github.com/herd-os/herd/internal/planner"
+	"github.com/herd-os/herd/internal/platform"
+)
+
+// PatrolResult holds the result of a monitor patrol.
+type PatrolResult struct {
+	StaleIssues       int
+	FailedIssues      int
+	RedispatchedCount int
+	EscalatedCount    int
+	StuckPRs          int
+}
+
+// Patrol checks for stale, failed, or stuck work and takes corrective action.
+func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*PatrolResult, error) {
+	result := &PatrolResult{}
+
+	// List in-progress and failed issues
+	inProgress, err := p.Issues().List(ctx, platform.IssueFilters{
+		State:  "open",
+		Labels: []string{issues.StatusInProgress},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing in-progress issues: %w", err)
+	}
+
+	failed, err := p.Issues().List(ctx, platform.IssueFilters{
+		State:  "open",
+		Labels: []string{issues.StatusFailed},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing failed issues: %w", err)
+	}
+
+	// Get active runs for stale detection
+	activeRuns, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "in_progress"})
+	if err != nil {
+		return nil, fmt.Errorf("listing active runs: %w", err)
+	}
+
+	// Check for stale in-progress issues
+	for _, issue := range inProgress {
+		hasRun := false
+		for _, run := range activeRuns {
+			if run.Inputs["issue_number"] == fmt.Sprintf("%d", issue.Number) {
+				hasRun = true
+				// Check if run exceeds timeout
+				if cfg.Workers.TimeoutMinutes > 0 && time.Since(run.CreatedAt) > time.Duration(cfg.Workers.TimeoutMinutes)*time.Minute {
+					_ = p.Workflows().CancelRun(ctx, run.ID)
+					_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusInProgress})
+					_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
+					_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+						"⚠️ **HerdOS Monitor Alert**\n\nWorker run exceeded timeout (%d minutes). Run cancelled.\n\n%s",
+						cfg.Workers.TimeoutMinutes, buildMentions(cfg.Monitor.NotifyUsers)))
+					result.StaleIssues++
+				}
+				break
+			}
+		}
+		if !hasRun {
+			result.StaleIssues++
+			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+				"⚠️ **HerdOS Monitor Alert**\n\nIssue #%d has been in-progress with no active workflow run.\n\n%s",
+				issue.Number, buildMentions(cfg.Monitor.NotifyUsers)))
+		}
+	}
+
+	// Handle failed issues
+	if cfg.Monitor.AutoRedispatch {
+		completedRuns, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "completed"})
+		if err != nil {
+			return nil, fmt.Errorf("listing completed runs: %w", err)
+		}
+
+		defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("getting default branch: %w", err)
+		}
+
+		for _, issue := range failed {
+			result.FailedIssues++
+
+			failureCount, lastFailedRun := countFailures(completedRuns, issue.Number)
+
+			if failureCount >= cfg.Monitor.MaxRedispatchAttempts {
+				_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+					"⚠️ **HerdOS Monitor Alert**\n\nIssue #%d has failed %d times. Max re-dispatch attempts reached.\n\nManual intervention needed.\n\n%s",
+					issue.Number, failureCount, buildMentions(cfg.Monitor.NotifyUsers)))
+				result.EscalatedCount++
+				continue
+			}
+
+			if lastFailedRun != nil && time.Since(lastFailedRun.CreatedAt) < BackoffDelay(failureCount) {
+				continue // Backoff not elapsed
+			}
+
+			// Re-dispatch
+			if issue.Milestone == nil {
+				continue
+			}
+			batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
+
+			_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusFailed})
+			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusInProgress})
+			_, err := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
+				"issue_number":    fmt.Sprintf("%d", issue.Number),
+				"batch_branch":    batchBranch,
+				"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+				"runner_label":    cfg.Workers.RunnerLabel,
+			})
+			if err != nil {
+				_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusInProgress})
+				_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
+				continue
+			}
+			result.RedispatchedCount++
+		}
+	} else {
+		result.FailedIssues = len(failed)
+	}
+
+	// Stuck PR detection
+	openPRs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open"})
+	if err != nil {
+		return nil, fmt.Errorf("listing open PRs: %w", err)
+	}
+	for _, pr := range openPRs {
+		if !strings.HasPrefix(pr.Title, "[herd]") {
+			continue
+		}
+		if cfg.Monitor.MaxPRHAgeHours > 0 && time.Since(pr.CreatedAt) > time.Duration(cfg.Monitor.MaxPRHAgeHours)*time.Hour {
+			_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
+				"⚠️ **HerdOS Monitor Alert**\n\nThis batch PR has been open for over %d hours.\n\n%s",
+				cfg.Monitor.MaxPRHAgeHours, buildMentions(cfg.Monitor.NotifyUsers)))
+			result.StuckPRs++
+		}
+	}
+
+	return result, nil
+}
+
+// BackoffDelay returns the backoff delay for a given failure count.
+func BackoffDelay(failureCount int) time.Duration {
+	switch failureCount {
+	case 1:
+		return 0
+	case 2:
+		return 15 * time.Minute
+	default:
+		return 1 * time.Hour
+	}
+}
+
+func countFailures(runs []*platform.Run, issueNumber int) (int, *platform.Run) {
+	count := 0
+	var latest *platform.Run
+	numStr := fmt.Sprintf("%d", issueNumber)
+	for _, run := range runs {
+		if run.Inputs["issue_number"] == numStr && run.Conclusion == "failure" {
+			count++
+			if latest == nil || run.CreatedAt.After(latest.CreatedAt) {
+				latest = run
+			}
+		}
+	}
+	return count, latest
+}
+
+func buildMentions(users []string) string {
+	if len(users) == 0 {
+		return ""
+	}
+	mentions := make([]string, len(users))
+	for i, u := range users {
+		mentions[i] = "@" + u
+	}
+	return "/cc " + strings.Join(mentions, " ")
+}

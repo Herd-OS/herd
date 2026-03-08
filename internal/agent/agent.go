@@ -10,7 +10,7 @@ type Agent interface {
 	Plan(ctx context.Context, initialPrompt string, opts PlanOptions) (*Plan, error)
 
 	// Execute runs a task in headless mode (used by workers).
-	Execute(ctx context.Context, task TaskSpec) (*ExecResult, error)
+	Execute(ctx context.Context, task TaskSpec, opts ExecOptions) (*ExecResult, error)
 
 	// Review runs a code review on a diff in headless mode (used by the Integrator).
 	Review(ctx context.Context, diff string, opts ReviewOptions) (*ReviewResult, error)
@@ -24,10 +24,16 @@ type PlanOptions struct {
 }
 
 type TaskSpec struct {
+	IssueNumber        int      // GitHub issue number (for commit messages)
 	Title              string
-	Description        string
+	Body               string   // Full issue body (raw markdown, passed verbatim to agent)
 	AcceptanceCriteria []string
 	Scope              []string
+}
+
+type ExecOptions struct {
+	RepoRoot     string
+	SystemPrompt string
 }
 
 type Plan struct {
@@ -57,6 +63,7 @@ type ExecResult struct {
 type ReviewOptions struct {
 	AcceptanceCriteria []string
 	RepoRoot           string
+	SystemPrompt       string
 }
 
 type ReviewResult struct {

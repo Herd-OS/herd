@@ -1,0 +1,241 @@
+package integrator
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/git"
+	"github.com/herd-os/herd/internal/issues"
+	"github.com/herd-os/herd/internal/planner"
+	"github.com/herd-os/herd/internal/platform"
+)
+
+const safetyValveLimit = 10
+
+// Review runs an agent review on the batch PR.
+// If approved, it optionally auto-merges. If changes are requested,
+// it creates fix issues and dispatches fix workers.
+func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git, cfg *config.Config, params ReviewParams) (*ReviewResult, error) {
+	// Get the run → issue → milestone
+	run, err := p.Workflows().GetRun(ctx, params.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
+	}
+
+	issueNumStr := run.Inputs["issue_number"]
+	issueNumber, err := strconv.Atoi(issueNumStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid issue_number: %w", err)
+	}
+
+	issue, err := p.Issues().Get(ctx, issueNumber)
+	if err != nil {
+		return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
+	}
+	if issue.Milestone == nil {
+		return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
+	}
+
+	ms := issue.Milestone
+	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+
+	// Find batch PR
+	prs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
+	if err != nil {
+		return nil, fmt.Errorf("listing batch PRs: %w", err)
+	}
+	if len(prs) == 0 {
+		return &ReviewResult{}, nil // No batch PR yet
+	}
+	pr := prs[0]
+
+	// Check if review is enabled
+	if !cfg.Integrator.Review {
+		// Skip review, just check auto-merge
+		if cfg.PullRequests.AutoMerge {
+			if _, err := p.PullRequests().Merge(ctx, pr.Number, platform.MergeMethod(cfg.Integrator.Strategy)); err != nil {
+				return nil, fmt.Errorf("auto-merging batch PR #%d: %w", pr.Number, err)
+			}
+			if err := postMergeCleanup(ctx, p, ms.Number, batchBranch); err != nil {
+				return nil, fmt.Errorf("post-merge cleanup: %w", err)
+			}
+		}
+		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
+	}
+
+	// Get diff
+	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting default branch: %w", err)
+	}
+	diff, err := g.Diff(defaultBranch, batchBranch)
+	if err != nil {
+		return nil, fmt.Errorf("getting diff: %w", err)
+	}
+
+	// Collect acceptance criteria from all milestone issues
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+		State:     "all",
+		Milestone: &ms.Number,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing milestone issues: %w", err)
+	}
+
+	var allCriteria []string
+	for _, iss := range allIssues {
+		parsed, err := issues.ParseBody(iss.Body)
+		if err != nil {
+			continue
+		}
+		allCriteria = append(allCriteria, parsed.Criteria...)
+	}
+
+	// Run agent review
+	reviewOpts := agent.ReviewOptions{
+		AcceptanceCriteria: allCriteria,
+		RepoRoot:           params.RepoRoot,
+	}
+
+	// Load integrator role instructions
+	ri, readErr := os.ReadFile(filepath.Join(params.RepoRoot, ".herd", "integrator.md"))
+	if readErr == nil {
+		reviewOpts.SystemPrompt = string(ri)
+	}
+
+	reviewResult, err := ag.Review(ctx, diff, reviewOpts)
+	if err != nil {
+		return nil, fmt.Errorf("agent review failed: %w", err)
+	}
+
+	// Handle approved
+	if reviewResult.Approved {
+		_ = p.PullRequests().CreateReview(ctx, pr.Number, reviewResult.Summary, platform.ReviewApprove)
+		if cfg.PullRequests.AutoMerge {
+			if _, err := p.PullRequests().Merge(ctx, pr.Number, platform.MergeMethod(cfg.Integrator.Strategy)); err != nil {
+				return nil, fmt.Errorf("auto-merging batch PR #%d: %w", pr.Number, err)
+			}
+			if err := postMergeCleanup(ctx, p, ms.Number, batchBranch); err != nil {
+				return nil, fmt.Errorf("post-merge cleanup: %w", err)
+			}
+		}
+		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
+	}
+
+	// Handle changes requested — determine fix cycle
+	currentCycle := findMaxFixCycle(allIssues)
+
+	if currentCycle >= cfg.Integrator.ReviewMaxFixCycles {
+		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found issues but max fix cycles (%d) reached. Manual intervention needed:\n\n",
+			cfg.Integrator.ReviewMaxFixCycles)
+		for _, c := range reviewResult.Comments {
+			comment += fmt.Sprintf("- %s\n", c)
+		}
+		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
+	}
+
+	// Safety valve
+	if len(reviewResult.Comments) > safetyValveLimit {
+		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found %d issues in a single pass. "+
+			"This exceeds the safety limit (%d). Creating fix workers was skipped to prevent runaway agent invocations.",
+			len(reviewResult.Comments), safetyValveLimit)
+		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
+	}
+
+	// Create fix issues and dispatch workers
+	nextCycle := currentCycle + 1
+	var fixIssueNums []int
+
+	defaultBranchForDispatch, _ := p.Repository().GetDefaultBranch(ctx)
+
+	for _, comment := range reviewResult.Comments {
+		body := issues.RenderBody(issues.IssueBody{
+			FrontMatter: issues.FrontMatter{
+				Version:  1,
+				Batch:    ms.Number,
+				Type:     "fix",
+				FixCycle: nextCycle,
+				BatchPR:  pr.Number,
+			},
+			Task:    comment,
+			Context: fmt.Sprintf("Found during agent review of batch PR #%d ([herd] %s).", pr.Number, ms.Title),
+		})
+
+		fixIssue, err := p.Issues().Create(ctx, "Fix: "+truncate(comment, 60), body,
+			[]string{issues.TypeFix, issues.StatusInProgress}, &ms.Number)
+		if err != nil {
+			continue
+		}
+		fixIssueNums = append(fixIssueNums, fixIssue.Number)
+
+		// Dispatch fix worker
+		_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
+			"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
+			"batch_branch":    batchBranch,
+			"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+			"runner_label":    cfg.Workers.RunnerLabel,
+		})
+	}
+
+	return &ReviewResult{
+		FixIssues:     fixIssueNums,
+		FixCycle:      nextCycle,
+		BatchPRNumber: pr.Number,
+	}, nil
+}
+
+// postMergeCleanup closes all issues in the milestone, closes the milestone,
+// and deletes the batch branch.
+func postMergeCleanup(ctx context.Context, p platform.Platform, msNumber int, batchBranch string) error {
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+		State:     "open",
+		Milestone: &msNumber,
+	})
+	if err != nil {
+		return fmt.Errorf("listing milestone issues: %w", err)
+	}
+
+	closed := "closed"
+	for _, issue := range allIssues {
+		_, _ = p.Issues().Update(ctx, issue.Number, platform.IssueUpdate{State: &closed})
+	}
+
+	_, _ = p.Milestones().Update(ctx, msNumber, platform.MilestoneUpdate{State: &closed})
+
+	_ = p.Repository().DeleteBranch(ctx, batchBranch)
+
+	return nil
+}
+
+func findMaxFixCycle(allIssues []*platform.Issue) int {
+	max := 0
+	for _, issue := range allIssues {
+		parsed, err := issues.ParseBody(issue.Body)
+		if err != nil {
+			continue
+		}
+		if parsed.FrontMatter.FixCycle > max {
+			max = parsed.FrontMatter.FixCycle
+		}
+	}
+	return max
+}
+
+func truncate(s string, max int) string {
+	// Truncate to first line, then to max chars
+	if idx := strings.Index(s, "\n"); idx >= 0 {
+		s = s[:idx]
+	}
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
+}

@@ -72,9 +72,21 @@ See [docs/getting-started.md](docs/getting-started.md) for the full setup guide.
 
 Anyone who's tried to coordinate multiple AI agents knows the feeling — it's like herding cats. Each agent is powerful on its own, but getting them to work together without stepping on each other? That's the hard part. Herd tames the chaos.
 
+## Architecture
+
+Herd has four internal roles, all running as GitHub Actions on self-hosted runners:
+
+| Role | What it does |
+|------|-------------|
+| **Worker** | Executes a single task — reads the issue, runs your agent in headless mode, pushes a branch |
+| **Integrator** | Merges worker branches into the batch branch, detects tier completion, dispatches the next tier, opens the batch PR, runs agent review |
+| **Monitor** | Patrols for stale or failed work, auto-redispatches with exponential backoff, escalates when retries are exhausted |
+
+These are exposed as hidden CLI commands (`herd worker exec`, `herd integrator consolidate|advance|review`, `herd monitor patrol`) called by the installed GitHub Actions workflows. You don't invoke them directly.
+
 ## Status
 
-In active development. Planning, dispatch, and monitoring commands are functional. Worker execution and the Integrator are next.
+In active development. The core system is functional: planning, dispatch, worker execution, integrator (consolidate, advance, review with fix cycles), and monitor patrol are all implemented.
 
 ## License
 

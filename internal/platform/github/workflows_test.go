@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/platform"
@@ -47,6 +48,7 @@ func TestWorkflowServiceDispatch(t *testing.T) {
 }
 
 func TestWorkflowServiceGetRun(t *testing.T) {
+	ts := gh.Timestamp{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99", func(w http.ResponseWriter, r *http.Request) {
 		resp := gh.WorkflowRun{
@@ -54,6 +56,7 @@ func TestWorkflowServiceGetRun(t *testing.T) {
 			Status:     gh.Ptr("completed"),
 			Conclusion: gh.Ptr("success"),
 			HTMLURL:    gh.Ptr("https://github.com/test-org/test-repo/actions/runs/99"),
+			CreatedAt:  &ts,
 		}
 		json.NewEncoder(w).Encode(resp)
 	})
@@ -65,6 +68,7 @@ func TestWorkflowServiceGetRun(t *testing.T) {
 	assert.Equal(t, int64(99), run.ID)
 	assert.Equal(t, "completed", run.Status)
 	assert.Equal(t, "success", run.Conclusion)
+	assert.Equal(t, time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC), run.CreatedAt)
 }
 
 func TestWorkflowServiceListRuns(t *testing.T) {
