@@ -1,11 +1,6 @@
 package claude
 
-import (
-	"context"
-	"fmt"
-
-	"github.com/herd-os/herd/internal/agent"
-)
+import "github.com/herd-os/herd/internal/agent"
 
 
 // ClaudeAgent implements agent.Agent using the Claude Code CLI.
@@ -29,12 +24,4 @@ func New(binaryPath, model string) *ClaudeAgent {
 	}
 }
 
-var errNotImpl = fmt.Errorf("not implemented")
-
-func (c *ClaudeAgent) Execute(_ context.Context, _ agent.TaskSpec) (*agent.ExecResult, error) {
-	return nil, errNotImpl
-}
-
-func (c *ClaudeAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
-	return nil, errNotImpl
-}
+// Execute and Review are implemented in execute.go and review.go respectively.
