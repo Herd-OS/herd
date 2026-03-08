@@ -115,6 +115,16 @@ func (s *pullRequestService) CreateReview(ctx context.Context, number int, body 
 	return nil
 }
 
+func (s *pullRequestService) AddComment(ctx context.Context, number int, body string) error {
+	_, _, err := s.c.gh.Issues.CreateComment(ctx, s.c.owner, s.c.repo, number, &gh.IssueComment{
+		Body: gh.Ptr(body),
+	})
+	if err != nil {
+		return fmt.Errorf("adding comment to pull request #%d: %w", number, err)
+	}
+	return nil
+}
+
 func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 	return &platform.PullRequest{
 		Number:    pr.GetNumber(),
@@ -125,5 +135,6 @@ func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 		Base:      pr.GetBase().GetRef(),
 		Mergeable: pr.GetMergeable(),
 		URL:       pr.GetHTMLURL(),
+		CreatedAt: pr.GetCreatedAt().Time,
 	}
 }

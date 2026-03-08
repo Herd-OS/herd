@@ -34,6 +34,7 @@ type PullRequestService interface {
 	Merge(ctx context.Context, number int, method MergeMethod) (*MergeResult, error)
 	UpdateBranch(ctx context.Context, number int) error
 	CreateReview(ctx context.Context, number int, body string, event ReviewEvent) error
+	AddComment(ctx context.Context, number int, body string) error
 }
 
 type WorkflowService interface {

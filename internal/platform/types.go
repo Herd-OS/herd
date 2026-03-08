@@ -22,6 +22,7 @@ type PullRequest struct {
 	Base      string // target branch
 	Mergeable bool
 	URL       string
+	CreatedAt time.Time
 }
 
 type Run struct {
@@ -30,6 +31,7 @@ type Run struct {
 	Conclusion string            // "success", "failure", "cancelled"
 	Inputs     map[string]string // workflow_dispatch inputs
 	URL        string
+	CreatedAt  time.Time
 }
 
 type Runner struct {
