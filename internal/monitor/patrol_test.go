@@ -185,6 +185,42 @@ func TestPatrol_StaleIssue(t *testing.T) {
 	assert.Contains(t, issueSvc.comments[42][0], "HerdOS Monitor Alert")
 }
 
+func TestPatrol_TimeoutCancellation(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusInProgress}},
+	}
+
+	wf := &mockWorkflowService{
+		activeRuns: []*platform.Run{
+			{ID: 200, Inputs: map[string]string{"issue_number": "42"}, CreatedAt: time.Now().Add(-2 * time.Hour)},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{
+		Workers: config.Workers{TimeoutMinutes: 60},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.StaleIssues)
+	// Should cancel the run
+	assert.Contains(t, wf.cancelled, int64(200))
+	// Should label as failed
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusInProgress)
+	// Should comment
+	assert.Len(t, issueSvc.comments[42], 1)
+	assert.Contains(t, issueSvc.comments[42][0], "exceeded timeout")
+}
+
 func TestPatrol_FailedIssue_Redispatch(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.listResults[issues.StatusFailed] = []*platform.Issue{

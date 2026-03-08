@@ -32,10 +32,12 @@ func (m *mockPlatform) Runners() platform.RunnerService            { return nil 
 func (m *mockPlatform) Repository() platform.RepositoryService     { return m.repo }
 
 type mockIssueService struct {
-	getResult     map[int]*platform.Issue
-	listResult    []*platform.Issue
-	addedLabels   map[int][]string
-	removedLabels map[int][]string
+	getResult      map[int]*platform.Issue
+	listResult     []*platform.Issue
+	addedLabels    map[int][]string
+	removedLabels  map[int][]string
+	updatedIssues  map[int]platform.IssueUpdate
+	comments       map[int][]string
 }
 
 func newMockIssueService() *mockIssueService {
@@ -43,6 +45,8 @@ func newMockIssueService() *mockIssueService {
 		getResult:     make(map[int]*platform.Issue),
 		addedLabels:   make(map[int][]string),
 		removedLabels: make(map[int][]string),
+		updatedIssues: make(map[int]platform.IssueUpdate),
+		comments:      make(map[int][]string),
 	}
 }
 
@@ -58,7 +62,8 @@ func (m *mockIssueService) Get(_ context.Context, number int) (*platform.Issue, 
 func (m *mockIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*platform.Issue, error) {
 	return m.listResult, nil
 }
-func (m *mockIssueService) Update(_ context.Context, _ int, _ platform.IssueUpdate) (*platform.Issue, error) {
+func (m *mockIssueService) Update(_ context.Context, number int, update platform.IssueUpdate) (*platform.Issue, error) {
+	m.updatedIssues[number] = update
 	return nil, nil
 }
 func (m *mockIssueService) AddLabels(_ context.Context, number int, labels []string) error {
@@ -69,7 +74,10 @@ func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []
 	m.removedLabels[number] = append(m.removedLabels[number], labels...)
 	return nil
 }
-func (m *mockIssueService) AddComment(_ context.Context, _ int, _ string) error { return nil }
+func (m *mockIssueService) AddComment(_ context.Context, number int, body string) error {
+	m.comments[number] = append(m.comments[number], body)
+	return nil
+}
 
 type mockPRService struct {
 	listResult []*platform.PullRequest
@@ -144,7 +152,10 @@ func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, 
 	return "", fmt.Errorf("branch %s not found", name)
 }
 
-type mockMilestoneService struct{}
+type mockMilestoneService struct {
+	updatedNumbers []int
+	updatedStates  []string
+}
 
 func (m *mockMilestoneService) Create(_ context.Context, _, _ string, _ *time.Time) (*platform.Milestone, error) {
 	return nil, nil
@@ -155,7 +166,11 @@ func (m *mockMilestoneService) Get(_ context.Context, _ int) (*platform.Mileston
 func (m *mockMilestoneService) List(_ context.Context) ([]*platform.Milestone, error) {
 	return nil, nil
 }
-func (m *mockMilestoneService) Update(_ context.Context, _ int, _ platform.MilestoneUpdate) (*platform.Milestone, error) {
+func (m *mockMilestoneService) Update(_ context.Context, number int, changes platform.MilestoneUpdate) (*platform.Milestone, error) {
+	m.updatedNumbers = append(m.updatedNumbers, number)
+	if changes.State != nil {
+		m.updatedStates = append(m.updatedStates, *changes.State)
+	}
 	return nil, nil
 }
 

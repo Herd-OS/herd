@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"testing"
 
@@ -282,21 +283,86 @@ func TestPostMergeCleanup(t *testing.T) {
 		{Number: 10}, {Number: 11},
 	}
 
+	msSvc := &mockMilestoneService{}
+	repoSvc := &mockRepoService{}
 	mock := &mockPlatform{
 		issues:     issueSvc,
-		milestones: &mockMilestoneService{},
-		repo:       &mockRepoService{},
+		milestones: msSvc,
+		repo:       repoSvc,
 	}
 
 	err := postMergeCleanup(context.Background(), mock, 1, "herd/batch/1-test")
 	require.NoError(t, err)
-	assert.Equal(t, "herd/batch/1-test", mock.repo.deletedBranch)
+
+	// Should close all issues
+	assert.Contains(t, issueSvc.updatedIssues, 10)
+	assert.Contains(t, issueSvc.updatedIssues, 11)
+	assert.Equal(t, "closed", *issueSvc.updatedIssues[10].State)
+	assert.Equal(t, "closed", *issueSvc.updatedIssues[11].State)
+
+	// Should close milestone
+	assert.Contains(t, msSvc.updatedNumbers, 1)
+	assert.Contains(t, msSvc.updatedStates, "closed")
+
+	// Should delete batch branch
+	assert.Equal(t, "herd/batch/1-test", repoSvc.deletedBranch)
+}
+
+func TestReview_LoadsRoleInstructions(t *testing.T) {
+	dir, g := initTestRepo(t)
+
+	// Create .herd/integrator.md
+	require.NoError(t, os.MkdirAll(dir+"/.herd", 0755))
+	require.NoError(t, os.WriteFile(dir+"/.herd/integrator.md", []byte("Be strict about error handling"), 0644))
+
+	// Use a capturing agent to verify system prompt is passed
+	var capturedOpts agent.ReviewOptions
+	capturingAgent := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+	}
+	// Override Review to capture opts
+	origReview := capturingAgent.reviewResult
+	captureAgent := &capturingMockAgent{
+		result:       origReview,
+		capturedOpts: &capturedOpts,
+	}
+
+	mock := newReviewTestPlatform(
+		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		[]*platform.Issue{
+			{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+		},
+	)
+
+	_, err := Review(context.Background(), mock, captureAgent, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, "Be strict about error handling", capturedOpts.SystemPrompt)
 }
 
 func TestTruncate(t *testing.T) {
 	assert.Equal(t, "hello", truncate("hello", 10))
 	assert.Equal(t, "hel...", truncate("hello world", 3))
 	assert.Equal(t, "first line", truncate("first line\nsecond line", 60))
+}
+
+// capturingMockAgent captures ReviewOptions for assertions
+type capturingMockAgent struct {
+	result       *agent.ReviewResult
+	capturedOpts *agent.ReviewOptions
+}
+
+func (m *capturingMockAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
+	return nil, nil
+}
+func (m *capturingMockAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOptions) (*agent.ExecResult, error) {
+	return nil, nil
+}
+func (m *capturingMockAgent) Review(_ context.Context, _ string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
+	*m.capturedOpts = opts
+	return m.result, nil
 }
 
 // mockIssueServiceWithCreate wraps mockIssueService to override Create

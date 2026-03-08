@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/platform"
@@ -217,7 +218,25 @@ func TestPullRequestUpdateBranch(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestPullRequestAddComment(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test-org/test-repo/issues/42/comments", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		var req gh.IssueComment
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "Test comment", req.GetBody())
+
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(gh.IssueComment{ID: gh.Ptr(int64(1)), Body: gh.Ptr("Test comment")})
+	})
+
+	client, _ := newTestClient(t, mux)
+	err := client.PullRequests().AddComment(context.Background(), 42, "Test comment")
+	require.NoError(t, err)
+}
+
 func TestMapPullRequest(t *testing.T) {
+	ts := gh.Timestamp{Time: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)}
 	pr := mapPullRequest(&gh.PullRequest{
 		Number:    gh.Ptr(42),
 		Title:     gh.Ptr("Test"),
@@ -227,6 +246,7 @@ func TestMapPullRequest(t *testing.T) {
 		Base:      &gh.PullRequestBranch{Ref: gh.Ptr("main")},
 		Mergeable: gh.Ptr(true),
 		HTMLURL:   gh.Ptr("https://github.com/org/repo/pull/42"),
+		CreatedAt: &ts,
 	})
 
 	assert.Equal(t, 42, pr.Number)
@@ -237,4 +257,5 @@ func TestMapPullRequest(t *testing.T) {
 	assert.Equal(t, "main", pr.Base)
 	assert.True(t, pr.Mergeable)
 	assert.Equal(t, "https://github.com/org/repo/pull/42", pr.URL)
+	assert.Equal(t, time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC), pr.CreatedAt)
 }
