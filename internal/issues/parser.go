@@ -33,6 +33,15 @@ func ParseBody(raw string) (*IssueBody, error) {
 	sections := parseSections(markdown)
 	body.Task = sections["Task"]
 	body.Context = sections["Context"]
+	body.ImplementationDetails = sections["Implementation Details"]
+
+	if conventions, ok := sections["Conventions"]; ok {
+		body.Conventions = parseBulletList(conventions)
+	}
+
+	if ctxDeps, ok := sections["Context from Dependencies"]; ok {
+		body.ContextFromDeps = parseBulletList(ctxDeps)
+	}
 
 	if criteria, ok := sections["Acceptance Criteria"]; ok {
 		body.Criteria = parseChecklist(criteria)
@@ -95,6 +104,17 @@ func parseChecklist(text string) []string {
 			items = append(items, strings.TrimPrefix(line, "- [ ] "))
 		} else if strings.HasPrefix(line, "- [x] ") {
 			items = append(items, strings.TrimPrefix(line, "- [x] "))
+		}
+	}
+	return items
+}
+
+func parseBulletList(text string) []string {
+	var items []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "- ") {
+			items = append(items, strings.TrimPrefix(line, "- "))
 		}
 	}
 	return items

@@ -23,11 +23,14 @@ type FrontMatter struct {
 
 // IssueBody holds the parsed content of a herd issue body.
 type IssueBody struct {
-	FrontMatter    FrontMatter
-	Task           string
-	Criteria       []string
-	Context        string
-	FilesToModify  []string
+	FrontMatter           FrontMatter
+	Task                  string
+	ImplementationDetails string
+	Conventions           []string
+	ContextFromDeps       []string
+	Criteria              []string
+	Context               string
+	FilesToModify         []string
 }
 
 // RenderBody generates the full issue body from structured data.
@@ -79,6 +82,31 @@ func RenderBody(body IssueBody) string {
 	b.WriteString("## Task\n\n")
 	b.WriteString(body.Task)
 	b.WriteString("\n\n")
+
+	// Implementation Details
+	if body.ImplementationDetails != "" {
+		b.WriteString("## Implementation Details\n\n")
+		b.WriteString(body.ImplementationDetails)
+		b.WriteString("\n\n")
+	}
+
+	// Conventions
+	if len(body.Conventions) > 0 {
+		b.WriteString("## Conventions\n\n")
+		for _, c := range body.Conventions {
+			b.WriteString(fmt.Sprintf("- %s\n", c))
+		}
+		b.WriteString("\n")
+	}
+
+	// Context from Dependencies
+	if len(body.ContextFromDeps) > 0 {
+		b.WriteString("## Context from Dependencies\n\n")
+		for _, c := range body.ContextFromDeps {
+			b.WriteString(fmt.Sprintf("- %s\n", c))
+		}
+		b.WriteString("\n")
+	}
 
 	// Acceptance Criteria
 	if len(body.Criteria) > 0 {

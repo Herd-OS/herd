@@ -7,6 +7,7 @@ import (
 	"github.com/herd-os/herd/internal/agent"
 )
 
+
 // ClaudeAgent implements agent.Agent using the Claude Code CLI.
 type ClaudeAgent struct {
 	BinaryPath string // Path to `claude` CLI (default: "claude")
@@ -29,10 +30,6 @@ func New(binaryPath, model string) *ClaudeAgent {
 }
 
 var errNotImpl = fmt.Errorf("not implemented")
-
-func (c *ClaudeAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
-	return nil, errNotImpl
-}
 
 func (c *ClaudeAgent) Execute(_ context.Context, _ agent.TaskSpec) (*agent.ExecResult, error) {
 	return nil, errNotImpl
