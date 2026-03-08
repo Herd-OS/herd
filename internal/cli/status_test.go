@@ -13,13 +13,18 @@ import (
 )
 
 func TestGetBatchStatus(t *testing.T) {
-	mock := newMockPlatformForStatus()
-	mock.issues.listResult = []*platform.Issue{
-		{Number: 1, Labels: []string{issues.StatusDone}},
-		{Number: 2, Labels: []string{issues.StatusDone}},
-		{Number: 3, Labels: []string{issues.StatusInProgress}},
-		{Number: 4, Labels: []string{issues.StatusBlocked}},
-		{Number: 5, Labels: []string{issues.StatusReady}},
+	mock := &mockStatusPlatform{
+		issues: &mockStatusIssueService{listResult: []*platform.Issue{
+			{Number: 1, Labels: []string{issues.StatusDone}},
+			{Number: 2, Labels: []string{issues.StatusDone}},
+			{Number: 3, Labels: []string{issues.StatusInProgress}},
+			{Number: 4, Labels: []string{issues.StatusBlocked}},
+			{Number: 5, Labels: []string{issues.StatusReady}},
+		}},
+		milestones: &mockStatusMilestoneService{},
+		workflows:  &mockStatusWorkflowService{},
+		runners:    &mockStatusRunnerService{},
+		repo:       &mockDispatchRepoService{},
 	}
 
 	ms := &platform.Milestone{Number: 1, Title: "Test Batch"}
@@ -54,10 +59,15 @@ func TestStatusOutputJSON(t *testing.T) {
 }
 
 func TestBatchStatusAllDone(t *testing.T) {
-	mock := newMockPlatformForStatus()
-	mock.issues.listResult = []*platform.Issue{
-		{Number: 1, Labels: []string{issues.StatusDone}},
-		{Number: 2, Labels: []string{issues.StatusDone}},
+	mock := &mockStatusPlatform{
+		issues: &mockStatusIssueService{listResult: []*platform.Issue{
+			{Number: 1, Labels: []string{issues.StatusDone}},
+			{Number: 2, Labels: []string{issues.StatusDone}},
+		}},
+		milestones: &mockStatusMilestoneService{},
+		workflows:  &mockStatusWorkflowService{},
+		runners:    &mockStatusRunnerService{},
+		repo:       &mockDispatchRepoService{},
 	}
 
 	ms := &platform.Milestone{Number: 1, Title: "Complete"}
@@ -68,11 +78,16 @@ func TestBatchStatusAllDone(t *testing.T) {
 }
 
 func TestBatchStatusWithFailures(t *testing.T) {
-	mock := newMockPlatformForStatus()
-	mock.issues.listResult = []*platform.Issue{
-		{Number: 1, Labels: []string{issues.StatusDone}},
-		{Number: 2, Labels: []string{issues.StatusFailed}},
-		{Number: 3, Labels: []string{issues.StatusFailed}},
+	mock := &mockStatusPlatform{
+		issues: &mockStatusIssueService{listResult: []*platform.Issue{
+			{Number: 1, Labels: []string{issues.StatusDone}},
+			{Number: 2, Labels: []string{issues.StatusFailed}},
+			{Number: 3, Labels: []string{issues.StatusFailed}},
+		}},
+		milestones: &mockStatusMilestoneService{},
+		workflows:  &mockStatusWorkflowService{},
+		runners:    &mockStatusRunnerService{},
+		repo:       &mockDispatchRepoService{},
 	}
 
 	ms := &platform.Milestone{Number: 1, Title: "Failing"}
@@ -85,11 +100,11 @@ func TestBatchStatusWithFailures(t *testing.T) {
 // --- Mock Platform for status tests ---
 
 type mockStatusPlatform struct {
-	issues     *mockStatusIssueService
-	milestones *mockStatusMilestoneService
-	workflows  *mockStatusWorkflowService
-	runners    *mockStatusRunnerService
-	repo       *mockDispatchRepoService
+	issues     platform.IssueService
+	milestones platform.MilestoneService
+	workflows  platform.WorkflowService
+	runners    platform.RunnerService
+	repo       platform.RepositoryService
 }
 
 func newMockPlatformForStatus() *mockStatusPlatform {
