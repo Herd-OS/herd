@@ -107,16 +107,6 @@ type mockStatusPlatform struct {
 	repo       platform.RepositoryService
 }
 
-func newMockPlatformForStatus() *mockStatusPlatform {
-	return &mockStatusPlatform{
-		issues:     &mockStatusIssueService{},
-		milestones: &mockStatusMilestoneService{},
-		workflows:  &mockStatusWorkflowService{},
-		runners:    &mockStatusRunnerService{},
-		repo:       &mockDispatchRepoService{},
-	}
-}
-
 func (m *mockStatusPlatform) Issues() platform.IssueService             { return m.issues }
 func (m *mockStatusPlatform) PullRequests() platform.PullRequestService  { return nil }
 func (m *mockStatusPlatform) Workflows() platform.WorkflowService        { return m.workflows }
