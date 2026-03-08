@@ -21,6 +21,8 @@ func initTestRepo(t *testing.T) (string, *git.Git) {
 	dir := t.TempDir()
 	cmds := [][]string{
 		{"git", "init", "-b", "main", dir},
+		{"git", "-C", dir, "config", "user.email", "test@test.com"},
+		{"git", "-C", dir, "config", "user.name", "Test"},
 		{"git", "-C", dir, "commit", "--allow-empty", "-m", "init"},
 		{"git", "-C", dir, "branch", "herd/batch/1-batch"},
 	}
