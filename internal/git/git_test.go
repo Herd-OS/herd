@@ -118,6 +118,102 @@ func TestDiff(t *testing.T) {
 	assert.Contains(t, diff, "new.txt")
 }
 
+func TestRebase(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	// Create feature branch with a commit
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0644))
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "add feature")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Add a commit to default branch
+	require.NoError(t, g.Checkout(defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.txt"), []byte("main"), 0644))
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "add main")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Rebase feature onto default
+	require.NoError(t, g.Checkout("feature"))
+	require.NoError(t, g.Rebase(defaultBranch))
+
+	// Both files should exist
+	_, err = os.Stat(filepath.Join(dir, "feature.txt"))
+	assert.NoError(t, err)
+	_, err = os.Stat(filepath.Join(dir, "main.txt"))
+	assert.NoError(t, err)
+}
+
+func TestMergeConflict(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	// Create feature branch modifying README
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("feature content"), 0644))
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "feature change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Modify same file on default branch
+	require.NoError(t, g.Checkout(defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("main content"), 0644))
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "main change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Merge should fail with conflict
+	err = g.Merge("feature")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "git merge")
+}
+
+func TestHasConflicts(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	// No conflicts in clean repo
+	assert.False(t, g.HasConflicts())
+}
+
+func TestDiffNoBranch(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	_, err := g.Diff("nonexistent", "alsononexistent")
+	assert.Error(t, err)
+}
+
+func TestCreateBranchFromNonexistent(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	err := g.CreateBranch("feature", "nonexistent")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "git checkout")
+}
+
 func TestCheckoutNonexistent(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

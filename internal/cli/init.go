@@ -48,7 +48,7 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	// Detect owner/repo from git remote
 	owner, repo, err := detectOwnerRepo(dir)
 	if err != nil {
-		return fmt.Errorf("could not detect repository: %w\nMake sure a GitHub remote is configured")
+		return fmt.Errorf("could not detect repository: %w — make sure a GitHub remote is configured", err)
 	}
 
 	// 2. Create config

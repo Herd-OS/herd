@@ -41,6 +41,43 @@ func TestProgress(t *testing.T) {
 	assert.Equal(t, "5/5 (100%)", Progress(5, 5))
 }
 
+func TestTableFewerColumnsThanHeaders(t *testing.T) {
+	tbl := NewTable("A", "B", "C")
+	tbl.AddRow("only-one")
+
+	out := tbl.Render()
+	assert.Contains(t, out, "only-one")
+	// Should not panic even with missing columns
+}
+
+func TestTableMoreColumnsThanHeaders(t *testing.T) {
+	tbl := NewTable("A")
+	tbl.AddRow("one", "two", "three")
+
+	out := tbl.Render()
+	assert.Contains(t, out, "one")
+	// Extra columns beyond headers are ignored gracefully
+}
+
+func TestTableNoRows(t *testing.T) {
+	tbl := NewTable("NAME", "STATUS")
+	out := tbl.Render()
+	assert.Contains(t, out, "NAME")
+	assert.Contains(t, out, "STATUS")
+}
+
+func TestTableString(t *testing.T) {
+	tbl := NewTable("X")
+	tbl.AddRow("y")
+	assert.Equal(t, tbl.Render(), tbl.String())
+}
+
+func TestProgressEdgeCases(t *testing.T) {
+	assert.Equal(t, "1/1 (100%)", Progress(1, 1))
+	assert.Equal(t, "0/10 (0%)", Progress(0, 10))
+	assert.Equal(t, "1/3 (33%)", Progress(1, 3))
+}
+
 func TestStatusMessages(t *testing.T) {
 	// Just verify they don't panic and contain the message
 	assert.Contains(t, Success("done"), "done")
