@@ -42,6 +42,11 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newBatchCmd())
 	root.AddCommand(newRunnerCmd())
 
+	// Internal commands (hidden, used by GitHub Actions workflows)
+	root.AddCommand(newWorkerCmd())
+	root.AddCommand(newIntegratorCmd())
+	root.AddCommand(newMonitorCmd())
+
 	// Override the help function to support --help-all
 	defaultHelp := root.HelpFunc()
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
