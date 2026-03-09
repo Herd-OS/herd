@@ -222,3 +222,58 @@ func TestCheckoutNonexistent(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "git checkout")
 }
+
+func TestIsMerging(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	// Clean repo — not merging
+	assert.False(t, g.IsMerging())
+
+	// Create a merge conflict to enter merge state
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	require.NoError(t, g.CreateBranch("conflict", defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("conflict content"), 0644))
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "conflict change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	require.NoError(t, g.Checkout(defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("main content"), 0644))
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "main change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Merge fails — now in merge state
+	err = g.Merge("conflict")
+	require.Error(t, err)
+	assert.True(t, g.IsMerging())
+
+	// Abort merge — no longer merging
+	require.NoError(t, g.AbortMerge())
+	assert.False(t, g.IsMerging())
+}
+
+func TestAbortMerge_NoMergeInProgress(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	err := g.AbortMerge()
+	assert.Error(t, err)
+}
+
+func TestAbortRebase_NoRebaseInProgress(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	err := g.AbortRebase()
+	assert.Error(t, err)
+}
