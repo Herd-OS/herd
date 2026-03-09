@@ -22,6 +22,7 @@ func newIntegratorCmd() *cobra.Command {
 	cmd.AddCommand(newAdvanceCmd())
 	cmd.AddCommand(newIntegratorReviewCmd())
 	cmd.AddCommand(newIntegratorMergeCmd())
+	cmd.AddCommand(newIntegratorCleanupCmd())
 	return cmd
 }
 
@@ -207,6 +208,42 @@ func newIntegratorMergeCmd() *cobra.Command {
 			} else if result.Merged {
 				fmt.Println("Batch PR merged and cleanup complete.")
 			}
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number (required)")
+	cmd.MarkFlagRequired("pr")
+	return cmd
+}
+
+func newIntegratorCleanupCmd() *cobra.Command {
+	var prNumber int
+
+	cmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Run post-merge cleanup for a merged batch PR",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if os.Getenv("HERD_RUNNER") != "true" {
+				return fmt.Errorf("herd integrator cleanup is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+
+			cfg, err := config.Load(".")
+			if err != nil {
+				return err
+			}
+			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			if err != nil {
+				return fmt.Errorf("creating GitHub client: %w", err)
+			}
+			_ = cfg // config loaded for consistency but CleanupMerged doesn't need it
+
+			if err := integrator.CleanupMerged(cmd.Context(), client, integrator.CleanupParams{
+				PRNumber: prNumber,
+			}); err != nil {
+				return err
+			}
+			fmt.Println("Post-merge cleanup complete.")
 			return nil
 		},
 	}

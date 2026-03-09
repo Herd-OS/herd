@@ -131,3 +131,77 @@ func TestMergeApproved_MergeFailure(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "merging batch PR")
 }
+
+func TestCleanupMerged(t *testing.T) {
+	tests := []struct {
+		name          string
+		pr            *platform.PullRequest
+		expectCleanup bool
+	}{
+		{
+			name: "success — closes issues, milestone, deletes branch",
+			pr: &platform.PullRequest{
+				Number: 100, Title: "[herd] Add auth (3 tasks)",
+				State: "closed", Head: "herd/batch/5-add-auth",
+			},
+			expectCleanup: true,
+		},
+		{
+			name: "skip — non-herd PR",
+			pr: &platform.PullRequest{
+				Number: 100, Title: "Fix typo",
+				State: "closed", Head: "fix-typo",
+			},
+			expectCleanup: false,
+		},
+		{
+			name: "skip — still open",
+			pr: &platform.PullRequest{
+				Number: 100, Title: "[herd] Add auth",
+				State: "open", Head: "herd/batch/5-add-auth",
+			},
+			expectCleanup: false,
+		},
+		{
+			name: "skip — unparseable branch",
+			pr: &platform.PullRequest{
+				Number: 100, Title: "[herd] Something",
+				State: "closed", Head: "not-a-batch-branch",
+			},
+			expectCleanup: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prSvc := &mockPRService{
+				getResult: map[int]*platform.PullRequest{tt.pr.Number: tt.pr},
+			}
+			issueSvc := newMockIssueService()
+			issueSvc.listResult = []*platform.Issue{
+				{Number: 10, Title: "Task", Labels: []string{issues.StatusDone}},
+			}
+			msSvc := &mockMilestoneService{
+				getResult: map[int]*platform.Milestone{5: {Number: 5, Title: "Add auth"}},
+			}
+			repoSvc := &mockRepoService{defaultBranch: "main"}
+
+			mock := &mockPlatform{
+				issues:     issueSvc,
+				prs:        prSvc,
+				repo:       repoSvc,
+				milestones: msSvc,
+			}
+
+			err := CleanupMerged(context.Background(), mock, CleanupParams{PRNumber: tt.pr.Number})
+			require.NoError(t, err)
+
+			if tt.expectCleanup {
+				assert.Contains(t, msSvc.updatedStates, "closed")
+				assert.Equal(t, "herd/batch/5-add-auth", repoSvc.deletedBranch)
+			} else {
+				assert.Empty(t, msSvc.updatedStates)
+			}
+		})
+	}
+}

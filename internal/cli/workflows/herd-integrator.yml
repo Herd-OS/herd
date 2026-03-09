@@ -5,6 +5,8 @@ on:
     types: [completed]
   pull_request_review:
     types: [submitted]
+  pull_request:
+    types: [closed]
 
 permissions:
   contents: write
@@ -61,3 +63,21 @@ jobs:
           else
             herd integrator review --pr ${{ github.event.pull_request.number }}
           fi
+
+  cleanup:
+    if: >
+      github.event_name == 'pull_request'
+      && github.event.action == 'closed'
+      && github.event.pull_request.merged == true
+      && startsWith(github.event.pull_request.title, '[herd]')
+    runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Post-merge cleanup
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          herd integrator cleanup --pr ${{ github.event.pull_request.number }}
