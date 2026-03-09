@@ -235,7 +235,7 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 	// Tier is complete — check if this was the last tier
 	if triggerTier+1 >= len(tiers) {
 		// All tiers done — open batch PR
-		prNum, err := openBatchPR(ctx, p, g, ms, allIssues, tiers, batchBranch)
+		prNum, err := openBatchPR(ctx, p, g, cfg, ms, allIssues, tiers, batchBranch)
 		if err != nil {
 			return nil, fmt.Errorf("opening batch PR: %w", err)
 		}
@@ -406,7 +406,7 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 	}, nil
 }
 
-func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, ms *platform.Milestone, allIssues []*platform.Issue, tiers [][]int, batchBranch string) (int, error) {
+func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, ms *platform.Milestone, allIssues []*platform.Issue, tiers [][]int, batchBranch string) (int, error) {
 	// Check if PR already exists
 	existing, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
 	if err == nil && len(existing) > 0 {
@@ -426,7 +426,14 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, ms *platf
 		return 0, fmt.Errorf("checking out batch branch: %w", err)
 	}
 	if err := g.Rebase("origin/" + defaultBranch); err != nil {
-		// Rebase failed — push un-rebased for now (on_conflict: notify)
+		_ = g.AbortRebase() // Clean up failed rebase state
+
+		if cfg.Integrator.OnConflict == "dispatch-resolver" {
+			if resolveErr := handleRebaseConflictResolution(ctx, p, cfg, ms, batchBranch, defaultBranch); resolveErr != nil {
+				fmt.Printf("Warning: failed to dispatch rebase resolver: %v\n", resolveErr)
+			}
+		}
+		// Open the PR un-rebased regardless (notify or dispatch-resolver)
 		fmt.Printf("Warning: rebase onto %s failed, opening PR without rebase: %v\n", defaultBranch, err)
 	} else {
 		// Force push rebased branch (batch branch is HerdOS-owned)
@@ -478,6 +485,68 @@ func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers
 	}
 
 	return b.String()
+}
+
+func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) error {
+	// Count existing conflict-resolution issues in this milestone
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+		State:     "all",
+		Milestone: &ms.Number,
+	})
+	if err != nil {
+		return fmt.Errorf("listing milestone issues: %w", err)
+	}
+
+	conflictCount := 0
+	for _, iss := range allIssues {
+		parsed, parseErr := issues.ParseBody(iss.Body)
+		if parseErr != nil {
+			continue
+		}
+		if parsed.FrontMatter.ConflictResolution {
+			conflictCount++
+		}
+	}
+
+	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
+		return nil // At cap, fall through to open PR un-rebased
+	}
+
+	// Create conflict-resolution issue
+	body := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:             1,
+			Batch:               ms.Number,
+			Type:                "fix",
+			ConflictResolution:  true,
+			ConflictingBranches: []string{batchBranch, defaultBranch},
+		},
+		Task: fmt.Sprintf("Rebase the batch branch `%s` onto the latest `%s`.\n\n"+
+			"Checkout `%s`, read the batch branch diff, produce a clean rebase, "+
+			"and force-push the result to `%s`.", batchBranch, defaultBranch, defaultBranch, batchBranch),
+		Context: fmt.Sprintf("Automatic rebase of batch branch `%s` onto `%s` failed due to conflicts.", batchBranch, defaultBranch),
+	})
+
+	fixIssue, err := p.Issues().Create(ctx,
+		fmt.Sprintf("Resolve rebase conflict: %s onto %s", batchBranch, defaultBranch),
+		body,
+		[]string{issues.TypeFix, issues.StatusInProgress},
+		&ms.Number,
+	)
+	if err != nil {
+		return fmt.Errorf("creating rebase conflict-resolution issue: %w", err)
+	}
+
+	// Dispatch resolver worker
+	refBranch, _ := p.Repository().GetDefaultBranch(ctx)
+	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", refBranch, map[string]string{
+		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
+		"batch_branch":    defaultBranch,
+		"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+		"runner_label":    cfg.Workers.RunnerLabel,
+	})
+
+	return nil
 }
 
 func tierForIssue(number int, tiers [][]int) int {

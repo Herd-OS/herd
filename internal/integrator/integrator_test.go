@@ -705,6 +705,213 @@ func initConflictRepo(t *testing.T) (string, *git.Git) {
 	return dir, git.New(dir)
 }
 
+func TestOpenBatchPR_RebaseConflict_DispatchResolver(t *testing.T) {
+	// Create a repo where rebase will fail due to diverged main
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("original"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Batch branch with conflicting change
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("batch content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "batch change")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	// Diverge main
+	runGit(t, dir, "checkout", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("main diverged"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "main diverge")
+	runGit(t, dir, "push", "origin", "main")
+
+	g := git.New(dir)
+
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{} // no existing conflict issues
+
+	createdIssues := []*platform.Issue{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			iss := &platform.Issue{Number: 99, Title: title}
+			createdIssues = append(createdIssues, iss)
+			return iss, nil
+		},
+	}
+
+	wf := &mockWorkflowService{}
+	prSvc := &mockPRService{}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	allIssues := []*platform.Issue{
+		{Number: 10, Title: "Task", Labels: []string{issues.StatusDone}},
+	}
+	tiers := [][]int{{10}}
+
+	mock := &mockPlatform{
+		issues:     mockCreate,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{
+			OnConflict:                    "dispatch-resolver",
+			MaxConflictResolutionAttempts: 3,
+		},
+		Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	prNum, err := openBatchPR(context.Background(), mock, g, cfg, ms, allIssues, tiers, "herd/batch/1-batch")
+	require.NoError(t, err)
+	assert.NotZero(t, prNum)
+	// PR was still created (un-rebased)
+	assert.NotNil(t, prSvc.created)
+	// Conflict-resolution issue was created
+	assert.Len(t, createdIssues, 1)
+	assert.Contains(t, createdIssues[0].Title, "Resolve rebase conflict")
+	// Worker was dispatched
+	assert.Len(t, wf.dispatched, 1)
+}
+
+func TestOpenBatchPR_RebaseConflict_MaxAttempts(t *testing.T) {
+	// Same diverged repo setup
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("original"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("batch content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "batch change")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	runGit(t, dir, "checkout", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("main diverged"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "main diverge")
+	runGit(t, dir, "push", "origin", "main")
+
+	g := git.New(dir)
+
+	issueSvc := newMockIssueService()
+	// Two existing conflict-resolution issues — at max
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\nResolve\n"},
+		{Number: 81, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\nResolve\n"},
+	}
+
+	wf := &mockWorkflowService{}
+	prSvc := &mockPRService{}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	allIssues := []*platform.Issue{
+		{Number: 10, Title: "Task", Labels: []string{issues.StatusDone}},
+	}
+	tiers := [][]int{{10}}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{
+			OnConflict:                    "dispatch-resolver",
+			MaxConflictResolutionAttempts: 2,
+		},
+		Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	prNum, err := openBatchPR(context.Background(), mock, g, cfg, ms, allIssues, tiers, "herd/batch/1-batch")
+	require.NoError(t, err)
+	assert.NotZero(t, prNum)
+	// PR was still created
+	assert.NotNil(t, prSvc.created)
+	// No resolver dispatched (at cap)
+	assert.Len(t, wf.dispatched, 0)
+}
+
+func TestOpenBatchPR_RebaseConflict_Notify(t *testing.T) {
+	// Same diverged repo setup
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("original"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("batch content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "batch change")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	runGit(t, dir, "checkout", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("main diverged"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "main diverge")
+	runGit(t, dir, "push", "origin", "main")
+
+	g := git.New(dir)
+
+	issueSvc := newMockIssueService()
+	wf := &mockWorkflowService{}
+	prSvc := &mockPRService{}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	allIssues := []*platform.Issue{
+		{Number: 10, Title: "Task", Labels: []string{issues.StatusDone}},
+	}
+	tiers := [][]int{{10}}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{OnConflict: "notify"},
+	}
+
+	prNum, err := openBatchPR(context.Background(), mock, g, cfg, ms, allIssues, tiers, "herd/batch/1-batch")
+	require.NoError(t, err)
+	assert.NotZero(t, prNum)
+	// PR created, no resolver dispatched
+	assert.NotNil(t, prSvc.created)
+	assert.Len(t, wf.dispatched, 0)
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
