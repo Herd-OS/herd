@@ -30,6 +30,7 @@ type Agent struct {
 	Provider string `yaml:"provider"`
 	Binary   string `yaml:"binary"`
 	Model    string `yaml:"model"`
+	MaxTurns int    `yaml:"max_turns"` // Max agentic turns for headless mode (0 = agent default)
 }
 
 type Workers struct {

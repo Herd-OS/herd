@@ -52,8 +52,14 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
 - Commit your changes with clear messages referencing issue #{{.IssueNumber}}.
 - Do not add features, refactor code, or make improvements beyond
   what is specified in the issue.
-- If you cannot complete the task, exit with a non-zero status and
-  include the reason in your output.
+- You are running in a fully automated CI environment with no human
+  present. Do not pause, ask questions, or wait for confirmation.
+  Figure it out. If something is broken, try to fix it. If a tool
+  fails, try a different approach. Only exit with a non-zero status
+  if the task is genuinely impossible (e.g., the issue references
+  code that doesn't exist and can't be inferred).
+- If you cannot complete the task after exhausting alternatives,
+  exit with a non-zero status and include the reason in your output.
 {{if .RoleInstructions}}
 ## Project-Specific Instructions
 {{.RoleInstructions}}
@@ -122,6 +128,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	execOpts := agent.ExecOptions{
 		RepoRoot:     params.RepoRoot,
 		SystemPrompt: systemPrompt,
+		MaxTurns:     cfg.Agent.MaxTurns,
 	}
 
 	if _, err = ag.Execute(ctx, taskSpec, execOpts); err != nil {

@@ -34,6 +34,7 @@ type TaskSpec struct {
 type ExecOptions struct {
 	RepoRoot     string
 	SystemPrompt string
+	MaxTurns     int // Max agentic turns (0 = agent default)
 }
 
 type Plan struct {

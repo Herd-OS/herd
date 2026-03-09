@@ -13,12 +13,15 @@ import (
 // The task body is passed as the prompt (-p), and the system prompt provides
 // worker instructions. The agent commits as it works in the repo.
 func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
-	args := []string{"-p", task.Body}
+	args := []string{"-p", task.Body, "--dangerously-skip-permissions"}
 	if opts.SystemPrompt != "" {
 		args = append(args, "--system-prompt", opts.SystemPrompt)
 	}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
+	}
+	if opts.MaxTurns > 0 {
+		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
 	}
 
 	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)

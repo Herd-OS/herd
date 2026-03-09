@@ -34,6 +34,22 @@ workflow_dispatch ──▶   1. Checkout batch branch
 
 The core of a worker is `herd worker exec <issue>`, which invokes the configured agent in headless mode with a carefully constructed prompt.
 
+### Headless Permissions
+
+Workers run in fully automated CI environments with no human present. The agent must never pause for permission prompts. For Claude Code, `herd` passes `--dangerously-skip-permissions` to bypass all permission checks. This is safe because:
+
+- Workers run on **isolated self-hosted runners** (or ephemeral containers)
+- They operate on **disposable worker branches** — damage is contained
+- The Integrator reviews all changes before they reach `main`
+
+An optional `max_turns` setting in the `agent:` config section limits how many agentic turns the agent can take, preventing infinite loops in headless mode. When set to 0 (default), the agent uses its own default limit.
+
+```yaml
+agent:
+  provider: "claude"
+  max_turns: 200  # optional, 0 = agent default
+```
+
 ### Role Instructions
 
 If `.herd/worker.md` exists in the repository, its contents are appended to the worker's system prompt. This is convention-based — no configuration is needed. Drop the file in `.herd/` and it gets picked up automatically. Use this to provide project-specific worker guidance: coding standards, forbidden patterns, testing requirements, or other constraints that every worker should follow.
@@ -71,8 +87,14 @@ sections as written by the Planner>
 - Commit your changes with clear messages referencing issue #<number>.
 - Do not add features, refactor code, or make improvements beyond
   what is specified in the issue.
-- If you cannot complete the task, exit with a non-zero status and
-  include the reason in your output.
+- You are running in a fully automated CI environment with no human
+  present. Do not pause, ask questions, or wait for confirmation.
+  Figure it out. If something is broken, try to fix it. If a tool
+  fails, try a different approach. Only exit with a non-zero status
+  if the task is genuinely impossible (e.g., the issue references
+  code that doesn't exist and can't be inferred).
+- If you cannot complete the task after exhausting alternatives,
+  exit with a non-zero status and include the reason in your output.
 ```
 
 The full issue body is passed through verbatim — it is not summarized, reformatted, or truncated. The Implementation Details, Conventions, and Context from Dependencies sections are written by the Planner specifically for the worker.
