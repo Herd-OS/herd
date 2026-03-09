@@ -21,7 +21,7 @@ import (
 
 type mockPlatform struct {
 	issues     platform.IssueService
-	prs        *mockPRService
+	prs        platform.PullRequestService
 	workflows  *mockWorkflowService
 	repo       *mockRepoService
 	milestones *mockMilestoneService
@@ -522,6 +522,136 @@ func TestConsolidate_ConflictMaxAttempts(t *testing.T) {
 	assert.Equal(t, 0, result.ConflictIssue) // No issue created
 	assert.Contains(t, issueSvc.comments[42][0], "max resolution attempts")
 	assert.Len(t, wf.dispatched, 0) // No dispatch
+}
+
+func TestAdvance_AllComplete_RebaseFailure(t *testing.T) {
+	// When all tiers complete, openBatchPR is called.
+	// If rebase fails, the PR should still be created (without rebase).
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[10] = &platform.Issue{
+		Number: 10, Title: "Task A",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Task A", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+	}
+
+	prSvc := &mockPRService{}
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "10"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	// Create a repo with a bare origin so fetch works but rebase will conflict
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	// Initial commit
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("original"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create batch branch with a conflicting change to shared.txt
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("batch content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "batch change")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	// Add a conflicting commit on main so rebase will fail
+	runGit(t, dir, "checkout", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("main diverged"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "main diverge")
+	runGit(t, dir, "push", "origin", "main")
+
+	g := git.New(dir)
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, g, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.AllComplete)
+	assert.True(t, result.TierComplete)
+	// PR should still have been created despite rebase failure
+	assert.NotNil(t, prSvc.created)
+	assert.Contains(t, prSvc.created.Title, "[herd] Batch")
+}
+
+func TestConsolidate_PushFailure(t *testing.T) {
+	// Merge succeeds locally but push fails — should return error
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	// Create a repo where merge succeeds but push will fail (no remote)
+	dir := t.TempDir()
+	runGit(t, "", "init", "-b", "main", dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("original"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	// Create batch branch
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("batch content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "batch change")
+
+	// Create worker branch with non-conflicting change
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+
+	// Go back to batch branch
+	runGit(t, dir, "checkout", "herd/batch/1-batch")
+
+	// Note: no remote "origin" configured, so fetch will use local refs
+	// We need to add a fake remote that will fail on push
+	runGit(t, dir, "remote", "add", "origin", "/nonexistent/path")
+
+	g := git.New(dir)
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	_, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "fetching")
 }
 
 // initConflictRepo creates a git repo with a bare "origin" remote, a batch branch,
