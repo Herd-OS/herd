@@ -281,7 +281,7 @@ func installWorkflows(dir string) error {
 
 // RoleInstructionFiles returns the list of role instruction filenames created by init.
 func RoleInstructionFiles() []string {
-	return []string{"planner.md", "worker.md", "integrator.md", "monitor.md"}
+	return []string{"planner.md", "worker.md", "integrator.md"}
 }
 
 func createRoleInstructionFiles(herdDir string) error {

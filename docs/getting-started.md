@@ -11,7 +11,7 @@ herd init
 This will:
 
 1. **Create `.herdos.yml`** — the configuration file with sensible defaults, auto-detecting your GitHub owner and repo from the git remote
-2. **Create `.herd/` directory** — with empty role instruction files (`planner.md`, `worker.md`, `integrator.md`, `monitor.md`) for customizing agent behavior per role
+2. **Create `.herd/` directory** — with empty role instruction files (`planner.md`, `worker.md`, `integrator.md`) for customizing agent behavior per role
 3. **Create GitHub labels** — the `herd/*` label taxonomy used to track issue status and type
 4. **Install workflow files** — GitHub Actions workflows for workers, integrator, and monitor in `.github/workflows/`
 
@@ -60,8 +60,7 @@ Customize how each HerdOS role behaves in your project by editing files in `.her
 |------|---------|
 | `.herd/planner.md` | Extra instructions for the Planner (e.g., "always include testing requirements") |
 | `.herd/worker.md` | Extra instructions for Workers (e.g., "use table-driven tests", "follow project coding standards") |
-| `.herd/integrator.md` | Extra instructions for the Integrator |
-| `.herd/monitor.md` | Extra instructions for the Monitor |
+| `.herd/integrator.md` | Extra instructions for the Integrator's agent review (e.g., "be strict about error handling") |
 
 These files are created empty by `herd init`. Add your project-specific instructions and commit them — they're shared across your team.
 

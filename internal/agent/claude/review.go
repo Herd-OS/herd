@@ -5,9 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"text/template"
 
@@ -91,12 +89,9 @@ func renderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 		Diff:               diff,
 	}
 
-	// Load role instructions if available
-	if opts.RepoRoot != "" {
-		ri, readErr := os.ReadFile(filepath.Join(opts.RepoRoot, ".herd", "integrator.md"))
-		if readErr == nil {
-			data.RoleInstructions = string(ri)
-		}
+	// Use role instructions passed by the caller (integrator loads .herd/integrator.md)
+	if opts.SystemPrompt != "" {
+		data.RoleInstructions = opts.SystemPrompt
 	}
 
 	var buf bytes.Buffer
