@@ -17,6 +17,7 @@ type FrontMatter struct {
 	Type                string   `yaml:"type,omitempty"`
 	FixCycle            int      `yaml:"fix_cycle,omitempty"`
 	BatchPR             int      `yaml:"batch_pr,omitempty"`
+	CIFixCycle          int      `yaml:"ci_fix_cycle,omitempty"`
 	ConflictResolution  bool     `yaml:"conflict_resolution,omitempty"`
 	ConflictingBranches []string `yaml:"conflicting_branches,omitempty"`
 }
@@ -66,6 +67,9 @@ func RenderBody(body IssueBody) string {
 	}
 	if body.FrontMatter.BatchPR > 0 {
 		b.WriteString(fmt.Sprintf("  batch_pr: %d\n", body.FrontMatter.BatchPR))
+	}
+	if body.FrontMatter.CIFixCycle > 0 {
+		b.WriteString(fmt.Sprintf("  ci_fix_cycle: %d\n", body.FrontMatter.CIFixCycle))
 	}
 	if body.FrontMatter.ConflictResolution {
 		b.WriteString("  conflict_resolution: true\n")

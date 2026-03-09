@@ -107,6 +107,7 @@ func (m *mockDispatchPlatform) Labels() platform.LabelService              { ret
 func (m *mockDispatchPlatform) Milestones() platform.MilestoneService      { return m.milestones }
 func (m *mockDispatchPlatform) Runners() platform.RunnerService            { return nil }
 func (m *mockDispatchPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockDispatchPlatform) Checks() platform.CheckService             { return nil }
 
 // mockDispatchIssueService
 

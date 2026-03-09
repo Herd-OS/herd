@@ -23,6 +23,7 @@ func newIntegratorCmd() *cobra.Command {
 	cmd.AddCommand(newIntegratorReviewCmd())
 	cmd.AddCommand(newIntegratorMergeCmd())
 	cmd.AddCommand(newIntegratorCleanupCmd())
+	cmd.AddCommand(newIntegratorCheckCICmd())
 	return cmd
 }
 
@@ -250,5 +251,52 @@ func newIntegratorCleanupCmd() *cobra.Command {
 
 	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number (required)")
 	cmd.MarkFlagRequired("pr")
+	return cmd
+}
+
+func newIntegratorCheckCICmd() *cobra.Command {
+	var runID int64
+
+	cmd := &cobra.Command{
+		Use:   "check-ci",
+		Short: "Check CI status and dispatch fix workers if needed",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if os.Getenv("HERD_RUNNER") != "true" {
+				return fmt.Errorf("herd integrator check-ci is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+
+			cfg, err := config.Load(".")
+			if err != nil {
+				return err
+			}
+			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			if err != nil {
+				return fmt.Errorf("creating GitHub client: %w", err)
+			}
+
+			cwd, _ := os.Getwd()
+			result, err := integrator.CheckCI(cmd.Context(), client, cfg, integrator.CheckCIParams{
+				RunID:    runID,
+				RepoRoot: cwd,
+			})
+			if err != nil {
+				return err
+			}
+
+			if result.Skipped {
+				fmt.Println("CI check skipped (require_ci is false).")
+			} else if result.MaxCyclesHit {
+				fmt.Println("CI failed — max fix cycles reached. Manual intervention needed.")
+			} else if len(result.FixIssues) > 0 {
+				fmt.Printf("CI failed — created %d fix issues and dispatched workers.\n", len(result.FixIssues))
+			} else {
+				fmt.Printf("CI status: %s\n", result.Status)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID (required)")
+	cmd.MarkFlagRequired("run-id")
 	return cmd
 }

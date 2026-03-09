@@ -29,6 +29,7 @@ func (m *mockPlatform) Labels() platform.LabelService              { return nil 
 func (m *mockPlatform) Milestones() platform.MilestoneService      { return nil }
 func (m *mockPlatform) Runners() platform.RunnerService            { return nil }
 func (m *mockPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 type mockIssueService struct {
 	listResults   map[string][]*platform.Issue // keyed by label

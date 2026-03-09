@@ -38,6 +38,7 @@ func (p *statefulPlatform) Labels() platform.LabelService             { return n
 func (p *statefulPlatform) Milestones() platform.MilestoneService     { return p.milestones }
 func (p *statefulPlatform) Runners() platform.RunnerService           { return nil }
 func (p *statefulPlatform) Repository() platform.RepositoryService    { return p.repo }
+func (p *statefulPlatform) Checks() platform.CheckService            { return nil }
 
 // --- Stateful Issue Service ---
 

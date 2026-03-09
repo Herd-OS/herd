@@ -34,6 +34,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           herd integrator consolidate --run-id ${{ github.event.workflow_run.id }}
+          herd integrator check-ci --run-id ${{ github.event.workflow_run.id }}
           herd integrator advance --run-id ${{ github.event.workflow_run.id }}
           herd integrator review --run-id ${{ github.event.workflow_run.id }}
 
