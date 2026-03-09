@@ -56,6 +56,26 @@ func TestExecute_CommandArgs(t *testing.T) {
 	}
 }
 
+func TestExecute_MaxTurns(t *testing.T) {
+	// Use a script that prints all args so we can verify --max-turns is passed
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\""), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	task := agent.TaskSpec{Body: "do work"}
+	opts := agent.ExecOptions{
+		RepoRoot: dir,
+		MaxTurns: 200,
+	}
+
+	result, err := a.Execute(context.Background(), task, opts)
+	require.NoError(t, err)
+	assert.Contains(t, result.Summary, "--max-turns 200")
+	assert.Contains(t, result.Summary, "--dangerously-skip-permissions")
+}
+
 func TestExecute_FailingCommand(t *testing.T) {
 	a := New("false", "") // "false" always exits with code 1
 	task := agent.TaskSpec{Body: "test"}

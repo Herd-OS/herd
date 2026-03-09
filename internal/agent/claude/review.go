@@ -50,7 +50,7 @@ func (c *ClaudeAgent) Review(ctx context.Context, diff string, opts agent.Review
 		return nil, fmt.Errorf("rendering review prompt: %w", err)
 	}
 
-	args := []string{"-p", prompt, "--system-prompt", reviewSystemPrompt}
+	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--system-prompt", reviewSystemPrompt}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}

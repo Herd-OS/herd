@@ -19,6 +19,7 @@ agent:
   provider: "claude"             # claude (codex, cursor, gemini, opencode coming soon)
   binary: ""                     # path to binary (default: auto-detect)
   model: ""                      # model override (optional, agent-specific)
+  max_turns: 0                   # max agentic turns for headless mode (0 = agent default)
 
 # Worker settings
 workers:

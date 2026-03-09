@@ -17,6 +17,7 @@ agent:
   provider: "claude"             # claude (codex, cursor, gemini, opencode coming soon)
   binary: ""                     # path to agent binary (auto-detect if empty)
   model: ""                      # model override (optional, agent-specific)
+  max_turns: 0                   # max agentic turns in headless mode (0 = agent default)
 
 workers:
   max_concurrent: 3              # max simultaneous worker Actions
