@@ -11,7 +11,7 @@ herd init
 This will:
 
 1. **Create `.herdos.yml`** — the configuration file with sensible defaults, auto-detecting your GitHub owner and repo from the git remote
-2. **Create `.herd/` directory** — with empty role instruction files (`planner.md`, `worker.md`, `integrator.md`, `monitor.md`) for customizing agent behavior per role
+2. **Create `.herd/` directory** — with empty role instruction files (`planner.md`, `worker.md`, `integrator.md`) for customizing agent behavior per role
 3. **Create GitHub labels** — the `herd/*` label taxonomy used to track issue status and type
 4. **Install workflow files** — GitHub Actions workflows for workers, integrator, and monitor in `.github/workflows/`
 
@@ -60,8 +60,7 @@ Customize how each HerdOS role behaves in your project by editing files in `.her
 |------|---------|
 | `.herd/planner.md` | Extra instructions for the Planner (e.g., "always include testing requirements") |
 | `.herd/worker.md` | Extra instructions for Workers (e.g., "use table-driven tests", "follow project coding standards") |
-| `.herd/integrator.md` | Extra instructions for the Integrator |
-| `.herd/monitor.md` | Extra instructions for the Monitor |
+| `.herd/integrator.md` | Extra instructions for the Integrator's agent review (e.g., "be strict about error handling") |
 
 These files are created empty by `herd init`. Add your project-specific instructions and commit them — they're shared across your team.
 
@@ -143,9 +142,9 @@ Once workers are dispatched, the system runs autonomously via GitHub Actions:
 
 1. **Workers execute** — Each worker reads its assigned issue, runs your agent in headless mode on a self-hosted runner, and pushes changes to a worker branch (`herd/worker/<number>-<slug>`). If no changes are needed, the worker marks the issue as done without pushing.
 
-2. **Integrator consolidates** — When a worker completes, the Integrator merges its branch into the batch branch (`herd/batch/<number>-<slug>`) and deletes the worker branch.
+2. **Integrator consolidates** — When a worker completes, the Integrator merges its branch into the batch branch (`herd/batch/<number>-<slug>`) and deletes the worker branch. If a merge conflict is detected, the behavior depends on `integrator.on_conflict`: with `notify` (default), a comment is posted for manual resolution; with `dispatch-resolver`, a conflict-resolution worker is automatically dispatched.
 
-3. **Integrator advances** — After consolidation, the Integrator checks if the current tier is complete. If so, it unblocks and dispatches the next tier. When all tiers are done, it opens a single batch PR against `main`.
+3. **Integrator advances** — After consolidation, the Integrator checks if the current tier is complete. If so, it unblocks and dispatches the next tier. When all tiers are done, it rebases the batch branch onto `main` and opens a single batch PR.
 
 4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. If issues are found, the Integrator creates fix issues and dispatches fix workers. This cycle repeats up to `review_max_fix_cycles` times.
 
@@ -166,4 +165,9 @@ These are loaded automatically when the respective role runs.
 
 - **Worker failure** — The issue is labeled `herd/status:failed` and the Monitor is triggered immediately for fast escalation
 - **Tier stuck** — If any issue in a tier fails, the tier is stuck and the next tier won't be dispatched until the failure is resolved (manually or by the Monitor's auto-redispatch)
+- **Merge conflict** — When `on_conflict: dispatch-resolver`, the Integrator creates a conflict-resolution issue and dispatches a worker to resolve it. The number of attempts is limited by `max_conflict_resolution_attempts`. When `on_conflict: notify`, a comment is posted on the issue for manual resolution.
 - **Review safety valve** — If a single agent review finds more than 10 issues, fix workers are not created (to prevent runaway invocations). The PR is flagged for manual intervention.
+
+### Re-triggering Review
+
+When a human submits a review on the batch PR, the Integrator's `re-review` job runs automatically, invoking the agent for a fresh review against the current diff. This allows you to push manual fixes and have the agent re-evaluate.

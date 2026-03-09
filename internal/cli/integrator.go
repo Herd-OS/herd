@@ -47,7 +47,7 @@ func newConsolidateCmd() *cobra.Command {
 			cwd, _ := os.Getwd()
 			g := git.New(cwd)
 
-			result, err := integrator.Consolidate(cmd.Context(), client, g, integrator.ConsolidateParams{
+			result, err := integrator.Consolidate(cmd.Context(), client, g, cfg, integrator.ConsolidateParams{
 				RunID:    runID,
 				RepoRoot: cwd,
 			})
@@ -120,6 +120,7 @@ func newAdvanceCmd() *cobra.Command {
 
 func newIntegratorReviewCmd() *cobra.Command {
 	var runID int64
+	var prNumber int
 
 	cmd := &cobra.Command{
 		Use:   "review",
@@ -127,6 +128,12 @@ func newIntegratorReviewCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator review is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+			if runID == 0 && prNumber == 0 {
+				return fmt.Errorf("either --run-id or --pr is required")
+			}
+			if runID != 0 && prNumber != 0 {
+				return fmt.Errorf("--run-id and --pr are mutually exclusive")
 			}
 
 			cfg, err := config.Load(".")
@@ -144,6 +151,7 @@ func newIntegratorReviewCmd() *cobra.Command {
 
 			result, err := integrator.Review(cmd.Context(), client, ag, g, cfg, integrator.ReviewParams{
 				RunID:    runID,
+				PRNumber: prNumber,
 				RepoRoot: cwd,
 			})
 			if err != nil {
@@ -161,7 +169,7 @@ func newIntegratorReviewCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID (required)")
-	cmd.MarkFlagRequired("run-id")
+	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID")
+	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number (alternative to --run-id)")
 	return cmd
 }

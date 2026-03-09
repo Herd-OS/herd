@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   patrol:
-    runs-on: [self-hosted, herd-worker]
+    runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
         uses: actions/checkout@v4

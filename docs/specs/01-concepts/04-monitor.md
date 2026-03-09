@@ -79,10 +79,6 @@ monitor:
   notify_users: ["jfturcot"]       # GitHub usernames to @mention on escalation
 ```
 
-## Role Instructions
-
-If `.herd/monitor.md` exists in the repository, its contents are appended to the Monitor's agent prompt. This is convention-based — no configuration is needed. Drop the file in `.herd/` and it gets picked up automatically. Use this to provide project-specific monitoring guidance: custom escalation policies, known flaky areas, or context about expected failure patterns.
-
 ## Escalation
 
 When the Monitor can't resolve a problem automatically, it escalates:

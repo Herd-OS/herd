@@ -45,7 +45,7 @@ Flags:
 **What it does:**
 
 1. Creates `.herdos.yml` with default settings (if not present)
-2. Creates `.herd/` directory with empty role instruction files (`planner.md`, `worker.md`, `integrator.md`, `monitor.md`) and a `state/` subdirectory (gitignored) for runtime data
+2. Creates `.herd/` directory with empty role instruction files (`planner.md`, `worker.md`, `integrator.md`) and a `state/` subdirectory (gitignored) for runtime data
 3. Creates `herd/*` labels in the repository
 4. Installs `.github/workflows/herd-worker.yml`
 5. Installs `.github/workflows/herd-monitor.yml`

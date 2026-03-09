@@ -222,3 +222,136 @@ func TestCheckoutNonexistent(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "git checkout")
 }
+
+func TestIsMerging(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	// Clean repo — not merging
+	assert.False(t, g.IsMerging())
+
+	// Create a merge conflict to enter merge state
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	require.NoError(t, g.CreateBranch("conflict", defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("conflict content"), 0644))
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "conflict change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	require.NoError(t, g.Checkout(defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("main content"), 0644))
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "main change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Merge fails — now in merge state
+	err = g.Merge("conflict")
+	require.Error(t, err)
+	assert.True(t, g.IsMerging())
+
+	// Abort merge — no longer merging
+	require.NoError(t, g.AbortMerge())
+	assert.False(t, g.IsMerging())
+}
+
+func TestAbortMerge_NoMergeInProgress(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	err := g.AbortMerge()
+	assert.Error(t, err)
+}
+
+func TestAbortRebase_NoRebaseInProgress(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	err := g.AbortRebase()
+	assert.Error(t, err)
+}
+
+func TestAbortRebase_DuringRebase(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	// Create feature branch with conflicting change
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("feature content"), 0644))
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "feature change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Add conflicting commit on default branch
+	require.NoError(t, g.Checkout(defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("main content"), 0644))
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "main change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Rebase feature onto default — should fail with conflict
+	require.NoError(t, g.Checkout("feature"))
+	err = g.Rebase(defaultBranch)
+	require.Error(t, err)
+
+	// Verify rebase is in progress
+	_, statErr := os.Stat(filepath.Join(dir, ".git", "rebase-merge"))
+	assert.NoError(t, statErr, "rebase-merge directory should exist during rebase")
+
+	// Abort should succeed
+	require.NoError(t, g.AbortRebase())
+
+	// Verify rebase is no longer in progress
+	_, statErr = os.Stat(filepath.Join(dir, ".git", "rebase-merge"))
+	assert.True(t, os.IsNotExist(statErr), "rebase-merge should not exist after abort")
+}
+
+func TestHasConflicts_WithConflict(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	// Create conflicting branches
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("feature content"), 0644))
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "feature change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	require.NoError(t, g.Checkout(defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("main content"), 0644))
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "main change")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Merge to create conflict markers
+	_ = g.Merge("feature")
+	assert.True(t, g.HasConflicts())
+
+	// Cleanup
+	_ = g.AbortMerge()
+}

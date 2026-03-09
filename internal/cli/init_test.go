@@ -179,7 +179,7 @@ func TestCreateRoleInstructionFilesDoesNotOverwrite(t *testing.T) {
 	assert.Equal(t, custom, content)
 
 	// Other files should still be created
-	for _, name := range []string{"worker.md", "integrator.md", "monitor.md"} {
+	for _, name := range []string{"worker.md", "integrator.md"} {
 		_, err := os.Stat(filepath.Join(herdDir, name))
 		assert.NoError(t, err, "%s should exist", name)
 	}
@@ -187,11 +187,10 @@ func TestCreateRoleInstructionFilesDoesNotOverwrite(t *testing.T) {
 
 func TestRoleInstructionFiles(t *testing.T) {
 	files := RoleInstructionFiles()
-	assert.Len(t, files, 4)
+	assert.Len(t, files, 3)
 	assert.Contains(t, files, "planner.md")
 	assert.Contains(t, files, "worker.md")
 	assert.Contains(t, files, "integrator.md")
-	assert.Contains(t, files, "monitor.md")
 }
 
 // setupTestGitRepo creates a temp git repo with the given remote URL.

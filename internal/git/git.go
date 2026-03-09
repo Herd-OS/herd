@@ -2,7 +2,9 @@ package git
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -58,6 +60,22 @@ func (g *Git) CurrentBranch() (string, error) {
 
 func (g *Git) HeadSHA() (string, error) {
 	return g.output("rev-parse", "HEAD")
+}
+
+// AbortMerge aborts an in-progress merge.
+func (g *Git) AbortMerge() error {
+	return g.run("merge", "--abort")
+}
+
+// AbortRebase aborts an in-progress rebase.
+func (g *Git) AbortRebase() error {
+	return g.run("rebase", "--abort")
+}
+
+// IsMerging returns true if a merge is in progress (MERGE_HEAD exists).
+func (g *Git) IsMerging() bool {
+	_, err := os.Stat(filepath.Join(g.WorkDir, ".git", "MERGE_HEAD"))
+	return err == nil
 }
 
 func (g *Git) HasConflicts() bool {

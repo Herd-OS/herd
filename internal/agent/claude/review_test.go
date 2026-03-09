@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"os"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -81,13 +80,9 @@ func TestRenderReviewPrompt_EmptyCriteria(t *testing.T) {
 }
 
 func TestRenderReviewPrompt_WithRoleInstructions(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(dir+"/.herd", 0755))
-	require.NoError(t, os.WriteFile(dir+"/.herd/integrator.md", []byte("Pay extra attention to SQL queries"), 0644))
-
 	opts := agent.ReviewOptions{
 		AcceptanceCriteria: []string{"secure"},
-		RepoRoot:           dir,
+		SystemPrompt:       "Pay extra attention to SQL queries",
 	}
 
 	prompt, err := renderReviewPrompt("diff", opts)
@@ -99,7 +94,6 @@ func TestRenderReviewPrompt_WithRoleInstructions(t *testing.T) {
 func TestRenderReviewPrompt_NoRoleInstructions(t *testing.T) {
 	opts := agent.ReviewOptions{
 		AcceptanceCriteria: []string{"works"},
-		RepoRoot:           t.TempDir(), // no .herd/integrator.md
 	}
 
 	prompt, err := renderReviewPrompt("diff", opts)

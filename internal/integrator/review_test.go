@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -344,6 +345,181 @@ func TestReview_LoadsRoleInstructions(t *testing.T) {
 	assert.Equal(t, "Be strict about error handling", capturedOpts.SystemPrompt)
 }
 
+func TestReview_ByPRNumber(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+
+	prSvc := &mockPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+		},
+	}
+
+	msSvc := &mockMilestoneService{
+		getResult: map[int]*platform.Milestone{
+			1: {Number: 1, Title: "Batch"},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: msSvc,
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 50, result.BatchPRNumber)
+}
+
+func TestReview_AutoMergeFailure(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{}
+
+	prSvc := &mockPRServiceWithMergeErr{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		mergeErr: fmt.Errorf("merge conflict on GitHub"),
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+	}
+
+	dir, g := initTestRepo(t)
+	_, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator:   config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		PullRequests: config.PullRequests{AutoMerge: true},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	// Should propagate the merge error
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "auto-merging batch PR")
+	// Post-merge cleanup should NOT have run (milestone not closed)
+	assert.Empty(t, issueSvc.updatedIssues)
+}
+
+func TestReview_DisabledAutoMergeFailure(t *testing.T) {
+	// When review is disabled but auto-merge fails, error should propagate
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{}
+
+	prSvc := &mockPRServiceWithMergeErr{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		mergeErr: fmt.Errorf("branch protection"),
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	_, err := Review(context.Background(), mock, &mockReviewAgent{}, nil, &config.Config{
+		Integrator:   config.Integrator{Review: false},
+		PullRequests: config.PullRequests{AutoMerge: true},
+	}, ReviewParams{RunID: 100, RepoRoot: t.TempDir()})
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "auto-merging batch PR")
+	assert.Empty(t, issueSvc.updatedIssues) // No cleanup ran
+}
+
+func TestReview_AgentError(t *testing.T) {
+	mock := newReviewTestPlatform(
+		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		[]*platform.Issue{
+			{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+		},
+	)
+
+	ag := &mockReviewAgent{
+		reviewErr: fmt.Errorf("agent crashed"),
+	}
+
+	dir, g := initTestRepo(t)
+	_, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "agent review failed")
+}
+
+func TestParseBatchBranchMilestone(t *testing.T) {
+	tests := []struct {
+		name    string
+		branch  string
+		want    int
+		wantErr bool
+	}{
+		{"valid", "herd/batch/4-some-slug", 4, false},
+		{"valid single digit", "herd/batch/1-batch", 1, false},
+		{"valid multi digit", "herd/batch/42-long-name-here", 42, false},
+		{"not a batch branch", "herd/worker/10-task", 0, true},
+		{"no dash", "herd/batch/4", 0, true},
+		{"not a number", "herd/batch/abc-slug", 0, true},
+		{"random string", "main", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseBatchBranchMilestone(tt.branch)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	assert.Equal(t, "hello", truncate("hello", 10))
 	assert.Equal(t, "hel...", truncate("hello world", 3))
@@ -365,6 +541,16 @@ func (m *capturingMockAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agen
 func (m *capturingMockAgent) Review(_ context.Context, _ string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
 	*m.capturedOpts = opts
 	return m.result, nil
+}
+
+// mockPRServiceWithMergeErr wraps mockPRService to fail on Merge
+type mockPRServiceWithMergeErr struct {
+	*mockPRService
+	mergeErr error
+}
+
+func (m *mockPRServiceWithMergeErr) Merge(_ context.Context, _ int, _ platform.MergeMethod) (*platform.MergeResult, error) {
+	return nil, m.mergeErr
 }
 
 // mockIssueServiceWithCreate wraps mockIssueService to override Create

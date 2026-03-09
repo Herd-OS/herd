@@ -22,10 +22,12 @@ type ConsolidateParams struct {
 
 // ConsolidateResult holds the result of a consolidation.
 type ConsolidateResult struct {
-	IssueNumber  int
-	WorkerBranch string
-	Merged       bool
-	NoOp         bool
+	IssueNumber      int
+	WorkerBranch     string
+	Merged           bool
+	NoOp             bool
+	ConflictDetected bool
+	ConflictIssue    int
 }
 
 // AdvanceParams holds the parameters for advancing tiers.
@@ -45,6 +47,7 @@ type AdvanceResult struct {
 // ReviewParams holds the parameters for reviewing a batch PR.
 type ReviewParams struct {
 	RunID    int64
+	PRNumber int    // Alternative to RunID — used by pull_request_review trigger
 	RepoRoot string
 }
 
@@ -59,7 +62,7 @@ type ReviewResult struct {
 
 // Consolidate merges a completed worker branch into the batch branch.
 // It resolves the worker branch from the workflow run, merges it, and cleans up.
-func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, params ConsolidateParams) (*ConsolidateResult, error) {
+func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, params ConsolidateParams) (*ConsolidateResult, error) {
 	// Get the completed run
 	run, err := p.Workflows().GetRun(ctx, params.RunID)
 	if err != nil {
@@ -114,7 +117,22 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, params Co
 		return nil, fmt.Errorf("checking out batch branch: %w", err)
 	}
 	if err := g.Merge("origin/" + workerBranch); err != nil {
-		return nil, fmt.Errorf("merging worker branch %s into batch branch: %w", workerBranch, err)
+		// Abort the failed merge to restore clean state
+		_ = g.AbortMerge()
+
+		if cfg.Integrator.OnConflict == "dispatch-resolver" {
+			return handleConflictResolution(ctx, p, cfg, issue, issue.Milestone, workerBranch, batchBranch)
+		}
+
+		// Default: notify — comment on issue and return error
+		_ = p.Issues().AddComment(ctx, issueNumber, fmt.Sprintf(
+			"⚠️ **HerdOS Integrator**\n\nMerge conflict detected when consolidating `%s` into `%s`.\n\nManual resolution required.",
+			workerBranch, batchBranch))
+		return &ConsolidateResult{
+			IssueNumber:      issueNumber,
+			WorkerBranch:     workerBranch,
+			ConflictDetected: true,
+		}, fmt.Errorf("merging worker branch %s into batch branch: %w", workerBranch, err)
 	}
 	if err := g.Push("origin", batchBranch); err != nil {
 		return nil, fmt.Errorf("pushing batch branch: %w", err)
@@ -312,6 +330,80 @@ func findIssue(allIssues []*platform.Issue, number int) *platform.Issue {
 		}
 	}
 	return nil
+}
+
+func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, issue *platform.Issue, ms *platform.Milestone, workerBranch, batchBranch string) (*ConsolidateResult, error) {
+	// Count existing conflict-resolution issues in this milestone
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+		State:     "all",
+		Milestone: &ms.Number,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing milestone issues: %w", err)
+	}
+
+	conflictCount := 0
+	for _, iss := range allIssues {
+		parsed, parseErr := issues.ParseBody(iss.Body)
+		if parseErr != nil {
+			continue
+		}
+		if parsed.FrontMatter.ConflictResolution {
+			conflictCount++
+		}
+	}
+
+	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
+		_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+			"⚠️ **HerdOS Integrator**\n\nMerge conflict detected but max resolution attempts (%d) reached. Manual intervention required.\n\nConflicting branches: `%s` ← `%s`",
+			cfg.Integrator.MaxConflictResolutionAttempts, batchBranch, workerBranch))
+		return &ConsolidateResult{
+			IssueNumber:      issue.Number,
+			WorkerBranch:     workerBranch,
+			ConflictDetected: true,
+		}, nil
+	}
+
+	// Create conflict-resolution issue
+	body := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:             1,
+			Batch:               ms.Number,
+			Type:                "fix",
+			ConflictResolution:  true,
+			ConflictingBranches: []string{workerBranch, batchBranch},
+		},
+		Task: fmt.Sprintf("Resolve merge conflict between `%s` and `%s`.\n\n"+
+			"Checkout the batch branch (`%s`), merge the worker branch (`%s`), "+
+			"resolve all conflicts, and commit the result.", workerBranch, batchBranch, batchBranch, workerBranch),
+		Context: fmt.Sprintf("Worker branch `%s` (from issue #%d) conflicts with the batch branch `%s`.", workerBranch, issue.Number, batchBranch),
+	})
+
+	fixIssue, err := p.Issues().Create(ctx,
+		fmt.Sprintf("Resolve conflict: #%d (%s)", issue.Number, truncate(issue.Title, 40)),
+		body,
+		[]string{issues.TypeFix, issues.StatusInProgress},
+		&ms.Number,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating conflict-resolution issue: %w", err)
+	}
+
+	// Dispatch resolver worker
+	defaultBranch, _ := p.Repository().GetDefaultBranch(ctx)
+	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
+		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
+		"batch_branch":    batchBranch,
+		"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+		"runner_label":    cfg.Workers.RunnerLabel,
+	})
+
+	return &ConsolidateResult{
+		IssueNumber:      issue.Number,
+		WorkerBranch:     workerBranch,
+		ConflictDetected: true,
+		ConflictIssue:    fixIssue.Number,
+	}, nil
 }
 
 func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, ms *platform.Milestone, allIssues []*platform.Issue, tiers [][]int, batchBranch string) (int, error) {
