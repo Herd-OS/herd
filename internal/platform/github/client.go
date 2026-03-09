@@ -77,6 +77,7 @@ func (c *Client) Labels() platform.LabelService             { return &labelServi
 func (c *Client) Milestones() platform.MilestoneService     { return &milestoneService{c} }
 func (c *Client) Runners() platform.RunnerService           { return &runnerService{c} }
 func (c *Client) Repository() platform.RepositoryService   { return &repositoryService{c} }
+func (c *Client) Checks() platform.CheckService             { return &checkService{c} }
 
 // repositoryService implements platform.RepositoryService.
 type repositoryService struct{ c *Client }

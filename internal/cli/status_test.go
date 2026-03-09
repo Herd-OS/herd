@@ -114,6 +114,7 @@ func (m *mockStatusPlatform) Labels() platform.LabelService              { retur
 func (m *mockStatusPlatform) Milestones() platform.MilestoneService      { return m.milestones }
 func (m *mockStatusPlatform) Runners() platform.RunnerService            { return m.runners }
 func (m *mockStatusPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockStatusPlatform) Checks() platform.CheckService             { return nil }
 
 type mockStatusIssueService struct {
 	listResult []*platform.Issue

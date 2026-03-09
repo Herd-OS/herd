@@ -66,6 +66,7 @@ func (m *mockBatchCancelPlatform) Labels() platform.LabelService              { 
 func (m *mockBatchCancelPlatform) Milestones() platform.MilestoneService      { return m.milestones }
 func (m *mockBatchCancelPlatform) Runners() platform.RunnerService            { return nil }
 func (m *mockBatchCancelPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockBatchCancelPlatform) Checks() platform.CheckService             { return nil }
 
 type mockBatchCancelIssueService struct {
 	listResult    []*platform.Issue

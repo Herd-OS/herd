@@ -14,6 +14,7 @@ type Platform interface {
 	Milestones() MilestoneService
 	Runners() RunnerService
 	Repository() RepositoryService
+	Checks() CheckService
 }
 
 type IssueService interface {
@@ -61,6 +62,15 @@ type MilestoneService interface {
 type RunnerService interface {
 	List(ctx context.Context) ([]*Runner, error)
 	Get(ctx context.Context, id int64) (*Runner, error)
+}
+
+type CheckService interface {
+	// GetCombinedStatus returns the combined CI status for a ref (branch or SHA).
+	// Returns "success", "failure", "pending", or "error".
+	GetCombinedStatus(ctx context.Context, ref string) (string, error)
+
+	// RerunFailedChecks re-runs failed check suites for a ref.
+	RerunFailedChecks(ctx context.Context, ref string) error
 }
 
 type RepositoryService interface {
