@@ -36,7 +36,9 @@ jobs:
           herd integrator review --run-id ${{ github.event.workflow_run.id }}
 
   re-review:
-    if: github.event_name == 'pull_request_review'
+    if: >
+      github.event_name == 'pull_request_review'
+      && startsWith(github.event.pull_request.title, '[herd]')
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
@@ -45,7 +47,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - name: Re-review batch PR
+      - name: Handle review
         env:
           HERD_RUNNER: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -54,4 +56,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          herd integrator review --pr ${{ github.event.pull_request.number }}
+          if [ "${{ github.event.review.state }}" = "approved" ]; then
+            herd integrator merge --pr ${{ github.event.pull_request.number }}
+          else
+            herd integrator review --pr ${{ github.event.pull_request.number }}
+          fi
