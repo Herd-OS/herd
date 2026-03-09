@@ -22,38 +22,62 @@ const safetyValveLimit = 10
 // If approved, it optionally auto-merges. If changes are requested,
 // it creates fix issues and dispatches fix workers.
 func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git, cfg *config.Config, params ReviewParams) (*ReviewResult, error) {
-	// Get the run → issue → milestone
-	run, err := p.Workflows().GetRun(ctx, params.RunID)
-	if err != nil {
-		return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
-	}
+	var pr *platform.PullRequest
+	var ms *platform.Milestone
+	var batchBranch string
 
-	issueNumStr := run.Inputs["issue_number"]
-	issueNumber, err := strconv.Atoi(issueNumStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid issue_number: %w", err)
-	}
+	if params.PRNumber > 0 {
+		// Direct PR lookup — used by pull_request_review trigger
+		got, err := p.PullRequests().Get(ctx, params.PRNumber)
+		if err != nil {
+			return nil, fmt.Errorf("getting PR #%d: %w", params.PRNumber, err)
+		}
+		pr = got
+		batchBranch = pr.Head
 
-	issue, err := p.Issues().Get(ctx, issueNumber)
-	if err != nil {
-		return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
-	}
-	if issue.Milestone == nil {
-		return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
-	}
+		msNumber, err := parseBatchBranchMilestone(batchBranch)
+		if err != nil {
+			return nil, fmt.Errorf("parsing milestone from branch %s: %w", batchBranch, err)
+		}
+		got_ms, err := p.Milestones().Get(ctx, msNumber)
+		if err != nil {
+			return nil, fmt.Errorf("getting milestone #%d: %w", msNumber, err)
+		}
+		ms = got_ms
+	} else {
+		// Run-based lookup — used by workflow_run trigger
+		run, err := p.Workflows().GetRun(ctx, params.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
+		}
 
-	ms := issue.Milestone
-	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+		issueNumStr := run.Inputs["issue_number"]
+		issueNumber, err := strconv.Atoi(issueNumStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid issue_number: %w", err)
+		}
 
-	// Find batch PR
-	prs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
-	if err != nil {
-		return nil, fmt.Errorf("listing batch PRs: %w", err)
+		issue, err := p.Issues().Get(ctx, issueNumber)
+		if err != nil {
+			return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
+		}
+		if issue.Milestone == nil {
+			return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
+		}
+
+		ms = issue.Milestone
+		batchBranch = fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+
+		// Find batch PR
+		prs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
+		if err != nil {
+			return nil, fmt.Errorf("listing batch PRs: %w", err)
+		}
+		if len(prs) == 0 {
+			return &ReviewResult{}, nil // No batch PR yet
+		}
+		pr = prs[0]
 	}
-	if len(prs) == 0 {
-		return &ReviewResult{}, nil // No batch PR yet
-	}
-	pr := prs[0]
 
 	// Check if review is enabled
 	if !cfg.Integrator.Review {
@@ -227,6 +251,20 @@ func findMaxFixCycle(allIssues []*platform.Issue) int {
 		}
 	}
 	return max
+}
+
+// parseBatchBranchMilestone extracts the milestone number from a batch branch name.
+// Expected format: "herd/batch/{number}-{slug}"
+func parseBatchBranchMilestone(branch string) (int, error) {
+	parts := strings.TrimPrefix(branch, "herd/batch/")
+	if parts == branch {
+		return 0, fmt.Errorf("not a batch branch: %s", branch)
+	}
+	idx := strings.Index(parts, "-")
+	if idx < 0 {
+		return 0, fmt.Errorf("invalid batch branch format: %s", branch)
+	}
+	return strconv.Atoi(parts[:idx])
 }
 
 func truncate(s string, max int) string {

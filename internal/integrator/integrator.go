@@ -45,6 +45,7 @@ type AdvanceResult struct {
 // ReviewParams holds the parameters for reviewing a batch PR.
 type ReviewParams struct {
 	RunID    int64
+	PRNumber int    // Alternative to RunID — used by pull_request_review trigger
 	RepoRoot string
 }
 

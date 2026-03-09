@@ -14,7 +14,8 @@ permissions:
 
 jobs:
   integrate:
-    runs-on: [self-hosted, herd-worker]
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped'
+    runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,3 +34,24 @@ jobs:
           herd integrator consolidate --run-id ${{ github.event.workflow_run.id }}
           herd integrator advance --run-id ${{ github.event.workflow_run.id }}
           herd integrator review --run-id ${{ github.event.workflow_run.id }}
+
+  re-review:
+    if: github.event_name == 'pull_request_review'
+    runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Re-review batch PR
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          herd integrator review --pr ${{ github.event.pull_request.number }}

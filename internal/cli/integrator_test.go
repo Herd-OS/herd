@@ -29,6 +29,24 @@ func TestIntegratorCmd_RequiresHerdRunner(t *testing.T) {
 	}
 }
 
+func TestIntegratorReviewCmd_RequiresRunIDOrPR(t *testing.T) {
+	t.Setenv("HERD_RUNNER", "true")
+	root := NewRootCmd()
+	root.SetArgs([]string{"integrator", "review"})
+	err := root.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "either --run-id or --pr is required")
+}
+
+func TestIntegratorReviewCmd_MutuallyExclusive(t *testing.T) {
+	t.Setenv("HERD_RUNNER", "true")
+	root := NewRootCmd()
+	root.SetArgs([]string{"integrator", "review", "--run-id", "100", "--pr", "50"})
+	err := root.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
 func TestIntegratorCmd_SubcommandStructure(t *testing.T) {
 	cmd := newIntegratorCmd()
 	assert.True(t, cmd.Hidden)

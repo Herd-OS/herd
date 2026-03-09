@@ -81,6 +81,7 @@ func (m *mockIssueService) AddComment(_ context.Context, number int, body string
 
 type mockPRService struct {
 	listResult []*platform.PullRequest
+	getResult  map[int]*platform.PullRequest
 	created    *platform.PullRequest
 	merged     bool
 }
@@ -89,7 +90,14 @@ func (m *mockPRService) Create(_ context.Context, title, body, head, base string
 	m.created = &platform.PullRequest{Number: 100, Title: title, Body: body, Head: head, Base: base}
 	return m.created, nil
 }
-func (m *mockPRService) Get(_ context.Context, _ int) (*platform.PullRequest, error) { return nil, nil }
+func (m *mockPRService) Get(_ context.Context, number int) (*platform.PullRequest, error) {
+	if m.getResult != nil {
+		if pr, ok := m.getResult[number]; ok {
+			return pr, nil
+		}
+	}
+	return nil, fmt.Errorf("PR #%d not found", number)
+}
 func (m *mockPRService) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
 	return m.listResult, nil
 }
@@ -153,6 +161,7 @@ func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, 
 }
 
 type mockMilestoneService struct {
+	getResult      map[int]*platform.Milestone
 	updatedNumbers []int
 	updatedStates  []string
 }
@@ -160,8 +169,13 @@ type mockMilestoneService struct {
 func (m *mockMilestoneService) Create(_ context.Context, _, _ string, _ *time.Time) (*platform.Milestone, error) {
 	return nil, nil
 }
-func (m *mockMilestoneService) Get(_ context.Context, _ int) (*platform.Milestone, error) {
-	return nil, nil
+func (m *mockMilestoneService) Get(_ context.Context, number int) (*platform.Milestone, error) {
+	if m.getResult != nil {
+		if ms, ok := m.getResult[number]; ok {
+			return ms, nil
+		}
+	}
+	return nil, fmt.Errorf("milestone #%d not found", number)
 }
 func (m *mockMilestoneService) List(_ context.Context) ([]*platform.Milestone, error) {
 	return nil, nil

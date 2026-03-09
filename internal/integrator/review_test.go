@@ -344,6 +344,76 @@ func TestReview_LoadsRoleInstructions(t *testing.T) {
 	assert.Equal(t, "Be strict about error handling", capturedOpts.SystemPrompt)
 }
 
+func TestReview_ByPRNumber(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+
+	prSvc := &mockPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+		},
+	}
+
+	msSvc := &mockMilestoneService{
+		getResult: map[int]*platform.Milestone{
+			1: {Number: 1, Title: "Batch"},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: msSvc,
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 50, result.BatchPRNumber)
+}
+
+func TestParseBatchBranchMilestone(t *testing.T) {
+	tests := []struct {
+		name    string
+		branch  string
+		want    int
+		wantErr bool
+	}{
+		{"valid", "herd/batch/4-some-slug", 4, false},
+		{"valid single digit", "herd/batch/1-batch", 1, false},
+		{"valid multi digit", "herd/batch/42-long-name-here", 42, false},
+		{"not a batch branch", "herd/worker/10-task", 0, true},
+		{"no dash", "herd/batch/4", 0, true},
+		{"not a number", "herd/batch/abc-slug", 0, true},
+		{"random string", "main", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseBatchBranchMilestone(tt.branch)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	assert.Equal(t, "hello", truncate("hello", 10))
 	assert.Equal(t, "hel...", truncate("hello world", 3))
