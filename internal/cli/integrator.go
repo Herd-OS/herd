@@ -47,7 +47,7 @@ func newConsolidateCmd() *cobra.Command {
 			cwd, _ := os.Getwd()
 			g := git.New(cwd)
 
-			result, err := integrator.Consolidate(cmd.Context(), client, g, integrator.ConsolidateParams{
+			result, err := integrator.Consolidate(cmd.Context(), client, g, cfg, integrator.ConsolidateParams{
 				RunID:    runID,
 				RepoRoot: cwd,
 			})

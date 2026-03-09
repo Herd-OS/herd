@@ -3,10 +3,14 @@ package integrator
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -208,7 +212,7 @@ func TestConsolidate_FailedRun(t *testing.T) {
 		repo: &mockRepoService{defaultBranch: "main"},
 	}
 
-	result, err := Consolidate(context.Background(), mock, nil, ConsolidateParams{RunID: 100})
+	result, err := Consolidate(context.Background(), mock, nil, &config.Config{}, ConsolidateParams{RunID: 100})
 	require.NoError(t, err)
 	assert.False(t, result.Merged)
 	assert.Equal(t, 42, result.IssueNumber)
@@ -237,7 +241,7 @@ func TestConsolidate_NoOpWorker(t *testing.T) {
 		},
 	}
 
-	result, err := Consolidate(context.Background(), mock, nil, ConsolidateParams{RunID: 100})
+	result, err := Consolidate(context.Background(), mock, nil, &config.Config{}, ConsolidateParams{RunID: 100})
 	require.NoError(t, err)
 	assert.True(t, result.NoOp)
 	assert.False(t, result.Merged)
@@ -391,4 +395,192 @@ func TestFindIssue(t *testing.T) {
 	}
 	assert.Equal(t, 2, findIssue(allIssues, 2).Number)
 	assert.Nil(t, findIssue(allIssues, 99))
+}
+
+func TestConsolidate_ConflictNotify(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	// mockGit that fails on merge
+	dir, g := initConflictRepo(t)
+	_ = dir
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{OnConflict: "notify"},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
+	assert.Error(t, err)
+	assert.True(t, result.ConflictDetected)
+	assert.Contains(t, issueSvc.comments[42][0], "Merge conflict detected")
+}
+
+func TestConsolidate_ConflictDispatchResolver(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test task",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{} // no existing conflict issues
+
+	createdIssues := []*platform.Issue{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			iss := &platform.Issue{Number: 99, Title: title}
+			createdIssues = append(createdIssues, iss)
+			return iss, nil
+		},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+		},
+	}
+
+	_, g := initConflictRepo(t)
+
+	mock := &mockPlatform{
+		issues: mockCreate,
+		workflows: wf,
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test-task": true},
+		},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{OnConflict: "dispatch-resolver", MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.ConflictDetected)
+	assert.Equal(t, 99, result.ConflictIssue)
+	assert.Len(t, createdIssues, 1)
+	assert.Contains(t, createdIssues[0].Title, "Resolve conflict")
+	assert.Len(t, wf.dispatched, 1)
+}
+
+func TestConsolidate_ConflictMaxAttempts(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	// Two existing conflict-resolution issues
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\nResolve\n"},
+		{Number: 81, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\nResolve\n"},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+		},
+	}
+
+	_, g := initConflictRepo(t)
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		workflows: wf,
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{OnConflict: "dispatch-resolver", MaxConflictResolutionAttempts: 2},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.ConflictDetected)
+	assert.Equal(t, 0, result.ConflictIssue) // No issue created
+	assert.Contains(t, issueSvc.comments[42][0], "max resolution attempts")
+	assert.Len(t, wf.dispatched, 0) // No dispatch
+}
+
+// initConflictRepo creates a git repo with a bare "origin" remote, a batch branch,
+// and a conflicting worker branch pushed to origin, so that Consolidate's
+// fetch → checkout → merge("origin/worker") flow works and produces a conflict.
+func initConflictRepo(t *testing.T) (string, *git.Git) {
+	t.Helper()
+
+	// Create bare repo as "origin"
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	// Create working repo
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	// Initial commit with a file
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("original"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create batch branch and modify the file
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("batch content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "batch change")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	// Create worker branch from main with conflicting change and push
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("worker content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	// Also create variant for "test-task" slug
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test-task")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("worker content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test-task")
+
+	// Go back to batch branch for consolidate
+	runGit(t, dir, "checkout", "herd/batch/1-batch")
+
+	return dir, git.New(dir)
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v failed: %s", args, string(out))
 }
