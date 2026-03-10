@@ -90,9 +90,11 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 			result.StaleIssues++
 			if !hasMonitorComment(ctx, p, issue.Number) {
 				_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
-					"⚠️ **HerdOS Monitor Alert**\n\nIssue #%d has been in-progress with no active workflow run.\n\n%s",
+					"⚠️ **HerdOS Monitor Alert**\n\nIssue #%d is in-progress with no active workflow run. Marking as failed for redispatch.\n\n%s",
 					issue.Number, buildMentions(cfg.Monitor.NotifyUsers)))
 			}
+			_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusInProgress})
+			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
 		}
 	}
 
