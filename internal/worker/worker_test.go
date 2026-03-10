@@ -131,7 +131,8 @@ func (m *mockMilestoneService) Update(_ context.Context, _ int, _ platform.Miles
 // --- Tests ---
 
 func TestRenderWorkerPrompt(t *testing.T) {
-	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, t.TempDir())
+	cfg := &config.Config{}
+	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, t.TempDir(), cfg)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "Add auth")
 	assert.Contains(t, prompt, "## Task\nBuild it")
@@ -145,7 +146,8 @@ func TestRenderWorkerPromptWithRoleInstructions(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dir+"/.herd", 0755))
 	require.NoError(t, os.WriteFile(dir+"/.herd/worker.md", []byte("Use table-driven tests"), 0644))
 
-	prompt, err := renderWorkerPrompt("Task", "Body", 1, dir)
+	cfg := &config.Config{}
+	prompt, err := renderWorkerPrompt("Task", "Body", 1, dir, cfg)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "Use table-driven tests")
 	assert.Contains(t, prompt, "Project-Specific Instructions")
@@ -198,9 +200,38 @@ func TestExec_AgentFailure(t *testing.T) {
 	assert.True(t, mock.workflows.dispatched)
 }
 
+func TestWorkerPrompt_CoAuthorTrailer(t *testing.T) {
+	tests := []struct {
+		name          string
+		coAuthorEmail string
+		expectTrailer bool
+	}{
+		{"empty — no trailer", "", false},
+		{"configured — trailer present", "123+herd-os[bot]@users.noreply.github.com", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				PullRequests: config.PullRequests{CoAuthorEmail: tt.coAuthorEmail},
+			}
+			prompt, err := renderWorkerPrompt("Task", "Body", 1, t.TempDir(), cfg)
+			require.NoError(t, err)
+
+			if tt.expectTrailer {
+				assert.Contains(t, prompt, "Co-authored-by: herd-os[bot]")
+				assert.Contains(t, prompt, tt.coAuthorEmail)
+			} else {
+				assert.NotContains(t, prompt, "Co-authored-by")
+			}
+		})
+	}
+}
+
 func TestPromptTemplate_AllInstructions(t *testing.T) {
 	// Verify all 8 instruction bullets from the spec are present
-	prompt, err := renderWorkerPrompt("Title", "Body", 1, t.TempDir())
+	cfg := &config.Config{}
+	prompt, err := renderWorkerPrompt("Title", "Body", 1, t.TempDir(), cfg)
 	require.NoError(t, err)
 
 	expectedPhrases := []string{

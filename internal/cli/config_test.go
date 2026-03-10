@@ -110,6 +110,20 @@ func TestFlattenConfig(t *testing.T) {
 	}
 }
 
+func TestFlattenConfig_CoAuthorEmail(t *testing.T) {
+	cfg := config.Default()
+	kvs := flattenConfig(cfg)
+
+	found := false
+	for _, kv := range kvs {
+		if kv.key == "pull_requests.co_author_email" {
+			found = true
+			assert.Equal(t, "(not set)", kv.value)
+		}
+	}
+	assert.True(t, found, "pull_requests.co_author_email should be in config list")
+}
+
 func TestDisplayValue(t *testing.T) {
 	assert.Equal(t, "(not set)", displayValue(""))
 	assert.Equal(t, "claude", displayValue("claude"))
