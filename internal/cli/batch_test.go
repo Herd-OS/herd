@@ -97,6 +97,9 @@ func (m *mockBatchCancelIssueService) RemoveLabels(_ context.Context, number int
 func (m *mockBatchCancelIssueService) AddComment(_ context.Context, _ int, _ string) error {
 	return nil
 }
+func (m *mockBatchCancelIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
+	return nil, nil
+}
 
 type mockBatchCancelWorkflowService struct {
 	runs          []*platform.Run

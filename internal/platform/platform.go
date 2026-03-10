@@ -25,6 +25,7 @@ type IssueService interface {
 	AddLabels(ctx context.Context, number int, labels []string) error
 	RemoveLabels(ctx context.Context, number int, labels []string) error
 	AddComment(ctx context.Context, number int, body string) error
+	ListComments(ctx context.Context, number int) ([]*Comment, error)
 }
 
 type PullRequestService interface {

@@ -32,10 +32,12 @@ func (m *mockPlatform) Repository() platform.RepositoryService     { return m.re
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 type mockIssueService struct {
-	listResults   map[string][]*platform.Issue // keyed by label
-	addedLabels   map[int][]string
-	removedLabels map[int][]string
-	comments      map[int][]string
+	listResults    map[string][]*platform.Issue // keyed by label
+	addedLabels    map[int][]string
+	removedLabels  map[int][]string
+	comments       map[int][]string
+	existingComments map[int][]*platform.Comment // for ListComments
+	listCommentsErr  error
 }
 
 func newMockIssueService() *mockIssueService {
@@ -71,6 +73,12 @@ func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []
 func (m *mockIssueService) AddComment(_ context.Context, number int, body string) error {
 	m.comments[number] = append(m.comments[number], body)
 	return nil
+}
+func (m *mockIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	if m.listCommentsErr != nil {
+		return nil, m.listCommentsErr
+	}
+	return m.existingComments[number], nil
 }
 
 type mockPRService struct {
@@ -384,4 +392,84 @@ func TestBuildMentions(t *testing.T) {
 	assert.Equal(t, "", buildMentions([]string{}))
 	assert.Equal(t, "/cc @alice", buildMentions([]string{"alice"}))
 	assert.Equal(t, "/cc @alice @bob", buildMentions([]string{"alice", "bob"}))
+}
+
+func TestHasMonitorComment(t *testing.T) {
+	tests := []struct {
+		name     string
+		comments []*platform.Comment
+		expected bool
+	}{
+		{
+			"no comments",
+			nil,
+			false,
+		},
+		{
+			"unrelated comment",
+			[]*platform.Comment{{ID: 1, Body: "This looks good!"}},
+			false,
+		},
+		{
+			"monitor comment exists",
+			[]*platform.Comment{
+				{ID: 1, Body: "Nice work"},
+				{ID: 2, Body: "⚠️ **HerdOS Monitor Alert**\n\nIssue #42 has been stale."},
+			},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			if tt.comments != nil {
+				issueSvc.existingComments = map[int][]*platform.Comment{42: tt.comments}
+			}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       newMockPRService(),
+				workflows: &mockWorkflowService{},
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+			assert.Equal(t, tt.expected, hasMonitorComment(context.Background(), mock, 42))
+		})
+	}
+}
+
+func TestHasMonitorComment_ErrorFallback(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listCommentsErr = fmt.Errorf("API error")
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	// Should return false (fail open) when ListComments errors
+	assert.False(t, hasMonitorComment(context.Background(), mock, 42))
+}
+
+func TestPatrol_NoDuplicateComments(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusInProgress}},
+	}
+	// Simulate existing monitor comment on issue 42
+	issueSvc.existingComments = map[int][]*platform.Comment{
+		42: {{ID: 1, Body: "⚠️ **HerdOS Monitor Alert**\n\nIssue #42 has been in-progress with no active workflow run."}},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{activeRuns: []*platform.Run{}},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	result, err := Patrol(context.Background(), mock, &config.Config{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.StaleIssues)
+	// No new comment should be posted since one already exists
+	assert.Len(t, issueSvc.comments[42], 0)
 }

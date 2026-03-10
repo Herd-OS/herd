@@ -21,6 +21,23 @@ type PatrolResult struct {
 	StuckPRs          int
 }
 
+const monitorCommentSignature = "**HerdOS Monitor Alert**"
+
+// hasMonitorComment checks if a HerdOS Monitor comment already exists on an issue.
+// Fails open (returns false on error) so a broken comments API doesn't silence the monitor.
+func hasMonitorComment(ctx context.Context, p platform.Platform, number int) bool {
+	comments, err := p.Issues().ListComments(ctx, number)
+	if err != nil {
+		return false
+	}
+	for _, c := range comments {
+		if strings.Contains(c.Body, monitorCommentSignature) {
+			return true
+		}
+	}
+	return false
+}
+
 // Patrol checks for stale, failed, or stuck work and takes corrective action.
 func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*PatrolResult, error) {
 	result := &PatrolResult{}
@@ -59,9 +76,11 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 					_ = p.Workflows().CancelRun(ctx, run.ID)
 					_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusInProgress})
 					_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
-					_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
-						"⚠️ **HerdOS Monitor Alert**\n\nWorker run exceeded timeout (%d minutes). Run cancelled.\n\n%s",
-						cfg.Workers.TimeoutMinutes, buildMentions(cfg.Monitor.NotifyUsers)))
+					if !hasMonitorComment(ctx, p, issue.Number) {
+						_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+							"⚠️ **HerdOS Monitor Alert**\n\nWorker run exceeded timeout (%d minutes). Run cancelled.\n\n%s",
+							cfg.Workers.TimeoutMinutes, buildMentions(cfg.Monitor.NotifyUsers)))
+					}
 					result.StaleIssues++
 				}
 				break
@@ -69,9 +88,11 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		}
 		if !hasRun {
 			result.StaleIssues++
-			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
-				"⚠️ **HerdOS Monitor Alert**\n\nIssue #%d has been in-progress with no active workflow run.\n\n%s",
-				issue.Number, buildMentions(cfg.Monitor.NotifyUsers)))
+			if !hasMonitorComment(ctx, p, issue.Number) {
+				_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+					"⚠️ **HerdOS Monitor Alert**\n\nIssue #%d has been in-progress with no active workflow run.\n\n%s",
+					issue.Number, buildMentions(cfg.Monitor.NotifyUsers)))
+			}
 		}
 	}
 
@@ -93,9 +114,11 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 			failureCount, lastFailedRun := countFailures(completedRuns, issue.Number)
 
 			if failureCount >= cfg.Monitor.MaxRedispatchAttempts {
-				_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
-					"⚠️ **HerdOS Monitor Alert**\n\nIssue #%d has failed %d times. Max re-dispatch attempts reached.\n\nManual intervention needed.\n\n%s",
-					issue.Number, failureCount, buildMentions(cfg.Monitor.NotifyUsers)))
+				if !hasMonitorComment(ctx, p, issue.Number) {
+					_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+						"⚠️ **HerdOS Monitor Alert**\n\nIssue #%d has failed %d times. Max re-dispatch attempts reached.\n\nManual intervention needed.\n\n%s",
+						issue.Number, failureCount, buildMentions(cfg.Monitor.NotifyUsers)))
+				}
 				result.EscalatedCount++
 				continue
 			}
@@ -139,9 +162,11 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 			continue
 		}
 		if cfg.Monitor.MaxPRHAgeHours > 0 && time.Since(pr.CreatedAt) > time.Duration(cfg.Monitor.MaxPRHAgeHours)*time.Hour {
-			_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
-				"⚠️ **HerdOS Monitor Alert**\n\nThis batch PR has been open for over %d hours.\n\n%s",
-				cfg.Monitor.MaxPRHAgeHours, buildMentions(cfg.Monitor.NotifyUsers)))
+			if !hasMonitorComment(ctx, p, pr.Number) {
+				_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
+					"⚠️ **HerdOS Monitor Alert**\n\nThis batch PR has been open for over %d hours.\n\n%s",
+					cfg.Monitor.MaxPRHAgeHours, buildMentions(cfg.Monitor.NotifyUsers)))
+			}
 			result.StuckPRs++
 		}
 	}
