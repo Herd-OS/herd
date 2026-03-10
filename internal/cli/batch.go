@@ -8,12 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/display"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/planner"
 	"github.com/herd-os/herd/internal/platform"
-	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
 )
 
@@ -41,13 +39,13 @@ func newBatchListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List batches",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(".")
+			cfg, err := loadConfigOrExit()
 			if err != nil {
 				return err
 			}
-			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			client, err := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
 			if err != nil {
-				return fmt.Errorf("creating GitHub client: %w", err)
+				return err
 			}
 
 			return runBatchList(cmd.Context(), client, all, jsonOutput)
@@ -118,13 +116,13 @@ func newBatchShowCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid batch number: %s", args[0])
 			}
-			cfg, err := config.Load(".")
+			cfg, err := loadConfigOrExit()
 			if err != nil {
 				return err
 			}
-			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			client, err := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
 			if err != nil {
-				return fmt.Errorf("creating GitHub client: %w", err)
+				return err
 			}
 
 			return renderBatchDetail(cmd.Context(), client, batchNum, jsonOutput)
@@ -148,13 +146,13 @@ func newBatchCancelCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid batch number: %s", args[0])
 			}
-			cfg, err := config.Load(".")
+			cfg, err := loadConfigOrExit()
 			if err != nil {
 				return err
 			}
-			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			client, err := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
 			if err != nil {
-				return fmt.Errorf("creating GitHub client: %w", err)
+				return err
 			}
 
 			return runBatchCancel(cmd.Context(), client, batchNum, force)

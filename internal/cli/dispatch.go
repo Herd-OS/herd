@@ -10,7 +10,6 @@ import (
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/planner"
 	"github.com/herd-os/herd/internal/platform"
-	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
 )
 
@@ -25,14 +24,14 @@ func newDispatchCmd() *cobra.Command {
 		Long:  "Trigger worker workflows for ready issues. Dispatch a single issue, all ready issues in a batch, or all ready issues across all batches.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(".")
+			cfg, err := loadConfigOrExit()
 			if err != nil {
 				return err
 			}
 
-			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			client, err := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
 			if err != nil {
-				return fmt.Errorf("creating GitHub client: %w", err)
+				return err
 			}
 
 			if timeout > 0 {

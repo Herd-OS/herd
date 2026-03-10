@@ -12,11 +12,9 @@ import (
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/claude"
-	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/display"
 	"github.com/herd-os/herd/internal/planner"
-	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -47,7 +45,7 @@ func newPlanCmd() *cobra.Command {
 }
 
 func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDispatch, dryRun bool) error {
-	cfg, err := config.Load(".")
+	cfg, err := loadConfigOrExit()
 	if err != nil {
 		return err
 	}
@@ -112,9 +110,9 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 	}
 
 	// Create platform client
-	client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+	client, err := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
 	if err != nil {
-		return fmt.Errorf("creating GitHub client: %w", err)
+		return err
 	}
 
 	// Create issues, milestone, and batch branch
