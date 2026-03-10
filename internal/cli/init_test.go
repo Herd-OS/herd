@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -191,6 +192,88 @@ func TestRoleInstructionFiles(t *testing.T) {
 	assert.Contains(t, files, "planner.md")
 	assert.Contains(t, files, "worker.md")
 	assert.Contains(t, files, "integrator.md")
+}
+
+func TestCreateRunnerFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, createRunnerFiles(dir, "my-org", "my-project"))
+
+	// Dockerfile.runner
+	df, err := os.ReadFile(filepath.Join(dir, "Dockerfile.runner"))
+	require.NoError(t, err)
+	assert.Contains(t, string(df), "FROM ubuntu:24.04")
+	assert.Contains(t, string(df), "go install github.com/herd-os/herd/cmd/herd@latest")
+	assert.Contains(t, string(df), "ENTRYPOINT")
+
+	// entrypoint.sh
+	ep, err := os.ReadFile(filepath.Join(dir, "entrypoint.sh"))
+	require.NoError(t, err)
+	assert.Contains(t, string(ep), "#!/bin/bash")
+	assert.Contains(t, string(ep), "--ephemeral")
+	assert.Contains(t, string(ep), "trap cleanup SIGTERM SIGINT")
+	assert.Contains(t, string(ep), "exec ./run.sh")
+	info, err := os.Stat(filepath.Join(dir, "entrypoint.sh"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0755), info.Mode().Perm(), "entrypoint.sh should be executable")
+
+	// docker-compose.herd.yml
+	dc, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(dc), "REPO_URL=https://github.com/my-org/my-project")
+	assert.Contains(t, string(dc), "Dockerfile.runner")
+	assert.Contains(t, string(dc), "ANTHROPIC_API_KEY")
+}
+
+func TestCreateRunnerFiles_SkipsExisting(t *testing.T) {
+	dir := t.TempDir()
+
+	// Pre-create files with custom content
+	custom := []byte("custom content")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.runner"), custom, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.sh"), custom, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), custom, 0644))
+
+	require.NoError(t, createRunnerFiles(dir, "org", "repo"))
+
+	// All files should keep their custom content
+	for _, name := range []string{"Dockerfile.runner", "entrypoint.sh", "docker-compose.herd.yml"} {
+		content, err := os.ReadFile(filepath.Join(dir, name))
+		require.NoError(t, err)
+		assert.Equal(t, custom, content, "%s should not be overwritten", name)
+	}
+}
+
+func TestCreateRunnerFiles_OwnerRepoSubstitution(t *testing.T) {
+	tests := []struct {
+		name  string
+		owner string
+		repo  string
+	}{
+		{"simple", "acme", "app"},
+		{"hyphens", "my-org", "my-project"},
+		{"underscores", "my_org", "my_project"},
+		{"mixed", "Herd-OS", "herd_app"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, createRunnerFiles(dir, tt.owner, tt.repo))
+
+			dc, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
+			require.NoError(t, err)
+			expected := fmt.Sprintf("REPO_URL=https://github.com/%s/%s", tt.owner, tt.repo)
+			assert.Contains(t, string(dc), expected)
+		})
+	}
+}
+
+func TestRenderDockerCompose(t *testing.T) {
+	rendered, err := renderDockerCompose("test-org", "test-repo")
+	require.NoError(t, err)
+	assert.Contains(t, rendered, "https://github.com/test-org/test-repo")
+	assert.Contains(t, rendered, "docker compose -f docker-compose.herd.yml")
 }
 
 // setupTestGitRepo creates a temp git repo with the given remote URL.
