@@ -155,6 +155,9 @@ func (s *statefulIssueService) AddComment(_ context.Context, number int, body st
 	s.comments[number] = append(s.comments[number], body)
 	return nil
 }
+func (s *statefulIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
+	return nil, nil
+}
 
 func (s *statefulIssueService) hasLabel(number int, label string) bool {
 	iss, ok := s.issues[number]

@@ -278,6 +278,9 @@ func (m *mockIssueService) Update(_ context.Context, number int, changes platfor
 func (m *mockIssueService) AddLabels(_ context.Context, _ int, _ []string) error    { return nil }
 func (m *mockIssueService) RemoveLabels(_ context.Context, _ int, _ []string) error { return nil }
 func (m *mockIssueService) AddComment(_ context.Context, _ int, _ string) error     { return nil }
+func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
+	return nil, nil
+}
 
 // mockMilestoneService
 
