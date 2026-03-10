@@ -192,6 +192,9 @@ func TestPatrol_StaleIssue(t *testing.T) {
 	assert.Equal(t, 1, result.StaleIssues)
 	assert.Len(t, issueSvc.comments[42], 1)
 	assert.Contains(t, issueSvc.comments[42][0], "HerdOS Monitor Alert")
+	// Should relabel to failed
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
 }
 
 func TestPatrol_TimeoutCancellation(t *testing.T) {
@@ -472,4 +475,124 @@ func TestPatrol_NoDuplicateComments(t *testing.T) {
 	assert.Equal(t, 1, result.StaleIssues)
 	// No new comment should be posted since one already exists
 	assert.Len(t, issueSvc.comments[42], 0)
+}
+
+func TestPatrol_StaleIssueRelabeled(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusInProgress}},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{activeRuns: []*platform.Run{}},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	result, err := Patrol(context.Background(), mock, &config.Config{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.StaleIssues)
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+}
+
+func TestPatrol_StaleIssueRedispatchedNextCycle(t *testing.T) {
+	// First patrol: stale issue gets relabeled to failed
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusInProgress},
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"}},
+	}
+
+	wf := &mockWorkflowService{activeRuns: []*platform.Run{}}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{
+		Monitor: config.Monitor{AutoRedispatch: true, MaxRedispatchAttempts: 3},
+		Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.StaleIssues)
+	assert.Equal(t, 0, result.RedispatchedCount) // Not redispatched in same cycle
+	assert.Len(t, wf.dispatched, 0)
+
+	// Second patrol: issue is now failed, should be redispatched
+	issueSvc2 := newMockIssueService()
+	issueSvc2.listResults[issues.StatusFailed] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusFailed},
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"}},
+	}
+	// Simulate one past failure run
+	wf2 := &mockWorkflowService{
+		completedRuns: []*platform.Run{
+			{ID: 100, Conclusion: "failure", Inputs: map[string]string{"issue_number": "42"}, CreatedAt: time.Now().Add(-2 * time.Hour)},
+		},
+	}
+	mock2 := &mockPlatform{
+		issues:    issueSvc2,
+		prs:       newMockPRService(),
+		workflows: wf2,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	result2, err := Patrol(context.Background(), mock2, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result2.RedispatchedCount)
+	assert.Len(t, wf2.dispatched, 1)
+}
+
+func TestPatrol_TimeoutAndStale_BothRelabel(t *testing.T) {
+	tests := []struct {
+		name       string
+		activeRuns []*platform.Run
+		timeout    int
+	}{
+		{
+			"timeout exceeded",
+			[]*platform.Run{
+				{ID: 200, Inputs: map[string]string{"issue_number": "42"}, CreatedAt: time.Now().Add(-2 * time.Hour)},
+			},
+			60,
+		},
+		{
+			"no active run",
+			[]*platform.Run{},
+			0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
+				{Number: 42, Title: "Test", Labels: []string{issues.StatusInProgress}},
+			}
+
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       newMockPRService(),
+				workflows: &mockWorkflowService{activeRuns: tt.activeRuns},
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+
+			cfg := &config.Config{
+				Workers: config.Workers{TimeoutMinutes: tt.timeout},
+			}
+
+			result, err := Patrol(context.Background(), mock, cfg)
+			require.NoError(t, err)
+			assert.Equal(t, 1, result.StaleIssues)
+			// Both paths should result in the same label transition
+			assert.Contains(t, issueSvc.removedLabels[42], issues.StatusInProgress)
+			assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+		})
+	}
 }
