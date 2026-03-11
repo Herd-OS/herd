@@ -60,7 +60,9 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
   code that doesn't exist and can't be inferred).
 - If you cannot complete the task after exhausting alternatives,
   exit with a non-zero status and include the reason in your output.
-{{if .RoleInstructions}}
+{{if .CoAuthorTrailer}}- Add the following trailer to every commit message (on its own line after a blank line):
+  {{.CoAuthorTrailer}}
+{{end}}{{if .RoleInstructions}}
 ## Project-Specific Instructions
 {{.RoleInstructions}}
 {{end}}`
@@ -70,6 +72,7 @@ type promptData struct {
 	Body             string
 	IssueNumber      int
 	RoleInstructions string
+	CoAuthorTrailer  string
 }
 
 // Exec runs the full worker lifecycle: reads the issue, creates a worker branch,
@@ -114,7 +117,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	}
 
 	// Build system prompt
-	systemPrompt, err := renderWorkerPrompt(issue.Title, issue.Body, params.IssueNumber, params.RepoRoot)
+	systemPrompt, err := renderWorkerPrompt(issue.Title, issue.Body, params.IssueNumber, params.RepoRoot, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("rendering worker prompt: %w", err)
 	}
@@ -162,7 +165,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	}, nil
 }
 
-func renderWorkerPrompt(title, body string, issueNumber int, repoRoot string) (string, error) {
+func renderWorkerPrompt(title, body string, issueNumber int, repoRoot string, cfg *config.Config) (string, error) {
 	tmpl, err := template.New("worker").Parse(workerPromptTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parsing worker prompt template: %w", err)
@@ -172,6 +175,10 @@ func renderWorkerPrompt(title, body string, issueNumber int, repoRoot string) (s
 		Title:       title,
 		Body:        body,
 		IssueNumber: issueNumber,
+	}
+
+	if cfg.PullRequests.CoAuthorEmail != "" {
+		data.CoAuthorTrailer = fmt.Sprintf("Co-authored-by: herd-os[bot] <%s>", cfg.PullRequests.CoAuthorEmail)
 	}
 
 	// Load role instructions from .herd/worker.md if it exists

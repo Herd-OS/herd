@@ -1,0 +1,17 @@
+# HerdOS runner configuration
+# Start runners: docker compose -f docker-compose.herd.yml up -d
+# Scale:         docker compose -f docker-compose.herd.yml up -d --scale worker=5
+# Stop:          docker compose -f docker-compose.herd.yml down
+
+services:
+  worker:
+    build:
+      dockerfile: Dockerfile.runner
+    restart: always
+    environment:
+      - GITHUB_TOKEN
+      - REPO_URL=https://github.com/{{.Owner}}/{{.Repo}}
+      - RUNNER_LABELS=herd-worker
+      - ANTHROPIC_API_KEY
+    deploy:
+      replicas: 3

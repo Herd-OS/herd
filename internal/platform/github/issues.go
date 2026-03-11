@@ -126,6 +126,30 @@ func (s *issueService) AddComment(ctx context.Context, number int, body string) 
 	return nil
 }
 
+func (s *issueService) ListComments(ctx context.Context, number int) ([]*platform.Comment, error) {
+	opts := &gh.IssueListCommentsOptions{
+		ListOptions: gh.ListOptions{PerPage: 100},
+	}
+	var result []*platform.Comment
+	for {
+		comments, resp, err := s.c.gh.Issues.ListComments(ctx, s.c.owner, s.c.repo, number, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing comments for issue #%d: %w", number, err)
+		}
+		for _, c := range comments {
+			result = append(result, &platform.Comment{
+				ID:   c.GetID(),
+				Body: c.GetBody(),
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return result, nil
+}
+
 func mapIssue(i *gh.Issue) *platform.Issue {
 	labels := make([]string, len(i.Labels))
 	for j, l := range i.Labels {

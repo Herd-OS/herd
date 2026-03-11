@@ -135,6 +135,9 @@ func (m *mockStatusIssueService) Update(_ context.Context, _ int, _ platform.Iss
 func (m *mockStatusIssueService) AddLabels(_ context.Context, _ int, _ []string) error    { return nil }
 func (m *mockStatusIssueService) RemoveLabels(_ context.Context, _ int, _ []string) error { return nil }
 func (m *mockStatusIssueService) AddComment(_ context.Context, _ int, _ string) error     { return nil }
+func (m *mockStatusIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
+	return nil, nil
+}
 
 type mockStatusMilestoneService struct{}
 

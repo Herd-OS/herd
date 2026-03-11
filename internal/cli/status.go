@@ -8,11 +8,9 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/display"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
-	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
 )
 
@@ -50,13 +48,13 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show system status",
 		Long:  "Display active batches, workers, and runners.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(".")
+			cfg, err := loadConfigOrExit()
 			if err != nil {
 				return err
 			}
-			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			client, err := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
 			if err != nil {
-				return fmt.Errorf("creating GitHub client: %w", err)
+				return err
 			}
 
 			ctx := cmd.Context()

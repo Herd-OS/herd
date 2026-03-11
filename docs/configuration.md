@@ -44,7 +44,7 @@ monitor:
 
 pull_requests:
   auto_merge: false              # auto-merge batch PRs after review passes
-  co_author: true                # add Co-authored-by: herd-os[bot] to worker commits
+  co_author_email: ""            # Co-authored-by email (set after installing the GitHub App)
 ```
 
 ## Managing Configuration

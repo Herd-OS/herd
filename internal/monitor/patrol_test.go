@@ -32,10 +32,12 @@ func (m *mockPlatform) Repository() platform.RepositoryService     { return m.re
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 type mockIssueService struct {
-	listResults   map[string][]*platform.Issue // keyed by label
-	addedLabels   map[int][]string
-	removedLabels map[int][]string
-	comments      map[int][]string
+	listResults    map[string][]*platform.Issue // keyed by label
+	addedLabels    map[int][]string
+	removedLabels  map[int][]string
+	comments       map[int][]string
+	existingComments map[int][]*platform.Comment // for ListComments
+	listCommentsErr  error
 }
 
 func newMockIssueService() *mockIssueService {
@@ -71,6 +73,12 @@ func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []
 func (m *mockIssueService) AddComment(_ context.Context, number int, body string) error {
 	m.comments[number] = append(m.comments[number], body)
 	return nil
+}
+func (m *mockIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	if m.listCommentsErr != nil {
+		return nil, m.listCommentsErr
+	}
+	return m.existingComments[number], nil
 }
 
 type mockPRService struct {
@@ -184,6 +192,9 @@ func TestPatrol_StaleIssue(t *testing.T) {
 	assert.Equal(t, 1, result.StaleIssues)
 	assert.Len(t, issueSvc.comments[42], 1)
 	assert.Contains(t, issueSvc.comments[42][0], "HerdOS Monitor Alert")
+	// Should relabel to failed
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
 }
 
 func TestPatrol_TimeoutCancellation(t *testing.T) {
@@ -384,4 +395,204 @@ func TestBuildMentions(t *testing.T) {
 	assert.Equal(t, "", buildMentions([]string{}))
 	assert.Equal(t, "/cc @alice", buildMentions([]string{"alice"}))
 	assert.Equal(t, "/cc @alice @bob", buildMentions([]string{"alice", "bob"}))
+}
+
+func TestHasMonitorComment(t *testing.T) {
+	tests := []struct {
+		name     string
+		comments []*platform.Comment
+		expected bool
+	}{
+		{
+			"no comments",
+			nil,
+			false,
+		},
+		{
+			"unrelated comment",
+			[]*platform.Comment{{ID: 1, Body: "This looks good!"}},
+			false,
+		},
+		{
+			"monitor comment exists",
+			[]*platform.Comment{
+				{ID: 1, Body: "Nice work"},
+				{ID: 2, Body: "⚠️ **HerdOS Monitor Alert**\n\nIssue #42 has been stale."},
+			},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			if tt.comments != nil {
+				issueSvc.existingComments = map[int][]*platform.Comment{42: tt.comments}
+			}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       newMockPRService(),
+				workflows: &mockWorkflowService{},
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+			assert.Equal(t, tt.expected, hasMonitorComment(context.Background(), mock, 42))
+		})
+	}
+}
+
+func TestHasMonitorComment_ErrorFallback(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listCommentsErr = fmt.Errorf("API error")
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	// Should return false (fail open) when ListComments errors
+	assert.False(t, hasMonitorComment(context.Background(), mock, 42))
+}
+
+func TestPatrol_NoDuplicateComments(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusInProgress}},
+	}
+	// Simulate existing monitor comment on issue 42
+	issueSvc.existingComments = map[int][]*platform.Comment{
+		42: {{ID: 1, Body: "⚠️ **HerdOS Monitor Alert**\n\nIssue #42 has been in-progress with no active workflow run."}},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{activeRuns: []*platform.Run{}},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	result, err := Patrol(context.Background(), mock, &config.Config{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.StaleIssues)
+	// No new comment should be posted since one already exists
+	assert.Len(t, issueSvc.comments[42], 0)
+}
+
+func TestPatrol_StaleIssueRelabeled(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusInProgress}},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{activeRuns: []*platform.Run{}},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	result, err := Patrol(context.Background(), mock, &config.Config{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.StaleIssues)
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+}
+
+func TestPatrol_StaleIssueRedispatchedNextCycle(t *testing.T) {
+	// First patrol: stale issue gets relabeled to failed
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusInProgress},
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"}},
+	}
+
+	wf := &mockWorkflowService{activeRuns: []*platform.Run{}}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{
+		Monitor: config.Monitor{AutoRedispatch: true, MaxRedispatchAttempts: 3},
+		Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.StaleIssues)
+	assert.Equal(t, 0, result.RedispatchedCount) // Not redispatched in same cycle
+	assert.Len(t, wf.dispatched, 0)
+
+	// Second patrol: issue is now failed, should be redispatched
+	issueSvc2 := newMockIssueService()
+	issueSvc2.listResults[issues.StatusFailed] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusFailed},
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"}},
+	}
+	// Simulate one past failure run
+	wf2 := &mockWorkflowService{
+		completedRuns: []*platform.Run{
+			{ID: 100, Conclusion: "failure", Inputs: map[string]string{"issue_number": "42"}, CreatedAt: time.Now().Add(-2 * time.Hour)},
+		},
+	}
+	mock2 := &mockPlatform{
+		issues:    issueSvc2,
+		prs:       newMockPRService(),
+		workflows: wf2,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	result2, err := Patrol(context.Background(), mock2, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result2.RedispatchedCount)
+	assert.Len(t, wf2.dispatched, 1)
+}
+
+func TestPatrol_TimeoutAndStale_BothRelabel(t *testing.T) {
+	tests := []struct {
+		name       string
+		activeRuns []*platform.Run
+		timeout    int
+	}{
+		{
+			"timeout exceeded",
+			[]*platform.Run{
+				{ID: 200, Inputs: map[string]string{"issue_number": "42"}, CreatedAt: time.Now().Add(-2 * time.Hour)},
+			},
+			60,
+		},
+		{
+			"no active run",
+			[]*platform.Run{},
+			0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
+				{Number: 42, Title: "Test", Labels: []string{issues.StatusInProgress}},
+			}
+
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       newMockPRService(),
+				workflows: &mockWorkflowService{activeRuns: tt.activeRuns},
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+
+			cfg := &config.Config{
+				Workers: config.Workers{TimeoutMinutes: tt.timeout},
+			}
+
+			result, err := Patrol(context.Background(), mock, cfg)
+			require.NoError(t, err)
+			assert.Equal(t, 1, result.StaleIssues)
+			// Both paths should result in the same label transition
+			assert.Contains(t, issueSvc.removedLabels[42], issues.StatusInProgress)
+			assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+		})
+	}
 }

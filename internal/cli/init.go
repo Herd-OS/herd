@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"text/template"
 
+	"github.com/herd-os/herd/internal/cli/runner"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/display"
 	"github.com/herd-os/herd/internal/issues"
@@ -96,7 +99,12 @@ func runInit(skipLabels, skipWorkflows bool) error {
 		fmt.Println(display.Warning("Skipped workflow installation"))
 	}
 
-	// 6. Print next steps
+	// 6. Create runner files
+	if err := createRunnerFiles(dir, owner, repo); err != nil {
+		return err
+	}
+
+	// 7. Print next steps
 	printNextSteps(owner, repo)
 
 	return nil
@@ -296,6 +304,76 @@ func createRoleInstructionFiles(herdDir string) error {
 	return nil
 }
 
+type runnerTemplateData struct {
+	Owner string
+	Repo  string
+}
+
+func createRunnerFiles(dir, owner, repo string) error {
+	// Dockerfile.runner (static)
+	dockerfilePath := filepath.Join(dir, "Dockerfile.runner")
+	if _, err := os.Stat(dockerfilePath); os.IsNotExist(err) {
+		data, err := runner.FS.ReadFile("Dockerfile.runner")
+		if err != nil {
+			return fmt.Errorf("reading embedded Dockerfile.runner: %w", err)
+		}
+		if err := os.WriteFile(dockerfilePath, data, 0644); err != nil {
+			return fmt.Errorf("creating Dockerfile.runner: %w", err)
+		}
+		fmt.Println(display.Success("Created Dockerfile.runner"))
+	} else {
+		fmt.Println(display.Success("Dockerfile.runner already exists"))
+	}
+
+	// entrypoint.sh (static, executable)
+	entrypointPath := filepath.Join(dir, "entrypoint.sh")
+	if _, err := os.Stat(entrypointPath); os.IsNotExist(err) {
+		data, err := runner.FS.ReadFile("entrypoint.sh")
+		if err != nil {
+			return fmt.Errorf("reading embedded entrypoint.sh: %w", err)
+		}
+		if err := os.WriteFile(entrypointPath, data, 0755); err != nil {
+			return fmt.Errorf("creating entrypoint.sh: %w", err)
+		}
+		fmt.Println(display.Success("Created entrypoint.sh"))
+	} else {
+		fmt.Println(display.Success("entrypoint.sh already exists"))
+	}
+
+	// docker-compose.herd.yml (templated with owner/repo)
+	composePath := filepath.Join(dir, "docker-compose.herd.yml")
+	if _, err := os.Stat(composePath); os.IsNotExist(err) {
+		rendered, err := renderDockerCompose(owner, repo)
+		if err != nil {
+			return fmt.Errorf("rendering docker-compose.herd.yml: %w", err)
+		}
+		if err := os.WriteFile(composePath, []byte(rendered), 0644); err != nil {
+			return fmt.Errorf("creating docker-compose.herd.yml: %w", err)
+		}
+		fmt.Println(display.Success("Created docker-compose.herd.yml"))
+	} else {
+		fmt.Println(display.Success("docker-compose.herd.yml already exists"))
+	}
+
+	return nil
+}
+
+func renderDockerCompose(owner, repo string) (string, error) {
+	data, err := runner.FS.ReadFile("docker-compose.herd.yml.tmpl")
+	if err != nil {
+		return "", fmt.Errorf("reading embedded template: %w", err)
+	}
+	tmpl, err := template.New("compose").Parse(string(data))
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, runnerTemplateData{Owner: owner, Repo: repo}); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
 func printNextSteps(owner, repo string) {
 	fmt.Println()
 	fmt.Println("Set up agent credentials:")
@@ -304,7 +382,7 @@ func printNextSteps(owner, repo string) {
 	fmt.Printf("     → https://github.com/%s/%s/settings/secrets/actions\n", owner, repo)
 	fmt.Println()
 	fmt.Println("Setup complete! Next steps:")
-	fmt.Println("  Set up runners     See docs for Docker setup")
+	fmt.Println("  Start runners      docker compose -f docker-compose.herd.yml up -d")
 	fmt.Println("  herd plan          Start a planning session")
 	fmt.Println("  herd plan \"...\"    Start a planning session with an initial prompt")
 	fmt.Println("  herd status        Check system status")

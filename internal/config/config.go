@@ -60,7 +60,8 @@ type Monitor struct {
 }
 
 type PullRequests struct {
-	AutoMerge bool `yaml:"auto_merge"`
+	AutoMerge     bool   `yaml:"auto_merge"`
+	CoAuthorEmail string `yaml:"co_author_email"` // e.g. "123456+herd-os[bot]@users.noreply.github.com"
 }
 
 // Load reads and parses .herdos.yml from the given directory.

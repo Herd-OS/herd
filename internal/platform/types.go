@@ -66,6 +66,11 @@ type RepoInfo struct {
 	URL           string
 }
 
+type Comment struct {
+	ID   int64
+	Body string
+}
+
 type MergeMethod string
 
 const (

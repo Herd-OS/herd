@@ -168,6 +168,7 @@ func flattenConfig(cfg *config.Config) []keyValue {
 	kvs = append(kvs, keyValue{"monitor.notify_on_failure", btoa(cfg.Monitor.NotifyOnFailure)})
 	kvs = append(kvs, keyValue{"monitor.notify_users", formatStringSlice(cfg.Monitor.NotifyUsers)})
 	kvs = append(kvs, keyValue{"pull_requests.auto_merge", btoa(cfg.PullRequests.AutoMerge)})
+	kvs = append(kvs, keyValue{"pull_requests.co_author_email", displayValue(cfg.PullRequests.CoAuthorEmail)})
 	return kvs
 }
 
