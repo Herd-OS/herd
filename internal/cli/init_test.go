@@ -222,7 +222,16 @@ func TestCreateRunnerFiles(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(dc), "REPO_URL=https://github.com/my-org/my-project")
 	assert.Contains(t, string(dc), "Dockerfile.runner")
-	assert.Contains(t, string(dc), "ANTHROPIC_API_KEY")
+	assert.Contains(t, string(dc), "GITHUB_TOKEN=${GITHUB_TOKEN}")
+	assert.Contains(t, string(dc), "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}")
+	assert.Contains(t, string(dc), "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}")
+
+	// .env.example
+	env, err := os.ReadFile(filepath.Join(dir, ".env.example"))
+	require.NoError(t, err)
+	assert.Contains(t, string(env), "GITHUB_TOKEN=")
+	assert.Contains(t, string(env), "CLAUDE_CODE_OAUTH_TOKEN=")
+	assert.Contains(t, string(env), "ANTHROPIC_API_KEY=")
 }
 
 func TestCreateRunnerFiles_SkipsExisting(t *testing.T) {
@@ -233,11 +242,12 @@ func TestCreateRunnerFiles_SkipsExisting(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.runner"), custom, 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.sh"), custom, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), custom, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.example"), custom, 0644))
 
 	require.NoError(t, createRunnerFiles(dir, "org", "repo"))
 
 	// All files should keep their custom content
-	for _, name := range []string{"Dockerfile.runner", "entrypoint.sh", "docker-compose.herd.yml"} {
+	for _, name := range []string{"Dockerfile.runner", "entrypoint.sh", "docker-compose.herd.yml", ".env.example"} {
 		content, err := os.ReadFile(filepath.Join(dir, name))
 		require.NoError(t, err)
 		assert.Equal(t, custom, content, "%s should not be overwritten", name)
@@ -269,11 +279,30 @@ func TestCreateRunnerFiles_OwnerRepoSubstitution(t *testing.T) {
 	}
 }
 
+func TestEnvFileGitignored(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, ensureGitignore(dir, ".env"))
+
+	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	require.NoError(t, err)
+	assert.Contains(t, string(content), ".env")
+
+	// Idempotent
+	require.NoError(t, ensureGitignore(dir, ".env"))
+	content2, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	require.NoError(t, err)
+	assert.Equal(t, string(content), string(content2))
+}
+
 func TestRenderDockerCompose(t *testing.T) {
 	rendered, err := renderDockerCompose("test-org", "test-repo")
 	require.NoError(t, err)
 	assert.Contains(t, rendered, "https://github.com/test-org/test-repo")
 	assert.Contains(t, rendered, "docker compose -f docker-compose.herd.yml")
+	assert.Contains(t, rendered, "GITHUB_TOKEN=${GITHUB_TOKEN}")
+	assert.Contains(t, rendered, "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}")
+	assert.Contains(t, rendered, "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}")
 }
 
 // setupTestGitRepo creates a temp git repo with the given remote URL.

@@ -76,6 +76,9 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	if err := ensureGitignore(dir, ".herd/state/"); err != nil {
 		return fmt.Errorf("updating .gitignore: %w", err)
 	}
+	if err := ensureGitignore(dir, ".env"); err != nil {
+		return fmt.Errorf("updating .gitignore: %w", err)
+	}
 	if err := createRoleInstructionFiles(herdDir); err != nil {
 		return err
 	}
@@ -355,6 +358,21 @@ func createRunnerFiles(dir, owner, repo string) error {
 		fmt.Println(display.Success("docker-compose.herd.yml already exists"))
 	}
 
+	// .env.example (static)
+	envExamplePath := filepath.Join(dir, ".env.example")
+	if _, err := os.Stat(envExamplePath); os.IsNotExist(err) {
+		data, err := runner.FS.ReadFile(".env.example")
+		if err != nil {
+			return fmt.Errorf("reading embedded .env.example: %w", err)
+		}
+		if err := os.WriteFile(envExamplePath, data, 0644); err != nil {
+			return fmt.Errorf("creating .env.example: %w", err)
+		}
+		fmt.Println(display.Success("Created .env.example"))
+	} else {
+		fmt.Println(display.Success(".env.example already exists"))
+	}
+
 	return nil
 }
 
@@ -376,13 +394,14 @@ func renderDockerCompose(owner, repo string) (string, error) {
 
 func printNextSteps(owner, repo string) {
 	fmt.Println()
-	fmt.Println("Set up agent credentials:")
-	fmt.Println("  1. Run: claude setup-token (recommended, uses your subscription)")
-	fmt.Println("  2. Store the token as CLAUDE_CODE_OAUTH_TOKEN in repo secrets")
-	fmt.Printf("     → https://github.com/%s/%s/settings/secrets/actions\n", owner, repo)
+	fmt.Println("Set up runners:")
+	fmt.Println("  1. cp .env.example .env")
+	fmt.Println("  2. Add your GITHUB_TOKEN to .env")
+	fmt.Println("  3. Run: claude setup-token (uses your subscription, no API cost)")
+	fmt.Println("     Add the token as CLAUDE_CODE_OAUTH_TOKEN in .env")
+	fmt.Println("  4. docker compose -f docker-compose.herd.yml up -d")
 	fmt.Println()
-	fmt.Println("Setup complete! Next steps:")
-	fmt.Println("  Start runners      docker compose -f docker-compose.herd.yml up -d")
+	fmt.Println("Next steps:")
 	fmt.Println("  herd plan          Start a planning session")
 	fmt.Println("  herd plan \"...\"    Start a planning session with an initial prompt")
 	fmt.Println("  herd status        Check system status")
