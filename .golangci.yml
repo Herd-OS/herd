@@ -1,0 +1,47 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - staticcheck
+    - gosimple
+    - govet
+    - errcheck
+    - ineffassign
+    - unused
+    - gocritic
+    - revive
+    - gosec
+    - unconvert
+    - unparam
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        disabled: true
+      - name: package-comments
+        disabled: true
+  gocritic:
+    disabled-checks:
+      - ifElseChain
+  gosec:
+    excludes:
+      - G204  # subprocess with variable — expected for CLI tool
+      - G301  # directory permissions 0750 — 0755 is standard
+      - G304  # file inclusion via variable — expected for config/template reads
+      - G104  # errors unhandled — covered by errcheck with better granularity
+      - G302  # file permissions 0600 — 0644 is standard for non-secret files
+      - G306  # WriteFile permissions 0600 — 0644 is standard for non-secret files
+  errcheck:
+    exclude-functions:
+      - (*github.com/spf13/cobra.Command).MarkFlagRequired
+
+issues:
+  exclude-use-default: false
+  exclude-rules:
+    # Test files can skip error checks on encode/decode in mock handlers
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
