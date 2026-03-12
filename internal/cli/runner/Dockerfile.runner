@@ -27,8 +27,13 @@ RUN npm install -g @anthropic-ai/claude-code
 # RUN apt-get update && apt-get install -y golang-go
 # RUN apt-get update && apt-get install -y python3 python3-pip
 
+# Runner must not run as root
+RUN useradd -m -d /home/runner runner \
+    && chown -R runner:runner /runner
+
 WORKDIR /runner
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
+USER runner
 ENTRYPOINT ["./entrypoint.sh"]
