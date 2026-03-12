@@ -385,7 +385,7 @@ func initOrchestrationRepo(t *testing.T) (string, *git.Git) {
 	return dir, git.New(dir)
 }
 
-func runCmd(t *testing.T, dir string, name string, args ...string) {
+func runCmd(t *testing.T, dir string, name string, args ...string) { //nolint:unparam // always "git" but kept for readability at call sites
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	if dir != "" {

@@ -99,12 +99,12 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 	// Check caps
 	if cfg.Integrator.CIMaxFixCycles == 0 {
 		// Notify-only mode
-		notifyCI(ctx, p, ms, batchBranch, "CI failed. `ci_max_fix_cycles` is 0 — no fix workers will be dispatched.")
+		notifyCI(ctx, p, batchBranch, "CI failed. `ci_max_fix_cycles` is 0 — no fix workers will be dispatched.")
 		return &CheckCIResult{Status: "failure", MaxCyclesHit: true}, nil
 	}
 
 	if currentCycle >= cfg.Integrator.CIMaxFixCycles {
-		notifyCI(ctx, p, ms, batchBranch, fmt.Sprintf(
+		notifyCI(ctx, p, batchBranch, fmt.Sprintf(
 			"CI failed but max fix cycles (%d) reached. Manual intervention needed.", cfg.Integrator.CIMaxFixCycles))
 		return &CheckCIResult{Status: "failure", MaxCyclesHit: true}, nil
 	}
@@ -157,7 +157,7 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 	}, nil
 }
 
-func notifyCI(ctx context.Context, p platform.Platform, ms *platform.Milestone, batchBranch, message string) {
+func notifyCI(ctx context.Context, p platform.Platform, batchBranch, message string) {
 	prs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
 	if err != nil || len(prs) == 0 {
 		return

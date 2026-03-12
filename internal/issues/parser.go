@@ -13,10 +13,7 @@ type frontMatterWrapper struct {
 
 // ParseBody parses a herd issue body into structured data.
 func ParseBody(raw string) (*IssueBody, error) {
-	fm, markdown, err := splitFrontMatter(raw)
-	if err != nil {
-		return nil, err
-	}
+	fm, markdown := splitFrontMatter(raw)
 
 	body := &IssueBody{}
 
@@ -54,21 +51,21 @@ func ParseBody(raw string) (*IssueBody, error) {
 	return body, nil
 }
 
-func splitFrontMatter(raw string) (frontMatter, markdown string, err error) {
+func splitFrontMatter(raw string) (frontMatter, markdown string) {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(raw, "---") {
-		return "", raw, nil
+		return "", raw
 	}
 
 	rest := raw[3:]
 	idx := strings.Index(rest, "\n---")
 	if idx < 0 {
-		return "", raw, nil
+		return "", raw
 	}
 
 	frontMatter = strings.TrimSpace(rest[:idx])
 	markdown = strings.TrimSpace(rest[idx+4:])
-	return frontMatter, markdown, nil
+	return frontMatter, markdown
 }
 
 func parseSections(markdown string) map[string]string {

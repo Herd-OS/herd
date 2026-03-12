@@ -661,7 +661,7 @@ func TestConsolidate_PushFailure(t *testing.T) {
 // initConflictRepo creates a git repo with a bare "origin" remote, a batch branch,
 // and a conflicting worker branch pushed to origin, so that Consolidate's
 // fetch → checkout → merge("origin/worker") flow works and produces a conflict.
-func initConflictRepo(t *testing.T) (string, *git.Git) {
+func initConflictRepo(t *testing.T) (string, *git.Git) { //nolint:unparam // dir used by some callers
 	t.Helper()
 
 	// Create bare repo as "origin"
