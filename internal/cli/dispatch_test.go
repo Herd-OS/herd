@@ -100,6 +100,43 @@ func TestEnsureBatchBranch_CreatesFromDefault(t *testing.T) {
 	assert.Equal(t, "abc123", mock.repo.createdBranches[0].sha)
 }
 
+func TestDispatchSingle_ManualTaskSkipped(t *testing.T) {
+	mock := newMockPlatformForDispatch()
+	mock.issues.getResult = &platform.Issue{
+		Number: 42,
+		Labels: []string{issues.StatusReady, issues.TypeManual},
+		Milestone: &platform.Milestone{Number: 1, Title: "Test"},
+	}
+
+	cfg := &config.Config{}
+	err := runDispatchSingle(context.Background(), mock, cfg, 42, false)
+	require.NoError(t, err)
+
+	// Should not have dispatched anything
+	assert.Empty(t, mock.workflows.dispatched)
+}
+
+func TestDispatchBatch_SkipsManualTasks(t *testing.T) {
+	mock := newMockPlatformForDispatch()
+	mock.issues.listResult = []*platform.Issue{
+		{Number: 1, Title: "Normal", Labels: []string{issues.StatusReady, issues.TypeFeature}, Milestone: &platform.Milestone{Number: 1, Title: "Test"}},
+		{Number: 2, Title: "Manual", Labels: []string{issues.StatusReady, issues.TypeManual}, Milestone: &platform.Milestone{Number: 1, Title: "Test"}},
+		{Number: 3, Title: "Also normal", Labels: []string{issues.StatusReady, issues.TypeFeature}, Milestone: &platform.Milestone{Number: 1, Title: "Test"}},
+	}
+	// dispatchIssue will call Get for each issue
+	mock.issues.getByNumber = map[int]*platform.Issue{
+		1: mock.issues.listResult[0],
+		3: mock.issues.listResult[2],
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 10, TimeoutMinutes: 30}}
+	err := runDispatchBatch(context.Background(), mock, cfg, 1, true, false)
+	require.NoError(t, err)
+
+	// Should have dispatched 2 (skipped the manual one)
+	assert.Len(t, mock.workflows.dispatched, 2)
+}
+
 // --- Mock Platform for dispatch tests ---
 
 type mockDispatchPlatform struct {
@@ -131,6 +168,8 @@ func (m *mockDispatchPlatform) Checks() platform.CheckService             { retu
 
 type mockDispatchIssueService struct {
 	getResult     *platform.Issue
+	getByNumber   map[int]*platform.Issue
+	listResult    []*platform.Issue
 	addedLabels   map[int][]string
 	removedLabels map[int][]string
 }
@@ -138,11 +177,16 @@ type mockDispatchIssueService struct {
 func (m *mockDispatchIssueService) Create(_ context.Context, _, _ string, _ []string, _ *int) (*platform.Issue, error) {
 	return nil, nil
 }
-func (m *mockDispatchIssueService) Get(_ context.Context, _ int) (*platform.Issue, error) {
+func (m *mockDispatchIssueService) Get(_ context.Context, number int) (*platform.Issue, error) {
+	if m.getByNumber != nil {
+		if iss, ok := m.getByNumber[number]; ok {
+			return iss, nil
+		}
+	}
 	return m.getResult, nil
 }
 func (m *mockDispatchIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*platform.Issue, error) {
-	return nil, nil
+	return m.listResult, nil
 }
 func (m *mockDispatchIssueService) Update(_ context.Context, _ int, _ platform.IssueUpdate) (*platform.Issue, error) {
 	return nil, nil

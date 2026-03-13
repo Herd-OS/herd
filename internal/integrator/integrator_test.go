@@ -1064,6 +1064,140 @@ func TestOpenBatchPR_RebaseConflict_Notify(t *testing.T) {
 	assert.Len(t, wf.dispatched, 0)
 }
 
+func TestIsIssueComplete(t *testing.T) {
+	tests := []struct {
+		name     string
+		issue    *platform.Issue
+		expected bool
+	}{
+		{"closed issue", &platform.Issue{State: "closed", Labels: []string{}}, true},
+		{"done label", &platform.Issue{State: "open", Labels: []string{issues.StatusDone}}, true},
+		{"closed with done", &platform.Issue{State: "closed", Labels: []string{issues.StatusDone}}, true},
+		{"open in-progress", &platform.Issue{State: "open", Labels: []string{issues.StatusInProgress}}, false},
+		{"open ready", &platform.Issue{State: "open", Labels: []string{issues.StatusReady}}, false},
+		{"open blocked", &platform.Issue{State: "open", Labels: []string{issues.StatusBlocked}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isIssueComplete(tt.issue))
+		})
+	}
+}
+
+func TestAdvance_SkipsManualTasks(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[10] = &platform.Issue{
+		Number: 10, Title: "Task A",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Task A", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+		{Number: 11, Title: "Manual Task", Labels: []string{issues.StatusBlocked, issues.TypeManual},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo B manually\n"},
+		{Number: 12, Title: "Auto Task", Labels: []string{issues.StatusBlocked},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo C\n"},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "10"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, nil, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.TierComplete)
+	// Only issue 12 should be dispatched, not 11 (manual)
+	assert.Equal(t, 1, result.DispatchedCount)
+	assert.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "12", wf.dispatched[0]["issue_number"])
+}
+
+func TestAdvance_ClosedIssueCountsAsComplete(t *testing.T) {
+	issueSvc := newMockIssueService()
+	// Issue 10 is closed but doesn't have herd/status:done label (manual task scenario)
+	issueSvc.getResult[10] = &platform.Issue{
+		Number: 10, Title: "Manual Task", State: "closed",
+		Labels:    []string{issues.TypeManual},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Manual Task", State: "closed", Labels: []string{issues.TypeManual},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo manually\n"},
+		{Number: 11, Title: "Auto Task", Labels: []string{issues.StatusBlocked},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo auto\n"},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "10"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, nil, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.TierComplete)
+	assert.Equal(t, 1, result.DispatchedCount)
+}
+
+func TestAdvanceByBatch(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Manual Task", State: "closed", Labels: []string{issues.TypeManual},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo manually\n"},
+		{Number: 11, Title: "Auto Task", Labels: []string{issues.StatusBlocked},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo auto\n"},
+	}
+
+	wf := &mockWorkflowService{
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{
+			getResult: map[int]*platform.Milestone{
+				1: {Number: 1, Title: "Batch"},
+			},
+		},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := AdvanceByBatch(context.Background(), mock, nil, cfg, 1)
+	require.NoError(t, err)
+	assert.True(t, result.TierComplete)
+	assert.Equal(t, 1, result.DispatchedCount)
+	assert.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "11", wf.dispatched[0]["issue_number"])
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

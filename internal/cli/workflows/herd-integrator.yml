@@ -7,6 +7,8 @@ on:
     types: [submitted]
   pull_request:
     types: [closed]
+  issues:
+    types: [closed]
 
 permissions:
   contents: write
@@ -39,6 +41,28 @@ jobs:
           herd integrator check-ci --run-id ${{ github.event.workflow_run.id }}
           herd integrator advance --run-id ${{ github.event.workflow_run.id }}
           herd integrator review --run-id ${{ github.event.workflow_run.id }}
+
+  advance-on-close:
+    if: github.event_name == 'issues'
+    runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if herd issue and advance
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY="${{ github.event.issue.body }}"
+          BATCH=$(echo "$BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1)
+          if [ -n "$BATCH" ]; then
+            herd integrator advance --batch "$BATCH"
+          else
+            echo "Not a herd issue — skipping."
+          fi
 
   re-review:
     if: >

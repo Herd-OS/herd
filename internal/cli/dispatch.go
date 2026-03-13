@@ -81,6 +81,11 @@ func runDispatchSingle(ctx context.Context, client platform.Platform, cfg *confi
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
 
+	if issues.HasLabel(issue.Labels, issues.TypeManual) {
+		fmt.Printf("Issue #%d is a manual task — cannot dispatch to a worker.\n", issueNum)
+		return nil
+	}
+
 	if dryRun {
 		fmt.Printf("Would dispatch issue #%d to branch %s\n", issueNum, batchBranch)
 		return nil
@@ -116,9 +121,12 @@ func runDispatchBatch(ctx context.Context, client platform.Platform, cfg *config
 		return fmt.Errorf("listing issues: %w", err)
 	}
 
-	// Filter to ready and failed
+	// Filter to ready and failed, skip manual tasks
 	var dispatchable []*platform.Issue
 	for _, issue := range allIssues {
+		if issues.HasLabel(issue.Labels, issues.TypeManual) {
+			continue
+		}
 		status := issues.StatusLabel(issue.Labels)
 		if status == issues.StatusReady || status == issues.StatusFailed {
 			dispatchable = append(dispatchable, issue)
