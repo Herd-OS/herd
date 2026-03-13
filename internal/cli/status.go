@@ -30,6 +30,7 @@ type BatchStatus struct {
 	Active   int    `json:"active"`
 	Blocked  int    `json:"blocked"`
 	Ready    int    `json:"ready"`
+	Manual   int    `json:"manual"`
 }
 
 // WorkerRun holds info about an active workflow run.
@@ -173,21 +174,30 @@ func renderBatchDetail(ctx context.Context, client platform.Platform, batchNum i
 	fmt.Printf("Progress: %s\n\n", display.Progress(done, len(allIssues)))
 
 	for _, issue := range allIssues {
+		isManual := issues.HasLabel(issue.Labels, issues.TypeManual)
 		status := issues.StatusLabel(issue.Labels)
 		var symbol string
-		switch status {
-		case issues.StatusDone:
-			symbol = display.Success("")
-		case issues.StatusInProgress:
-			symbol = display.InProgress("")
-		case issues.StatusFailed:
-			symbol = display.Error("")
-		case issues.StatusBlocked:
-			symbol = display.Blocked("")
-		default:
-			symbol = "  "
+		if isManual {
+			symbol = display.Manual("")
+		} else {
+			switch status {
+			case issues.StatusDone:
+				symbol = display.Success("")
+			case issues.StatusInProgress:
+				symbol = display.InProgress("")
+			case issues.StatusFailed:
+				symbol = display.Error("")
+			case issues.StatusBlocked:
+				symbol = display.Blocked("")
+			default:
+				symbol = "  "
+			}
 		}
-		fmt.Printf("  %s #%-4d %s\n", symbol, issue.Number, issue.Title)
+		suffix := ""
+		if isManual && status == issues.StatusReady {
+			suffix = " (waiting for human)"
+		}
+		fmt.Printf("  %s #%-4d %s%s\n", symbol, issue.Number, issue.Title, suffix)
 	}
 
 	return nil
@@ -260,6 +270,9 @@ func getBatchStatus(ctx context.Context, client platform.Platform, ms *platform.
 		Total:  len(allIssues),
 	}
 	for _, issue := range allIssues {
+		if issues.HasLabel(issue.Labels, issues.TypeManual) {
+			bs.Manual++
+		}
 		switch issues.StatusLabel(issue.Labels) {
 		case issues.StatusDone:
 			bs.Done++

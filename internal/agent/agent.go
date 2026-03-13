@@ -54,6 +54,7 @@ type PlannedTask struct {
 	Type                    string   `json:"type" yaml:"type"`                   // "feature", "bugfix" (default: "feature")
 	RunnerLabel             string   `json:"runner_label" yaml:"runner_label"`   // Runner label override; empty = use config default
 	DependsOn               []int    `json:"depends_on" yaml:"depends_on"`      // Indices into the Tasks slice
+	Manual                  bool     `json:"manual" yaml:"manual"`              // Requires human action, not dispatched to workers
 }
 
 type ExecResult struct {

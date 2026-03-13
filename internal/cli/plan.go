@@ -116,7 +116,7 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 	}
 
 	// Create issues, milestone, and batch branch
-	result, err := planner.CreateFromPlan(ctx, client, plan)
+	result, err := planner.CreateFromPlan(ctx, client, plan, cfg)
 	if err != nil {
 		return err
 	}
