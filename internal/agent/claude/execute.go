@@ -13,16 +13,24 @@ import (
 // The task body is passed as the prompt (-p), and the system prompt provides
 // worker instructions. The agent commits as it works in the repo.
 func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
-	args := []string{"-p", task.Body, "--dangerously-skip-permissions"}
+	// Build the prompt: system prompt wraps the task body, so we pass
+	// the full rendered prompt via -p. The task body may start with ---
+	// (YAML front matter) which some CLI parsers misinterpret as a flag.
+	prompt := task.Body
 	if opts.SystemPrompt != "" {
-		args = append(args, "--system-prompt", opts.SystemPrompt)
+		prompt = opts.SystemPrompt
 	}
+
+	args := []string{"--dangerously-skip-permissions"}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
 	}
+	// Place -p last so the prompt value (which may start with ---) is not
+	// misinterpreted as a flag by the argument parser.
+	args = append(args, "-p", prompt)
 
 	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
 	cmd.Dir = opts.RepoRoot

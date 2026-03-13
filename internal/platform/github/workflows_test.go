@@ -92,6 +92,50 @@ func TestWorkflowServiceListRuns(t *testing.T) {
 	assert.Equal(t, int64(100), runs[0].ID)
 }
 
+func TestWorkflowServiceGetRun_ParsesRunName(t *testing.T) {
+	ts := gh.Timestamp{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99", func(w http.ResponseWriter, r *http.Request) {
+		resp := gh.WorkflowRun{
+			ID:        gh.Ptr(int64(99)),
+			Name:      gh.Ptr("Herd Worker #42"),
+			Status:    gh.Ptr("completed"),
+			CreatedAt: &ts,
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	client, _ := newTestClient(t, mux)
+	run, err := client.Workflows().GetRun(context.Background(), 99)
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"issue_number": "42"}, run.Inputs)
+}
+
+func TestParseRunNameInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		input string
+		want map[string]string
+	}{
+		{"valid", "Herd Worker #42", map[string]string{"issue_number": "42"}},
+		{"large number", "Herd Worker #12345", map[string]string{"issue_number": "12345"}},
+		{"empty", "", nil},
+		{"wrong prefix", "worker #42", nil},
+		{"no number", "Herd Worker #", nil},
+		{"non-numeric", "Herd Worker #abc", nil},
+		{"mixed", "Herd Worker #42abc", nil},
+		{"just name", "HerdOS Worker", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseRunNameInputs(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestWorkflowServiceCancelRun(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /repos/test-org/test-repo/actions/runs/99/cancel", func(w http.ResponseWriter, r *http.Request) {

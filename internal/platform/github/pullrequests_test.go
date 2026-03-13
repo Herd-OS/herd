@@ -81,6 +81,19 @@ func TestPullRequestList(t *testing.T) {
 	assert.Len(t, prs, 2)
 }
 
+func TestPullRequestList_HeadFilterIncludesOwner(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test-org/test-repo/pulls", func(w http.ResponseWriter, r *http.Request) {
+		// GitHub API requires "owner:branch" format for head filter
+		assert.Equal(t, "test-org:herd/batch/1-test", r.URL.Query().Get("head"))
+		json.NewEncoder(w).Encode([]gh.PullRequest{})
+	})
+
+	client, _ := newTestClient(t, mux)
+	_, err := client.PullRequests().List(context.Background(), platform.PRFilters{Head: "herd/batch/1-test"})
+	require.NoError(t, err)
+}
+
 func TestPullRequestListPaginated(t *testing.T) {
 	callCount := 0
 	mux := http.NewServeMux()

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -80,6 +81,23 @@ func TestCountActiveWorkers(t *testing.T) {
 	count, err := countActiveWorkers(context.Background(), mock)
 	require.NoError(t, err)
 	assert.Equal(t, 2, count)
+}
+
+func TestEnsureBatchBranch_AlreadyExists(t *testing.T) {
+	mock := newMockPlatformForDispatch()
+	err := ensureBatchBranch(context.Background(), mock, "herd/batch/1-test")
+	require.NoError(t, err)
+	assert.Empty(t, mock.repo.createdBranches, "should not create branch if it already exists")
+}
+
+func TestEnsureBatchBranch_CreatesFromDefault(t *testing.T) {
+	mock := newMockPlatformForDispatch()
+	mock.repo.branchNotFound = "herd/batch/1-test" // simulate branch not found
+	err := ensureBatchBranch(context.Background(), mock, "herd/batch/1-test")
+	require.NoError(t, err)
+	require.Len(t, mock.repo.createdBranches, 1)
+	assert.Equal(t, "herd/batch/1-test", mock.repo.createdBranches[0].name)
+	assert.Equal(t, "abc123", mock.repo.createdBranches[0].sha)
 }
 
 // --- Mock Platform for dispatch tests ---
@@ -189,7 +207,15 @@ func (m *mockDispatchMilestoneService) Update(_ context.Context, _ int, _ platfo
 
 // mockDispatchRepoService
 
-type mockDispatchRepoService struct{}
+type createdBranch struct {
+	name string
+	sha  string
+}
+
+type mockDispatchRepoService struct {
+	branchNotFound  string // if set, GetBranchSHA returns error for this branch
+	createdBranches []createdBranch
+}
 
 func (m *mockDispatchRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) {
 	return &platform.RepoInfo{DefaultBranch: "main"}, nil
@@ -197,8 +223,14 @@ func (m *mockDispatchRepoService) GetInfo(_ context.Context) (*platform.RepoInfo
 func (m *mockDispatchRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return "main", nil
 }
-func (m *mockDispatchRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
-func (m *mockDispatchRepoService) DeleteBranch(_ context.Context, _ string) error    { return nil }
-func (m *mockDispatchRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
+func (m *mockDispatchRepoService) CreateBranch(_ context.Context, name, sha string) error {
+	m.createdBranches = append(m.createdBranches, createdBranch{name, sha})
+	return nil
+}
+func (m *mockDispatchRepoService) DeleteBranch(_ context.Context, _ string) error { return nil }
+func (m *mockDispatchRepoService) GetBranchSHA(_ context.Context, branch string) (string, error) {
+	if m.branchNotFound != "" && branch == m.branchNotFound {
+		return "", fmt.Errorf("branch %s not found", branch)
+	}
 	return "abc123", nil
 }

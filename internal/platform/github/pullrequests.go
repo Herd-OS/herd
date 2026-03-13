@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/platform"
@@ -32,9 +33,15 @@ func (s *pullRequestService) Get(ctx context.Context, number int) (*platform.Pul
 }
 
 func (s *pullRequestService) List(ctx context.Context, filters platform.PRFilters) ([]*platform.PullRequest, error) {
+	// GitHub API requires "owner:branch" format for head filter
+	head := filters.Head
+	if head != "" && !strings.Contains(head, ":") {
+		head = s.c.owner + ":" + head
+	}
+
 	opts := &gh.PullRequestListOptions{
 		State: filters.State,
-		Head:  filters.Head,
+		Head:  head,
 		Base:  filters.Base,
 		ListOptions: gh.ListOptions{
 			PerPage: 100,

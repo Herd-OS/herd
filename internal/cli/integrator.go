@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/integrator"
+	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
 )
@@ -94,6 +96,15 @@ func newAdvanceCmd() *cobra.Command {
 				return fmt.Errorf("creating GitHub client: %w", err)
 			}
 
+			ok, err := runWasSuccessful(cmd.Context(), client, runID)
+			if err != nil {
+				return fmt.Errorf("checking run status: %w", err)
+			}
+			if !ok {
+				fmt.Println("Skipped: triggering run was not successful.")
+				return nil
+			}
+
 			cwd, _ := os.Getwd()
 			g := git.New(cwd)
 
@@ -146,6 +157,17 @@ func newIntegratorReviewCmd() *cobra.Command {
 			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
 			if err != nil {
 				return fmt.Errorf("creating GitHub client: %w", err)
+			}
+
+			if runID != 0 {
+				ok, err := runWasSuccessful(cmd.Context(), client, runID)
+				if err != nil {
+					return fmt.Errorf("checking run status: %w", err)
+				}
+				if !ok {
+					fmt.Println("Skipped: triggering run was not successful.")
+					return nil
+				}
 			}
 
 			ag := claude.New(cfg.Agent.Binary, cfg.Agent.Model)
@@ -254,6 +276,17 @@ func newIntegratorCleanupCmd() *cobra.Command {
 	return cmd
 }
 
+// runWasSuccessful checks if the triggering run succeeded. Returns false for
+// failed/cancelled runs — the subsequent integrator steps (check-ci, advance, review)
+// should be skipped since consolidate already handled labeling.
+func runWasSuccessful(ctx context.Context, client platform.Platform, runID int64) (bool, error) {
+	run, err := client.Workflows().GetRun(ctx, runID)
+	if err != nil {
+		return false, err
+	}
+	return run.Conclusion == "success", nil
+}
+
 func newIntegratorCheckCICmd() *cobra.Command {
 	var runID int64
 
@@ -272,6 +305,15 @@ func newIntegratorCheckCICmd() *cobra.Command {
 			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
 			if err != nil {
 				return fmt.Errorf("creating GitHub client: %w", err)
+			}
+
+			ok, err := runWasSuccessful(cmd.Context(), client, runID)
+			if err != nil {
+				return fmt.Errorf("checking run status: %w", err)
+			}
+			if !ok {
+				fmt.Println("Skipped: triggering run was not successful.")
+				return nil
 			}
 
 			cwd, _ := os.Getwd()

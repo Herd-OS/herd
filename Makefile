@@ -14,7 +14,10 @@ release:
 test:
 	go test ./...
 
+test-e2e:
+	go test ./tests/e2e/... -tags=e2e -v -timeout=30m -count=1
+
 lint:
 	golangci-lint run
 
-.PHONY: build release test lint
+.PHONY: build release test test-e2e lint

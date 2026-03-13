@@ -251,6 +251,154 @@ func TestConsolidate_NoOpWorker(t *testing.T) {
 	assert.False(t, result.Merged)
 }
 
+func TestConsolidate_CancelledRun(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "cancelled", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{defaultBranch: "main"},
+	}
+
+	result, err := Consolidate(context.Background(), mock, nil, &config.Config{}, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.False(t, result.Merged)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+}
+
+func TestConsolidate_SuccessfulMerge(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	// Create repo with batch and worker branches
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create batch branch
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	// Create worker branch with non-conflicting change
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	g := git.New(dir)
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.Merged)
+	assert.Equal(t, "herd/worker/42-test", result.WorkerBranch)
+
+	// Verify worker.txt exists on batch branch
+	_, statErr := os.Stat(filepath.Join(dir, "worker.txt"))
+	assert.NoError(t, statErr)
+}
+
+func TestConsolidate_ConfiguresGitIdentity(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	// Create repo WITHOUT git identity configured
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	// Deliberately NOT setting user.email/user.name
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	runGit(t, dir, "config", "user.email", "temp@temp.com") // needed for initial commit
+	runGit(t, dir, "config", "user.name", "Temp")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Now unset the identity to simulate the runner environment
+	runGit(t, dir, "config", "--unset", "user.email")
+	runGit(t, dir, "config", "--unset", "user.name")
+
+	// Create branches
+	runGit(t, dir, "config", "user.email", "temp@temp.com")
+	runGit(t, dir, "config", "user.name", "Temp")
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	// Unset identity again
+	runGit(t, dir, "config", "--unset", "user.email")
+	runGit(t, dir, "config", "--unset", "user.name")
+
+	g := git.New(dir)
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	// This would previously fail with "unable to auto-detect email address"
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.Merged)
+}
+
 func TestAdvance_TierComplete(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[10] = &platform.Issue{

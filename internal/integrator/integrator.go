@@ -102,11 +102,16 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		return &ConsolidateResult{IssueNumber: issueNumber, Merged: false}, nil
 	}
 
-	// Check if worker branch exists (no-op worker = no branch)
+	// Check if worker branch exists (no-op worker = no branch, or already consolidated)
 	_, err = p.Repository().GetBranchSHA(ctx, workerBranch)
 	if err != nil {
-		// Branch doesn't exist — no-op worker (task already done)
+		// Branch doesn't exist — either no-op worker or already consolidated by another integrator run
 		return &ConsolidateResult{IssueNumber: issueNumber, NoOp: true, Merged: false}, nil
+	}
+
+	// Configure git identity for merge commits
+	if err := g.ConfigureIdentity("HerdOS Integrator", "herd@herd-os.com"); err != nil {
+		return nil, fmt.Errorf("configuring git identity: %w", err)
 	}
 
 	// Merge worker branch into batch branch
@@ -416,6 +421,11 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("getting default branch: %w", err)
+	}
+
+	// Configure git identity for rebase
+	if err := g.ConfigureIdentity("HerdOS Integrator", "herd@herd-os.com"); err != nil {
+		return 0, fmt.Errorf("configuring git identity: %w", err)
 	}
 
 	// Rebase batch branch onto main
