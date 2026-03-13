@@ -20,6 +20,6 @@ jobs:
       - name: Patrol
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           herd monitor patrol

@@ -31,7 +31,7 @@ jobs:
       - name: Consolidate, advance, and review
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -54,7 +54,7 @@ jobs:
       - name: Check if herd issue and advance
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           BODY="${{ github.event.issue.body }}"
           BATCH=$(echo "$BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1)
@@ -79,7 +79,7 @@ jobs:
       - name: Handle review
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -105,6 +105,6 @@ jobs:
       - name: Post-merge cleanup
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           herd integrator cleanup --pr ${{ github.event.pull_request.number }}
