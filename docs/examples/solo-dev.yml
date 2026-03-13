@@ -1,0 +1,43 @@
+# HerdOS configuration for solo developers.
+#
+# Optimized for small runner pools and fast iteration.
+# You review all PRs yourself, so agent review is off.
+
+version: 1
+
+platform:
+  provider: github
+  owner: your-username
+  repo: your-repo
+
+agent:
+  provider: claude
+  # binary: claude       # Uncomment to override agent binary name
+  # model: sonnet        # Uncomment to override default model
+  # max_turns: 0         # 0 = use agent's default
+
+workers:
+  max_concurrent: 2       # Small runner pool — 2 workers is plenty for solo work
+  runner_label: herd-worker
+  timeout_minutes: 20     # Shorter timeout — solo projects tend to have smaller tasks
+
+integrator:
+  strategy: squash
+  on_conflict: notify                    # Just notify you — you'll resolve conflicts yourself
+  max_conflict_resolution_attempts: 2
+  require_ci: true
+  review: false                          # No agent review — you review everything yourself
+  review_max_fix_cycles: 3
+  ci_max_fix_cycles: 2
+
+monitor:
+  patrol_interval_minutes: 15
+  stale_threshold_minutes: 30
+  max_pr_age_hours: 24
+  auto_redispatch: true                  # Self-healing — redispatch failed workers automatically
+  max_redispatch_attempts: 2             # Lower than default — you're around to intervene
+  notify_on_failure: true
+  notify_users: []                       # Empty = no @mentions, just issue labels
+
+pull_requests:
+  auto_merge: false                      # You want to review before merging

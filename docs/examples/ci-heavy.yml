@@ -1,0 +1,44 @@
+# HerdOS configuration for projects with extensive CI pipelines.
+#
+# Higher fix-cycle limits let the integrator iterate on CI failures
+# and review feedback without human intervention. Longer timeouts
+# accommodate complex build and test suites.
+
+version: 1
+
+platform:
+  provider: github
+  owner: your-org
+  repo: your-repo
+
+agent:
+  provider: claude
+  # model: sonnet        # Uncomment to override default model
+  # max_turns: 0         # 0 = use agent's default
+
+workers:
+  max_concurrent: 5
+  runner_label: herd-worker
+  timeout_minutes: 45     # Longer timeout — complex builds take time
+
+integrator:
+  strategy: squash
+  on_conflict: dispatch-resolver
+  max_conflict_resolution_attempts: 3    # More attempts — CI-heavy repos have more merge friction
+  require_ci: true                       # CI must pass before merge
+  review: true                           # Agent review enabled
+  review_max_fix_cycles: 3              # Let the agent iterate on review feedback
+  ci_max_fix_cycles: 3                   # More CI fix attempts — flaky tests and build issues
+
+monitor:
+  patrol_interval_minutes: 10            # Check more frequently — CI failures should be caught fast
+  stale_threshold_minutes: 45            # Higher threshold — builds take longer
+  max_pr_age_hours: 48                   # CI-heavy PRs take longer to land
+  auto_redispatch: true
+  max_redispatch_attempts: 3
+  notify_on_failure: true
+  notify_users:
+    - oncall                             # @mention whoever is on-call
+
+pull_requests:
+  auto_merge: false
