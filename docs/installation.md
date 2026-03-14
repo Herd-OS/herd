@@ -1,5 +1,37 @@
 # Installation
 
+## Homebrew (macOS and Linux)
+
+```bash
+brew tap herd-os/tap
+brew install herd
+```
+
+## Binary Download
+
+Download the latest release for your platform from the [GitHub Releases page](https://github.com/Herd-OS/herd/releases/latest).
+
+```bash
+# Linux (amd64)
+curl -L https://github.com/Herd-OS/herd/releases/latest/download/herd-linux-amd64 -o herd
+
+# Linux (arm64)
+curl -L https://github.com/Herd-OS/herd/releases/latest/download/herd-linux-arm64 -o herd
+
+# macOS (Apple Silicon)
+curl -L https://github.com/Herd-OS/herd/releases/latest/download/herd-darwin-arm64 -o herd
+
+# macOS (Intel)
+curl -L https://github.com/Herd-OS/herd/releases/latest/download/herd-darwin-amd64 -o herd
+```
+
+Then install:
+
+```bash
+chmod +x herd
+sudo mv herd /usr/local/bin/
+```
+
 ## From Source
 
 Requires Go 1.26 or later.
@@ -27,3 +59,5 @@ herd --version
 - **Git** — Herd operates on git repositories
 - **GitHub CLI** (`gh`) — optional, used as fallback for label creation during `herd init`
 - **GitHub account** — with write access to the target repository
+- **Self-hosted runners** — for worker execution. See [Runner Setup](runners.md) for Docker-based runner configuration
+- **GitHub Personal Access Token** — for runner registration and workflow dispatch. See [Runner Setup](runners.md) for details
