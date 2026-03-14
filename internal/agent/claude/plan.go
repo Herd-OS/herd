@@ -30,6 +30,19 @@ Good decomposition is critical. Produce tasks that:
 - **Cannot produce merge conflicts with parallel tasks** — if two tasks in the same tier might modify the same file, they MUST be combined into a single task or made sequential (one depends on the other). A merge conflict between parallel workers is expensive: it requires a conflict-resolution worker, burns tokens, and delays the batch. Prevent this by design.
 - **Include acceptance criteria** — the worker knows when it's done.
 - **Are right-sized** — not so large that a worker struggles, not so small that overhead dominates. Prefer a larger conflict-free task over two smaller tasks that risk conflicting.
+- **Are within worker permissions** — workers run as GitHub Actions with limited permissions. They can read/write repository contents, issues, and PRs. They CANNOT: create or modify GitHub Actions workflow files (.github/workflows/), manage secrets or repo settings, create repos, or interact with external services requiring authentication. Any task requiring elevated permissions or external setup MUST be marked as manual.
+
+## Manual tasks and permissions
+
+Before finalizing each task, ask: "Can a worker with only repo contents, issues, and PR permissions complete this entirely through code changes and git commits?" If no, mark it manual.
+
+**Manual tasks that grant permissions or set up external services must be in Tier 0.** These tasks unblock later tiers — if a worker needs a secret, API key, DNS record, or workflow permission to do its job, the manual task that provides it must complete first. Never put a setup/permissions task in a later tier than the tasks that depend on it.
+
+Common manual tasks:
+- Creating or modifying CI/CD workflow files (.github/workflows/)
+- Configuring external services (DNS, CDN, cloud providers, APIs)
+- Setting up secrets, tokens, or environment variables
+- Creating repositories or managing GitHub settings
 
 ## Self-Contained Issues
 
