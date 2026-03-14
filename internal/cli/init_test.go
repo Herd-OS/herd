@@ -473,6 +473,10 @@ func setupTestGitRepoWithCommit(t *testing.T, remoteURL string) string {
 	cmd.Dir = dir
 	_ = cmd.Run()
 
+	// Set git identity for the repo (CI runners may not have global config)
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+
 	return dir
 }
 
