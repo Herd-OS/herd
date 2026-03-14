@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,7 +82,7 @@ func TestIntegration_Issues(t *testing.T) {
 	body := "Integration test issue body"
 
 	// Create
-	issue, err := issueSvc.Create(ctx, title, body, nil, nil)
+	issue, err := issueSvc.Create(ctx, title, body, []string{}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, issue)
 	assert.Equal(t, title, issue.Title)
@@ -201,6 +202,29 @@ func TestIntegration_PullRequests(t *testing.T) {
 	err = repoSvc.CreateBranch(ctx, branchName, sha)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = repoSvc.DeleteBranch(ctx, branchName) })
+
+	// Add a commit so the branch is ahead of main
+	fileName := uniqueName("test-file") + ".txt"
+	content := []byte("integration test file")
+	msg := "test commit for PR"
+	_, _, err = client.gh.Repositories.CreateFile(ctx, client.owner, client.repo, fileName, &gh.RepositoryContentFileOptions{
+		Message: &msg,
+		Content: content,
+		Branch:  &branchName,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Delete the test file
+		fc, _, _, _ := client.gh.Repositories.GetContents(ctx, client.owner, client.repo, fileName, &gh.RepositoryContentGetOptions{Ref: branchName})
+		if fc != nil {
+			delMsg := "cleanup test file"
+			_, _, _ = client.gh.Repositories.DeleteFile(ctx, client.owner, client.repo, fileName, &gh.RepositoryContentFileOptions{
+				Message: &delMsg,
+				SHA:     fc.SHA,
+				Branch:  &branchName,
+			})
+		}
+	})
 
 	// Create PR
 	title := uniqueName("herd-test-pr")
