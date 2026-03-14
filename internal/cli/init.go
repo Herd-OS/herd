@@ -107,7 +107,13 @@ func runInit(skipLabels, skipWorkflows bool) error {
 		return err
 	}
 
-	// 7. Print next steps
+	// 7. Stage and commit init files
+	if err := commitInitFiles(dir, owner, repo); err != nil {
+		fmt.Println(display.Warning(fmt.Sprintf("Could not commit init files: %s", err)))
+		fmt.Println("  You should manually commit and push these files before running herd plan.")
+	}
+
+	// 8. Print next steps
 	printNextSteps(owner, repo)
 
 	return nil
@@ -390,6 +396,78 @@ func renderDockerCompose(owner, repo string) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+func commitInitFiles(dir, owner, repo string) error {
+	// Create a branch for the init commit
+	branch := "herd/init"
+	cmd := exec.Command("git", "checkout", "-b", branch)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git checkout -b: %s: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// Stage the files herd init creates
+	filesToAdd := []string{
+		config.ConfigFile,
+		".gitignore",
+		".herd/",
+		".github/workflows/",
+		"Dockerfile.runner",
+		"entrypoint.sh",
+		"docker-compose.herd.yml",
+		".env.example",
+	}
+	args := append([]string{"add", "--"}, filesToAdd...)
+	cmd = exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add: %s: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// Check if there's anything staged
+	cmd = exec.Command("git", "diff", "--cached", "--quiet")
+	cmd.Dir = dir
+	if err := cmd.Run(); err == nil {
+		fmt.Println(display.Success("All init files already committed"))
+		// Switch back to previous branch
+		cmd = exec.Command("git", "checkout", "-")
+		cmd.Dir = dir
+		_ = cmd.Run()
+		return nil
+	}
+
+	cmd = exec.Command("git", "commit", "-m", "Initialize HerdOS")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %s: %s", err, strings.TrimSpace(string(out)))
+	}
+	fmt.Println(display.Success("Committed init files on branch " + branch))
+
+	// Push
+	cmd = exec.Command("git", "push", "-u", "origin", branch)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git push: %s: %s", err, strings.TrimSpace(string(out)))
+	}
+	fmt.Println(display.Success("Pushed to remote"))
+
+	// Open PR
+	cmd = exec.Command("gh", "pr", "create",
+		"--title", "Initialize HerdOS",
+		"--body", "Adds HerdOS configuration, workflows, and runner infrastructure.\n\nCreated by `herd init`.",
+		"--repo", owner+"/"+repo,
+	)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Println(display.Warning(fmt.Sprintf("Could not create PR: %s", strings.TrimSpace(string(out)))))
+		fmt.Println("  You can create it manually: gh pr create")
+	} else {
+		fmt.Println(display.Success("Created PR: " + strings.TrimSpace(string(out))))
+	}
+
+	return nil
 }
 
 func printNextSteps(owner, repo string) {

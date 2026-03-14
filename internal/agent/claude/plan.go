@@ -55,6 +55,8 @@ You pay the research cost once during this planning session. Read the codebase, 
 When the user approves the plan, write the structured plan as JSON to:
   {{.OutputPath}}
 
+The directory already exists — do not create it or ask the user to create it.
+
 The JSON schema:
 {
   "batch_name": "Feature name",
