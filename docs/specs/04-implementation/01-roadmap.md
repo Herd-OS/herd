@@ -41,7 +41,7 @@ A complete, self-healing orchestration system for a single repository.
 ### Distribution
 
 - Binary releases for Linux, macOS, Windows
-- Homebrew formula (`brew tap herd-os/tap && brew install herd`)
+- Homebrew formula (`brew install herd-os/tap/herd`)
 - User-facing documentation:
   - `README.md` — project overview, installation, quickstart (plan → dispatch → merge in 5 minutes)
   - `docs/quickstart.md` — step-by-step guide: install herd, init a repo, plan a feature, dispatch, review PR

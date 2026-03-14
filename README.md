@@ -34,7 +34,7 @@ Workers execute in parallel where possible, tier by tier. If a worker fails, the
 
 ```bash
 # Install via Homebrew
-brew tap herd-os/tap && brew install herd
+brew install herd-os/tap/herd
 
 # Or download the binary (Linux amd64)
 curl -L https://github.com/Herd-OS/herd/releases/latest/download/herd-linux-amd64 -o herd

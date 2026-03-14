@@ -3,8 +3,7 @@
 ## Homebrew (macOS and Linux)
 
 ```bash
-brew tap herd-os/tap
-brew install herd
+brew install herd-os/tap/herd
 ```
 
 ## Binary Download
@@ -23,6 +22,14 @@ curl -L https://github.com/Herd-OS/herd/releases/latest/download/herd-darwin-arm
 
 # macOS (Intel)
 curl -L https://github.com/Herd-OS/herd/releases/latest/download/herd-darwin-amd64 -o herd
+```
+
+Verify the checksum (optional but recommended):
+
+```bash
+curl -L https://github.com/Herd-OS/herd/releases/latest/download/checksums.txt -o checksums.txt
+sha256sum herd
+# Compare the output against the matching line in checksums.txt
 ```
 
 Then install:

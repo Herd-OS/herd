@@ -257,8 +257,7 @@ end
 Installation:
 
 ```bash
-brew tap herd-os/tap
-brew install herd
+brew install herd-os/tap/herd
 ```
 
 The formula is updated automatically by the release workflow — after uploading binaries, it computes SHA256 checksums and pushes an updated formula to the tap repo.
