@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -82,6 +83,60 @@ func TestCountActiveWorkers(t *testing.T) {
 	assert.Equal(t, 2, count)
 }
 
+func TestEnsureBatchBranch_AlreadyExists(t *testing.T) {
+	mock := newMockPlatformForDispatch()
+	err := ensureBatchBranch(context.Background(), mock, "herd/batch/1-test")
+	require.NoError(t, err)
+	assert.Empty(t, mock.repo.createdBranches, "should not create branch if it already exists")
+}
+
+func TestEnsureBatchBranch_CreatesFromDefault(t *testing.T) {
+	mock := newMockPlatformForDispatch()
+	mock.repo.branchNotFound = "herd/batch/1-test" // simulate branch not found
+	err := ensureBatchBranch(context.Background(), mock, "herd/batch/1-test")
+	require.NoError(t, err)
+	require.Len(t, mock.repo.createdBranches, 1)
+	assert.Equal(t, "herd/batch/1-test", mock.repo.createdBranches[0].name)
+	assert.Equal(t, "abc123", mock.repo.createdBranches[0].sha)
+}
+
+func TestDispatchSingle_ManualTaskSkipped(t *testing.T) {
+	mock := newMockPlatformForDispatch()
+	mock.issues.getResult = &platform.Issue{
+		Number: 42,
+		Labels: []string{issues.StatusReady, issues.TypeManual},
+		Milestone: &platform.Milestone{Number: 1, Title: "Test"},
+	}
+
+	cfg := &config.Config{}
+	err := runDispatchSingle(context.Background(), mock, cfg, 42, false)
+	require.NoError(t, err)
+
+	// Should not have dispatched anything
+	assert.Empty(t, mock.workflows.dispatched)
+}
+
+func TestDispatchBatch_SkipsManualTasks(t *testing.T) {
+	mock := newMockPlatformForDispatch()
+	mock.issues.listResult = []*platform.Issue{
+		{Number: 1, Title: "Normal", Labels: []string{issues.StatusReady, issues.TypeFeature}, Milestone: &platform.Milestone{Number: 1, Title: "Test"}},
+		{Number: 2, Title: "Manual", Labels: []string{issues.StatusReady, issues.TypeManual}, Milestone: &platform.Milestone{Number: 1, Title: "Test"}},
+		{Number: 3, Title: "Also normal", Labels: []string{issues.StatusReady, issues.TypeFeature}, Milestone: &platform.Milestone{Number: 1, Title: "Test"}},
+	}
+	// dispatchIssue will call Get for each issue
+	mock.issues.getByNumber = map[int]*platform.Issue{
+		1: mock.issues.listResult[0],
+		3: mock.issues.listResult[2],
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 10, TimeoutMinutes: 30}}
+	err := runDispatchBatch(context.Background(), mock, cfg, 1, true, false)
+	require.NoError(t, err)
+
+	// Should have dispatched 2 (skipped the manual one)
+	assert.Len(t, mock.workflows.dispatched, 2)
+}
+
 // --- Mock Platform for dispatch tests ---
 
 type mockDispatchPlatform struct {
@@ -113,6 +168,8 @@ func (m *mockDispatchPlatform) Checks() platform.CheckService             { retu
 
 type mockDispatchIssueService struct {
 	getResult     *platform.Issue
+	getByNumber   map[int]*platform.Issue
+	listResult    []*platform.Issue
 	addedLabels   map[int][]string
 	removedLabels map[int][]string
 }
@@ -120,11 +177,16 @@ type mockDispatchIssueService struct {
 func (m *mockDispatchIssueService) Create(_ context.Context, _, _ string, _ []string, _ *int) (*platform.Issue, error) {
 	return nil, nil
 }
-func (m *mockDispatchIssueService) Get(_ context.Context, _ int) (*platform.Issue, error) {
+func (m *mockDispatchIssueService) Get(_ context.Context, number int) (*platform.Issue, error) {
+	if m.getByNumber != nil {
+		if iss, ok := m.getByNumber[number]; ok {
+			return iss, nil
+		}
+	}
 	return m.getResult, nil
 }
 func (m *mockDispatchIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*platform.Issue, error) {
-	return nil, nil
+	return m.listResult, nil
 }
 func (m *mockDispatchIssueService) Update(_ context.Context, _ int, _ platform.IssueUpdate) (*platform.Issue, error) {
 	return nil, nil
@@ -189,7 +251,15 @@ func (m *mockDispatchMilestoneService) Update(_ context.Context, _ int, _ platfo
 
 // mockDispatchRepoService
 
-type mockDispatchRepoService struct{}
+type createdBranch struct {
+	name string
+	sha  string
+}
+
+type mockDispatchRepoService struct {
+	branchNotFound  string // if set, GetBranchSHA returns error for this branch
+	createdBranches []createdBranch
+}
 
 func (m *mockDispatchRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) {
 	return &platform.RepoInfo{DefaultBranch: "main"}, nil
@@ -197,8 +267,14 @@ func (m *mockDispatchRepoService) GetInfo(_ context.Context) (*platform.RepoInfo
 func (m *mockDispatchRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return "main", nil
 }
-func (m *mockDispatchRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
-func (m *mockDispatchRepoService) DeleteBranch(_ context.Context, _ string) error    { return nil }
-func (m *mockDispatchRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
+func (m *mockDispatchRepoService) CreateBranch(_ context.Context, name, sha string) error {
+	m.createdBranches = append(m.createdBranches, createdBranch{name, sha})
+	return nil
+}
+func (m *mockDispatchRepoService) DeleteBranch(_ context.Context, _ string) error { return nil }
+func (m *mockDispatchRepoService) GetBranchSHA(_ context.Context, branch string) (string, error) {
+	if m.branchNotFound != "" && branch == m.branchNotFound {
+		return "", fmt.Errorf("branch %s not found", branch)
+	}
 	return "abc123", nil
 }

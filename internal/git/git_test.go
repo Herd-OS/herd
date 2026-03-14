@@ -34,6 +34,44 @@ func initTestRepo(t *testing.T) string {
 	return dir
 }
 
+func TestConfigureIdentity(t *testing.T) {
+	// Create a repo without user identity
+	dir := t.TempDir()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	g := New(dir)
+
+	// Should set identity
+	require.NoError(t, g.ConfigureIdentity("HerdOS Integrator", "herd@herd-os.com"))
+
+	// Verify
+	name, err := g.output("config", "user.name")
+	require.NoError(t, err)
+	assert.Equal(t, "HerdOS Integrator", name)
+
+	email, err := g.output("config", "user.email")
+	require.NoError(t, err)
+	assert.Equal(t, "herd@herd-os.com", email)
+}
+
+func TestConfigureIdentity_DoesNotOverwrite(t *testing.T) {
+	dir := initTestRepo(t) // already has user.name="Test", user.email="test@test.com"
+	g := New(dir)
+
+	require.NoError(t, g.ConfigureIdentity("HerdOS Integrator", "herd@herd-os.com"))
+
+	// Should keep existing values
+	name, err := g.output("config", "user.name")
+	require.NoError(t, err)
+	assert.Equal(t, "Test", name)
+
+	email, err := g.output("config", "user.email")
+	require.NoError(t, err)
+	assert.Equal(t, "test@test.com", email)
+}
+
 func TestCurrentBranch(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

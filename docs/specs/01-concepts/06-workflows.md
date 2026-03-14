@@ -182,3 +182,14 @@ The user only needs to run `herd plan` — the system handles everything from th
 For manual control, `herd plan --no-dispatch` creates issues without dispatching. The user can then dispatch with `herd dispatch --batch <N>`.
 
 If the planning session is interrupted before the user confirms the plan (Ctrl+C, agent crash, etc.), no issues or milestones are created. Issue creation only happens after explicit user approval.
+
+## Manual Tasks
+
+Some tasks require human action rather than agent execution — infrastructure setup, external service configuration, approval gates, etc. These are labeled `herd/type:manual` by the Planner.
+
+Manual tasks behave differently from regular tasks:
+
+- **Not dispatched** — `herd dispatch` skips manual tasks. They appear in status output with a 👤 icon and "waiting for human" indicator.
+- **Completed by closing** — A manual task is considered complete when a human closes the issue (or labels it `herd/status:done`). The Integrator's `advance-on-close` job detects issue close events and checks if the tier is now complete.
+- **Tier-aware** — Manual tasks participate in the DAG like any other task. If a manual task is in Tier 0, Tier 1 won't dispatch until it's closed. Plan accordingly — avoid putting manual tasks on the critical path when possible.
+- **Notifications** — When `monitor.notify_users` is configured, the Planner posts a comment @mentioning those users on manual task issues to ensure visibility.

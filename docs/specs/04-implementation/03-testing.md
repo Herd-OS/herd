@@ -232,17 +232,33 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 jobs:
-  unit:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
-      - run: go test ./...
-      - run: golangci-lint run
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: go test ./... -count=1 -race
+      - name: Vet
+        run: go vet ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
 
   integration:
     runs-on: ubuntu-latest
@@ -251,10 +267,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
-      - run: go test ./internal/platform/github/... -tags=integration
+          go-version-file: go.mod
+      - name: Run integration tests
+        run: go test ./internal/platform/github/... -tags=integration -count=1 -v
         env:
-          GITHUB_TOKEN: ${{ secrets.HERD_TEST_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN }}
+          HERD_TEST_OWNER: ${{ vars.HERD_TEST_OWNER }}
           HERD_TEST_REPO: ${{ vars.HERD_TEST_REPO }}
 ```
 

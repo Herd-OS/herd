@@ -33,10 +33,12 @@ Workers execute in parallel where possible, tier by tier. If a worker fails, the
 ## Quick Start
 
 ```bash
-# Build and install (requires Go 1.26+)
-git clone https://github.com/Herd-OS/herd.git
-cd herd && make build
-sudo cp bin/herd /usr/local/bin/
+# Install via Homebrew
+brew tap herd-os/tap && brew install herd
+
+# Or download the binary (Linux amd64)
+curl -L https://github.com/Herd-OS/herd/releases/latest/download/herd-linux-amd64 -o herd
+chmod +x herd && sudo mv herd /usr/local/bin/
 
 # Initialize a repository
 cd /path/to/your/repo
@@ -65,7 +67,9 @@ See [docs/getting-started.md](docs/getting-started.md) for the full setup guide.
 
 - [Installation](docs/installation.md)
 - [Getting Started](docs/getting-started.md)
+- [Runner Setup](docs/runners.md)
 - [Configuration](docs/configuration.md)
+- [Example Configs](docs/examples/)
 - [Design Specs](docs/specs/) (internal)
 
 ## Why a Cat?

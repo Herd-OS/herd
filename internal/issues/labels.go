@@ -14,6 +14,7 @@ const (
 	TypeFeature = "herd/type:feature"
 	TypeBugfix  = "herd/type:bugfix"
 	TypeFix     = "herd/type:fix"
+	TypeManual  = "herd/type:manual"
 )
 
 // AllStatusLabels returns all status labels.
@@ -23,7 +24,7 @@ func AllStatusLabels() []string {
 
 // AllTypeLabels returns all type labels.
 func AllTypeLabels() []string {
-	return []string{TypeFeature, TypeBugfix, TypeFix}
+	return []string{TypeFeature, TypeBugfix, TypeFix, TypeManual}
 }
 
 // AllLabels returns all herd labels.
@@ -37,6 +38,7 @@ func AllLabels() []LabelDef {
 		{TypeFeature, "1D76DB", "New functionality"},
 		{TypeBugfix, "D93F0B", "Bug fix"},
 		{TypeFix, "E99695", "Auto-generated fix from agent review or conflict resolution"},
+		{TypeManual, "BFD4F2", "Requires human action — not dispatched to workers"},
 	}
 }
 

@@ -1,0 +1,43 @@
+# HerdOS configuration for small teams (2–5 developers).
+#
+# Agent review catches issues before human review.
+# Conflicts are resolved automatically via dispatch.
+
+version: 1
+
+platform:
+  provider: github
+  owner: your-org
+  repo: your-repo
+
+agent:
+  provider: claude
+  # model: sonnet        # Uncomment to override default model
+  # max_turns: 0         # 0 = use agent's default
+
+workers:
+  max_concurrent: 5       # More workers — team generates more parallel work
+  runner_label: herd-worker
+  timeout_minutes: 30     # Default timeout — adjust based on your project's complexity
+
+integrator:
+  strategy: squash
+  on_conflict: dispatch-resolver         # Auto-resolve conflicts by dispatching a resolver worker
+  max_conflict_resolution_attempts: 2
+  require_ci: true
+  review: true                           # Agent review catches common issues before human review
+  review_max_fix_cycles: 3
+  ci_max_fix_cycles: 2
+
+monitor:
+  patrol_interval_minutes: 15
+  stale_threshold_minutes: 30
+  max_pr_age_hours: 24
+  auto_redispatch: true
+  max_redispatch_attempts: 3
+  notify_on_failure: true
+  notify_users:
+    - team-lead                          # @mention the team lead on failures
+
+pull_requests:
+  auto_merge: false                      # Team reviews PRs before merging

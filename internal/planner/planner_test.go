@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -92,7 +93,7 @@ func TestCreateFromPlan(t *testing.T) {
 	}
 
 	mock := newMockPlatform()
-	result, err := CreateFromPlan(context.Background(), mock, plan)
+	result, err := CreateFromPlan(context.Background(), mock, plan, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.MilestoneNumber)
@@ -125,7 +126,7 @@ func TestCreateFromPlan_CycleError(t *testing.T) {
 	}
 
 	mock := newMockPlatform()
-	_, err := CreateFromPlan(context.Background(), mock, plan)
+	_, err := CreateFromPlan(context.Background(), mock, plan, nil)
 	assert.ErrorContains(t, err, "cycle detected")
 }
 
@@ -210,6 +211,44 @@ func indexOf(s, substr string) int {
 	return -1
 }
 
+func TestBuildLabels_ManualTask(t *testing.T) {
+	tiers := [][]int{{0}}
+	labels := buildLabels(agent.PlannedTask{Manual: true}, 0, tiers)
+	assert.Contains(t, labels, issues.TypeManual)
+	assert.NotContains(t, labels, issues.TypeFeature)
+	assert.Contains(t, labels, issues.StatusReady)
+}
+
+func TestCreateFromPlan_ManualTaskNotifyUsers(t *testing.T) {
+	plan := &agent.Plan{
+		BatchName: "Test",
+		Tasks: []agent.PlannedTask{
+			{Title: "Setup repo", Description: "Create the repo", Manual: true},
+		},
+	}
+
+	mock := newMockPlatform()
+	cfg := &config.Config{
+		Monitor: config.Monitor{NotifyUsers: []string{"alice", "bob"}},
+	}
+
+	_, err := CreateFromPlan(context.Background(), mock, plan, cfg)
+	require.NoError(t, err)
+
+	// Should have created the issue with TypeManual
+	assert.Contains(t, mock.issues.created[0].labels, issues.TypeManual)
+
+	// Should have added a comment mentioning users
+	require.Len(t, mock.issues.comments, 1)
+	assert.Contains(t, mock.issues.comments[0], "@alice")
+	assert.Contains(t, mock.issues.comments[0], "@bob")
+}
+
+func TestBuildMentions(t *testing.T) {
+	assert.Equal(t, "@alice @bob", buildMentions([]string{"alice", "bob"}))
+	assert.Equal(t, "@solo", buildMentions([]string{"solo"}))
+}
+
 // --- Mock Platform ---
 
 type mockPlatform struct {
@@ -253,6 +292,7 @@ type mockIssueService struct {
 	nextNumber int
 	created    []createdIssue
 	updates    []issueUpdate
+	comments   []string
 }
 
 func (m *mockIssueService) Create(_ context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
@@ -277,7 +317,10 @@ func (m *mockIssueService) Update(_ context.Context, number int, changes platfor
 
 func (m *mockIssueService) AddLabels(_ context.Context, _ int, _ []string) error    { return nil }
 func (m *mockIssueService) RemoveLabels(_ context.Context, _ int, _ []string) error { return nil }
-func (m *mockIssueService) AddComment(_ context.Context, _ int, _ string) error     { return nil }
+func (m *mockIssueService) AddComment(_ context.Context, _ int, body string) error {
+	m.comments = append(m.comments, body)
+	return nil
+}
 func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }

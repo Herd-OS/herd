@@ -1,4 +1,5 @@
 name: HerdOS Worker
+run-name: "Herd Worker #${{ inputs.issue_number }}"
 on:
   workflow_dispatch:
     inputs:
@@ -30,7 +31,7 @@ permissions:
 jobs:
   execute:
     runs-on: [self-hosted, '${{ inputs.runner_label }}']
-    timeout-minutes: ${{ inputs.timeout_minutes }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,7 +42,7 @@ jobs:
       - name: Execute task
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

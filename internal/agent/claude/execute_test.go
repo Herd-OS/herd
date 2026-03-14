@@ -17,41 +17,48 @@ func TestExecute_CommandArgs(t *testing.T) {
 		model        string
 		systemPrompt string
 		body         string
-		wantArgs     []string
+		wantContains []string
 	}{
 		{
-			name:         "basic",
+			name:         "system prompt replaces body as -p value",
 			body:         "do the thing",
 			systemPrompt: "you are a worker",
-			wantArgs:     []string{"-p", "do the thing", "--system-prompt", "you are a worker"},
+			wantContains: []string{"-p", "you are a worker"},
 		},
 		{
 			name:         "with model",
 			model:        "opus",
 			body:         "task body",
 			systemPrompt: "prompt",
-			wantArgs:     []string{"-p", "task body", "--system-prompt", "prompt", "--model", "opus"},
+			wantContains: []string{"-p", "prompt", "--model", "opus"},
 		},
 		{
-			name:     "no system prompt",
-			body:     "task body",
-			wantArgs: []string{"-p", "task body"},
+			name:         "no system prompt uses body",
+			body:         "task body",
+			wantContains: []string{"-p", "task body"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := New("echo", tt.model)
+			// Use a script that prints all args so we can verify
+			dir := t.TempDir()
+			script := dir + "/test-agent.sh"
+			err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\""), 0755)
+			require.NoError(t, err)
+
+			a := New(script, tt.model)
 			task := agent.TaskSpec{Body: tt.body}
 			opts := agent.ExecOptions{
-				RepoRoot:     t.TempDir(),
+				RepoRoot:     dir,
 				SystemPrompt: tt.systemPrompt,
 			}
 
-			// Use echo as the binary — it will print args and exit 0
 			result, err := a.Execute(context.Background(), task, opts)
 			require.NoError(t, err)
-			assert.NotEmpty(t, result.Summary)
+			for _, want := range tt.wantContains {
+				assert.Contains(t, result.Summary, want)
+			}
 		})
 	}
 }

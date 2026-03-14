@@ -18,6 +18,11 @@ get_token() {
 REPO_OWNER=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\1|')
 REPO_NAME=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\2|')
 
+# Remove stale config from previous run (ephemeral runners leave config behind on restart)
+if [ -f .runner ]; then
+  ./config.sh remove --token "$(get_token)" || true
+fi
+
 ./config.sh \
   --url "$REPO_URL" \
   --token "$(get_token)" \

@@ -190,7 +190,7 @@ func ensureGitignore(dir, entry string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
 		if _, err := f.WriteString("\n"); err != nil {
@@ -400,6 +400,12 @@ func printNextSteps(owner, repo string) {
 	fmt.Println("  3. Run: claude setup-token (uses your subscription, no API cost)")
 	fmt.Println("     Add the token as CLAUDE_CODE_OAUTH_TOKEN in .env")
 	fmt.Println("  4. docker compose -f docker-compose.herd.yml up -d")
+	fmt.Println()
+	fmt.Printf("For full automation (cross-workflow dispatch):\n")
+	fmt.Printf("  Add a PAT as HERD_GITHUB_TOKEN in repo secrets:\n")
+	fmt.Printf("  → https://github.com/%s/%s/settings/secrets/actions\n", owner, repo)
+	fmt.Println("  Without this, GITHUB_TOKEN's anti-recursion protection prevents")
+	fmt.Println("  Monitor→Worker and Integrator→Worker dispatch.")
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Println("  herd plan          Start a planning session")

@@ -81,9 +81,18 @@ func runDispatchSingle(ctx context.Context, client platform.Platform, cfg *confi
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
 
+	if issues.HasLabel(issue.Labels, issues.TypeManual) {
+		fmt.Printf("Issue #%d is a manual task — cannot dispatch to a worker.\n", issueNum)
+		return nil
+	}
+
 	if dryRun {
 		fmt.Printf("Would dispatch issue #%d to branch %s\n", issueNum, batchBranch)
 		return nil
+	}
+
+	if err := ensureBatchBranch(ctx, client, batchBranch); err != nil {
+		return fmt.Errorf("creating batch branch: %w", err)
 	}
 
 	return dispatchIssue(ctx, client, cfg, issueNum, batchBranch)
@@ -97,6 +106,13 @@ func runDispatchBatch(ctx context.Context, client platform.Platform, cfg *config
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
 
+	// Ensure batch branch exists (idempotent — no error if it already exists)
+	if !dryRun {
+		if err := ensureBatchBranch(ctx, client, batchBranch); err != nil {
+			return fmt.Errorf("creating batch branch: %w", err)
+		}
+	}
+
 	allIssues, err := client.Issues().List(ctx, platform.IssueFilters{
 		State:     "open",
 		Milestone: &ms.Number,
@@ -105,9 +121,12 @@ func runDispatchBatch(ctx context.Context, client platform.Platform, cfg *config
 		return fmt.Errorf("listing issues: %w", err)
 	}
 
-	// Filter to ready and failed
+	// Filter to ready and failed, skip manual tasks
 	var dispatchable []*platform.Issue
 	for _, issue := range allIssues {
+		if issues.HasLabel(issue.Labels, issues.TypeManual) {
+			continue
+		}
 		status := issues.StatusLabel(issue.Labels)
 		if status == issues.StatusReady || status == issues.StatusFailed {
 			dispatchable = append(dispatchable, issue)
@@ -221,6 +240,31 @@ func dispatchIssue(ctx context.Context, client platform.Platform, cfg *config.Co
 		return fmt.Errorf("dispatching workflow: %w", err)
 	}
 
+	return nil
+}
+
+// ensureBatchBranch creates the batch branch from the default branch if it doesn't already exist.
+func ensureBatchBranch(ctx context.Context, client platform.Platform, batchBranch string) error {
+	// Check if branch already exists
+	_, err := client.Repository().GetBranchSHA(ctx, batchBranch)
+	if err == nil {
+		return nil // already exists
+	}
+
+	// Get default branch SHA
+	defaultBranch, err := client.Repository().GetDefaultBranch(ctx)
+	if err != nil {
+		return fmt.Errorf("getting default branch: %w", err)
+	}
+	sha, err := client.Repository().GetBranchSHA(ctx, defaultBranch)
+	if err != nil {
+		return fmt.Errorf("getting %s SHA: %w", defaultBranch, err)
+	}
+
+	// Create the batch branch
+	if err := client.Repository().CreateBranch(ctx, batchBranch, sha); err != nil {
+		return fmt.Errorf("creating branch %s: %w", batchBranch, err)
+	}
 	return nil
 }
 

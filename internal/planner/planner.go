@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
@@ -22,7 +23,7 @@ type Result struct {
 
 // CreateFromPlan takes an agent plan and creates GitHub issues, a milestone,
 // and a batch branch. Returns the created issue numbers and batch branch name.
-func CreateFromPlan(ctx context.Context, p platform.Platform, plan *agent.Plan) (*Result, error) {
+func CreateFromPlan(ctx context.Context, p platform.Platform, plan *agent.Plan, cfg *config.Config) (*Result, error) {
 	// 1. Validate the plan DAG
 	d := dag.New()
 	for i := range plan.Tasks {
@@ -54,6 +55,13 @@ func CreateFromPlan(ctx context.Context, p platform.Platform, plan *agent.Plan) 
 			return nil, fmt.Errorf("creating issue for task %d (%s): %w", i, task.Title, err)
 		}
 		issueNumbers[i] = issue.Number
+
+		// For manual tasks, notify configured users
+		if task.Manual && cfg != nil && len(cfg.Monitor.NotifyUsers) > 0 {
+			mentions := buildMentions(cfg.Monitor.NotifyUsers)
+			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+				"👋 **Manual task** — this requires human action.\n\n%s", mentions))
+		}
 	}
 
 	// Second pass — update bodies that have dependencies with real issue numbers
@@ -130,11 +138,15 @@ func buildLabels(task agent.PlannedTask, index int, tiers [][]int) []string {
 	var labels []string
 
 	// Type label
-	switch task.Type {
-	case "bugfix":
-		labels = append(labels, issues.TypeBugfix)
-	default:
-		labels = append(labels, issues.TypeFeature)
+	if task.Manual {
+		labels = append(labels, issues.TypeManual)
+	} else {
+		switch task.Type {
+		case "bugfix":
+			labels = append(labels, issues.TypeBugfix)
+		default:
+			labels = append(labels, issues.TypeFeature)
+		}
 	}
 
 	// Status label based on tier
@@ -157,6 +169,14 @@ func tierForIndex(index int, tiers [][]int) int {
 		}
 	}
 	return 0
+}
+
+func buildMentions(users []string) string {
+	var mentions []string
+	for _, u := range users {
+		mentions = append(mentions, "@"+u)
+	}
+	return strings.Join(mentions, " ")
 }
 
 // Slugify converts a string to a URL-friendly slug.

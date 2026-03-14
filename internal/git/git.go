@@ -18,6 +18,22 @@ func New(workDir string) *Git {
 	return &Git{WorkDir: workDir}
 }
 
+// ConfigureIdentity sets the local git user identity for commits/merges if not already set.
+func (g *Git) ConfigureIdentity(name, email string) error {
+	// Check if local config already has identity (ignore global config)
+	if _, err := g.output("config", "--local", "user.name"); err != nil {
+		if err := g.run("config", "user.name", name); err != nil {
+			return err
+		}
+	}
+	if _, err := g.output("config", "--local", "user.email"); err != nil {
+		if err := g.run("config", "user.email", email); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (g *Git) Checkout(branch string) error {
 	return g.run("checkout", branch)
 }

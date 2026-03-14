@@ -7,6 +7,7 @@ const (
 	SymbolInProgress = "⟳"
 	SymbolBlocked    = "◌"
 	SymbolWarning    = "⚠"
+	SymbolManual     = "👤"
 )
 
 // Success renders a green success message.
@@ -32,4 +33,9 @@ func Blocked(msg string) string {
 // Warning renders a yellow warning message.
 func Warning(msg string) string {
 	return Yellow.Render(SymbolWarning) + " " + msg
+}
+
+// Manual renders a manual task message.
+func Manual(msg string) string {
+	return SymbolManual + " " + msg
 }

@@ -102,11 +102,16 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		return &ConsolidateResult{IssueNumber: issueNumber, Merged: false}, nil
 	}
 
-	// Check if worker branch exists (no-op worker = no branch)
+	// Check if worker branch exists (no-op worker = no branch, or already consolidated)
 	_, err = p.Repository().GetBranchSHA(ctx, workerBranch)
 	if err != nil {
-		// Branch doesn't exist — no-op worker (task already done)
+		// Branch doesn't exist — either no-op worker or already consolidated by another integrator run
 		return &ConsolidateResult{IssueNumber: issueNumber, NoOp: true, Merged: false}, nil
+	}
+
+	// Configure git identity for merge commits
+	if err := g.ConfigureIdentity("HerdOS Integrator", "herd@herd-os.com"); err != nil {
+		return nil, fmt.Errorf("configuring git identity: %w", err)
 	}
 
 	// Merge worker branch into batch branch
@@ -223,7 +228,7 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 			tierComplete = false
 			break
 		}
-		if status != issues.StatusDone {
+		if !isIssueComplete(iss) {
 			tierComplete = false
 		}
 	}
@@ -261,6 +266,11 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 	for _, num := range nextTier {
 		issue := findIssue(allIssues, num)
 		if issue == nil {
+			continue
+		}
+
+		// Skip manual tasks — they are never dispatched to workers
+		if issues.HasLabel(issue.Labels, issues.TypeManual) {
 			continue
 		}
 
@@ -321,6 +331,130 @@ func buildTiersFromIssues(allIssues []*platform.Issue) ([][]int, error) {
 	}
 
 	return d.Tiers()
+}
+
+// isIssueComplete returns true if the issue is closed or has the herd/status:done label.
+// Manual tasks are completed by closing them rather than adding labels.
+func isIssueComplete(issue *platform.Issue) bool {
+	return issue.State == "closed" || issues.HasLabel(issue.Labels, issues.StatusDone)
+}
+
+// AdvanceByBatch triggers tier advancement for a batch by milestone number.
+// Used when an issue is closed (e.g., manual tasks) rather than via workflow run.
+func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, batchNumber int) (*AdvanceResult, error) {
+	ms, err := p.Milestones().Get(ctx, batchNumber)
+	if err != nil {
+		return nil, fmt.Errorf("getting milestone #%d: %w", batchNumber, err)
+	}
+
+	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+
+	// List all issues in the milestone
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+		State:     "all",
+		Milestone: &ms.Number,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing milestone issues: %w", err)
+	}
+
+	// Build DAG from issue dependencies
+	tiers, err := buildTiersFromIssues(allIssues)
+	if err != nil {
+		return nil, fmt.Errorf("building tiers: %w", err)
+	}
+
+	// Find the first incomplete tier
+	incompleteTier := -1
+	for t, tier := range tiers {
+		tierDone := true
+		tierStuck := false
+		for _, num := range tier {
+			iss := findIssue(allIssues, num)
+			if iss == nil {
+				continue
+			}
+			status := issues.StatusLabel(iss.Labels)
+			if status == issues.StatusFailed {
+				tierStuck = true
+				tierDone = false
+				break
+			}
+			if !isIssueComplete(iss) {
+				tierDone = false
+			}
+		}
+		if tierStuck {
+			return &AdvanceResult{TierComplete: false}, nil
+		}
+		if !tierDone {
+			incompleteTier = t
+			break
+		}
+	}
+
+	// All tiers complete
+	if incompleteTier == -1 {
+		prNum, err := openBatchPR(ctx, p, g, cfg, ms, allIssues, tiers, batchBranch)
+		if err != nil {
+			return nil, fmt.Errorf("opening batch PR: %w", err)
+		}
+		return &AdvanceResult{AllComplete: true, TierComplete: true, BatchPRNumber: prNum}, nil
+	}
+
+	// Dispatch next tier's blocked issues
+	dispatched := 0
+	activeRuns, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "in_progress"})
+	if err != nil {
+		return nil, fmt.Errorf("counting active workers: %w", err)
+	}
+	remaining := cfg.Workers.MaxConcurrent - len(activeRuns)
+
+	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting default branch: %w", err)
+	}
+
+	for _, num := range tiers[incompleteTier] {
+		issue := findIssue(allIssues, num)
+		if issue == nil {
+			continue
+		}
+		if issues.HasLabel(issue.Labels, issues.TypeManual) {
+			continue
+		}
+
+		status := issues.StatusLabel(issue.Labels)
+		if status != issues.StatusBlocked {
+			continue
+		}
+
+		_ = p.Issues().RemoveLabels(ctx, num, []string{issues.StatusBlocked})
+
+		if dispatched >= remaining {
+			_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusReady})
+			continue
+		}
+
+		_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusInProgress})
+		_, err := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
+			"issue_number":    fmt.Sprintf("%d", num),
+			"batch_branch":    batchBranch,
+			"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+			"runner_label":    cfg.Workers.RunnerLabel,
+		})
+		if err != nil {
+			_ = p.Issues().RemoveLabels(ctx, num, []string{issues.StatusInProgress})
+			_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusFailed})
+			continue
+		}
+		dispatched++
+	}
+
+	return &AdvanceResult{
+		TierComplete:    true,
+		DispatchedCount: dispatched,
+	}, nil
 }
 
 func findIssue(allIssues []*platform.Issue, number int) *platform.Issue {
@@ -416,6 +550,11 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("getting default branch: %w", err)
+	}
+
+	// Configure git identity for rebase
+	if err := g.ConfigureIdentity("HerdOS Integrator", "herd@herd-os.com"); err != nil {
+		return 0, fmt.Errorf("configuring git identity: %w", err)
 	}
 
 	// Rebase batch branch onto main

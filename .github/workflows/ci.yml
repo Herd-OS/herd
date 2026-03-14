@@ -34,7 +34,24 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Staticcheck
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          staticcheck ./...
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+          install-mode: goinstall
+
+  integration:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run integration tests
+        run: go test ./internal/platform/github/... -tags=integration -count=1 -v
+        env:
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN }}
+          HERD_TEST_OWNER: ${{ vars.HERD_TEST_OWNER }}
+          HERD_TEST_REPO: ${{ vars.HERD_TEST_REPO }}

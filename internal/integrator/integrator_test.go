@@ -251,6 +251,154 @@ func TestConsolidate_NoOpWorker(t *testing.T) {
 	assert.False(t, result.Merged)
 }
 
+func TestConsolidate_CancelledRun(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "cancelled", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{defaultBranch: "main"},
+	}
+
+	result, err := Consolidate(context.Background(), mock, nil, &config.Config{}, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.False(t, result.Merged)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+}
+
+func TestConsolidate_SuccessfulMerge(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	// Create repo with batch and worker branches
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create batch branch
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	// Create worker branch with non-conflicting change
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	g := git.New(dir)
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.Merged)
+	assert.Equal(t, "herd/worker/42-test", result.WorkerBranch)
+
+	// Verify worker.txt exists on batch branch
+	_, statErr := os.Stat(filepath.Join(dir, "worker.txt"))
+	assert.NoError(t, statErr)
+}
+
+func TestConsolidate_ConfiguresGitIdentity(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	// Create repo WITHOUT git identity configured
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	// Deliberately NOT setting user.email/user.name
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	runGit(t, dir, "config", "user.email", "temp@temp.com") // needed for initial commit
+	runGit(t, dir, "config", "user.name", "Temp")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Now unset the identity to simulate the runner environment
+	runGit(t, dir, "config", "--unset", "user.email")
+	runGit(t, dir, "config", "--unset", "user.name")
+
+	// Create branches
+	runGit(t, dir, "config", "user.email", "temp@temp.com")
+	runGit(t, dir, "config", "user.name", "Temp")
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	// Unset identity again
+	runGit(t, dir, "config", "--unset", "user.email")
+	runGit(t, dir, "config", "--unset", "user.name")
+
+	g := git.New(dir)
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	// This would previously fail with "unable to auto-detect email address"
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.Merged)
+}
+
 func TestAdvance_TierComplete(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[10] = &platform.Issue{
@@ -661,7 +809,7 @@ func TestConsolidate_PushFailure(t *testing.T) {
 // initConflictRepo creates a git repo with a bare "origin" remote, a batch branch,
 // and a conflicting worker branch pushed to origin, so that Consolidate's
 // fetch → checkout → merge("origin/worker") flow works and produces a conflict.
-func initConflictRepo(t *testing.T) (string, *git.Git) {
+func initConflictRepo(t *testing.T) (string, *git.Git) { //nolint:unparam // dir used by some callers
 	t.Helper()
 
 	// Create bare repo as "origin"
@@ -914,6 +1062,140 @@ func TestOpenBatchPR_RebaseConflict_Notify(t *testing.T) {
 	// PR created, no resolver dispatched
 	assert.NotNil(t, prSvc.created)
 	assert.Len(t, wf.dispatched, 0)
+}
+
+func TestIsIssueComplete(t *testing.T) {
+	tests := []struct {
+		name     string
+		issue    *platform.Issue
+		expected bool
+	}{
+		{"closed issue", &platform.Issue{State: "closed", Labels: []string{}}, true},
+		{"done label", &platform.Issue{State: "open", Labels: []string{issues.StatusDone}}, true},
+		{"closed with done", &platform.Issue{State: "closed", Labels: []string{issues.StatusDone}}, true},
+		{"open in-progress", &platform.Issue{State: "open", Labels: []string{issues.StatusInProgress}}, false},
+		{"open ready", &platform.Issue{State: "open", Labels: []string{issues.StatusReady}}, false},
+		{"open blocked", &platform.Issue{State: "open", Labels: []string{issues.StatusBlocked}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isIssueComplete(tt.issue))
+		})
+	}
+}
+
+func TestAdvance_SkipsManualTasks(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[10] = &platform.Issue{
+		Number: 10, Title: "Task A",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Task A", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+		{Number: 11, Title: "Manual Task", Labels: []string{issues.StatusBlocked, issues.TypeManual},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo B manually\n"},
+		{Number: 12, Title: "Auto Task", Labels: []string{issues.StatusBlocked},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo C\n"},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "10"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, nil, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.TierComplete)
+	// Only issue 12 should be dispatched, not 11 (manual)
+	assert.Equal(t, 1, result.DispatchedCount)
+	assert.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "12", wf.dispatched[0]["issue_number"])
+}
+
+func TestAdvance_ClosedIssueCountsAsComplete(t *testing.T) {
+	issueSvc := newMockIssueService()
+	// Issue 10 is closed but doesn't have herd/status:done label (manual task scenario)
+	issueSvc.getResult[10] = &platform.Issue{
+		Number: 10, Title: "Manual Task", State: "closed",
+		Labels:    []string{issues.TypeManual},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Manual Task", State: "closed", Labels: []string{issues.TypeManual},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo manually\n"},
+		{Number: 11, Title: "Auto Task", Labels: []string{issues.StatusBlocked},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo auto\n"},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "10"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, nil, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.TierComplete)
+	assert.Equal(t, 1, result.DispatchedCount)
+}
+
+func TestAdvanceByBatch(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Manual Task", State: "closed", Labels: []string{issues.TypeManual},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo manually\n"},
+		{Number: 11, Title: "Auto Task", Labels: []string{issues.StatusBlocked},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo auto\n"},
+	}
+
+	wf := &mockWorkflowService{
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{
+			getResult: map[int]*platform.Milestone{
+				1: {Number: 1, Title: "Batch"},
+			},
+		},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := AdvanceByBatch(context.Background(), mock, nil, cfg, 1)
+	require.NoError(t, err)
+	assert.True(t, result.TierComplete)
+	assert.Equal(t, 1, result.DispatchedCount)
+	assert.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "11", wf.dispatched[0]["issue_number"])
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

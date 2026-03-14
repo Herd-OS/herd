@@ -57,7 +57,7 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 		return fmt.Errorf("creating state directory: %w", err)
 	}
 	outputPath := filepath.Join(stateDir, planID+".json")
-	defer os.Remove(outputPath)
+	defer func() { _ = os.Remove(outputPath) }()
 
 	// Read role instructions
 	roleInstructions := ""
@@ -116,7 +116,7 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 	}
 
 	// Create issues, milestone, and batch branch
-	result, err := planner.CreateFromPlan(ctx, client, plan)
+	result, err := planner.CreateFromPlan(ctx, client, plan, cfg)
 	if err != nil {
 		return err
 	}
@@ -221,13 +221,13 @@ func editPlan(plan *agent.Plan) (*agent.Plan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating temp file: %w", err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return nil, fmt.Errorf("writing plan: %w", err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	editor := os.Getenv("EDITOR")
 	if editor == "" {

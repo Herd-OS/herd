@@ -100,11 +100,35 @@ func (s *workflowService) CancelRun(ctx context.Context, runID int64) error {
 }
 
 func mapRun(r *gh.WorkflowRun) *platform.Run {
-	return &platform.Run{
+	run := &platform.Run{
 		ID:         r.GetID(),
 		Status:     r.GetStatus(),
 		Conclusion: r.GetConclusion(),
 		URL:        r.GetHTMLURL(),
 		CreatedAt:  r.GetCreatedAt().Time,
 	}
+	// Parse inputs from run name (format: "worker #42" set by run-name in workflow)
+	// This is needed because GitHub's REST API doesn't return dispatch inputs on the run object.
+	if name := r.GetName(); name != "" {
+		run.Inputs = parseRunNameInputs(name)
+	}
+	return run
+}
+
+// parseRunNameInputs extracts inputs from the run name.
+// Format: "Herd Worker #<issue_number>" → {"issue_number": "<issue_number>"}
+func parseRunNameInputs(name string) map[string]string {
+	// Match "Herd Worker #<number>"
+	const prefix = "Herd Worker #"
+	if len(name) > len(prefix) && name[:len(prefix)] == prefix {
+		num := name[len(prefix):]
+		// Verify it's a number
+		for _, c := range num {
+			if c < '0' || c > '9' {
+				return nil
+			}
+		}
+		return map[string]string{"issue_number": num}
+	}
+	return nil
 }

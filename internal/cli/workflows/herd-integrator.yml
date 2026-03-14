@@ -7,12 +7,16 @@ on:
     types: [submitted]
   pull_request:
     types: [closed]
+  issues:
+    types: [closed]
 
 permissions:
   contents: write
   issues: write
   pull-requests: write
   actions: write
+  statuses: read
+  checks: read
 
 jobs:
   integrate:
@@ -27,7 +31,7 @@ jobs:
       - name: Consolidate, advance, and review
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -37,6 +41,28 @@ jobs:
           herd integrator check-ci --run-id ${{ github.event.workflow_run.id }}
           herd integrator advance --run-id ${{ github.event.workflow_run.id }}
           herd integrator review --run-id ${{ github.event.workflow_run.id }}
+
+  advance-on-close:
+    if: github.event_name == 'issues'
+    runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if herd issue and advance
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          BODY="${{ github.event.issue.body }}"
+          BATCH=$(echo "$BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1)
+          if [ -n "$BATCH" ]; then
+            herd integrator advance --batch "$BATCH"
+          else
+            echo "Not a herd issue — skipping."
+          fi
 
   re-review:
     if: >
@@ -53,7 +79,7 @@ jobs:
       - name: Handle review
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -79,6 +105,6 @@ jobs:
       - name: Post-merge cleanup
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           herd integrator cleanup --pr ${{ github.event.pull_request.number }}

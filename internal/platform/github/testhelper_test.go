@@ -11,7 +11,7 @@ import (
 // newTestClient creates a Client backed by a mock HTTP server.
 // The caller provides a mux to register handlers for specific API endpoints.
 // Returns the client and a cleanup function.
-func newTestClient(t *testing.T, mux *http.ServeMux) (*Client, *httptest.Server) {
+func newTestClient(t *testing.T, mux *http.ServeMux) (*Client, *httptest.Server) { //nolint:unparam // server returned for future use
 	t.Helper()
 
 	server := httptest.NewServer(mux)
