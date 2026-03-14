@@ -203,7 +203,7 @@ func TestCreateRunnerFiles(t *testing.T) {
 	df, err := os.ReadFile(filepath.Join(dir, "Dockerfile.runner"))
 	require.NoError(t, err)
 	assert.Contains(t, string(df), "FROM ubuntu:24.04")
-	assert.Contains(t, string(df), "go install github.com/herd-os/herd/cmd/herd@latest")
+	assert.Contains(t, string(df), "/opt/herd/bin")
 	assert.Contains(t, string(df), "ENTRYPOINT")
 
 	// entrypoint.sh
@@ -213,6 +213,8 @@ func TestCreateRunnerFiles(t *testing.T) {
 	assert.Contains(t, string(ep), "--ephemeral")
 	assert.Contains(t, string(ep), "trap cleanup SIGTERM SIGINT")
 	assert.Contains(t, string(ep), "exec ./run.sh")
+	assert.Contains(t, string(ep), "Herd-OS/herd/releases")
+	assert.Contains(t, string(ep), "HERD_VERSION")
 	info, err := os.Stat(filepath.Join(dir, "entrypoint.sh"))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0755), info.Mode().Perm(), "entrypoint.sh should be executable")

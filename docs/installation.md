@@ -80,6 +80,20 @@ herd init
 
 `herd init` creates a `herd/init` branch, commits the updated files, pushes, and opens a PR. Review and merge the PR to apply the changes. Configuration (`.herdos.yml`) and role instructions (`.herd/*.md`) are never overwritten.
 
+### Update runner containers
+
+Runner containers automatically download the latest herd binary on startup. Just restart them:
+
+```bash
+docker compose -f docker-compose.herd.yml restart
+```
+
+To pin a specific version, set `HERD_VERSION` in `.env`:
+
+```bash
+HERD_VERSION=v0.1.0-rc.2
+```
+
 ## Verify Installation
 
 ```bash
