@@ -399,13 +399,23 @@ func renderDockerCompose(owner, repo string) (string, error) {
 }
 
 func commitInitFiles(dir, owner, repo string) error {
-	// Create a branch for the init commit
-	branch := "herd/init"
-	cmd := exec.Command("git", "checkout", "-b", branch)
+	// Use version-based branch name to avoid collisions on re-runs
+	branch := "herd/init-" + version
+
+	// Delete stale local branch if it exists
+	cmd := exec.Command("git", "branch", "-D", branch)
+	cmd.Dir = dir
+	_, _ = cmd.CombinedOutput() // ignore error if branch doesn't exist
+
+	cmd = exec.Command("git", "checkout", "-b", branch)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git checkout -b: %s: %s", err, strings.TrimSpace(string(out)))
 	}
+	defer func() {
+		switchBack(dir)
+		cleanupBranch(dir, branch)
+	}()
 
 	// Stage the files herd init creates
 	filesToAdd := []string{
@@ -429,23 +439,20 @@ func commitInitFiles(dir, owner, repo string) error {
 	cmd = exec.Command("git", "diff", "--cached", "--quiet")
 	cmd.Dir = dir
 	if err := cmd.Run(); err == nil {
-		fmt.Println(display.Success("All init files already committed"))
-		// Switch back to previous branch
-		cmd = exec.Command("git", "checkout", "-")
-		cmd.Dir = dir
-		_ = cmd.Run()
+		fmt.Println(display.Success("All init files up to date"))
 		return nil
 	}
 
-	cmd = exec.Command("git", "commit", "-m", "Initialize HerdOS")
+	commitMsg := fmt.Sprintf("Update HerdOS to %s", version)
+	cmd = exec.Command("git", "commit", "-m", commitMsg)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git commit: %s: %s", err, strings.TrimSpace(string(out)))
 	}
 	fmt.Println(display.Success("Committed init files on branch " + branch))
 
-	// Push
-	cmd = exec.Command("git", "push", "-u", "origin", branch)
+	// Push (force in case a stale remote branch exists from a previous failed run)
+	cmd = exec.Command("git", "push", "-u", "--force", "origin", branch)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git push: %s: %s", err, strings.TrimSpace(string(out)))
@@ -453,9 +460,11 @@ func commitInitFiles(dir, owner, repo string) error {
 	fmt.Println(display.Success("Pushed to remote"))
 
 	// Open PR
+	prTitle := fmt.Sprintf("Update HerdOS to %s", version)
+	prBody := fmt.Sprintf("Updates HerdOS workflows and runner infrastructure to %s.\n\nCreated by `herd init`.", version)
 	cmd = exec.Command("gh", "pr", "create",
-		"--title", "Initialize HerdOS",
-		"--body", "Adds HerdOS configuration, workflows, and runner infrastructure.\n\nCreated by `herd init`.",
+		"--title", prTitle,
+		"--body", prBody,
 		"--repo", owner+"/"+repo,
 	)
 	cmd.Dir = dir
@@ -468,6 +477,18 @@ func commitInitFiles(dir, owner, repo string) error {
 	}
 
 	return nil
+}
+
+func switchBack(dir string) {
+	cmd := exec.Command("git", "checkout", "-")
+	cmd.Dir = dir
+	_ = cmd.Run()
+}
+
+func cleanupBranch(dir, branch string) {
+	cmd := exec.Command("git", "branch", "-D", branch)
+	cmd.Dir = dir
+	_ = cmd.Run()
 }
 
 func printNextSteps(owner, repo string) {
