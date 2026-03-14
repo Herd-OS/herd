@@ -108,7 +108,8 @@ func newAdvanceCmd() *cobra.Command {
 			if batchNum > 0 {
 				result, err = integrator.AdvanceByBatch(cmd.Context(), client, g, cfg, batchNum)
 			} else {
-				ok, err := runWasSuccessful(cmd.Context(), client, runID)
+				var ok bool
+				ok, err = runWasSuccessful(cmd.Context(), client, runID)
 				if err != nil {
 					return fmt.Errorf("checking run status: %w", err)
 				}
