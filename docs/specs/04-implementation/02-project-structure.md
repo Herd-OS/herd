@@ -5,9 +5,18 @@ Repository layout and module boundaries for the `herd` CLI.
 ## Repo Layout
 
 ```
-herd_os/
+herd/
 ├── docs/
-│   └── specs/                    # These specification documents
+│   ├── specs/                    # These specification documents
+│   ├── examples/                 # Example .herdos.yml configs
+│   │   ├── README.md             # Index of example configs
+│   │   ├── solo-dev.yml          # Solo developer setup
+│   │   ├── small-team.yml        # Small team setup
+│   │   └── ci-heavy.yml          # CI-heavy repo setup
+│   ├── getting-started.md        # Getting started guide
+│   ├── installation.md           # Installation guide (Homebrew, binary, source)
+│   ├── configuration.md          # Configuration reference
+│   └── runners.md                # Runner setup and troubleshooting
 │
 ├── cmd/
 │   └── herd/
@@ -16,6 +25,7 @@ herd_os/
 ├── internal/
 │   ├── cli/                      # CLI command definitions
 │   │   ├── root.go               # Root command, global flags
+│   │   ├── errors.go             # Error handling helpers
 │   │   ├── init.go               # herd init
 │   │   ├── plan.go               # herd plan
 │   │   ├── dispatch.go           # herd dispatch
@@ -25,29 +35,39 @@ herd_os/
 │   │   ├── integrator.go         # herd integrator (used by Actions)
 │   │   ├── monitor.go            # herd monitor (used by Actions)
 │   │   ├── runner.go             # herd runner (list)
-│   │   └── config.go             # herd config
+│   │   ├── config.go             # herd config
+│   │   ├── workflows.go          # Embedded workflow file helpers
+│   │   ├── workflows/            # GitHub Actions workflow templates (embedded)
+│   │   │   ├── herd-worker.yml   # Worker workflow (installed by herd init)
+│   │   │   ├── herd-integrator.yml # Integrator workflow
+│   │   │   └── herd-monitor.yml  # Monitor workflow
+│   │   └── runner/               # Runner setup files (embedded)
+│   │       ├── embed.go          # Embed directive for runner files
+│   │       ├── Dockerfile.runner # Base image for Docker-based runners
+│   │       ├── entrypoint.sh     # Runner entrypoint script
+│   │       ├── docker-compose.herd.yml.tmpl # Compose template (owner/repo)
+│   │       └── .env.example      # Environment variable template
 │   │
-│   ├── agent/                      # Agent abstraction
+│   ├── agent/                    # Agent abstraction
 │   │   ├── agent.go              # Agent interface and types
 │   │   └── claude/               # Claude Code implementation
-│   │       └── claude.go         # Wraps `claude` CLI
+│   │       └── plan.go           # Planning via Claude Code
 │   │
 │   ├── planner/                  # Planning logic
-│   │   ├── planner.go            # Orchestrates planning flow
-│   │   ├── prompt.go             # System prompt templates
-│   │   └── parser.go             # Parse structured plan output
+│   │   └── planner.go            # Orchestrates planning flow
 │   │
 │   ├── worker/                   # Worker execution logic
 │   │   ├── worker.go             # Worker lifecycle (read issue, branch, invoke agent, push)
-│   │   └── prompt.go             # Worker system prompt template
+│   │   └── doc.go                # Package documentation
 │   │
 │   ├── integrator/               # Integration logic
 │   │   ├── integrator.go         # Consolidation, tier advancement, batch PR
-│   │   └── reviewer.go           # Agent review dispatch and result handling
+│   │   ├── merge.go              # Branch merging logic
+│   │   ├── review.go             # Agent review dispatch and result handling
+│   │   └── ci.go                 # CI failure handling and fix cycles
 │   │
 │   ├── monitor/                  # Monitor logic
-│   │   ├── monitor.go            # Patrol cycle, stale detection, escalation
-│   │   └── backoff.go            # Exponential backoff tracking for re-dispatch
+│   │   └── patrol.go             # Patrol cycle, stale detection, escalation
 │   │
 │   ├── dag/                      # DAG and tier logic (shared by dispatch, plan, integrator)
 │   │   └── dag.go                # DAG construction, topological sort, tier assignment, cycle detection
@@ -61,11 +81,12 @@ herd_os/
 │   │   └── github/               # GitHub implementation
 │   │       ├── client.go         # GitHub API client wrapper
 │   │       ├── issues.go         # Issue operations
-│   │       ├── pulls.go          # PR operations
+│   │       ├── pullrequests.go   # PR operations
 │   │       ├── workflows.go      # Action dispatch
 │   │       ├── labels.go         # Label management
 │   │       ├── milestones.go     # Milestone (batch) operations
-│   │       └── runners.go        # Runner queries
+│   │       ├── runners.go        # Runner queries
+│   │       └── checks.go         # CI check status queries
 │   │
 │   ├── config/                   # Configuration
 │   │   ├── config.go             # Config struct and loading
@@ -80,25 +101,25 @@ herd_os/
 │   │
 │   └── display/                  # Terminal output formatting
 │       ├── table.go              # Table rendering
-│       ├── status.go             # Status display
+│       ├── status.go             # Status display and symbols
 │       └── colors.go             # Color and style helpers
 │
 ├── tests/
 │   └── e2e/                     # End-to-end tests (real GitHub, real agent)
 │       └── e2e_test.go
 │
-├── workflows/                    # GitHub Actions workflow templates
-│   ├── herd-worker.yml           # Worker workflow (installed by herd init)
-│   ├── herd-monitor.yml          # Monitor workflow
-│   └── herd-integrator.yml     # Integrator workflow
+├── scripts/
+│   └── update-homebrew.sh        # Updates Homebrew tap formula after release
 │
-├── Dockerfile.runner             # Minimal base image for Docker-based runners
+├── .golangci.yml                 # golangci-lint configuration
 ├── go.mod
 ├── go.sum
 ├── Makefile
 ├── .herdos.yml                   # Dogfooding: HerdOS manages itself
-├── .herd/                        # Runtime directory (gitignored)
-│   └── plans/                    # Transient plan files from agent sessions
+├── .herd/                        # Role instruction files (committed) + state (gitignored)
+│   ├── planner.md                # Planner role instructions
+│   ├── worker.md                 # Worker role instructions
+│   └── integrator.md             # Integrator role instructions
 └── .github/
     └── workflows/
         ├── ci.yml                # CI for the herd CLI itself

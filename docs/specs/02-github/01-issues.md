@@ -25,6 +25,7 @@ An issue has exactly one status label at any time. The CLI and Actions enforce t
 | `herd/type:feature` | `#1D76DB` blue | New functionality (set by Planner) |
 | `herd/type:bugfix` | `#D93F0B` red | Bug fix (set by Planner) |
 | `herd/type:fix` | `#E99695` salmon | Auto-generated fix from agent review or conflict resolution |
+| `herd/type:manual` | `#BFD4F2` light blue | Requires human action — not dispatched to workers |
 
 Label descriptions are set by `herd init` via `LabelService.Create` and are visible on hover in the GitHub UI.
 

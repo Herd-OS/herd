@@ -14,6 +14,7 @@ This will:
 2. **Create `.herd/` directory** — with empty role instruction files (`planner.md`, `worker.md`, `integrator.md`) for customizing agent behavior per role
 3. **Create GitHub labels** — the `herd/*` label taxonomy used to track issue status and type
 4. **Install workflow files** — GitHub Actions workflows for workers, integrator, and monitor in `.github/workflows/`
+5. **Create runner files** — `Dockerfile.runner`, `entrypoint.sh`, `docker-compose.herd.yml`, and `.env.example` for self-hosted runner setup
 
 ### Skipping Steps
 
@@ -167,6 +168,10 @@ These are loaded automatically when the respective role runs.
 - **Tier stuck** — If any issue in a tier fails, the tier is stuck and the next tier won't be dispatched until the failure is resolved (manually or by the Monitor's auto-redispatch)
 - **Merge conflict** — When `on_conflict: dispatch-resolver`, the Integrator creates a conflict-resolution issue and dispatches a worker to resolve it. The number of attempts is limited by `max_conflict_resolution_attempts`. When `on_conflict: notify`, a comment is posted on the issue for manual resolution.
 - **Review safety valve** — If a single agent review finds more than 10 issues, fix workers are not created (to prevent runaway invocations). The PR is flagged for manual intervention.
+
+### Manual Tasks
+
+Some tasks in a batch may be labeled `herd/type:manual` — these require human action (e.g., infrastructure setup, external service configuration). They appear in `herd status` with a 👤 icon. To complete a manual task, close the issue on GitHub. The Integrator detects the close event and advances the tier if all tasks are now complete.
 
 ### Re-triggering Review
 
