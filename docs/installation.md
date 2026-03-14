@@ -55,6 +55,31 @@ The binary is built to `bin/herd`. Add it to your `PATH` or move it to a directo
 sudo cp bin/herd /usr/local/bin/
 ```
 
+## Updating
+
+### Update the binary
+
+```bash
+# Homebrew
+brew upgrade herd-os/tap/herd
+
+# Binary download — same as installation, replace the existing binary
+
+# From source
+git pull && make build && sudo cp bin/herd /usr/local/bin/
+```
+
+### Update project workflows
+
+After updating the binary, re-run `herd init` in each repository that uses HerdOS. This updates the workflow files and runner infrastructure to match the new version.
+
+```bash
+cd /path/to/your/repo
+herd init
+```
+
+`herd init` creates a `herd/init` branch, commits the updated files, pushes, and opens a PR. Review and merge the PR to apply the changes. Configuration (`.herdos.yml`) and role instructions (`.herd/*.md`) are never overwritten.
+
 ## Verify Installation
 
 ```bash
