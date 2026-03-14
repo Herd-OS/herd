@@ -70,7 +70,7 @@ See [docs/getting-started.md](docs/getting-started.md) for the full setup guide.
 - [Runner Setup](docs/runners.md)
 - [Configuration](docs/configuration.md)
 - [Example Configs](docs/examples/)
-- [Design Specs](docs/specs/) (internal)
+- [Design Docs](docs/design/) (internal)
 
 ## Why a Cat?
 
