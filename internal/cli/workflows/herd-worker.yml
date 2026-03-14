@@ -30,6 +30,7 @@ permissions:
 
 jobs:
   execute:
+    if: vars.HERD_ENABLED == 'true'
     runs-on: [self-hosted, '${{ inputs.runner_label }}']
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
     steps:

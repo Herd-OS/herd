@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   patrol:
+    if: vars.HERD_ENABLED == 'true'
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
