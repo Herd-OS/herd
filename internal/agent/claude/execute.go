@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/herd-os/herd/internal/agent"
 )
@@ -28,12 +29,13 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
 	}
-	// Place -p last so the prompt value (which may start with ---) is not
-	// misinterpreted as a flag by the argument parser.
-	args = append(args, "-p", prompt)
+	// Use -p (print mode) which reads the prompt from stdin, avoiding the
+	// issue body's YAML front matter (---) being misinterpreted as a CLI flag.
+	args = append(args, "-p")
 
 	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
 	cmd.Dir = opts.RepoRoot
+	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

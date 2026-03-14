@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   integrate:
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped'
+    if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped'
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
@@ -43,7 +43,7 @@ jobs:
           herd integrator review --run-id ${{ github.event.workflow_run.id }}
 
   advance-on-close:
-    if: github.event_name == 'issues'
+    if: vars.HERD_ENABLED == 'true' && github.event_name == 'issues'
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
@@ -66,7 +66,8 @@ jobs:
 
   re-review:
     if: >
-      github.event_name == 'pull_request_review'
+      vars.HERD_ENABLED == 'true'
+      && github.event_name == 'pull_request_review'
       && startsWith(github.event.pull_request.title, '[herd]')
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
@@ -93,7 +94,8 @@ jobs:
 
   cleanup:
     if: >
-      github.event_name == 'pull_request'
+      vars.HERD_ENABLED == 'true'
+      && github.event_name == 'pull_request'
       && github.event.action == 'closed'
       && github.event.pull_request.merged == true
       && startsWith(github.event.pull_request.title, '[herd]')
