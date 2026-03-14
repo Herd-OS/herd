@@ -32,27 +32,26 @@ You walk away after `herd plan`. You come back to a reviewed PR.
 
 ## How it works
 
-```
-  herd plan "Add auth"
-        │
-        ▼
-  ┌─ Tier 0 ──────────────────────┐
-  │  Worker #42    Worker #43      │  ← parallel
-  │  (auth model)  (login route)   │
-  └────────────┬───────────────────┘
-               ▼
-        Integrator consolidates
-               │
-               ▼
-  ┌─ Tier 1 ──────────────────────┐
-  │  Worker #44                    │  ← depends on #42, #43
-  │  (auth middleware)             │
-  └────────────┬───────────────────┘
-               ▼
-        Integrator consolidates
-               │
-               ▼
-     Batch PR opened → Agent review → You merge
+```mermaid
+graph TD
+    A[herd plan 'Add auth'] --> B
+
+    subgraph B[Tier 0 — parallel]
+        W1[Worker #42<br>auth model]
+        W2[Worker #43<br>login route]
+    end
+
+    B --> C[Integrator consolidates]
+
+    subgraph D[Tier 1 — depends on Tier 0]
+        W3[Worker #44<br>auth middleware]
+    end
+
+    C --> D
+    D --> E[Integrator consolidates]
+    E --> F[Batch PR opened]
+    F --> G[Agent review]
+    G --> H[You merge]
 ```
 
 Workers run your configured agent (Claude Code, Codex, Cursor) in
