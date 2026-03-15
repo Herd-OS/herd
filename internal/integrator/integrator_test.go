@@ -1124,6 +1124,9 @@ func TestAdvance_SkipsManualTasks(t *testing.T) {
 	assert.Equal(t, 1, result.DispatchedCount)
 	assert.Len(t, wf.dispatched, 1)
 	assert.Equal(t, "12", wf.dispatched[0]["issue_number"])
+	// Manual task should be unblocked (blocked removed, ready added)
+	assert.Contains(t, issueSvc.removedLabels[11], issues.StatusBlocked)
+	assert.Contains(t, issueSvc.addedLabels[11], issues.StatusReady)
 }
 
 func TestAdvance_ClosedIssueCountsAsComplete(t *testing.T) {

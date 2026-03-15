@@ -269,11 +269,6 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 			continue
 		}
 
-		// Skip manual tasks — they are never dispatched to workers
-		if issues.HasLabel(issue.Labels, issues.TypeManual) {
-			continue
-		}
-
 		status := issues.StatusLabel(issue.Labels)
 		// Double-dispatch prevention: only dispatch blocked issues
 		if status != issues.StatusBlocked {
@@ -282,6 +277,12 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 
 		// Unblock: blocked → ready
 		_ = p.Issues().RemoveLabels(ctx, num, []string{issues.StatusBlocked})
+
+		// Manual tasks get unblocked but not dispatched
+		if issues.HasLabel(issue.Labels, issues.TypeManual) {
+			_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusReady})
+			continue
+		}
 
 		if dispatched >= remaining {
 			// At capacity — just mark ready, don't dispatch
