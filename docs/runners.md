@@ -2,14 +2,14 @@
 
 HerdOS workers run as GitHub Actions on self-hosted runners. Self-hosted runners are required because workers need an AI agent (Claude Code) installed, and because GitHub-hosted runners don't support `workflow_dispatch` chaining with custom tools.
 
-`herd init` generates all the files you need: `Dockerfile.runner`, `entrypoint.sh`, `docker-compose.herd.yml`, and `.env.example`.
+`herd init` generates all the files you need: `Dockerfile.runner`, `entrypoint.sh`, `docker-compose.herd.yml`, and `.env.herd.example`.
 
 ## Quick Setup
 
 ```bash
 herd init                    # generates runner files + config + PR
 # merge the PR created by herd init
-cp .env.example .env         # copy the env template
+cp .env.herd.example .env         # copy the env template
 # fill in .env (see sections below)
 docker compose -f docker-compose.herd.yml build
 docker compose -f docker-compose.herd.yml up -d
