@@ -125,7 +125,7 @@ Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
 
 - **workflow_dispatch** -- primary dispatch mechanism. Only users with write access can trigger it (enforced by GitHub). The `ref` parameter points to the branch containing the workflow YAML, not the branch the worker checks out.
 - **workflow_run** -- triggers the Integrator when a worker completes (success or failure).
-- **check_suite** -- triggers the Integrator when CI completes on a batch branch. If CI failed, the Integrator re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`.
+- **check_suite** -- triggers the Integrator when CI completes on a batch branch. If CI failed, the Integrator re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`. Note: `check_suite` events may not fire for external CI providers (e.g., Cloudflare Pages). The Monitor patrol serves as a fallback, checking CI status on open batch PRs every 15 minutes. CI status detection checks both GitHub's commit status API and the check runs API to support external providers.
 - **issues** -- triggers the Integrator when an issue is closed. Used for manual task completion — the Integrator advances the tier and runs agent review if all tiers are done.
 - **pull_request_review** -- triggers the Integrator to merge batch PRs after human approval + CI pass.
 - **pull_request** -- triggers cleanup when a batch PR is merged (branch deletion, milestone closure).
