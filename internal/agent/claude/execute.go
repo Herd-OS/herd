@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -37,9 +39,11 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 	cmd.Dir = opts.RepoRoot
 	cmd.Stdin = strings.NewReader(prompt)
 
+	// Stream to both stdout/stderr (visible in Docker logs and Actions logs)
+	// and capture in buffers for the summary comment.
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("agent exited with error: %w\n%s", err, stderr.String())
