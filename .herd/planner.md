@@ -2,3 +2,4 @@
 - Use table-driven tests where applicable.
 - Include full function signatures and struct definitions, not just descriptions.
 - Specify which packages to import and which existing helpers to reuse.
+- Every batch must include a final-tier task to review and update documentation in `docs/`. Check if existing docs need updating to reflect the changes, and whether new docs are needed for new features. This task depends on all other tasks in the batch.

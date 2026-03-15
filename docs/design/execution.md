@@ -439,11 +439,12 @@ with 👤 in status output.
 Manual tasks participate fully in the DAG:
 
 - **Not dispatched** -- `herd dispatch` skips them
+- **Unblocked on tier advancement** -- when the previous tier completes, manual tasks transition from `blocked` to `ready` like any other task, but are not dispatched to workers
 - **Completed by closing** -- a human closes the issue (or labels it
   `herd/status:done`); the Integrator's `advance-on-close` job detects the
-  close event and checks if the tier is now complete
+  close event, advances the tier, and runs agent review if all tiers are done
 - **Tier-aware** -- if a manual task is in Tier 0, Tier 1 won't dispatch until
-  it's closed; avoid putting manual tasks on the critical path when possible
+  it's closed. Manual tasks that grant permissions or set up external services should always be in Tier 0 so they unblock automated tasks that depend on them
 - **Notifications** -- when `notify_users` is configured, the Planner @mentions
   those users on manual task issues for visibility
 
@@ -479,10 +480,14 @@ Worker pushes to worker branch
 Integrator consolidates into batch branch
         |
         v
-CI runs on the updated batch branch, tests fail
+CI runs on the updated batch branch
         |
         v
-Re-run the failed Action (transient/flaky failure filter)
+check_suite.completed event triggers the Integrator
+        |
+        +-- CI passed --> done, continue normally
+        |
+        +-- CI failed --> Re-run the failed checks (transient/flaky failure filter)
         |
         +-- Passes --> done, continue normally
         |
