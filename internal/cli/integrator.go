@@ -307,6 +307,7 @@ func runWasSuccessful(ctx context.Context, client platform.Platform, runID int64
 
 func newIntegratorCheckCICmd() *cobra.Command {
 	var runID int64
+	var batchNum int
 
 	cmd := &cobra.Command{
 		Use:   "check-ci",
@@ -314,6 +315,12 @@ func newIntegratorCheckCICmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator check-ci is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+			if runID == 0 && batchNum == 0 {
+				return fmt.Errorf("one of --run-id or --batch is required")
+			}
+			if runID != 0 && batchNum != 0 {
+				return fmt.Errorf("--run-id and --batch are mutually exclusive")
 			}
 
 			cfg, err := config.Load(".")
@@ -325,19 +332,22 @@ func newIntegratorCheckCICmd() *cobra.Command {
 				return fmt.Errorf("creating GitHub client: %w", err)
 			}
 
-			ok, err := runWasSuccessful(cmd.Context(), client, runID)
-			if err != nil {
-				return fmt.Errorf("checking run status: %w", err)
-			}
-			if !ok {
-				fmt.Println("Skipped: triggering run was not successful.")
-				return nil
+			if runID != 0 {
+				ok, err := runWasSuccessful(cmd.Context(), client, runID)
+				if err != nil {
+					return fmt.Errorf("checking run status: %w", err)
+				}
+				if !ok {
+					fmt.Println("Skipped: triggering run was not successful.")
+					return nil
+				}
 			}
 
 			cwd, _ := os.Getwd()
 			result, err := integrator.CheckCI(cmd.Context(), client, cfg, integrator.CheckCIParams{
-				RunID:    runID,
-				RepoRoot: cwd,
+				RunID:       runID,
+				BatchNumber: batchNum,
+				RepoRoot:    cwd,
 			})
 			if err != nil {
 				return err
@@ -356,7 +366,7 @@ func newIntegratorCheckCICmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID (required)")
-	cmd.MarkFlagRequired("run-id")
+	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID")
+	cmd.Flags().IntVar(&batchNum, "batch", 0, "Batch/milestone number")
 	return cmd
 }

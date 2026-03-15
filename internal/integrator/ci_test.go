@@ -194,3 +194,88 @@ func TestCheckCI(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckCI_BatchLookup(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch"},
+		},
+	}
+
+	checkSvc := &mockCheckService{status: "success"}
+
+	mock := &mockPlatformWithChecks{
+		mockPlatform: &mockPlatform{
+			issues:    issueSvc,
+			prs:       prSvc,
+			workflows: &mockWorkflowService{},
+			repo:      &mockRepoService{defaultBranch: "main"},
+			milestones: &mockMilestoneService{
+				getResult: map[int]*platform.Milestone{
+					1: {Number: 1, Title: "Batch"},
+				},
+			},
+		},
+		checks: checkSvc,
+	}
+
+	result, err := CheckCI(context.Background(), mock, &config.Config{
+		Integrator: config.Integrator{RequireCI: true, CIMaxFixCycles: 2},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}, CheckCIParams{BatchNumber: 1})
+
+	require.NoError(t, err)
+	assert.Equal(t, "success", result.Status)
+}
+
+func TestCheckCI_BatchLookup_Failure(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+
+	createdIssues := []*platform.Issue{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			iss := &platform.Issue{Number: 99, Title: title}
+			createdIssues = append(createdIssues, iss)
+			return iss, nil
+		},
+	}
+
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch"},
+		},
+	}
+
+	wf := &mockWorkflowService{}
+	checkSvc := &mockCheckService{status: "failure", rerunErr: fmt.Errorf("re-run failed")}
+
+	mock := &mockPlatformWithChecks{
+		mockPlatform: &mockPlatform{
+			issues:    mockCreate,
+			prs:       prSvc,
+			workflows: wf,
+			repo:      &mockRepoService{defaultBranch: "main"},
+			milestones: &mockMilestoneService{
+				getResult: map[int]*platform.Milestone{
+					1: {Number: 1, Title: "Batch"},
+				},
+			},
+		},
+		checks: checkSvc,
+	}
+
+	result, err := CheckCI(context.Background(), mock, &config.Config{
+		Integrator: config.Integrator{RequireCI: true, CIMaxFixCycles: 2},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}, CheckCIParams{BatchNumber: 1})
+
+	require.NoError(t, err)
+	assert.Equal(t, "failure", result.Status)
+	assert.Len(t, createdIssues, 1)
+	assert.Len(t, result.FixIssues, 1)
+}

@@ -3,6 +3,8 @@ on:
   workflow_run:
     workflows: ["HerdOS Worker"]
     types: [completed]
+  check_suite:
+    types: [completed]
   pull_request_review:
     types: [submitted]
   pull_request:
@@ -43,6 +45,36 @@ jobs:
           herd integrator check-ci --run-id "$RUN_ID"
           herd integrator advance --run-id "$RUN_ID"
           herd integrator review --run-id "$RUN_ID"
+
+  check-ci-on-completion:
+    if: >
+      vars.HERD_ENABLED == 'true'
+      && github.event_name == 'check_suite'
+      && github.event.check_suite.conclusion == 'failure'
+      && startsWith(github.event.check_suite.head_branch, 'herd/batch/')
+    runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.check_suite.head_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Check CI and dispatch fix workers
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HEAD_BRANCH: ${{ github.event.check_suite.head_branch }}
+        run: |
+          BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+')
+          if [ -n "$BATCH" ]; then
+            herd integrator check-ci --batch "$BATCH"
+          fi
 
   advance-on-close:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'issues'

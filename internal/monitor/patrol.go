@@ -19,6 +19,7 @@ type PatrolResult struct {
 	RedispatchedCount int
 	EscalatedCount    int
 	StuckPRs          int
+	CIFailures        int
 }
 
 const monitorCommentSignature = "**HerdOS Monitor Alert**"
@@ -171,9 +172,36 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 			}
 			result.StuckPRs++
 		}
+
+		// CI failure detection on batch PRs
+		if cfg.Integrator.RequireCI && strings.HasPrefix(pr.Head, "herd/batch/") {
+			ciStatus, err := p.Checks().GetCombinedStatus(ctx, pr.Head)
+			if err == nil && ciStatus == "failure" {
+				if !hasCIMonitorComment(ctx, p, pr.Number) {
+					_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
+						"⚠️ **HerdOS Monitor Alert**\n\nCI is failing on batch branch `%s`. The integrator should have dispatched a fix worker. If this persists, manual intervention may be needed.\n\n%s",
+						pr.Head, buildMentions(cfg.Monitor.NotifyUsers)))
+				}
+				result.CIFailures++
+			}
+		}
 	}
 
 	return result, nil
+}
+
+func hasCIMonitorComment(ctx context.Context, p platform.Platform, prNumber int) bool {
+	// PR comments are issue comments in GitHub
+	comments, err := p.Issues().ListComments(ctx, prNumber)
+	if err != nil {
+		return false
+	}
+	for _, c := range comments {
+		if strings.Contains(c.Body, monitorCommentSignature) && strings.Contains(c.Body, "CI is failing") {
+			return true
+		}
+	}
+	return false
 }
 
 // BackoffDelay returns the backoff delay for a given failure count.

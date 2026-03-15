@@ -43,8 +43,8 @@ func newPatrolCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Printf("Patrol complete: %d stale, %d failed, %d redispatched, %d escalated, %d stuck PRs\n",
-				result.StaleIssues, result.FailedIssues, result.RedispatchedCount, result.EscalatedCount, result.StuckPRs)
+			fmt.Printf("Patrol complete: %d stale, %d failed, %d redispatched, %d escalated, %d stuck PRs, %d CI failures\n",
+				result.StaleIssues, result.FailedIssues, result.RedispatchedCount, result.EscalatedCount, result.StuckPRs, result.CIFailures)
 			return nil
 		},
 	}
