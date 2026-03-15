@@ -319,65 +319,48 @@ type runnerTemplateData struct {
 }
 
 func createRunnerFiles(dir, owner, repo string) error {
-	// Dockerfile.runner (static)
-	dockerfilePath := filepath.Join(dir, "Dockerfile.runner")
-	if _, err := os.Stat(dockerfilePath); os.IsNotExist(err) {
-		data, err := runner.FS.ReadFile("Dockerfile.runner")
-		if err != nil {
-			return fmt.Errorf("reading embedded Dockerfile.runner: %w", err)
-		}
-		if err := os.WriteFile(dockerfilePath, data, 0644); err != nil {
-			return fmt.Errorf("creating Dockerfile.runner: %w", err)
-		}
-		fmt.Println(display.Success("Created Dockerfile.runner"))
-	} else {
-		fmt.Println(display.Success("Dockerfile.runner already exists"))
-	}
+	// Runner infrastructure files are herd-managed — always overwrite to keep
+	// them in sync with the installed herd version.
 
-	// entrypoint.sh (static, executable)
-	entrypointPath := filepath.Join(dir, "entrypoint.sh")
-	if _, err := os.Stat(entrypointPath); os.IsNotExist(err) {
-		data, err := runner.FS.ReadFile("entrypoint.sh")
-		if err != nil {
-			return fmt.Errorf("reading embedded entrypoint.sh: %w", err)
-		}
-		if err := os.WriteFile(entrypointPath, data, 0755); err != nil {
-			return fmt.Errorf("creating entrypoint.sh: %w", err)
-		}
-		fmt.Println(display.Success("Created entrypoint.sh"))
-	} else {
-		fmt.Println(display.Success("entrypoint.sh already exists"))
+	// Dockerfile.runner (static)
+	data, err := runner.FS.ReadFile("Dockerfile.runner")
+	if err != nil {
+		return fmt.Errorf("reading embedded Dockerfile.runner: %w", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile.runner"), data, 0644); err != nil {
+		return fmt.Errorf("writing Dockerfile.runner: %w", err)
+	}
+	fmt.Println(display.Success("Installed Dockerfile.runner"))
+
+	// entrypoint.herd.sh (static, executable)
+	data, err = runner.FS.ReadFile("entrypoint.herd.sh")
+	if err != nil {
+		return fmt.Errorf("reading embedded entrypoint.herd.sh: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), data, 0755); err != nil {
+		return fmt.Errorf("writing entrypoint.herd.sh: %w", err)
+	}
+	fmt.Println(display.Success("Installed entrypoint.herd.sh"))
 
 	// docker-compose.herd.yml (templated with owner/repo)
-	composePath := filepath.Join(dir, "docker-compose.herd.yml")
-	if _, err := os.Stat(composePath); os.IsNotExist(err) {
-		rendered, err := renderDockerCompose(owner, repo)
-		if err != nil {
-			return fmt.Errorf("rendering docker-compose.herd.yml: %w", err)
-		}
-		if err := os.WriteFile(composePath, []byte(rendered), 0644); err != nil {
-			return fmt.Errorf("creating docker-compose.herd.yml: %w", err)
-		}
-		fmt.Println(display.Success("Created docker-compose.herd.yml"))
-	} else {
-		fmt.Println(display.Success("docker-compose.herd.yml already exists"))
+	rendered, err := renderDockerCompose(owner, repo)
+	if err != nil {
+		return fmt.Errorf("rendering docker-compose.herd.yml: %w", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), []byte(rendered), 0644); err != nil {
+		return fmt.Errorf("writing docker-compose.herd.yml: %w", err)
+	}
+	fmt.Println(display.Success("Installed docker-compose.herd.yml"))
 
-	// .env.example (static)
-	envExamplePath := filepath.Join(dir, ".env.example")
-	if _, err := os.Stat(envExamplePath); os.IsNotExist(err) {
-		data, err := runner.FS.ReadFile(".env.example")
-		if err != nil {
-			return fmt.Errorf("reading embedded .env.example: %w", err)
-		}
-		if err := os.WriteFile(envExamplePath, data, 0644); err != nil {
-			return fmt.Errorf("creating .env.example: %w", err)
-		}
-		fmt.Println(display.Success("Created .env.example"))
-	} else {
-		fmt.Println(display.Success(".env.example already exists"))
+	// .env.herd.example (static)
+	data, err = runner.FS.ReadFile(".env.herd.example")
+	if err != nil {
+		return fmt.Errorf("reading embedded .env.herd.example: %w", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, ".env.herd.example"), data, 0644); err != nil {
+		return fmt.Errorf("writing .env.herd.example: %w", err)
+	}
+	fmt.Println(display.Success("Installed .env.herd.example"))
 
 	return nil
 }
@@ -424,9 +407,9 @@ func commitInitFiles(dir, owner, repo string) error {
 		".herd/",
 		".github/workflows/",
 		"Dockerfile.runner",
-		"entrypoint.sh",
+		"entrypoint.herd.sh",
 		"docker-compose.herd.yml",
-		".env.example",
+		".env.herd.example",
 	}
 	args := append([]string{"add", "--"}, filesToAdd...)
 	cmd = exec.Command("git", args...)
@@ -494,7 +477,7 @@ func cleanupBranch(dir, branch string) {
 func printNextSteps(owner, repo string) {
 	fmt.Println()
 	fmt.Println("Set up runners:")
-	fmt.Println("  1. cp .env.example .env")
+	fmt.Println("  1. cp .env.herd.example .env")
 	fmt.Println("  2. Add your GITHUB_TOKEN to .env")
 	fmt.Println("  3. Run: claude setup-token (uses your subscription, no API cost)")
 	fmt.Println("     Add the token as CLAUDE_CODE_OAUTH_TOKEN in .env")

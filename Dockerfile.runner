@@ -14,11 +14,10 @@ RUN ARCH=$(echo "$TARGETARCH" | sed 's/amd64/x64/' | sed 's/arm64/arm64/') \
     && curl -sL "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${ARCH}-${RUNNER_VERSION}.tar.gz" \
     | tar xz
 
-# Herd CLI (will switch to binary download when releases are available)
-RUN apt-get update && apt-get install -y golang-go \
-    && go install github.com/herd-os/herd/cmd/herd@latest \
-    && cp $(go env GOPATH)/bin/herd /usr/local/bin/herd \
-    && apt-get purge -y golang-go && apt-get autoremove -y
+# Herd CLI is installed at startup by entrypoint.herd.sh
+# Set HERD_VERSION in .env to pin a version, otherwise latest is used.
+RUN mkdir -p /opt/herd/bin
+ENV PATH="/opt/herd/bin:${PATH}"
 
 # Agent CLI
 RUN npm install -g @anthropic-ai/claude-code
@@ -29,11 +28,11 @@ RUN npm install -g @anthropic-ai/claude-code
 
 # Runner must not run as root
 RUN useradd -m -d /home/runner runner \
-    && chown -R runner:runner /runner
+    && chown -R runner:runner /runner /opt/herd
 
 WORKDIR /runner
-COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
+COPY entrypoint.herd.sh .
+RUN chmod +x entrypoint.herd.sh
 
 USER runner
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["./entrypoint.herd.sh"]

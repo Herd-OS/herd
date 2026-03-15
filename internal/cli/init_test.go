@@ -207,8 +207,8 @@ func TestCreateRunnerFiles(t *testing.T) {
 	assert.Contains(t, string(df), "/opt/herd/bin")
 	assert.Contains(t, string(df), "ENTRYPOINT")
 
-	// entrypoint.sh
-	ep, err := os.ReadFile(filepath.Join(dir, "entrypoint.sh"))
+	// entrypoint.herd.sh
+	ep, err := os.ReadFile(filepath.Join(dir, "entrypoint.herd.sh"))
 	require.NoError(t, err)
 	assert.Contains(t, string(ep), "#!/bin/bash")
 	assert.Contains(t, string(ep), "--ephemeral")
@@ -216,9 +216,9 @@ func TestCreateRunnerFiles(t *testing.T) {
 	assert.Contains(t, string(ep), "exec ./run.sh")
 	assert.Contains(t, string(ep), "Herd-OS/herd/releases")
 	assert.Contains(t, string(ep), "HERD_VERSION")
-	info, err := os.Stat(filepath.Join(dir, "entrypoint.sh"))
+	info, err := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0755), info.Mode().Perm(), "entrypoint.sh should be executable")
+	assert.Equal(t, os.FileMode(0755), info.Mode().Perm(), "entrypoint.herd.sh should be executable")
 
 	// docker-compose.herd.yml
 	dc, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
@@ -229,31 +229,32 @@ func TestCreateRunnerFiles(t *testing.T) {
 	assert.Contains(t, string(dc), "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}")
 	assert.Contains(t, string(dc), "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}")
 
-	// .env.example
-	env, err := os.ReadFile(filepath.Join(dir, ".env.example"))
+	// .env.herd.example
+	env, err := os.ReadFile(filepath.Join(dir, ".env.herd.example"))
 	require.NoError(t, err)
 	assert.Contains(t, string(env), "GITHUB_TOKEN=")
 	assert.Contains(t, string(env), "CLAUDE_CODE_OAUTH_TOKEN=")
 	assert.Contains(t, string(env), "ANTHROPIC_API_KEY=")
 }
 
-func TestCreateRunnerFiles_SkipsExisting(t *testing.T) {
+func TestCreateRunnerFiles_OverwritesExisting(t *testing.T) {
 	dir := t.TempDir()
 
-	// Pre-create files with custom content
-	custom := []byte("custom content")
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.runner"), custom, 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.sh"), custom, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), custom, 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.example"), custom, 0644))
+	// Pre-create files with stale content
+	stale := []byte("stale content")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.runner"), stale, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), stale, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), stale, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.herd.example"), stale, 0644))
 
 	require.NoError(t, createRunnerFiles(dir, "org", "repo"))
 
-	// All files should keep their custom content
-	for _, name := range []string{"Dockerfile.runner", "entrypoint.sh", "docker-compose.herd.yml", ".env.example"} {
+	// All files should be overwritten with embedded content
+	for _, name := range []string{"Dockerfile.runner", "entrypoint.herd.sh", "docker-compose.herd.yml", ".env.herd.example"} {
 		content, err := os.ReadFile(filepath.Join(dir, name))
 		require.NoError(t, err)
-		assert.Equal(t, custom, content, "%s should not be overwritten", name)
+		assert.NotEqual(t, stale, content, "%s should be overwritten", name)
+		assert.True(t, len(content) > 0, "%s should not be empty", name)
 	}
 }
 
@@ -422,9 +423,9 @@ func setupTestGitRepoWithInitFiles(t *testing.T) string {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".github", "workflows", "herd-monitor.yml"), []byte("name: monitor"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".github", "workflows", "herd-integrator.yml"), []byte("name: integrator"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.runner"), []byte("FROM ubuntu"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.sh"), []byte("#!/bin/bash"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), []byte("#!/bin/bash"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), []byte("services:"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.example"), []byte("GITHUB_TOKEN="), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.herd.example"), []byte("GITHUB_TOKEN="), 0644))
 
 	return dir
 }

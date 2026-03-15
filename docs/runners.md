@@ -2,14 +2,14 @@
 
 HerdOS workers run as GitHub Actions on self-hosted runners. Self-hosted runners are required because workers need an AI agent (Claude Code) installed, and because GitHub-hosted runners don't support `workflow_dispatch` chaining with custom tools.
 
-`herd init` generates all the files you need: `Dockerfile.runner`, `entrypoint.sh`, `docker-compose.herd.yml`, and `.env.example`.
+`herd init` generates all the files you need: `Dockerfile.runner`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`.
 
 ## Quick Setup
 
 ```bash
 herd init                    # generates runner files + config + PR
 # merge the PR created by herd init
-cp .env.example .env         # copy the env template
+cp .env.herd.example .env         # copy the env template
 # fill in .env (see sections below)
 docker compose -f docker-compose.herd.yml build
 docker compose -f docker-compose.herd.yml up -d
@@ -135,9 +135,9 @@ The generated `Dockerfile.runner` builds an Ubuntu 24.04 image with:
 - **Claude Code** (installed via npm)
 - **Tools**: curl, jq, git, gh, Node.js
 
-The **Herd CLI** is not baked into the image — it's downloaded at container startup by `entrypoint.sh`. This ensures runners always use the latest version without rebuilding. Set `HERD_VERSION` in `.env` to pin a specific version.
+The **Herd CLI** is not baked into the image — it's downloaded at container startup by `entrypoint.herd.sh`. This ensures runners always use the latest version without rebuilding. Set `HERD_VERSION` in `.env` to pin a specific version.
 
-The `entrypoint.sh` script handles runner lifecycle:
+The `entrypoint.herd.sh` script handles runner lifecycle:
 1. Downloads the herd binary (latest or pinned version)
 2. Removes stale config from previous runs (ephemeral runners leave `.runner` behind on restart)
 3. Registers with GitHub using a short-lived registration token

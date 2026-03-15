@@ -15,6 +15,18 @@ get_token() {
     | jq -r .token
 }
 
+# Install or update herd CLI
+ARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+if [ -n "${HERD_VERSION:-}" ] && [ "$HERD_VERSION" != "latest" ]; then
+  HERD_URL="https://github.com/Herd-OS/herd/releases/download/${HERD_VERSION}/herd-linux-${ARCH}"
+else
+  HERD_URL="https://github.com/Herd-OS/herd/releases/latest/download/herd-linux-${ARCH}"
+fi
+echo "Installing herd from ${HERD_URL}..."
+curl -fsSL "$HERD_URL" -o /opt/herd/bin/herd
+chmod +x /opt/herd/bin/herd
+echo "Installed herd $(herd --version 2>/dev/null || echo 'unknown')"
+
 REPO_OWNER=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\1|')
 REPO_NAME=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\2|')
 
