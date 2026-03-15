@@ -44,6 +44,23 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			return nil, fmt.Errorf("getting milestone #%d: %w", msNumber, err)
 		}
 		ms = got_ms
+	} else if params.BatchNumber > 0 {
+		// Batch-based lookup — used by advance-on-close
+		got_ms, err := p.Milestones().Get(ctx, params.BatchNumber)
+		if err != nil {
+			return nil, fmt.Errorf("getting milestone #%d: %w", params.BatchNumber, err)
+		}
+		ms = got_ms
+		batchBranch = fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+
+		prs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
+		if err != nil {
+			return nil, fmt.Errorf("listing batch PRs: %w", err)
+		}
+		if len(prs) == 0 {
+			return &ReviewResult{}, nil // No batch PR yet
+		}
+		pr = prs[0]
 	} else {
 		// Run-based lookup — used by workflow_run trigger
 		run, err := p.Workflows().GetRun(ctx, params.RunID)
