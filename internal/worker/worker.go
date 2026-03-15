@@ -134,8 +134,19 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		MaxTurns:     cfg.Agent.MaxTurns,
 	}
 
-	if _, err = ag.Execute(ctx, taskSpec, execOpts); err != nil {
+	agentResult, err := ag.Execute(ctx, taskSpec, execOpts)
+	if err != nil {
 		return nil, fmt.Errorf("agent execution failed: %w", err)
+	}
+
+	// Post agent summary as a comment on the issue
+	if agentResult != nil && agentResult.Summary != "" {
+		summary := agentResult.Summary
+		if len(summary) > 60000 {
+			summary = summary[:60000] + "\n\n... (truncated)"
+		}
+		_ = p.Issues().AddComment(ctx, params.IssueNumber, fmt.Sprintf(
+			"**Worker Summary**\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", summary))
 	}
 
 	// Check for no-op (no commits made)
