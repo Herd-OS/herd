@@ -14,7 +14,7 @@ RUN ARCH=$(echo "$TARGETARCH" | sed 's/amd64/x64/' | sed 's/arm64/arm64/') \
     && curl -sL "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${ARCH}-${RUNNER_VERSION}.tar.gz" \
     | tar xz
 
-# Herd CLI is installed at startup by entrypoint.sh
+# Herd CLI is installed at startup by entrypoint.herd.sh
 # Set HERD_VERSION in .env to pin a version, otherwise latest is used.
 RUN mkdir -p /opt/herd/bin
 ENV PATH="/opt/herd/bin:${PATH}"
@@ -31,8 +31,8 @@ RUN useradd -m -d /home/runner runner \
     && chown -R runner:runner /runner /opt/herd
 
 WORKDIR /runner
-COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
+COPY entrypoint.herd.sh .
+RUN chmod +x entrypoint.herd.sh
 
 USER runner
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["./entrypoint.herd.sh"]

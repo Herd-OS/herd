@@ -332,15 +332,15 @@ func createRunnerFiles(dir, owner, repo string) error {
 	}
 	fmt.Println(display.Success("Installed Dockerfile.runner"))
 
-	// entrypoint.sh (static, executable)
-	data, err = runner.FS.ReadFile("entrypoint.sh")
+	// entrypoint.herd.sh (static, executable)
+	data, err = runner.FS.ReadFile("entrypoint.herd.sh")
 	if err != nil {
-		return fmt.Errorf("reading embedded entrypoint.sh: %w", err)
+		return fmt.Errorf("reading embedded entrypoint.herd.sh: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "entrypoint.sh"), data, 0755); err != nil {
-		return fmt.Errorf("writing entrypoint.sh: %w", err)
+	if err := os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), data, 0755); err != nil {
+		return fmt.Errorf("writing entrypoint.herd.sh: %w", err)
 	}
-	fmt.Println(display.Success("Installed entrypoint.sh"))
+	fmt.Println(display.Success("Installed entrypoint.herd.sh"))
 
 	// docker-compose.herd.yml (templated with owner/repo)
 	rendered, err := renderDockerCompose(owner, repo)
@@ -407,7 +407,7 @@ func commitInitFiles(dir, owner, repo string) error {
 		".herd/",
 		".github/workflows/",
 		"Dockerfile.runner",
-		"entrypoint.sh",
+		"entrypoint.herd.sh",
 		"docker-compose.herd.yml",
 		".env.herd.example",
 	}

@@ -14,7 +14,7 @@ This will:
 2. **Create `.herd/` directory** — with empty role instruction files (`planner.md`, `worker.md`, `integrator.md`) for customizing agent behavior per role
 3. **Create GitHub labels** — the `herd/*` label taxonomy used to track issue status and type
 4. **Install workflow files** — GitHub Actions workflows for workers, integrator, and monitor in `.github/workflows/`
-5. **Create runner files** — `Dockerfile.runner`, `entrypoint.sh`, `docker-compose.herd.yml`, and `.env.herd.example` for self-hosted runner setup
+5. **Create runner files** — `Dockerfile.runner`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example` for self-hosted runner setup
 6. **Commit and open a PR** — creates a `herd/init-<version>` branch, commits all generated files, pushes, and opens a PR. Review and merge the PR to apply the changes.
 
 ### Enable Workflows
