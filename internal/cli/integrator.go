@@ -146,6 +146,7 @@ func newAdvanceCmd() *cobra.Command {
 func newIntegratorReviewCmd() *cobra.Command {
 	var runID int64
 	var prNumber int
+	var batchNum int
 
 	cmd := &cobra.Command{
 		Use:   "review",
@@ -154,11 +155,15 @@ func newIntegratorReviewCmd() *cobra.Command {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator review is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
-			if runID == 0 && prNumber == 0 {
-				return fmt.Errorf("either --run-id or --pr is required")
+			set := 0
+			if runID != 0 { set++ }
+			if prNumber != 0 { set++ }
+			if batchNum != 0 { set++ }
+			if set == 0 {
+				return fmt.Errorf("one of --run-id, --pr, or --batch is required")
 			}
-			if runID != 0 && prNumber != 0 {
-				return fmt.Errorf("--run-id and --pr are mutually exclusive")
+			if set > 1 {
+				return fmt.Errorf("--run-id, --pr, and --batch are mutually exclusive")
 			}
 
 			cfg, err := config.Load(".")
@@ -186,9 +191,10 @@ func newIntegratorReviewCmd() *cobra.Command {
 			g := git.New(cwd)
 
 			result, err := integrator.Review(cmd.Context(), client, ag, g, cfg, integrator.ReviewParams{
-				RunID:    runID,
-				PRNumber: prNumber,
-				RepoRoot: cwd,
+				RunID:       runID,
+				PRNumber:    prNumber,
+				BatchNumber: batchNum,
+				RepoRoot:    cwd,
 			})
 			if err != nil {
 				return err
@@ -206,7 +212,8 @@ func newIntegratorReviewCmd() *cobra.Command {
 	}
 
 	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID")
-	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number (alternative to --run-id)")
+	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number")
+	cmd.Flags().IntVar(&batchNum, "batch", 0, "Batch/milestone number")
 	return cmd
 }
 

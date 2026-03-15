@@ -387,6 +387,62 @@ func TestReview_ByPRNumber(t *testing.T) {
 	assert.Equal(t, 50, result.BatchPRNumber)
 }
 
+func TestReview_BatchLookup(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 60, Title: "[herd] Batch", Head: "herd/batch/1-batch"}},
+		},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{
+			getResult: map[int]*platform.Milestone{
+				1: {Number: 1, Title: "Batch"},
+			},
+		},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{BatchNumber: 1, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 60, result.BatchPRNumber)
+}
+
+func TestReview_BatchLookup_NoPR(t *testing.T) {
+	mock := &mockPlatform{
+		issues: newMockIssueService(),
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{},
+		},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{
+			getResult: map[int]*platform.Milestone{
+				5: {Number: 5, Title: "My Feature"},
+			},
+		},
+	}
+
+	result, err := Review(context.Background(), mock, &mockReviewAgent{}, nil, &config.Config{
+		Integrator: config.Integrator{Review: true},
+	}, ReviewParams{BatchNumber: 5, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	assert.False(t, result.Approved)
+	assert.Equal(t, 0, result.BatchPRNumber)
+}
+
 func TestReview_AutoMergeFailure(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
