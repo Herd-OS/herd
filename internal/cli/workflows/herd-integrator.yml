@@ -57,9 +57,9 @@ jobs:
         env:
           HERD_RUNNER: "true"
           GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          BODY="${{ github.event.issue.body }}"
-          BATCH=$(echo "$BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1)
+          BATCH=$(echo "$ISSUE_BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1)
           if [ -n "$BATCH" ]; then
             herd integrator advance --batch "$BATCH"
           else
