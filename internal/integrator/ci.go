@@ -13,8 +13,9 @@ import (
 
 // CheckCIParams holds parameters for CI failure handling.
 type CheckCIParams struct {
-	RunID    int64
-	RepoRoot string
+	RunID       int64
+	BatchNumber int // Alternative to RunID — used by check_suite trigger
+	RepoRoot    string
 }
 
 // CheckCIResult holds the result of CI checking.
@@ -34,28 +35,41 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		return &CheckCIResult{Skipped: true}, nil
 	}
 
-	// Resolve the batch branch from the run
-	run, err := p.Workflows().GetRun(ctx, params.RunID)
-	if err != nil {
-		return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
-	}
+	var ms *platform.Milestone
+	var batchBranch string
 
-	issueNumStr := run.Inputs["issue_number"]
-	issueNumber, err := strconv.Atoi(issueNumStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid issue_number: %w", err)
-	}
+	if params.BatchNumber > 0 {
+		// Batch-based lookup — used by check_suite trigger
+		got, err := p.Milestones().Get(ctx, params.BatchNumber)
+		if err != nil {
+			return nil, fmt.Errorf("getting milestone #%d: %w", params.BatchNumber, err)
+		}
+		ms = got
+		batchBranch = fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	} else {
+		// Run-based lookup — used by workflow_run trigger
+		run, err := p.Workflows().GetRun(ctx, params.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
+		}
 
-	issue, err := p.Issues().Get(ctx, issueNumber)
-	if err != nil {
-		return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
-	}
-	if issue.Milestone == nil {
-		return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
-	}
+		issueNumStr := run.Inputs["issue_number"]
+		issueNumber, err := strconv.Atoi(issueNumStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid issue_number: %w", err)
+		}
 
-	ms := issue.Milestone
-	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+		issue, err := p.Issues().Get(ctx, issueNumber)
+		if err != nil {
+			return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
+		}
+		if issue.Milestone == nil {
+			return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
+		}
+
+		ms = issue.Milestone
+		batchBranch = fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	}
 
 	// Get CI status
 	status, err := p.Checks().GetCombinedStatus(ctx, batchBranch)

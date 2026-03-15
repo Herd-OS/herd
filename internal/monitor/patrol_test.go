@@ -20,6 +20,7 @@ type mockPlatform struct {
 	prs       *mockPRService
 	workflows *mockWorkflowService
 	repo      *mockRepoService
+	checks    *mockCheckService
 }
 
 func (m *mockPlatform) Issues() platform.IssueService             { return m.issues }
@@ -29,7 +30,23 @@ func (m *mockPlatform) Labels() platform.LabelService              { return nil 
 func (m *mockPlatform) Milestones() platform.MilestoneService      { return nil }
 func (m *mockPlatform) Runners() platform.RunnerService            { return nil }
 func (m *mockPlatform) Repository() platform.RepositoryService     { return m.repo }
-func (m *mockPlatform) Checks() platform.CheckService             { return nil }
+func (m *mockPlatform) Checks() platform.CheckService {
+	if m.checks != nil {
+		return m.checks
+	}
+	return &mockCheckService{status: "success"}
+}
+
+type mockCheckService struct {
+	status string
+}
+
+func (m *mockCheckService) GetCombinedStatus(_ context.Context, _ string) (string, error) {
+	return m.status, nil
+}
+func (m *mockCheckService) RerunFailedChecks(_ context.Context, _ string) error {
+	return nil
+}
 
 type mockIssueService struct {
 	listResults    map[string][]*platform.Issue // keyed by label
@@ -370,6 +387,82 @@ func TestPatrol_StuckPR(t *testing.T) {
 	assert.Len(t, prSvc.comments[10], 1)
 	assert.Contains(t, prSvc.comments[10][0], "open for over 48 hours")
 	assert.Len(t, prSvc.comments[11], 0) // non-herd PR not flagged
+}
+
+func TestPatrol_CIFailureOnBatchPR(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "failure"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.CIFailures)
+	assert.Len(t, prSvc.comments[10], 1)
+	assert.Contains(t, prSvc.comments[10][0], "CI is failing")
+}
+
+func TestPatrol_CIPassingOnBatchPR(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "success"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.CIFailures)
+	assert.Len(t, prSvc.comments[10], 0)
+}
+
+func TestPatrol_CINotCheckedWhenRequireCIFalse(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	mock := &mockPlatform{
+		issues:    newMockIssueService(),
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "failure"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: false},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.CIFailures)
 }
 
 func TestBackoffDelay(t *testing.T) {
