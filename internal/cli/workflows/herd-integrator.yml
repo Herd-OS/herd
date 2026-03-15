@@ -37,11 +37,12 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          herd integrator consolidate --run-id ${{ github.event.workflow_run.id }}
-          herd integrator check-ci --run-id ${{ github.event.workflow_run.id }}
-          herd integrator advance --run-id ${{ github.event.workflow_run.id }}
-          herd integrator review --run-id ${{ github.event.workflow_run.id }}
+          herd integrator consolidate --run-id "$RUN_ID"
+          herd integrator check-ci --run-id "$RUN_ID"
+          herd integrator advance --run-id "$RUN_ID"
+          herd integrator review --run-id "$RUN_ID"
 
   advance-on-close:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'issues'
@@ -88,11 +89,13 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [ "${{ github.event.review.state }}" = "approved" ]; then
-            herd integrator merge --pr ${{ github.event.pull_request.number }}
+          if [ "$REVIEW_STATE" = "approved" ]; then
+            herd integrator merge --pr "$PR_NUMBER"
           else
-            herd integrator review --pr ${{ github.event.pull_request.number }}
+            herd integrator review --pr "$PR_NUMBER"
           fi
 
   cleanup:
@@ -113,5 +116,6 @@ jobs:
         env:
           HERD_RUNNER: "true"
           GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          herd integrator cleanup --pr ${{ github.event.pull_request.number }}
+          herd integrator cleanup --pr "$PR_NUMBER"

@@ -49,5 +49,6 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
-          herd worker exec ${{ inputs.issue_number }}
+          herd worker exec "$ISSUE_NUMBER"
