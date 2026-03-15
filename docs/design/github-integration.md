@@ -83,7 +83,7 @@ HerdOS ships three workflow files, installed by `herd init` into `.github/workfl
 |----------|---------|---------|
 | `herd-worker.yml` | `workflow_dispatch` | Executes a task from an issue. Receives issue number, batch branch, timeout, and runner label as inputs. Checks out the batch branch (or main), runs `herd worker exec`, which handles reading the issue, labeling, branching, invoking the agent, pushing, and updating status. |
 | `herd-monitor.yml` | `schedule` (cron, every 15 min) + `workflow_dispatch` | Health patrol. Runs `herd monitor patrol` to detect stuck/failed work, re-dispatch if configured, comment on issues, and unblock stragglers. Does not need an agent -- only makes API calls. |
-| `herd-integrator.yml` | `workflow_run` (worker completed) + `pull_request_review` (submitted) | Consolidates worker branches into the batch branch, checks tier completion, dispatches next tier, opens the batch PR when all tiers are done, runs agent review, and merges after human approval. |
+| `herd-integrator.yml` | `workflow_run` (worker completed) + `check_suite` (CI completed) + `issues` (closed) + `pull_request_review` (submitted) + `pull_request` (closed) | Consolidates worker branches into the batch branch, checks tier completion, dispatches next tier, opens the batch PR when all tiers are done, detects CI failures and dispatches fix workers, runs agent review, and merges after human approval. |
 
 ### Secrets Management
 
@@ -105,13 +105,17 @@ Worker completes   -> workflow_run.completed  -> Integrator consolidates
                                                       |
 Tier complete      -> (integrator logic)      -> Dispatch next tier
                                                       |
+Manual task closed -> issues.closed           -> Integrator advances + reviews
+                                                      |
 All tiers done     -> (integrator logic)      -> Batch PR opened
+                                                      |
+CI fails on batch  -> check_suite.completed   -> Integrator dispatches fix worker
                                                       |
 Agent review       -> (integrator logic)      -> Approve or fix cycle
                                                       |
 Human approves PR  -> pull_request_review     -> Integrator merges (if CI passes)
                                                       |
-Batch PR merged    -> pull_request.closed     -> Issues closed
+Batch PR merged    -> pull_request.closed     -> Issues closed, cleanup
                                                       |
 Cron fires         -> schedule                -> Monitor patrols
 Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
@@ -121,8 +125,15 @@ Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
 
 - **workflow_dispatch** -- primary dispatch mechanism. Only users with write access can trigger it (enforced by GitHub). The `ref` parameter points to the branch containing the workflow YAML, not the branch the worker checks out.
 - **workflow_run** -- triggers the Integrator when a worker completes (success or failure).
+- **check_suite** -- triggers the Integrator when CI completes on a batch branch. If CI failed, the Integrator re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`.
+- **issues** -- triggers the Integrator when an issue is closed. Used for manual task completion — the Integrator advances the tier and runs agent review if all tiers are done.
 - **pull_request_review** -- triggers the Integrator to merge batch PRs after human approval + CI pass.
+- **pull_request** -- triggers cleanup when a batch PR is merged (branch deletion, milestone closure).
 - **schedule** -- triggers Monitor patrol. GitHub may delay or skip scheduled runs under load; the Monitor is stateless and catches up on the next patrol.
+
+All workflows require the `HERD_ENABLED` repository variable to be set to `true`. This prevents workflow storms when `herd init` pushes workflow files before runners are configured. All `${{ }}` expressions in `run:` blocks are passed through environment variables to prevent shell injection.
+
+The checkout action in all workflows uses `HERD_GITHUB_TOKEN` (falling back to `GITHUB_TOKEN`) to configure git credentials for pushes. This is required for workers that create workflow files, which need the `workflows` permission.
 
 Issues auto-close via GitHub's native "Closes #N" references in the batch PR description. Dependency unblocking is handled by the Integrator's tier advancement logic, with the Monitor as a safety net.
 

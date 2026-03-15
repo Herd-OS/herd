@@ -15,6 +15,17 @@ This will:
 3. **Create GitHub labels** — the `herd/*` label taxonomy used to track issue status and type
 4. **Install workflow files** — GitHub Actions workflows for workers, integrator, and monitor in `.github/workflows/`
 5. **Create runner files** — `Dockerfile.runner`, `entrypoint.sh`, `docker-compose.herd.yml`, and `.env.example` for self-hosted runner setup
+6. **Commit and open a PR** — creates a `herd/init-<version>` branch, commits all generated files, pushes, and opens a PR. Review and merge the PR to apply the changes.
+
+### Enable Workflows
+
+Workflows are installed but inactive until you enable them. After setting up runners (see [Runner Setup](runners.md)), set the `HERD_ENABLED` repository variable:
+
+```bash
+gh variable set HERD_ENABLED --body true --repo <owner>/<repo>
+```
+
+This prevents a workflow storm if runners are online before the system is fully configured.
 
 ### Skipping Steps
 
@@ -149,9 +160,11 @@ Once workers are dispatched, the system runs autonomously via GitHub Actions:
 
 4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. If issues are found, the Integrator creates fix issues and dispatches fix workers. This cycle repeats up to `review_max_fix_cycles` times.
 
-5. **Monitor patrols** — A cron-triggered Action detects stale workers (in-progress with no active run), failed issues (auto-redispatches with exponential backoff), and stuck PRs (open longer than `max_pr_age_hours`). It escalates to `notify_users` when retries are exhausted.
+5. **CI failure detection** — When CI completes on the batch branch, a `check_suite` event triggers the Integrator. If CI failed, it re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`.
 
-6. **You review and merge** — The batch PR arrives with a summary table of all tasks and their tiers. If `pull_requests.auto_merge` is true and the agent review passed, it merges automatically.
+6. **Monitor patrols** — A cron-triggered Action detects stale workers (in-progress with no active run), failed issues (auto-redispatches with exponential backoff), CI failures on batch PRs, and stuck PRs (open longer than `max_pr_age_hours`). It escalates to `notify_users` when retries are exhausted.
+
+7. **You review and merge** — The batch PR arrives with a summary table of all tasks and their tiers. If `pull_requests.auto_merge` is true and the agent review passed, it merges automatically.
 
 ### Role Instruction Files
 

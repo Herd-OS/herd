@@ -41,6 +41,20 @@ Good decomposition is critical. The Planner should produce tasks that:
 
 The interactive session is key to achieving these properties. The agent has full codebase context and can reason about file boundaries, dependency relationships, and potential conflicts before producing a plan.
 
+## Worker Permissions and Manual Tasks
+
+Workers run as GitHub Actions with limited permissions. They can read/write repository contents, issues, and PRs. They **cannot**: create or modify GitHub Actions workflow files (`.github/workflows/`), manage secrets or repo settings, create repos, or interact with external services requiring authentication.
+
+The Planner evaluates each task against these boundaries. Any task requiring elevated permissions or external setup must be marked as **manual** (`"manual": true`). Manual tasks are tracked as GitHub Issues but not dispatched to workers — a human must complete and close them.
+
+**Manual tasks that grant permissions or set up external services must be in Tier 0.** These tasks unblock later tiers. If a worker needs a secret, API key, DNS record, or workflow permission to do its job, the manual task that provides it must complete first. Never place a setup task in a later tier than the tasks that depend on it.
+
+Common manual tasks:
+- Creating or modifying CI/CD workflow files
+- Configuring external services (DNS, CDN, cloud providers, APIs)
+- Setting up secrets, tokens, or environment variables
+- Creating repositories or managing GitHub settings
+
 ## Self-Contained Issues
 
 **The Planner does the thinking, the Worker does the typing.**
