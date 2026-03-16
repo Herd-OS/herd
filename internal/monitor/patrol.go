@@ -160,8 +160,12 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 			ciStatus, err := p.Checks().GetCombinedStatus(ctx, pr.Head)
 			if err == nil && ciStatus == "failure" {
 				if !hasCIFixPendingLabel(ctx, p, pr.Number) {
-					_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
-					_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.CIFixPending})
+					// Add the label before posting the command. If AddLabels fails,
+					// skip posting the comment so the next patrol cycle doesn't
+					// dispatch a duplicate fix worker.
+					if labelErr := p.Issues().AddLabels(ctx, pr.Number, []string{issues.CIFixPending}); labelErr == nil {
+						_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
+					}
 				}
 				result.CIFailures++
 			} else if err == nil && ciStatus == "success" {
