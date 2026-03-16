@@ -10,6 +10,27 @@ import (
 
 // --- tests ---
 
+func TestIsBotUser(t *testing.T) {
+	tests := []struct {
+		login   string
+		allowed bool
+	}{
+		{"herd-os[bot]", true},
+		{"github-actions[bot]", true},
+		{"dependabot[bot]", false},
+		{"renovate[bot]", false},
+		{"coderabbit[bot]", false},
+		{"random-user", false},
+		{"[bot]", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.login, func(t *testing.T) {
+			assert.Equal(t, tc.allowed, isBotUser(tc.login))
+		})
+	}
+}
+
 func TestHandle(t *testing.T) {
 	// Ensure a clean registry for each test by saving and restoring.
 	savedRegistry := Registry
@@ -68,25 +89,52 @@ func TestHandle(t *testing.T) {
 		assert.Contains(t, err.Error(), "permission denied")
 	})
 
-	t.Run("bot user allowed", func(t *testing.T) {
-		Registry = map[string]HandlerFunc{}
-		Register("fix-ci", func(_ context.Context, _ *HandlerContext, cmd *Command) (string, error) {
-			return "bot did it", nil
-		})
+	t.Run("allowlisted bot user allowed", func(t *testing.T) {
+		for _, botLogin := range []string{"herd-os[bot]", "github-actions[bot]"} {
+			botLogin := botLogin
+			t.Run(botLogin, func(t *testing.T) {
+				Registry = map[string]HandlerFunc{}
+				Register("fix-ci", func(_ context.Context, _ *HandlerContext, cmd *Command) (string, error) {
+					return "bot did it", nil
+				})
 
-		issues := &mockIssueService{}
-		hctx := &HandlerContext{
-			Platform:    &mockPlatform{issues: issues},
-			CommentID:   789,
-			IssueNumber: 4,
-			AuthorLogin: "herd-os[bot]",
+				issues := &mockIssueService{}
+				hctx := &HandlerContext{
+					Platform:    &mockPlatform{issues: issues},
+					CommentID:   789,
+					IssueNumber: 4,
+					AuthorLogin: botLogin,
+				}
+
+				// Allowlisted bot has NONE association but should still be allowed.
+				resp, err := Handle(context.Background(), hctx, "/herd fix-ci", "NONE")
+				require.NoError(t, err)
+				assert.Equal(t, "bot did it", resp)
+				assert.Contains(t, issues.reactions, "eyes")
+			})
 		}
+	})
 
-		// Bot has NONE association but should still be allowed.
-		resp, err := Handle(context.Background(), hctx, "/herd fix-ci", "NONE")
-		require.NoError(t, err)
-		assert.Equal(t, "bot did it", resp)
-		assert.Contains(t, issues.reactions, "eyes")
+	t.Run("non-allowlisted bot user denied", func(t *testing.T) {
+		for _, botLogin := range []string{"dependabot[bot]", "renovate[bot]", "coderabbit[bot]", "some-random[bot]"} {
+			botLogin := botLogin
+			t.Run(botLogin, func(t *testing.T) {
+				Registry = map[string]HandlerFunc{}
+				Register("fix-ci", func(_ context.Context, _ *HandlerContext, cmd *Command) (string, error) {
+					return "done", nil
+				})
+
+				hctx := &HandlerContext{
+					IssueNumber: 4,
+					AuthorLogin: botLogin,
+				}
+
+				resp, err := Handle(context.Background(), hctx, "/herd fix-ci", "NONE")
+				assert.Error(t, err)
+				assert.Empty(t, resp)
+				assert.Contains(t, err.Error(), "permission denied")
+			})
+		}
 	})
 
 	t.Run("no command returns empty string", func(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/platform"
@@ -43,9 +42,15 @@ var allowedAssociations = map[string]bool{
 	"COLLABORATOR": true,
 }
 
-// isBotUser returns true if the login is a GitHub App bot (ends with "[bot]").
+// allowedBotLogins is the explicit allowlist of GitHub App bot logins permitted to run commands.
+var allowedBotLogins = map[string]bool{
+	"github-actions[bot]": true,
+	"herd-os[bot]":        true,
+}
+
+// isBotUser returns true only if the login is in the explicit bot allowlist.
 func isBotUser(login string) bool {
-	return strings.HasSuffix(login, "[bot]")
+	return allowedBotLogins[login]
 }
 
 // Handle parses a comment, validates permissions, and dispatches to the handler.
