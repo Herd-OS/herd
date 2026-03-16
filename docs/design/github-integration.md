@@ -119,6 +119,7 @@ Batch PR merged    -> pull_request.closed     -> Issues closed, cleanup
                                                       |
 Cron fires         -> schedule                -> Monitor patrols
 Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
+Comment with /herd -> issue_comment.created  -> Comment handler parses & dispatches
 ```
 
 ### Event Types
@@ -129,6 +130,7 @@ Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
 - **issues** -- triggers the Integrator when an issue is closed. Used for manual task completion — the Integrator advances the tier and runs agent review if all tiers are done.
 - **pull_request_review** -- triggers the Integrator to merge batch PRs after human approval + CI pass.
 - **pull_request** -- triggers cleanup when a batch PR is merged (branch deletion, milestone closure).
+- **issue_comment** -- triggers the comment command handler when a comment containing `/herd` is posted on an issue or PR. Used by both humans and the Monitor for dispatching actions.
 - **schedule** -- triggers Monitor patrol. GitHub may delay or skip scheduled runs under load; the Monitor is stateless and catches up on the next patrol.
 
 All workflows require the `HERD_ENABLED` repository variable to be set to `true`. This prevents workflow storms when `herd init` pushes workflow files before runners are configured. All `${{ }}` expressions in `run:` blocks are passed through environment variables to prevent shell injection.

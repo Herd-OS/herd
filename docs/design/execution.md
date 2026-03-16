@@ -525,6 +525,12 @@ Option B: Notify user
           (on_conflict: notify, or after resolver cap reached)
 ```
 
+### Comment-Driven Actions
+
+All automated actions that dispatch workers (Monitor retry, CI fix, review fix) use the comment command system. The Monitor or Integrator posts a `/herd <command>` comment, which triggers the `issue_comment` workflow job. This creates a single execution path regardless of whether the action was initiated by a human or the system.
+
+This architecture is a stepping stone toward the GitHub App (`@herd-os`) which will use the same command functions but with agent-based natural language interpretation instead of `/herd` prefix parsing.
+
 ### Recovering from a Stuck Tier
 
 When a tier is stuck (worker failed and auto-redispatch exhausted):

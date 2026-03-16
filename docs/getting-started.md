@@ -189,3 +189,18 @@ Some tasks in a batch may be labeled `herd/type:manual` — these require human 
 ### Re-triggering Review
 
 When a human submits a review on the batch PR, the Integrator's `re-review` job runs automatically, invoking the agent for a fresh review against the current diff. This allows you to push manual fixes and have the agent re-evaluate.
+
+### Comment Commands
+
+You can interact with HerdOS by commenting on issues and PRs:
+
+| Command | Where | What it does |
+|---------|-------|-------------|
+| `/herd fix-ci` | Batch PR | Checks CI status and dispatches fix workers if failing |
+| `/herd fix-ci "hint"` | Batch PR | Same, with context for the fix worker |
+| `/herd retry <N>` | Any issue | Redispatches a failed issue |
+| `/herd review` | Batch PR | Triggers agent review |
+| `/herd review "focus area"` | Batch PR | Review with extra instructions |
+| `/herd fix "description"` | Batch PR | Creates a fix issue and dispatches a worker |
+
+Commands are available to repository owners, members, and collaborators. The Monitor also uses these commands — when it detects a CI failure, it comments `/herd fix-ci` on the batch PR, which triggers the same handler.
