@@ -138,8 +138,10 @@ func (s *issueService) ListComments(ctx context.Context, number int) ([]*platfor
 		}
 		for _, c := range comments {
 			result = append(result, &platform.Comment{
-				ID:   c.GetID(),
-				Body: c.GetBody(),
+				ID:                c.GetID(),
+				Body:              c.GetBody(),
+				AuthorLogin:       c.GetUser().GetLogin(),
+				AuthorAssociation: c.GetAuthorAssociation(),
 			})
 		}
 		if resp.NextPage == 0 {
@@ -148,6 +150,14 @@ func (s *issueService) ListComments(ctx context.Context, number int) ([]*platfor
 		opts.Page = resp.NextPage
 	}
 	return result, nil
+}
+
+func (s *issueService) CreateCommentReaction(ctx context.Context, commentID int64, reaction string) error {
+	_, _, err := s.c.gh.Reactions.CreateIssueCommentReaction(ctx, s.c.owner, s.c.repo, commentID, reaction)
+	if err != nil {
+		return fmt.Errorf("creating reaction on comment %d: %w", commentID, err)
+	}
+	return nil
 }
 
 func mapIssue(i *gh.Issue) *platform.Issue {
