@@ -143,6 +143,10 @@ jobs:
       && github.event_name == 'issue_comment'
       && github.event.action == 'created'
       && contains(github.event.comment.body, '/herd')
+      && (
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+        || endsWith(github.event.comment.user.login, '[bot]')
+      )
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout

@@ -10,6 +10,27 @@ import (
 
 // --- tests ---
 
+func TestIsBotUser(t *testing.T) {
+	tests := []struct {
+		name     string
+		login    string
+		expected bool
+	}{
+		{"github-actions bot", "github-actions[bot]", true},
+		{"herd-os bot", "herd-os[bot]", true},
+		{"regular user", "octocat", false},
+		{"empty login", "", false},
+		{"bot in middle", "my[bot]user", false},
+		{"bot suffix only", "[bot]", true},
+		{"bot suffix exact", "some-app[bot]", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isBotUser(tt.login))
+		})
+	}
+}
+
 func TestHandle(t *testing.T) {
 	// Ensure a clean registry for each test by saving and restoring.
 	savedRegistry := Registry
