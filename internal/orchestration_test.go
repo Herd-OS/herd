@@ -155,6 +155,7 @@ func (s *statefulIssueService) AddComment(_ context.Context, number int, body st
 	s.comments[number] = append(s.comments[number], body)
 	return nil
 }
+func (s *statefulIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
 func (s *statefulIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }

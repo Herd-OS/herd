@@ -58,6 +58,7 @@ type mockIssueService struct {
 	comments         map[int][]string
 	existingComments map[int][]*platform.Comment // for ListComments
 	listCommentsErr  error
+	deletedComments  []int64
 }
 
 func newMockIssueService() *mockIssueService {
@@ -104,6 +105,10 @@ func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []
 }
 func (m *mockIssueService) AddComment(_ context.Context, number int, body string) error {
 	m.comments[number] = append(m.comments[number], body)
+	return nil
+}
+func (m *mockIssueService) DeleteComment(_ context.Context, commentID int64) error {
+	m.deletedComments = append(m.deletedComments, commentID)
 	return nil
 }
 func (m *mockIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
@@ -542,6 +547,94 @@ func TestPatrol_CIPassingOnBatchPR(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.CIFailures)
 	assert.Len(t, prSvc.comments[10], 0)
+}
+
+func TestPatrol_CIPassingDeletesExistingFixCIComment(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+	// A /herd fix-ci comment exists from a prior fix cycle.
+	issueSvc.existingComments = map[int][]*platform.Comment{
+		10: {{ID: 42, Body: "/herd fix-ci"}},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "success"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.CIFailures)
+	// The stale /herd fix-ci comment must be deleted to allow future re-triggering.
+	assert.Contains(t, issueSvc.deletedComments, int64(42))
+}
+
+func TestPatrol_CIPassingNoFixCICommentNoDeleteCalled(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+	// No existing fix-ci comment.
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "success"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.CIFailures)
+	assert.Empty(t, issueSvc.deletedComments)
+}
+
+func TestPatrol_CIFailureAfterFixCICommentDeleted(t *testing.T) {
+	// Regression test: after CI passes (comment deleted), a new CI failure
+	// must post a fresh /herd fix-ci comment.
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+	// No existing comment — simulates state after a prior pass deleted it.
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "failure"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.CIFailures)
+	assert.Len(t, prSvc.comments[10], 1)
+	assert.Contains(t, prSvc.comments[10][0], "/herd fix-ci")
 }
 
 func TestPatrol_CINotCheckedWhenRequireCIFalse(t *testing.T) {

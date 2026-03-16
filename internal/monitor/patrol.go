@@ -158,11 +158,16 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		// CI failure detection on batch PRs
 		if cfg.Integrator.RequireCI && strings.HasPrefix(pr.Head, "herd/batch/") {
 			ciStatus, err := p.Checks().GetCombinedStatus(ctx, pr.Head)
-			if err == nil && ciStatus == "failure" {
-				if !hasCIFixComment(ctx, p, pr.Number) {
-					_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
+			if err == nil {
+				switch ciStatus {
+				case "failure":
+					if !hasCIFixComment(ctx, p, pr.Number) {
+						_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
+					}
+					result.CIFailures++
+				case "success":
+					deleteCIFixComments(ctx, p, pr.Number)
 				}
-				result.CIFailures++
 			}
 		}
 	}
@@ -183,6 +188,20 @@ func hasCIFixComment(ctx context.Context, p platform.Platform, prNumber int) boo
 		}
 	}
 	return false
+}
+
+// deleteCIFixComments removes all /herd fix-ci comments from the PR, resetting the
+// dedup state so future CI failures can trigger a new fix cycle.
+func deleteCIFixComments(ctx context.Context, p platform.Platform, prNumber int) {
+	comments, err := p.Issues().ListComments(ctx, prNumber)
+	if err != nil {
+		return
+	}
+	for _, c := range comments {
+		if strings.Contains(c.Body, "/herd fix-ci") {
+			_ = p.Issues().DeleteComment(ctx, c.ID)
+		}
+	}
 }
 
 // BackoffDelay returns the backoff delay for a given failure count.

@@ -321,6 +321,7 @@ func (m *mockIssueService) AddComment(_ context.Context, _ int, body string) err
 	m.comments = append(m.comments, body)
 	return nil
 }
+func (m *mockIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
 func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }
