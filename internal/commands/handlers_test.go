@@ -296,7 +296,7 @@ func TestHandleFixCI_NotBatchPR(t *testing.T) {
 	}
 	result := handleFixCI(hctx, Command{Name: "fix-ci"})
 
-	assert.Empty(t, result.Error)
+	assert.NoError(t, result.Error)
 	assert.Contains(t, result.Message, "can only be used on batch PRs")
 }
 
