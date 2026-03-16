@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/herd-os/herd/internal/agent/claude"
+	"github.com/herd-os/herd/internal/commands"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/integrator"
@@ -26,6 +28,7 @@ func newIntegratorCmd() *cobra.Command {
 	cmd.AddCommand(newIntegratorMergeCmd())
 	cmd.AddCommand(newIntegratorCleanupCmd())
 	cmd.AddCommand(newIntegratorCheckCICmd())
+	cmd.AddCommand(newHandleCommentCmd())
 	return cmd
 }
 
@@ -291,6 +294,101 @@ func newIntegratorCleanupCmd() *cobra.Command {
 
 	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number (required)")
 	cmd.MarkFlagRequired("pr")
+	return cmd
+}
+
+func newHandleCommentCmd() *cobra.Command {
+	var (
+		commentID         int64
+		issueNumber       int
+		authorLogin       string
+		authorAssociation string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "handle-comment",
+		Short: "Handle a /herd command from an issue/PR comment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if os.Getenv("HERD_RUNNER") != "true" {
+				return fmt.Errorf("herd integrator handle-comment is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+
+			commentBody := os.Getenv("COMMENT_BODY")
+			issueBody := os.Getenv("ISSUE_BODY")
+
+			if commentBody == "" {
+				return fmt.Errorf("COMMENT_BODY env var is required")
+			}
+
+			parsed := commands.Parse(commentBody)
+			if parsed == nil {
+				fmt.Println("No /herd command found in comment.")
+				return nil
+			}
+
+			allowed := map[string]bool{
+				"OWNER":        true,
+				"MEMBER":       true,
+				"COLLABORATOR": true,
+			}
+			if !allowed[authorAssociation] {
+				if !strings.HasSuffix(authorLogin, "[bot]") {
+					fmt.Printf("Ignoring command from %s (association: %s)\n", authorLogin, authorAssociation)
+					return nil
+				}
+			}
+
+			cfg, err := config.Load(".")
+			if err != nil {
+				return err
+			}
+			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			if err != nil {
+				return fmt.Errorf("creating GitHub client: %w", err)
+			}
+
+			_ = client.Issues().CreateCommentReaction(cmd.Context(), commentID, "eyes")
+
+			cwd, _ := os.Getwd()
+			ag := claude.New(cfg.Agent.Binary, cfg.Agent.Model)
+			g := git.New(cwd)
+
+			reg := commands.DefaultRegistry()
+			hctx := &commands.HandlerContext{
+				Ctx:         cmd.Context(),
+				Platform:    client,
+				Agent:       ag,
+				Git:         g,
+				Config:      cfg,
+				RepoRoot:    cwd,
+				IssueNumber: issueNumber,
+				CommentID:   commentID,
+				IssueBody:   issueBody,
+				AuthorLogin: authorLogin,
+			}
+
+			result := reg.Handle(hctx, *parsed)
+
+			if result.Error != nil {
+				msg := fmt.Sprintf("❌ **HerdOS Command Failed**\n\n`/herd %s` failed: %s", parsed.Name, result.Error)
+				_ = client.Issues().AddComment(cmd.Context(), issueNumber, msg)
+				return result.Error
+			}
+			if result.Message != "" {
+				_ = client.Issues().AddComment(cmd.Context(), issueNumber, result.Message)
+			}
+
+			fmt.Println(result.Message)
+			return nil
+		},
+	}
+
+	cmd.Flags().Int64Var(&commentID, "comment-id", 0, "Comment ID (required)")
+	cmd.Flags().IntVar(&issueNumber, "issue-number", 0, "Issue/PR number (required)")
+	cmd.Flags().StringVar(&authorLogin, "author-login", "", "Comment author login")
+	cmd.Flags().StringVar(&authorAssociation, "author-association", "", "Comment author association")
+	cmd.MarkFlagRequired("comment-id")
+	cmd.MarkFlagRequired("issue-number")
 	return cmd
 }
 

@@ -84,6 +84,9 @@ func (m *mockIssueService) AddComment(_ context.Context, _ int, body string) err
 func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }
+func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
+	return nil
+}
 
 type mockWorkflowService struct {
 	dispatched bool

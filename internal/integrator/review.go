@@ -35,7 +35,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		pr = got
 		batchBranch = pr.Head
 
-		msNumber, err := parseBatchBranchMilestone(batchBranch)
+		msNumber, err := ParseBatchBranchMilestone(batchBranch)
 		if err != nil {
 			return nil, fmt.Errorf("parsing milestone from branch %s: %w", batchBranch, err)
 		}
@@ -167,6 +167,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		reviewOpts.SystemPrompt = string(ri)
 	}
 
+	if params.ExtraInstructions != "" {
+		if reviewOpts.SystemPrompt != "" {
+			reviewOpts.SystemPrompt += "\n\n"
+		}
+		reviewOpts.SystemPrompt += params.ExtraInstructions
+	}
+
 	reviewResult, err := ag.Review(ctx, diff, reviewOpts)
 	if err != nil {
 		return nil, fmt.Errorf("agent review failed: %w", err)
@@ -174,6 +181,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// Handle approved
 	if reviewResult.Approved {
+		_ = p.PullRequests().AddComment(ctx, pr.Number,
+			fmt.Sprintf("✅ **HerdOS Review**\n\n%s", reviewResult.Summary))
 		_ = p.PullRequests().CreateReview(ctx, pr.Number, reviewResult.Summary, platform.ReviewApprove)
 		if cfg.PullRequests.AutoMerge {
 			if _, err := p.PullRequests().Merge(ctx, pr.Number, platform.MergeMethod(cfg.Integrator.Strategy)); err != nil {
@@ -208,8 +217,17 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Create fix issues and dispatch workers
+	// Post findings comment
 	nextCycle := currentCycle + 1
+	var findingsMsg strings.Builder
+	findingsMsg.WriteString(fmt.Sprintf("🔍 **HerdOS Review** (cycle %d)\n\n", nextCycle))
+	for _, comment := range reviewResult.Comments {
+		findingsMsg.WriteString(fmt.Sprintf("- %s\n", comment))
+	}
+	findingsMsg.WriteString(fmt.Sprintf("\nDispatching %d fix workers.", len(reviewResult.Comments)))
+	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsMsg.String())
+
+	// Create fix issues and dispatch workers
 	var fixIssueNums []int
 
 	defaultBranchForDispatch, _ := p.Repository().GetDefaultBranch(ctx)
@@ -287,9 +305,9 @@ func findMaxFixCycle(allIssues []*platform.Issue) int {
 	return max
 }
 
-// parseBatchBranchMilestone extracts the milestone number from a batch branch name.
+// ParseBatchBranchMilestone extracts the milestone number from a batch branch name.
 // Expected format: "herd/batch/{number}-{slug}"
-func parseBatchBranchMilestone(branch string) (int, error) {
+func ParseBatchBranchMilestone(branch string) (int, error) {
 	parts := strings.TrimPrefix(branch, "herd/batch/")
 	if parts == branch {
 		return 0, fmt.Errorf("not a batch branch: %s", branch)

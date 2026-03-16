@@ -47,7 +47,7 @@ func MergeApproved(ctx context.Context, p platform.Platform, cfg *config.Config,
 	}
 
 	// Post-merge cleanup: close issues, close milestone, delete branch
-	msNumber, err := parseBatchBranchMilestone(pr.Head)
+	msNumber, err := ParseBatchBranchMilestone(pr.Head)
 	if err != nil {
 		// Merged successfully but can't parse milestone — not fatal
 		return &MergeApprovedResult{Merged: true}, nil
@@ -83,7 +83,7 @@ func CleanupMerged(ctx context.Context, p platform.Platform, params CleanupParam
 		return nil
 	}
 
-	msNumber, err := parseBatchBranchMilestone(pr.Head)
+	msNumber, err := ParseBatchBranchMilestone(pr.Head)
 	if err != nil {
 		return nil // Not a batch branch, skip
 	}
