@@ -67,10 +67,7 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 		Context: fmt.Sprintf("Requested by @%s via `/herd fix` on batch PR #%d.", hctx.AuthorLogin, pr.Number),
 	})
 
-	truncated := cmd.Prompt
-	if len(truncated) > 60 {
-		truncated = truncated[:60] + "..."
-	}
+	truncated := truncateRunes(cmd.Prompt, 60)
 	fixIssue, err := hctx.Platform.Issues().Create(hctx.Ctx,
 		"Fix: "+truncated,
 		body,
@@ -96,4 +93,14 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 	}
 
 	return Result{Message: fmt.Sprintf("🔧 Created fix issue #%d and dispatched worker.", fixIssue.Number)}
+}
+
+// truncateRunes truncates s to at most n runes, appending "..." if truncated.
+// This is safe for multi-byte UTF-8 strings.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
