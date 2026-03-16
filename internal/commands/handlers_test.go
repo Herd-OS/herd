@@ -651,6 +651,58 @@ func TestHandleReview_WithFixes(t *testing.T) {
 	assert.Len(t, issueSvc.createdIssues, 2)
 }
 
+func TestHandleReview_MaxCyclesHit(t *testing.T) {
+	// An issue with fix_cycle: 3 causes findMaxFixCycle to return 3,
+	// which equals ReviewMaxFixCycles (3) → integrator takes MaxCyclesHit path.
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{
+			Number: 42,
+			Body:   "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 3\n---\n\n## Task\nA prior fix.\n",
+		},
+	}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Head: "herd/batch/1-batch", Base: "main"},
+		},
+	}
+	p := &testPlatform{
+		issues:  issueSvc,
+		prs:     prSvc,
+		workflows: &testWorkflowService{},
+		repo:    &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{
+			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}},
+		},
+	}
+
+	dir, g := initHandlerTestRepo(t)
+	ag := &testAgent{reviewResult: &agent.ReviewResult{
+		Approved: false,
+		Comments: []string{"Fix error handling"},
+	}}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Agent:       ag,
+		Git:         g,
+		Config:      baseConfig(),
+		IssueNumber: 50,
+		RepoRoot:    dir,
+		IsPR:        true,
+	}
+	result := handleReview(hctx, Command{Name: "review"})
+
+	require.NoError(t, result.Error)
+	// integrator.Review posts the max-cycles warning directly on the PR; handler
+	// must return an empty message to avoid posting a duplicate comment.
+	assert.Empty(t, result.Message)
+	// The PR should have received the warning comment from integrator.Review.
+	require.NotEmpty(t, prSvc.comments, "expected integrator to post a PR comment on MaxCyclesHit")
+	assert.Contains(t, prSvc.comments[0], "max fix cycles")
+}
+
 // --- Tests for handleFix ---
 
 func TestHandleFix_NotPR(t *testing.T) {
