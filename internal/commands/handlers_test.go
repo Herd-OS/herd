@@ -46,7 +46,6 @@ type testIssueService struct {
 	removedLabels map[int][]string
 	createdIssues []*platform.Issue
 	nextIssueNum  int
-	dispatchErr   error
 }
 
 func newTestIssueService() *testIssueService {
