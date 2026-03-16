@@ -93,6 +93,7 @@ type mockPRService struct {
 	getResult  map[int]*platform.PullRequest
 	created    *platform.PullRequest
 	merged     bool
+	comments   []string
 }
 
 func (m *mockPRService) Create(_ context.Context, title, body, head, base string) (*platform.PullRequest, error) {
@@ -118,7 +119,10 @@ func (m *mockPRService) Merge(_ context.Context, _ int, _ platform.MergeMethod) 
 	return &platform.MergeResult{Merged: true}, nil
 }
 func (m *mockPRService) UpdateBranch(_ context.Context, _ int) error { return nil }
-func (m *mockPRService) AddComment(_ context.Context, _ int, _ string) error { return nil }
+func (m *mockPRService) AddComment(_ context.Context, _ int, body string) error {
+	m.comments = append(m.comments, body)
+	return nil
+}
 func (m *mockPRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
 	return nil
 }

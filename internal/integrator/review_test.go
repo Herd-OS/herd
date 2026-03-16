@@ -105,12 +105,29 @@ func TestReview_Disabled(t *testing.T) {
 }
 
 func TestReview_Approved(t *testing.T) {
-	mock := newReviewTestPlatform(
-		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
-		[]*platform.Issue{
-			{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n\n## Acceptance Criteria\n\n- [ ] Works\n"},
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+	}
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n\n## Acceptance Criteria\n\n- [ ] Works\n"},
+	}
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
 		},
-	)
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
 
 	ag := &mockReviewAgent{
 		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
@@ -124,6 +141,9 @@ func TestReview_Approved(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.Approved)
 	assert.Equal(t, 50, result.BatchPRNumber)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "✅ **HerdOS Agent Review**")
+	assert.Contains(t, prSvc.comments[0], "LGTM")
 }
 
 func TestReview_ChangesRequested_CreatesFixes(t *testing.T) {
@@ -157,11 +177,12 @@ func TestReview_ChangesRequested_CreatesFixes(t *testing.T) {
 		},
 	}
 
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+	}
 	mock := &mockPlatform{
-		issues: mockCreate,
-		prs: &mockPRService{
-			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
-		},
+		issues:     mockCreate,
+		prs:        prSvc,
 		workflows:  wf,
 		repo:       &mockRepoService{defaultBranch: "main"},
 		milestones: &mockMilestoneService{},
@@ -185,6 +206,12 @@ func TestReview_ChangesRequested_CreatesFixes(t *testing.T) {
 	assert.Len(t, result.FixIssues, 2)
 	assert.Len(t, createdIssues, 2)
 	assert.Len(t, wf.dispatched, 2)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "🔍 **HerdOS Agent Review**")
+	assert.Contains(t, prSvc.comments[0], "Missing error handling in auth.go")
+	assert.Contains(t, prSvc.comments[0], "Tests not covering edge case")
+	assert.Contains(t, prSvc.comments[0], "#100")
+	assert.Contains(t, prSvc.comments[0], "#101")
 }
 
 func TestReview_MaxCyclesHit(t *testing.T) {
@@ -580,6 +607,23 @@ func TestTruncate(t *testing.T) {
 	assert.Equal(t, "hello", truncate("hello", 10))
 	assert.Equal(t, "hel...", truncate("hello world", 3))
 	assert.Equal(t, "first line", truncate("first line\nsecond line", 60))
+}
+
+func TestFormatIssueLinks(t *testing.T) {
+	tests := []struct {
+		name string
+		nums []int
+		want string
+	}{
+		{"empty", []int{}, ""},
+		{"single", []int{42}, "#42"},
+		{"multiple", []int{1, 2, 3}, "#1, #2, #3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, formatIssueLinks(tt.nums))
+		})
+	}
 }
 
 // capturingMockAgent captures ReviewOptions for assertions

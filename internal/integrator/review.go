@@ -161,6 +161,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// Handle approved
 	if reviewResult.Approved {
+		_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
+			"✅ **HerdOS Agent Review**\n\nAll acceptance criteria met.\n\n%s", reviewResult.Summary))
 		_ = p.PullRequests().CreateReview(ctx, pr.Number, reviewResult.Summary, platform.ReviewApprove)
 		if cfg.PullRequests.AutoMerge {
 			if _, err := p.PullRequests().Merge(ctx, pr.Number, platform.MergeMethod(cfg.Integrator.Strategy)); err != nil {
@@ -199,6 +201,14 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	nextCycle := currentCycle + 1
 	var fixIssueNums []int
 
+	// Start building findings comment
+	var findingsComment strings.Builder
+	findingsComment.WriteString("🔍 **HerdOS Agent Review**\n\n")
+	findingsComment.WriteString(fmt.Sprintf("Found %d issues (cycle %d of %d):\n\n", len(reviewResult.Comments), nextCycle, cfg.Integrator.ReviewMaxFixCycles))
+	for _, c := range reviewResult.Comments {
+		findingsComment.WriteString(fmt.Sprintf("- %s\n", c))
+	}
+
 	defaultBranchForDispatch, _ := p.Repository().GetDefaultBranch(ctx)
 
 	for _, comment := range reviewResult.Comments {
@@ -229,6 +239,11 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			"runner_label":    cfg.Workers.RunnerLabel,
 		})
 	}
+
+	if len(fixIssueNums) > 0 {
+		findingsComment.WriteString(fmt.Sprintf("\nDispatching fix workers: %s\n", formatIssueLinks(fixIssueNums)))
+	}
+	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsComment.String())
 
 	return &ReviewResult{
 		FixIssues:     fixIssueNums,
@@ -286,6 +301,14 @@ func parseBatchBranchMilestone(branch string) (int, error) {
 		return 0, fmt.Errorf("invalid batch branch format: %s", branch)
 	}
 	return strconv.Atoi(parts[:idx])
+}
+
+func formatIssueLinks(nums []int) string {
+	parts := make([]string, len(nums))
+	for i, n := range nums {
+		parts[i] = fmt.Sprintf("#%d", n)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func truncate(s string, max int) string {
