@@ -440,6 +440,55 @@ func TestAdvance_TierComplete(t *testing.T) {
 	assert.Len(t, wf.dispatched, 1)
 }
 
+func TestAdvance_DispatchesReadyIssues(t *testing.T) {
+	// When advance previously left issues as ready (capacity limited),
+	// subsequent advances should dispatch them.
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[10] = &platform.Issue{
+		Number: 10, Title: "Task A",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Task A", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+		{Number: 11, Title: "Task B", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo B\n"},
+		// These two were left as ready by a previous capacity-limited advance
+		{Number: 12, Title: "Task C", Labels: []string{issues.StatusReady},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo C\n"},
+		{Number: 13, Title: "Task D", Labels: []string{issues.StatusReady},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [11]\n---\n\n## Task\nDo D\n"},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "10"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 5, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, nil, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.TierComplete)
+	// Both ready issues should be dispatched
+	assert.Equal(t, 2, result.DispatchedCount)
+	assert.Contains(t, issueSvc.removedLabels[12], issues.StatusReady)
+	assert.Contains(t, issueSvc.addedLabels[12], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.removedLabels[13], issues.StatusReady)
+	assert.Contains(t, issueSvc.addedLabels[13], issues.StatusInProgress)
+}
+
 func TestAdvance_TierStuck(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[10] = &platform.Issue{
