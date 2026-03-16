@@ -60,6 +60,6 @@ func handleFixCI(ctx context.Context, hctx *HandlerContext, cmd *Command) (strin
 		if len(result.FixIssues) > 0 {
 			return fmt.Sprintf("🔧 CI is failing. Dispatched fix worker: #%d (cycle %d).", result.FixIssues[0], result.FixCycle), nil
 		}
-		return "⚠️ CI is failing but max fix cycles reached. Manual intervention needed.", nil
+		return "⚠️ CI is failing but no fix worker was dispatched. Check logs for errors.", nil
 	}
 }

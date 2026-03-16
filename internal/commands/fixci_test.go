@@ -293,12 +293,12 @@ func TestHandleFixCI_States(t *testing.T) {
 			wantContains:   "max fix cycles reached",
 		},
 		{
-			name:        "CI failing — zero cycles (notify only)",
-			ciStatus:    "failure",
-			rerunErr:    fmt.Errorf("re-run failed"),
-			ciMaxCycles: 0,
-			wantPrefix:  "⚠️",
-			wantContains: "max fix cycles reached",
+			name:         "CI failing — zero cycles (notify only)",
+			ciStatus:     "failure",
+			rerunErr:     fmt.Errorf("re-run failed"),
+			ciMaxCycles:  0,
+			wantPrefix:   "⚠️",
+			wantContains: "no fix worker was dispatched",
 		},
 	}
 
