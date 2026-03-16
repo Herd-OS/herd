@@ -262,6 +262,22 @@ func baseConfig() *config.Config {
 
 // --- Tests for handleFixCI ---
 
+func TestHandleFixCI_NotPR(t *testing.T) {
+	p := &testPlatform{issues: newTestIssueService(), prs: &testPRService{}, workflows: &testWorkflowService{}, repo: &testRepoService{defaultBranch: "main"}, milestones: &testMilestoneService{}, checks: &testCheckService{}}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        false,
+	}
+	result := handleFixCI(hctx, Command{Name: "fix-ci"})
+
+	assert.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "can only be used on pull requests")
+}
+
 func TestHandleFixCI_NotBatchPR(t *testing.T) {
 	issueSvc := newTestIssueService()
 	prSvc := &testPRService{
@@ -276,6 +292,7 @@ func TestHandleFixCI_NotBatchPR(t *testing.T) {
 		Platform:    p,
 		Config:      baseConfig(),
 		IssueNumber: 10,
+		IsPR:        true,
 	}
 	result := handleFixCI(hctx, Command{Name: "fix-ci"})
 
@@ -306,6 +323,7 @@ func TestHandleFixCI_CISuccess(t *testing.T) {
 		Platform:    p,
 		Config:      baseConfig(),
 		IssueNumber: 10,
+		IsPR:        true,
 	}
 	result := handleFixCI(hctx, Command{Name: "fix-ci"})
 
@@ -338,6 +356,7 @@ func TestHandleFixCI_WithFixDispatch(t *testing.T) {
 		Platform:    p,
 		Config:      baseConfig(),
 		IssueNumber: 10,
+		IsPR:        true,
 	}
 	result := handleFixCI(hctx, Command{Name: "fix-ci"})
 
@@ -456,6 +475,28 @@ func TestHandleRetry_DispatchError(t *testing.T) {
 
 // --- Tests for handleReview ---
 
+func TestHandleReview_NotPR(t *testing.T) {
+	p := &testPlatform{
+		prs:        &testPRService{},
+		issues:     newTestIssueService(),
+		workflows:  &testWorkflowService{},
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        false,
+	}
+	result := handleReview(hctx, Command{Name: "review"})
+
+	assert.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "can only be used on pull requests")
+}
+
 func TestHandleReview_NotBatchPR(t *testing.T) {
 	prSvc := &testPRService{
 		getResult: map[int]*platform.PullRequest{
@@ -475,6 +516,7 @@ func TestHandleReview_NotBatchPR(t *testing.T) {
 		Platform:    p,
 		Config:      baseConfig(),
 		IssueNumber: 10,
+		IsPR:        true,
 	}
 	result := handleReview(hctx, Command{Name: "review"})
 
@@ -513,6 +555,7 @@ func TestHandleReview_Approved(t *testing.T) {
 		Config:      baseConfig(),
 		IssueNumber: 50,
 		RepoRoot:    dir,
+		IsPR:        true,
 	}
 	result := handleReview(hctx, Command{Name: "review"})
 
@@ -556,6 +599,7 @@ func TestHandleReview_WithFixes(t *testing.T) {
 		Config:      baseConfig(),
 		IssueNumber: 50,
 		RepoRoot:    dir,
+		IsPR:        true,
 	}
 	result := handleReview(hctx, Command{Name: "review"})
 
@@ -566,6 +610,27 @@ func TestHandleReview_WithFixes(t *testing.T) {
 }
 
 // --- Tests for handleFix ---
+
+func TestHandleFix_NotPR(t *testing.T) {
+	p := &testPlatform{
+		prs:        &testPRService{},
+		issues:     newTestIssueService(),
+		workflows:  &testWorkflowService{},
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{},
+	}
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        false,
+	}
+	result := handleFix(hctx, Command{Name: "fix", Prompt: "fix something"})
+
+	assert.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "can only be used on pull requests")
+}
 
 func TestHandleFix(t *testing.T) {
 	tests := []struct {
@@ -607,6 +672,7 @@ func TestHandleFix(t *testing.T) {
 				Platform:    p,
 				Config:      baseConfig(),
 				IssueNumber: 10,
+				IsPR:        true,
 			}
 			result := handleFix(hctx, Command{Name: "fix", Prompt: tt.prompt})
 
@@ -641,6 +707,7 @@ func TestHandleFix_Success(t *testing.T) {
 		Config:      baseConfig(),
 		IssueNumber: 50,
 		AuthorLogin: "octocat",
+		IsPR:        true,
 	}
 	result := handleFix(hctx, Command{Name: "fix", Prompt: "Add missing validation to the auth handler"})
 
@@ -723,6 +790,7 @@ func TestHandleReview_ExtraInstructions(t *testing.T) {
 		Config:      baseConfig(),
 		IssueNumber: 50,
 		RepoRoot:    dir,
+		IsPR:        true,
 	}
 	result := handleReview(hctx, Command{Name: "review", Prompt: "Focus on security issues"})
 
