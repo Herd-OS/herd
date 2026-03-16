@@ -47,7 +47,9 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 		return Result{Message: "⚠️ CI failed — max fix cycles reached. Manual intervention needed."}
 	}
 	if len(result.FixIssues) > 0 {
-		_ = hctx.Platform.Issues().AddLabels(hctx.Ctx, hctx.IssueNumber, []string{issues.CIFixPending})
+		if labelErr := hctx.Platform.Issues().AddLabels(hctx.Ctx, hctx.IssueNumber, []string{issues.CIFixPending}); labelErr != nil {
+			return Result{Error: fmt.Errorf("adding %s label to PR #%d: %w", issues.CIFixPending, hctx.IssueNumber, labelErr)}
+		}
 		nums := make([]string, len(result.FixIssues))
 		for i, n := range result.FixIssues {
 			nums[i] = fmt.Sprintf("#%d", n)
