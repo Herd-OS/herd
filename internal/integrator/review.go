@@ -265,6 +265,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 
 	n := len(fixIssueNums)
+	if n == 0 {
+		// All issue creates failed — nothing was dispatched. Return without
+		// posting a comment to avoid a misleading "Dispatching 0 fix workers."
+		// message and the double-comment situation when invoked via /herd review.
+		return &ReviewResult{BatchPRNumber: pr.Number}, nil
+	}
+
 	findingsMsg.WriteString(fmt.Sprintf("\nDispatching %d fix %s.", n, map[bool]string{true: "worker", false: "workers"}[n == 1]))
 	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsMsg.String())
 
