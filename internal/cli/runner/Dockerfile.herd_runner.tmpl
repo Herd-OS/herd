@@ -7,6 +7,10 @@
 
 FROM herd-runner-base
 
+# The base image runs as the 'runner' user. Switch to root to install
+# packages, then switch back when done.
+USER root
+
 # Examples — uncomment what your project needs:
 #
 # Go
@@ -17,3 +21,5 @@ FROM herd-runner-base
 #
 # Rust
 # RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+USER runner
