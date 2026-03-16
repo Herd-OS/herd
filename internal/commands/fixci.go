@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/herd-os/herd/internal/integrator"
+	"github.com/herd-os/herd/internal/issues"
 )
 
 func handleFixCI(hctx *HandlerContext, cmd Command) Result {
@@ -43,6 +44,7 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 		return Result{Message: "⚠️ CI failed — max fix cycles reached. Manual intervention needed."}
 	}
 	if len(result.FixIssues) > 0 {
+		_ = hctx.Platform.Issues().AddLabels(hctx.Ctx, hctx.IssueNumber, []string{issues.CIFixPending})
 		nums := make([]string, len(result.FixIssues))
 		for i, n := range result.FixIssues {
 			nums[i] = fmt.Sprintf("#%d", n)

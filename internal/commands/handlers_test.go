@@ -346,6 +346,7 @@ func TestHandleFixCI_WithFixDispatch(t *testing.T) {
 	assert.Contains(t, result.Message, "#200")
 	assert.Len(t, issueSvc.createdIssues, 1)
 	assert.Len(t, wf.dispatched, 1)
+	assert.Contains(t, issueSvc.addedLabels[10], issues.CIFixPending)
 }
 
 // --- Tests for handleRetry ---
