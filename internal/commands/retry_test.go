@@ -144,7 +144,7 @@ func TestHandleRetry(t *testing.T) {
 
 			hctx := &HandlerContext{
 				Platform: mock,
-				Cfg:      defaultCfg,
+				Config:      defaultCfg,
 			}
 			cmd := &Command{Name: "retry", Args: tc.args}
 
@@ -174,7 +174,7 @@ func TestHandleRetry_LabelsUpdatedOnSuccess(t *testing.T) {
 
 	hctx := &HandlerContext{
 		Platform: mock,
-		Cfg:      &config.Config{Workers: config.Workers{TimeoutMinutes: 30}},
+		Config:      &config.Config{Workers: config.Workers{TimeoutMinutes: 30}},
 	}
 	_, err := handleRetry(context.Background(), hctx, &Command{Name: "retry", Args: "42"})
 	require.NoError(t, err)
@@ -197,7 +197,7 @@ func TestHandleRetry_DispatchInputs(t *testing.T) {
 			RunnerLabel:    "my-runner",
 		},
 	}
-	hctx := &HandlerContext{Platform: mock, Cfg: cfg}
+	hctx := &HandlerContext{Platform: mock, Config: cfg}
 	cmd := &Command{Name: "retry", Args: "42"}
 
 	_, err := handleRetry(context.Background(), hctx, cmd)
@@ -224,7 +224,7 @@ func TestHandleRetry_DispatchFailureRevertsLabels(t *testing.T) {
 
 	hctx := &HandlerContext{
 		Platform: mock,
-		Cfg:      &config.Config{},
+		Config:      &config.Config{},
 	}
 	cmd := &Command{Name: "retry", Args: "10"}
 
@@ -258,7 +258,7 @@ func TestHandleRetry_BatchBranchSlug(t *testing.T) {
 
 			hctx := &HandlerContext{
 				Platform: mock,
-				Cfg:      &config.Config{},
+				Config:      &config.Config{},
 			}
 			_, err := handleRetry(context.Background(), hctx, &Command{Name: "retry", Args: "5"})
 			require.NoError(t, err)
@@ -270,7 +270,7 @@ func TestHandleRetry_BatchBranchSlug(t *testing.T) {
 }
 
 func TestRetryRegistered(t *testing.T) {
-	_, exists := registry["retry"]
+	_, exists := Registry["retry"]
 	assert.True(t, exists, "retry command should be registered via init()")
 }
 
@@ -338,6 +338,9 @@ func (m *mockRetryIssueService) RemoveLabels(_ context.Context, number int, labe
 func (m *mockRetryIssueService) AddComment(_ context.Context, _ int, _ string) error { return nil }
 func (m *mockRetryIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
+}
+func (m *mockRetryIssueService) CreateReaction(_ context.Context, _ int64, _ string) error {
+	return nil
 }
 
 // mockRetryWorkflowService

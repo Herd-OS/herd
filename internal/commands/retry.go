@@ -66,8 +66,8 @@ func handleRetry(ctx context.Context, hctx *HandlerContext, cmd *Command) (strin
 	_, err = hctx.Platform.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
 		"issue_number":    fmt.Sprintf("%d", issueNum),
 		"batch_branch":    batchBranch,
-		"timeout_minutes": fmt.Sprintf("%d", hctx.Cfg.Workers.TimeoutMinutes),
-		"runner_label":    hctx.Cfg.Workers.RunnerLabel,
+		"timeout_minutes": fmt.Sprintf("%d", hctx.Config.Workers.TimeoutMinutes),
+		"runner_label":    hctx.Config.Workers.RunnerLabel,
 	})
 	if err != nil {
 		// 9. Revert labels if dispatch fails
