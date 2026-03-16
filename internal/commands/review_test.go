@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -86,36 +85,16 @@ func TestHandleReview_PRGetError(t *testing.T) {
 }
 
 func TestHandleReview_Outcomes(t *testing.T) {
+	// integrator.Review posts comments directly to the PR on all outcome paths.
+	// handleReview must return "" to avoid a duplicate comment via newHandleCommentCmd.
 	tests := []struct {
-		name         string
-		result       *integrator.ReviewResult
-		wantPrefix   string
-		wantContains string
+		name   string
+		result *integrator.ReviewResult
 	}{
-		{
-			name:         "approved",
-			result:       &integrator.ReviewResult{Approved: true},
-			wantPrefix:   "✅",
-			wantContains: "All acceptance criteria met",
-		},
-		{
-			name:         "fix dispatched",
-			result:       &integrator.ReviewResult{FixIssues: []int{101, 102}, FixCycle: 1},
-			wantPrefix:   "🔍",
-			wantContains: "Dispatched fix workers",
-		},
-		{
-			name:         "fix dispatched single",
-			result:       &integrator.ReviewResult{FixIssues: []int{55}, FixCycle: 2},
-			wantPrefix:   "🔍",
-			wantContains: "#55",
-		},
-		{
-			name:         "max cycles",
-			result:       &integrator.ReviewResult{MaxCyclesHit: true},
-			wantPrefix:   "⚠️",
-			wantContains: "max fix cycles reached",
-		},
+		{name: "approved", result: &integrator.ReviewResult{Approved: true}},
+		{name: "fix dispatched", result: &integrator.ReviewResult{FixIssues: []int{101, 102}, FixCycle: 1}},
+		{name: "fix dispatched single", result: &integrator.ReviewResult{FixIssues: []int{55}, FixCycle: 2}},
+		{name: "max cycles", result: &integrator.ReviewResult{MaxCyclesHit: true}},
 	}
 
 	for _, tt := range tests {
@@ -131,13 +110,12 @@ func TestHandleReview_Outcomes(t *testing.T) {
 
 			resp, err := handleReview(context.Background(), hctx, cmd)
 			require.NoError(t, err)
-			assert.True(t, strings.HasPrefix(resp, tt.wantPrefix), "response %q should start with %q", resp, tt.wantPrefix)
-			assert.Contains(t, resp, tt.wantContains)
+			assert.Empty(t, resp, "handleReview must return empty string to avoid duplicate PR comment")
 		})
 	}
 }
 
-func TestHandleReview_FixDispatchedFormatting(t *testing.T) {
+func TestHandleReview_ReturnsEmptyOnFixDispatched(t *testing.T) {
 	mock := buildReviewMock(50, "herd/batch/1-my-batch")
 	hctx := &HandlerContext{Platform: mock, Config: reviewConfig(), PRNumber: 50}
 	cmd := &Command{Name: "review"}
@@ -148,8 +126,7 @@ func TestHandleReview_FixDispatchedFormatting(t *testing.T) {
 
 	resp, err := handleReview(context.Background(), hctx, cmd)
 	require.NoError(t, err)
-	assert.Contains(t, resp, "#10, #20")
-	assert.Contains(t, resp, "(cycle 3)")
+	assert.Empty(t, resp, "handleReview must return empty string to avoid duplicate PR comment")
 }
 
 func TestHandleReview_ReviewFnError(t *testing.T) {
@@ -180,7 +157,7 @@ func TestHandleReview_PromptPassthrough(t *testing.T) {
 
 	resp, err := handleReview(context.Background(), hctx, cmd)
 	require.NoError(t, err)
-	assert.Contains(t, resp, "LGTM")
+	assert.Empty(t, resp, "handleReview must return empty string to avoid duplicate PR comment")
 	assert.Contains(t, capturedParams.SystemPrompt, "Additional Review Instructions")
 	assert.Contains(t, capturedParams.SystemPrompt, "focus on security")
 }
