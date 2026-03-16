@@ -54,6 +54,7 @@ type mockIssueService struct {
 	getErr           error
 	addedLabels      map[int][]string
 	removedLabels    map[int][]string
+	addLabelsErr     error
 	comments         map[int][]string
 	existingComments map[int][]*platform.Comment // for ListComments
 	listCommentsErr  error
@@ -91,6 +92,9 @@ func (m *mockIssueService) Update(_ context.Context, _ int, _ platform.IssueUpda
 	return nil, nil
 }
 func (m *mockIssueService) AddLabels(_ context.Context, number int, labels []string) error {
+	if m.addLabelsErr != nil {
+		return m.addLabelsErr
+	}
 	m.addedLabels[number] = append(m.addedLabels[number], labels...)
 	return nil
 }
@@ -578,6 +582,38 @@ func TestPatrol_CIFixPendingLabelResetsAfterCIPass(t *testing.T) {
 	assert.Contains(t, prSvc.comments[10][0], "/herd fix-ci")
 	// And the label must be added again.
 	assert.Contains(t, issueSvc.addedLabels[10], issues.CIFixPending)
+}
+
+func TestPatrol_CIFailure_AddLabelError_NoCommentPosted(t *testing.T) {
+	// If AddLabels fails, the /herd fix-ci comment must NOT be posted so the
+	// next patrol cycle does not dispatch a duplicate fix worker.
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.addLabelsErr = fmt.Errorf("transient API error")
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "failure"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.CIFailures)
+	// No /herd fix-ci comment must be posted when label add fails.
+	assert.Len(t, prSvc.comments[10], 0)
+	// Label must not appear in addedLabels (the mock returned an error).
+	assert.NotContains(t, issueSvc.addedLabels[10], issues.CIFixPending)
 }
 
 func TestPatrol_CINotCheckedWhenRequireCIFalse(t *testing.T) {
