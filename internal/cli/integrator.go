@@ -348,6 +348,12 @@ func newHandleCommentCmd() *cobra.Command {
 				AuthorLogin: authorLogin,
 			}
 
+			// Check if a /herd command is present before dispatching.
+			if commands.Parse(commentBody) == nil {
+				// No /herd command in the comment — nothing to do.
+				return nil
+			}
+
 			response, err := commands.Handle(cmd.Context(), hctx, commentBody, authorAssociation)
 			if err != nil {
 				// Add ❌ reaction and post error as comment.
@@ -362,19 +368,15 @@ func newHandleCommentCmd() *cobra.Command {
 				return err
 			}
 
-			if response == "" {
-				// No command found — nothing to do.
-				return nil
-			}
-
-			// Post response as comment.
-			if issueNumber != 0 {
+			// Post response as comment. Handlers may return "" to signal they
+			// have already posted a comment themselves (e.g. integrator.Review).
+			if response != "" && issueNumber != 0 {
 				if postErr := client.Issues().AddComment(cmd.Context(), issueNumber, response); postErr != nil {
 					return fmt.Errorf("posting response comment: %w", postErr)
 				}
 			}
 
-			// Add ✅ reaction to signal success.
+			// Add ✅ reaction to signal the command completed successfully.
 			_ = client.Issues().CreateReaction(cmd.Context(), commentID, "+1")
 
 			fmt.Println(response)

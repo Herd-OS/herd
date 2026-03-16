@@ -51,22 +51,11 @@ func handleReview(ctx context.Context, hctx *HandlerContext, cmd *Command) (stri
 		params.SystemPrompt = string(ri) + "\n\n## Additional Review Instructions\n\n" + cmd.Prompt
 	}
 
-	result, err := reviewFn(ctx, hctx.Platform, ag, g, hctx.Config, params)
-	if err != nil {
+	if _, err := reviewFn(ctx, hctx.Platform, ag, g, hctx.Config, params); err != nil {
 		return "", fmt.Errorf("running review: %w", err)
 	}
 
-	switch {
-	case result.Approved:
-		return "✅ **Agent Review**: All acceptance criteria met. LGTM.", nil
-	case result.MaxCyclesHit:
-		return "⚠️ **Agent Review**: Found issues but max fix cycles reached.", nil
-	default:
-		nums := make([]string, len(result.FixIssues))
-		for i, n := range result.FixIssues {
-			nums[i] = fmt.Sprintf("#%d", n)
-		}
-		return fmt.Sprintf("🔍 **Agent Review**: Found issues. Dispatched fix workers: %s (cycle %d).",
-			strings.Join(nums, ", "), result.FixCycle), nil
-	}
+	// integrator.Review already posts a detailed comment to the PR on all paths.
+	// Return "" to avoid a duplicate comment from the command handler.
+	return "", nil
 }
