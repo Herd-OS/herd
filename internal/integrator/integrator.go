@@ -635,7 +635,7 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers [][]int) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("## Summary\n\nBatch **%s** — %d tasks across %d tiers.\n\n", ms.Title, len(allIssues), len(tiers)))
+	fmt.Fprintf(&b, "## Summary\n\nBatch **%s** — %d tasks across %d tiers.\n\n", ms.Title, len(allIssues), len(tiers))
 
 	// Tasks table
 	b.WriteString("## Tasks\n\n")
@@ -651,14 +651,14 @@ func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers
 			// Strip the prefix for readability
 			status = strings.TrimPrefix(status, "herd/status:")
 		}
-		b.WriteString(fmt.Sprintf("| #%d | %s | %d | %s |\n", issue.Number, issue.Title, tier, status))
+		fmt.Fprintf(&b, "| #%d | %s | %d | %s |\n", issue.Number, issue.Title, tier, status)
 	}
 
 	// Worker branches
 	b.WriteString("\n## Worker branches\n\n")
 	for _, issue := range allIssues {
 		branch := fmt.Sprintf("herd/worker/%d-%s", issue.Number, planner.Slugify(issue.Title))
-		b.WriteString(fmt.Sprintf("- `%s`\n", branch))
+		fmt.Fprintf(&b, "- `%s`\n", branch)
 	}
 
 	return b.String()
