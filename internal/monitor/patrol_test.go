@@ -684,7 +684,7 @@ func TestHasMonitorComment_ErrorFallback(t *testing.T) {
 	assert.False(t, hasMonitorComment(context.Background(), mock, 42))
 }
 
-func TestHasCIFixComment(t *testing.T) {
+func TestHasCIFixPendingLabel(t *testing.T) {
 	tests := []struct {
 		name     string
 		labels   []string
@@ -722,13 +722,13 @@ func TestHasCIFixComment(t *testing.T) {
 				workflows: &mockWorkflowService{},
 				repo:      &mockRepoService{defaultBranch: "main"},
 			}
-			assert.Equal(t, tt.expected, hasCIFixComment(context.Background(), mock, 10))
+			assert.Equal(t, tt.expected, hasCIFixPendingLabel(context.Background(), mock, 10))
 		})
 	}
 }
 
-func TestHasCIFixComment_ErrorFallback(t *testing.T) {
-	// When Get returns an error, hasCIFixComment should fail open (return false).
+func TestHasCIFixPendingLabel_ErrorFallback(t *testing.T) {
+	// When Get returns an error, hasCIFixPendingLabel should fail open (return false).
 	issueSvc := newMockIssueService()
 	issueSvc.getErr = fmt.Errorf("API error")
 	mock := &mockPlatform{
@@ -737,7 +737,7 @@ func TestHasCIFixComment_ErrorFallback(t *testing.T) {
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main"},
 	}
-	assert.False(t, hasCIFixComment(context.Background(), mock, 10))
+	assert.False(t, hasCIFixPendingLabel(context.Background(), mock, 10))
 }
 
 func TestPatrol_NoDuplicateComments(t *testing.T) {
