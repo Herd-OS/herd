@@ -788,7 +788,7 @@ func TestReview_DispatchCountAccurateWhenSomeCreatesFail(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, findingsComment, "expected a findings comment")
-	assert.Contains(t, findingsComment, "Dispatching 1 fix workers.")
+	assert.Contains(t, findingsComment, "Dispatching 1 fix worker.")
 	assert.NotContains(t, findingsComment, "Dispatching 2 fix workers.")
 }
 

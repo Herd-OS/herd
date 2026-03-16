@@ -264,7 +264,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		})
 	}
 
-	findingsMsg.WriteString(fmt.Sprintf("\nDispatching %d fix workers.", len(fixIssueNums)))
+	n := len(fixIssueNums)
+	findingsMsg.WriteString(fmt.Sprintf("\nDispatching %d fix %s.", n, map[bool]string{true: "worker", false: "workers"}[n == 1]))
 	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsMsg.String())
 
 	return &ReviewResult{
