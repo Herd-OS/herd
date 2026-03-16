@@ -224,4 +224,4 @@ When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the
 /herd fix "add missing error check in auth.go line 42"
 ```
 
-The Monitor also uses comment commands internally — it posts `/herd retry` and `/herd fix-ci` comments instead of dispatching directly, keeping all command execution flowing through a single handler.
+The Monitor also uses comment commands internally — it posts `/herd retry <N>` and `/herd fix-ci` comments instead of dispatching directly, keeping all command execution flowing through a single handler.
