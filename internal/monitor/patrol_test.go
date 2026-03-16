@@ -51,6 +51,7 @@ func (m *mockCheckService) RerunFailedChecks(_ context.Context, _ string) error 
 type mockIssueService struct {
 	listResults      map[string][]*platform.Issue // keyed by label
 	getResults       map[int]*platform.Issue      // for Get by number
+	getErr           error
 	addedLabels      map[int][]string
 	removedLabels    map[int][]string
 	comments         map[int][]string
@@ -72,6 +73,9 @@ func (m *mockIssueService) Create(_ context.Context, _, _ string, _ []string, _ 
 	return nil, nil
 }
 func (m *mockIssueService) Get(_ context.Context, number int) (*platform.Issue, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	if issue, ok := m.getResults[number]; ok {
 		return issue, nil
 	}
@@ -424,19 +428,19 @@ func TestPatrol_CIFailureOnBatchPR(t *testing.T) {
 	assert.Equal(t, 1, result.CIFailures)
 	assert.Len(t, prSvc.comments[10], 1)
 	assert.Contains(t, prSvc.comments[10][0], "/herd fix-ci")
+	// Label must be added immediately when posting the command.
+	assert.Contains(t, issueSvc.addedLabels[10], issues.CIFixPending)
 }
 
-func TestPatrol_CIFailureWithExistingComment_NoDuplicateCommand(t *testing.T) {
+func TestPatrol_CIFailureWithExistingLabel_NoDuplicateCommand(t *testing.T) {
 	prSvc := newMockPRService()
 	prSvc.listResult = []*platform.PullRequest{
 		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
 	}
 
 	issueSvc := newMockIssueService()
-	// Simulate a /herd fix-ci comment already present from a prior patrol cycle.
-	issueSvc.existingComments = map[int][]*platform.Comment{
-		10: {{ID: 1, Body: "/herd fix-ci"}},
-	}
+	// Simulate herd/ci-fix-pending label already present from a prior patrol cycle.
+	issueSvc.getResults[10] = &platform.Issue{Number: 10, Labels: []string{issues.CIFixPending}}
 
 	mock := &mockPlatform{
 		issues:    issueSvc,
@@ -455,6 +459,8 @@ func TestPatrol_CIFailureWithExistingComment_NoDuplicateCommand(t *testing.T) {
 	assert.Equal(t, 1, result.CIFailures)
 	// No new /herd fix-ci comment should be posted.
 	assert.Len(t, prSvc.comments[10], 0)
+	// No new label should be added either.
+	assert.NotContains(t, issueSvc.addedLabels[10], issues.CIFixPending)
 }
 
 func TestPatrol_CIPassingNoCIFixComment(t *testing.T) {
@@ -535,6 +541,43 @@ func TestPatrol_CIPassingOnBatchPR(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.CIFailures)
 	assert.Len(t, prSvc.comments[10], 0)
+	// Label must be removed so a future CI failure can re-trigger.
+	assert.Contains(t, issueSvc.removedLabels[10], issues.CIFixPending)
+}
+
+func TestPatrol_CIFixPendingLabelResetsAfterCIPass(t *testing.T) {
+	// Reproduces the critical bug: after CI passes and the label is removed,
+	// a subsequent CI failure must be able to re-trigger /herd fix-ci.
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+	// PR has NO herd/ci-fix-pending label (simulating state after CI previously passed
+	// and the label was removed).
+	issueSvc.getResults[10] = &platform.Issue{Number: 10, Labels: []string{}}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "failure"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.CIFailures)
+	// A new /herd fix-ci comment must be posted.
+	assert.Len(t, prSvc.comments[10], 1)
+	assert.Contains(t, prSvc.comments[10][0], "/herd fix-ci")
+	// And the label must be added again.
+	assert.Contains(t, issueSvc.addedLabels[10], issues.CIFixPending)
 }
 
 func TestPatrol_CINotCheckedWhenRequireCIFalse(t *testing.T) {
@@ -641,30 +684,30 @@ func TestHasMonitorComment_ErrorFallback(t *testing.T) {
 	assert.False(t, hasMonitorComment(context.Background(), mock, 42))
 }
 
-func TestHasCIFixComment(t *testing.T) {
+func TestHasCIFixPendingLabel(t *testing.T) {
 	tests := []struct {
 		name     string
-		comments []*platform.Comment
+		labels   []string
 		expected bool
 	}{
 		{
-			name:     "no comments",
-			comments: nil,
+			name:     "no labels",
+			labels:   nil,
 			expected: false,
 		},
 		{
-			name:     "unrelated comment only",
-			comments: []*platform.Comment{{ID: 1, Body: "some unrelated comment"}},
+			name:     "unrelated label only",
+			labels:   []string{"herd/status-in-progress"},
 			expected: false,
 		},
 		{
-			name:     "fix-ci comment present",
-			comments: []*platform.Comment{{ID: 1, Body: "/herd fix-ci"}},
+			name:     "ci-fix-pending label present",
+			labels:   []string{issues.CIFixPending},
 			expected: true,
 		},
 		{
-			name:     "fix-ci comment among others",
-			comments: []*platform.Comment{{ID: 1, Body: "unrelated"}, {ID: 2, Body: "/herd fix-ci"}},
+			name:     "ci-fix-pending among other labels",
+			labels:   []string{"herd/status-failed", issues.CIFixPending},
 			expected: true,
 		},
 	}
@@ -672,29 +715,29 @@ func TestHasCIFixComment(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			issueSvc := newMockIssueService()
-			issueSvc.existingComments = map[int][]*platform.Comment{10: tt.comments}
+			issueSvc.getResults[10] = &platform.Issue{Number: 10, Labels: tt.labels}
 			mock := &mockPlatform{
 				issues:    issueSvc,
 				prs:       newMockPRService(),
 				workflows: &mockWorkflowService{},
 				repo:      &mockRepoService{defaultBranch: "main"},
 			}
-			assert.Equal(t, tt.expected, hasCIFixComment(context.Background(), mock, 10))
+			assert.Equal(t, tt.expected, hasCIFixPendingLabel(context.Background(), mock, 10))
 		})
 	}
 }
 
-func TestHasCIFixComment_ErrorFallback(t *testing.T) {
-	// When ListComments returns an error, hasCIFixComment should fail open (return false).
+func TestHasCIFixPendingLabel_ErrorFallback(t *testing.T) {
+	// When Get returns an error, hasCIFixPendingLabel should fail open (return false).
 	issueSvc := newMockIssueService()
-	issueSvc.listCommentsErr = fmt.Errorf("API error")
+	issueSvc.getErr = fmt.Errorf("API error")
 	mock := &mockPlatform{
 		issues:    issueSvc,
 		prs:       newMockPRService(),
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main"},
 	}
-	assert.False(t, hasCIFixComment(context.Background(), mock, 10))
+	assert.False(t, hasCIFixPendingLabel(context.Background(), mock, 10))
 }
 
 func TestPatrol_NoDuplicateComments(t *testing.T) {
