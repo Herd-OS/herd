@@ -282,27 +282,36 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		}
 
 		status := issues.StatusLabel(issue.Labels)
-		// Double-dispatch prevention: only dispatch blocked issues
-		if status != issues.StatusBlocked {
+		// Only act on blocked or ready issues — skip done, in-progress, failed
+		if status != issues.StatusBlocked && status != issues.StatusReady {
 			continue
 		}
 
-		// Unblock: blocked → ready
-		_ = p.Issues().RemoveLabels(ctx, num, []string{issues.StatusBlocked})
+		// Unblock if still blocked
+		if status == issues.StatusBlocked {
+			_ = p.Issues().RemoveLabels(ctx, num, []string{issues.StatusBlocked})
+		}
 
 		// Manual tasks get unblocked but not dispatched
 		if issues.HasLabel(issue.Labels, issues.TypeManual) {
-			_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusReady})
+			if status == issues.StatusBlocked {
+				_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusReady})
+			}
 			continue
 		}
 
 		if dispatched >= remaining {
 			// At capacity — just mark ready, don't dispatch
-			_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusReady})
+			if status == issues.StatusBlocked {
+				_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusReady})
+			}
 			continue
 		}
 
-		// Dispatch: ready → in-progress
+		// Dispatch: remove ready if present, add in-progress
+		if status == issues.StatusReady {
+			_ = p.Issues().RemoveLabels(ctx, num, []string{issues.StatusReady})
+		}
 		_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusInProgress})
 		_, err := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
 			"issue_number":    fmt.Sprintf("%d", num),
