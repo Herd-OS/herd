@@ -1,13 +1,21 @@
 # HerdOS runner configuration
 # 1. Copy .env.herd.example to .env and fill in your tokens
-# 2. Start runners: docker compose -f docker-compose.herd.yml up -d
-# 3. Scale:         docker compose -f docker-compose.herd.yml up -d --scale worker=5
-# 4. Stop:          docker compose -f docker-compose.herd.yml down
+# 2. Customize Dockerfile.herd_runner with project-specific tools
+# 3. Start runners: docker compose -f docker-compose.herd.yml up -d
+# 4. Scale:         docker compose -f docker-compose.herd.yml up -d --scale worker=5
+# 5. Stop:          docker compose -f docker-compose.herd.yml down
 
 services:
+  herd-runner-base:
+    build:
+      dockerfile: Dockerfile.herd_runner_base
+    image: herd-runner-base
   worker:
     build:
-      dockerfile: Dockerfile.runner
+      dockerfile: Dockerfile.herd_runner
+    depends_on:
+      herd-runner-base:
+        condition: service_completed_successfully
     restart: always
     environment:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
