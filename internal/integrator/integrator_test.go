@@ -83,6 +83,7 @@ func (m *mockIssueService) AddComment(_ context.Context, number int, body string
 	m.comments[number] = append(m.comments[number], body)
 	return nil
 }
+func (m *mockIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
 func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }

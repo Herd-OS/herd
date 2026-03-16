@@ -126,6 +126,14 @@ func (s *issueService) AddComment(ctx context.Context, number int, body string) 
 	return nil
 }
 
+func (s *issueService) DeleteComment(ctx context.Context, commentID int64) error {
+	_, err := s.c.gh.Issues.DeleteComment(ctx, s.c.owner, s.c.repo, commentID)
+	if err != nil {
+		return fmt.Errorf("deleting comment %d: %w", commentID, err)
+	}
+	return nil
+}
+
 func (s *issueService) ListComments(ctx context.Context, number int) ([]*platform.Comment, error) {
 	opts := &gh.IssueListCommentsOptions{
 		ListOptions: gh.ListOptions{PerPage: 100},
