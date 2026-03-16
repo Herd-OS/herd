@@ -164,8 +164,8 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 					_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.CIFixPending})
 				}
 				result.CIFailures++
-			} else if err == nil {
-				// CI is passing — clear the fix-pending label so a future failure can re-trigger.
+			} else if err == nil && ciStatus == "success" {
+				// CI passed — clear the fix-pending label so a future failure can re-trigger.
 				_ = p.Issues().RemoveLabels(ctx, pr.Number, []string{issues.CIFixPending})
 			}
 		}

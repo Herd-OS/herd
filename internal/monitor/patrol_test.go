@@ -487,6 +487,34 @@ func TestPatrol_CIPassingClearsPendingLabel(t *testing.T) {
 	assert.Contains(t, issueSvc.removedLabels[10], issues.CIFixPending)
 }
 
+func TestPatrol_CIPendingDoesNotClearLabel(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "pending"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.CIFailures)
+	assert.Len(t, prSvc.comments[10], 0)
+	// Label must NOT be removed when CI is still pending.
+	assert.NotContains(t, issueSvc.removedLabels[10], issues.CIFixPending)
+}
+
 func TestPatrol_CIPassingOnBatchPR(t *testing.T) {
 	prSvc := newMockPRService()
 	prSvc.listResult = []*platform.PullRequest{
