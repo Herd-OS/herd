@@ -2,7 +2,7 @@
 
 HerdOS workers run as GitHub Actions on self-hosted runners. Self-hosted runners are required because workers need an AI agent (Claude Code) installed, and because GitHub-hosted runners don't support `workflow_dispatch` chaining with custom tools.
 
-`herd init` generates all the files you need: `Dockerfile.runner`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`.
+`herd init` generates all the files you need: `Dockerfile.herd_runner_base`, `Dockerfile.herd_runner`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`.
 
 ## Quick Setup
 
@@ -129,11 +129,17 @@ Configure at **org level** (recommended for multi-repo) or **repo level**:
 
 ## 5. What's in the Docker Image
 
-The generated `Dockerfile.runner` builds an Ubuntu 24.04 image with:
+The runner image uses a two-layer Dockerfile system:
 
-- **GitHub Actions runner** (v2.332.0)
-- **Claude Code** (installed via npm)
-- **Tools**: curl, jq, git, gh, Node.js
+- **`Dockerfile.herd_runner_base`** — herd-managed, always overwritten by `herd init`. Provides the GitHub Actions runner, Claude Code, Herd CLI (downloaded at startup), and base tools (curl, jq, git, gh, Node.js).
+- **`Dockerfile.herd_runner`** — user-owned, created once by `herd init`, never overwritten. Extends the base with `FROM herd-runner-base` and adds project-specific tools (Go, Python, Rust, linters, etc.).
+
+Edit `Dockerfile.herd_runner` to add your project's toolchain. For example, a Go project might add:
+
+```dockerfile
+FROM herd-runner-base
+RUN apt-get update && apt-get install -y golang-go && rm -rf /var/lib/apt/lists/*
+```
 
 The **Herd CLI** is not baked into the image — it's downloaded at container startup by `entrypoint.herd.sh`. This ensures runners always use the latest version without rebuilding. Set `HERD_VERSION` in `.env` to pin a specific version.
 
