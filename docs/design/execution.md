@@ -345,9 +345,10 @@ For each in-progress issue:
         v
 For each open batch PR:
   +-- Open > max_pr_age? --> comment once asking for review/merge
-  +-- CI failing? --> check for existing fix issues
-       +-- Fix issues exist --> fix cycle in progress, skip
-       +-- No fix issues --> comment on PR with details (once per CI state change)
+  +-- CI failing? --> check for herd/ci-fix-pending label
+       +-- Label present --> fix cycle in progress, skip (dedup via label)
+       +-- Label absent --> post /herd fix-ci comment, add herd/ci-fix-pending label
+  +-- CI passing? --> remove herd/ci-fix-pending label (reset for future failures)
         |
         v
 Done -- patrol complete
