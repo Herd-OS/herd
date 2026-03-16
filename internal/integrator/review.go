@@ -217,15 +217,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Post findings comment
+	// Post findings comment (dispatch count posted after loop with accurate count)
 	nextCycle := currentCycle + 1
 	var findingsMsg strings.Builder
 	findingsMsg.WriteString(fmt.Sprintf("🔍 **HerdOS Review** (cycle %d)\n\n", nextCycle))
 	for _, comment := range reviewResult.Comments {
 		findingsMsg.WriteString(fmt.Sprintf("- %s\n", comment))
 	}
-	findingsMsg.WriteString(fmt.Sprintf("\nDispatching %d fix workers.", len(reviewResult.Comments)))
-	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsMsg.String())
 
 	// Create fix issues and dispatch workers
 	var fixIssueNums []int
@@ -260,6 +258,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			"runner_label":    cfg.Workers.RunnerLabel,
 		})
 	}
+
+	findingsMsg.WriteString(fmt.Sprintf("\nDispatching %d fix workers.", len(fixIssueNums)))
+	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsMsg.String())
 
 	return &ReviewResult{
 		FixIssues:     fixIssueNums,
