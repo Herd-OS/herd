@@ -203,6 +203,9 @@ func (m *mockDispatchIssueService) AddComment(_ context.Context, _ int, _ string
 func (m *mockDispatchIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }
+func (m *mockDispatchIssueService) CreateReaction(_ context.Context, _ int64, _ string) error {
+	return nil
+}
 
 // mockDispatchWorkflowService
 

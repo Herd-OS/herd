@@ -97,6 +97,7 @@ func (m *mockIssueService) ListComments(_ context.Context, number int) ([]*platf
 	}
 	return m.existingComments[number], nil
 }
+func (m *mockIssueService) CreateReaction(_ context.Context, _ int64, _ string) error { return nil }
 
 type mockPRService struct {
 	listResult []*platform.PullRequest

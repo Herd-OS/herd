@@ -138,6 +138,9 @@ func (m *mockStatusIssueService) AddComment(_ context.Context, _ int, _ string) 
 func (m *mockStatusIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }
+func (m *mockStatusIssueService) CreateReaction(_ context.Context, _ int64, _ string) error {
+	return nil
+}
 
 type mockStatusMilestoneService struct{}
 

@@ -11,6 +11,8 @@ on:
     types: [closed]
   issues:
     types: [closed]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
@@ -134,6 +136,45 @@ jobs:
           else
             herd integrator review --pr "$PR_NUMBER"
           fi
+
+  handle-comment:
+    if: >
+      vars.HERD_ENABLED == 'true'
+      && github.event_name == 'issue_comment'
+      && github.event.action == 'created'
+      && contains(github.event.comment.body, '/herd')
+    runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Handle comment command
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.issue.pull_request && github.event.issue.number || '0' }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          AUTHOR_LOGIN: ${{ github.event.comment.user.login }}
+        run: |
+          herd integrator handle-comment \
+            --issue "$ISSUE_NUMBER" \
+            --comment-id "$COMMENT_ID" \
+            --body "$COMMENT_BODY" \
+            --author-association "$AUTHOR_ASSOCIATION" \
+            --pr "$PR_NUMBER" \
+            --issue-body "$ISSUE_BODY" \
+            --author-login "$AUTHOR_LOGIN"
 
   cleanup:
     if: >

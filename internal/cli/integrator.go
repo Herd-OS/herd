@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/herd-os/herd/internal/agent/claude"
+	"github.com/herd-os/herd/internal/commands"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/integrator"
@@ -26,6 +27,7 @@ func newIntegratorCmd() *cobra.Command {
 	cmd.AddCommand(newIntegratorMergeCmd())
 	cmd.AddCommand(newIntegratorCleanupCmd())
 	cmd.AddCommand(newIntegratorCheckCICmd())
+	cmd.AddCommand(newHandleCommentCmd())
 	return cmd
 }
 
@@ -291,6 +293,85 @@ func newIntegratorCleanupCmd() *cobra.Command {
 
 	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number (required)")
 	cmd.MarkFlagRequired("pr")
+	return cmd
+}
+
+func newHandleCommentCmd() *cobra.Command {
+	var issueNumber int
+	var commentID int64
+	var commentBody string
+	var authorAssociation string
+	var prNumber int
+	var issueBody string
+	var authorLogin string
+
+	cmd := &cobra.Command{
+		Use:   "handle-comment",
+		Short: "Handle a /herd command from a comment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if os.Getenv("HERD_RUNNER") != "true" {
+				return fmt.Errorf("herd integrator handle-comment is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+
+			cfg, err := config.Load(".")
+			if err != nil {
+				return err
+			}
+			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			if err != nil {
+				return fmt.Errorf("creating GitHub client: %w", err)
+			}
+
+			cwd, _ := os.Getwd()
+
+			hctx := &commands.HandlerContext{
+				Platform:    client,
+				Config:      cfg,
+				RepoRoot:    cwd,
+				PRNumber:    prNumber,
+				IssueNumber: issueNumber,
+				CommentID:   commentID,
+				IssueBody:   issueBody,
+				AuthorLogin: authorLogin,
+			}
+
+			response, err := commands.Handle(cmd.Context(), hctx, commentBody, authorAssociation)
+			if err != nil {
+				// Add ❌ reaction and post error as comment.
+				_ = client.Issues().CreateReaction(cmd.Context(), commentID, "-1")
+				if issueNumber != 0 && response != "" {
+					_ = client.Issues().AddComment(cmd.Context(), issueNumber, response)
+				}
+				return err
+			}
+
+			if response == "" {
+				// No command found — nothing to do.
+				return nil
+			}
+
+			// Post response as comment.
+			if issueNumber != 0 {
+				if postErr := client.Issues().AddComment(cmd.Context(), issueNumber, response); postErr != nil {
+					return fmt.Errorf("posting response comment: %w", postErr)
+				}
+			}
+
+			// Add ✅ reaction to signal success.
+			_ = client.Issues().CreateReaction(cmd.Context(), commentID, "+1")
+
+			fmt.Println(response)
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&issueNumber, "issue", 0, "Issue/PR number")
+	cmd.Flags().Int64Var(&commentID, "comment-id", 0, "Comment ID for reactions")
+	cmd.Flags().StringVar(&commentBody, "body", "", "Comment body")
+	cmd.Flags().StringVar(&authorAssociation, "author-association", "", "Comment author association")
+	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number (0 if issue comment)")
+	cmd.Flags().StringVar(&issueBody, "issue-body", "", "Full issue/PR body")
+	cmd.Flags().StringVar(&authorLogin, "author-login", "", "Comment author login")
 	return cmd
 }
 

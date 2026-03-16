@@ -150,6 +150,14 @@ func (s *issueService) ListComments(ctx context.Context, number int) ([]*platfor
 	return result, nil
 }
 
+func (s *issueService) CreateReaction(ctx context.Context, commentID int64, reaction string) error {
+	_, _, err := s.c.gh.Reactions.CreateIssueCommentReaction(ctx, s.c.owner, s.c.repo, commentID, reaction)
+	if err != nil {
+		return fmt.Errorf("creating reaction on comment %d: %w", commentID, err)
+	}
+	return nil
+}
+
 func mapIssue(i *gh.Issue) *platform.Issue {
 	labels := make([]string, len(i.Labels))
 	for j, l := range i.Labels {
