@@ -786,6 +786,38 @@ func TestHasRecentHerdCommand(t *testing.T) {
 			expected: false,
 		},
 		{
+			name: "prefix collision: retry 42 must not match retry 420",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd retry 420", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			},
+			command:  "retry 42",
+			expected: false,
+		},
+		{
+			name: "prefix collision: retry 4 must not match retry 42",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd retry 42", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			},
+			command:  "retry 4",
+			expected: false,
+		},
+		{
+			name: "command followed by newline is a match",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd fix-ci\nsome extra text", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			},
+			command:  "fix-ci",
+			expected: true,
+		},
+		{
+			name: "command followed by space is a match",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd fix-ci extra args", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			},
+			command:  "fix-ci",
+			expected: true,
+		},
+		{
 			name: "exactly at 30 minute boundary",
 			comments: []*platform.Comment{
 				{ID: 1, Body: "/herd fix-ci", CreatedAt: time.Now().Add(-30 * time.Minute)},

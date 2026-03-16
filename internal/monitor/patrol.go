@@ -50,7 +50,15 @@ func hasRecentHerdCommand(ctx context.Context, p platform.Platform, number int, 
 	}
 	prefix := "/herd " + command
 	for _, c := range comments {
-		if strings.HasPrefix(c.Body, prefix) && time.Since(c.CreatedAt) < herdCommandWindow {
+		body := c.Body
+		if !strings.HasPrefix(body, prefix) {
+			continue
+		}
+		rest := body[len(prefix):]
+		if len(rest) != 0 && rest[0] != ' ' && rest[0] != '\n' && rest[0] != '\r' {
+			continue
+		}
+		if time.Since(c.CreatedAt) < herdCommandWindow {
 			return true
 		}
 	}
