@@ -187,6 +187,168 @@ func TestReview_ChangesRequested_CreatesFixes(t *testing.T) {
 	assert.Len(t, wf.dispatched, 2)
 }
 
+func TestReview_SkipsWhenFixWorkersInProgress(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	// A fix issue is still in-progress from a previous review cycle
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Title: "Task", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+		{Number: 80, Title: "Fix: something", Labels: []string{issues.StatusInProgress},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\nFix it\n"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: false, Comments: []string{"issue found"}},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	// Should skip — no review ran, no approval, no fixes created
+	assert.False(t, result.Approved)
+	assert.Nil(t, result.FixIssues)
+	assert.Equal(t, 50, result.BatchPRNumber)
+}
+
+func TestReview_SkipsWhenFixWorkersReady(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	// A fix issue is ready (not yet dispatched)
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Title: "Task", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+		{Number: 80, Title: "Fix: something", Labels: []string{issues.StatusReady},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\nFix it\n"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: false, Comments: []string{"issue found"}},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.False(t, result.Approved)
+	assert.Nil(t, result.FixIssues)
+}
+
+func TestReview_RunsWhenAllFixWorkersDone(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	// All fix issues are done — review should proceed
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Title: "Task", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+		{Number: 80, Title: "Fix: something", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\nFix it\n"},
+	}
+
+	mock := newReviewTestPlatform(
+		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		issueSvc.listResult,
+	)
+	// Override the issue service with our custom one
+	mock.issues = issueSvc
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+}
+
+func TestReview_SkipsWhenCIFixInProgress(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	// A CI fix issue is in-progress
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Title: "Task", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+		{Number: 80, Title: "Fix CI", Labels: []string{issues.StatusInProgress},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  ci_fix_cycle: 1\n---\n\n## Task\nFix CI\n"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, &mockReviewAgent{}, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.False(t, result.Approved)
+	assert.Nil(t, result.FixIssues)
+}
+
 func TestReview_MaxCyclesHit(t *testing.T) {
 	mock := newReviewTestPlatform(
 		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},

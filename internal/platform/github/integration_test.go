@@ -97,7 +97,8 @@ func TestIntegration_Issues(t *testing.T) {
 	assert.Equal(t, title, got.Title)
 	assert.Equal(t, body, got.Body)
 
-	// Add comment
+	// Add comment (brief pause for GitHub API eventual consistency)
+	time.Sleep(2 * time.Second)
 	err = issueSvc.AddComment(ctx, issue.Number, "Test comment")
 	require.NoError(t, err)
 
