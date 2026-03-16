@@ -129,6 +129,23 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return nil, fmt.Errorf("listing milestone issues: %w", err)
 	}
 
+	// Skip review if fix workers from a previous cycle are still running.
+	// Without this gate, every fix worker completion triggers a new review
+	// that sees the remaining unfixed issues and creates duplicate fix issues.
+	for _, iss := range allIssues {
+		parsed, parseErr := issues.ParseBody(iss.Body)
+		if parseErr != nil {
+			continue
+		}
+		if parsed.FrontMatter.Type == "fix" || parsed.FrontMatter.CIFixCycle > 0 {
+			status := issues.StatusLabel(iss.Labels)
+			if status == issues.StatusInProgress || status == issues.StatusReady {
+				fmt.Printf("Skipping review: fix issue #%d is still %s\n", iss.Number, status)
+				return &ReviewResult{BatchPRNumber: pr.Number}, nil
+			}
+		}
+	}
+
 	var allCriteria []string
 	for _, iss := range allIssues {
 		parsed, err := issues.ParseBody(iss.Body)
