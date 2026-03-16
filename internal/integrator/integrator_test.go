@@ -582,6 +582,43 @@ func TestConsolidate_ConflictNotify(t *testing.T) {
 	assert.Error(t, err)
 	assert.True(t, result.ConflictDetected)
 	assert.Contains(t, issueSvc.comments[42][0], "Merge conflict detected")
+	// Should relabel from done → failed to block tier advancement
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+}
+
+func TestConsolidate_ConflictNotify_MentionsUsers(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	_, g := initConflictRepo(t)
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{OnConflict: "notify"},
+		Monitor:    config.Monitor{NotifyUsers: []string{"alice", "bob"}},
+	}
+
+	_, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
+	assert.Error(t, err)
+	assert.Contains(t, issueSvc.comments[42][0], "@alice")
+	assert.Contains(t, issueSvc.comments[42][0], "@bob")
 }
 
 func TestConsolidate_ConflictDispatchResolver(t *testing.T) {
@@ -632,6 +669,9 @@ func TestConsolidate_ConflictDispatchResolver(t *testing.T) {
 	assert.Len(t, createdIssues, 1)
 	assert.Contains(t, createdIssues[0].Title, "Resolve conflict")
 	assert.Len(t, wf.dispatched, 1)
+	// Original issue should be relabeled from done → failed to block tier advancement
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
 }
 
 func TestConsolidate_ConflictMaxAttempts(t *testing.T) {
@@ -674,6 +714,48 @@ func TestConsolidate_ConflictMaxAttempts(t *testing.T) {
 	assert.Equal(t, 0, result.ConflictIssue) // No issue created
 	assert.Contains(t, issueSvc.comments[42][0], "max resolution attempts")
 	assert.Len(t, wf.dispatched, 0) // No dispatch
+	// Should relabel from done → failed to block tier advancement
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+}
+
+func TestConsolidate_ConflictMaxAttempts_MentionsUsers(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\nResolve\n"},
+		{Number: 81, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\nResolve\n"},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+		},
+	}
+
+	_, g := initConflictRepo(t)
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		workflows: wf,
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{OnConflict: "dispatch-resolver", MaxConflictResolutionAttempts: 2},
+		Monitor:    config.Monitor{NotifyUsers: []string{"alice"}},
+	}
+
+	_, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.Contains(t, issueSvc.comments[42][0], "@alice")
 }
 
 func TestAdvance_AllComplete_RebaseFailure(t *testing.T) {

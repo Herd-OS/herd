@@ -17,7 +17,7 @@ func Default() *Config {
 		},
 		Integrator: Integrator{
 			Strategy:                      "squash",
-			OnConflict:                    "notify",
+			OnConflict:                    "dispatch-resolver",
 			MaxConflictResolutionAttempts: 2,
 			RequireCI:                     true,
 			Review:                        true,

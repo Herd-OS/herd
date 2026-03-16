@@ -13,7 +13,7 @@ workers:
     timeout_minutes: 30
 integrator:
     strategy: squash
-    on_conflict: notify
+    on_conflict: dispatch-resolver
     max_conflict_resolution_attempts: 2
     require_ci: true
     review: true

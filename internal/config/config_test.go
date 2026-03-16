@@ -18,7 +18,7 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, "herd-worker", cfg.Workers.RunnerLabel)
 	assert.Equal(t, 30, cfg.Workers.TimeoutMinutes)
 	assert.Equal(t, "squash", cfg.Integrator.Strategy)
-	assert.Equal(t, "notify", cfg.Integrator.OnConflict)
+	assert.Equal(t, "dispatch-resolver", cfg.Integrator.OnConflict)
 	assert.Equal(t, true, cfg.Integrator.RequireCI)
 	assert.Equal(t, true, cfg.Integrator.Review)
 	assert.Equal(t, 3, cfg.Integrator.ReviewMaxFixCycles)
