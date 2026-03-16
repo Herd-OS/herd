@@ -98,6 +98,14 @@ Preview what would be created:
 herd plan --dry-run "Add user authentication"
 ```
 
+Retry a failed plan from a preserved plan file:
+
+```bash
+herd plan --from-file .herd/state/1234567890.json
+```
+
+If issue creation fails (e.g., duplicate milestone), the plan file is preserved and the exact `--from-file` command is printed. This skips the agent session and goes straight to confirmation and creation.
+
 ## Dispatching Workers
 
 After planning, Tier 0 tasks are dispatched automatically. To manually dispatch:
