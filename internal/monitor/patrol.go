@@ -198,7 +198,7 @@ func deleteCIFixComments(ctx context.Context, p platform.Platform, prNumber int)
 		return
 	}
 	for _, c := range comments {
-		if strings.Contains(c.Body, "/herd fix-ci") {
+		if strings.TrimSpace(c.Body) == "/herd fix-ci" {
 			_ = p.Issues().DeleteComment(ctx, c.ID)
 		}
 	}

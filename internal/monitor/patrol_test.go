@@ -817,6 +817,80 @@ func TestHasCIFixComment_ErrorFallback(t *testing.T) {
 	assert.False(t, hasCIFixComment(context.Background(), mock, 10))
 }
 
+func TestDeleteCIFixComments(t *testing.T) {
+	tests := []struct {
+		name             string
+		comments         []*platform.Comment
+		expectedDeleted  []int64
+	}{
+		{
+			name:            "no comments",
+			comments:        nil,
+			expectedDeleted: nil,
+		},
+		{
+			name:            "exact match deleted",
+			comments:        []*platform.Comment{{ID: 1, Body: "/herd fix-ci"}},
+			expectedDeleted: []int64{1},
+		},
+		{
+			name:            "whitespace-only surrounding deleted",
+			comments:        []*platform.Comment{{ID: 2, Body: "  /herd fix-ci\n"}},
+			expectedDeleted: []int64{2},
+		},
+		{
+			name:            "prose mention not deleted",
+			comments:        []*platform.Comment{{ID: 3, Body: "I tried `/herd fix-ci` but nothing happened"}},
+			expectedDeleted: nil,
+		},
+		{
+			name:            "mid-sentence not deleted",
+			comments:        []*platform.Comment{{ID: 4, Body: "running /herd fix-ci now"}},
+			expectedDeleted: nil,
+		},
+		{
+			name: "only exact-match comments deleted among mixed",
+			comments: []*platform.Comment{
+				{ID: 10, Body: "/herd fix-ci"},
+				{ID: 11, Body: "some prose mentioning /herd fix-ci command"},
+				{ID: 12, Body: "  /herd fix-ci  "},
+			},
+			expectedDeleted: []int64{10, 12},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			if tt.comments != nil {
+				issueSvc.existingComments = map[int][]*platform.Comment{10: tt.comments}
+			}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       newMockPRService(),
+				workflows: &mockWorkflowService{},
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+			deleteCIFixComments(context.Background(), mock, 10)
+			assert.Equal(t, tt.expectedDeleted, issueSvc.deletedComments)
+		})
+	}
+}
+
+func TestDeleteCIFixComments_ErrorFallback(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listCommentsErr = fmt.Errorf("API error")
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	// Should not panic on error
+	deleteCIFixComments(context.Background(), mock, 10)
+	assert.Empty(t, issueSvc.deletedComments)
+}
+
 func TestPatrol_NoDuplicateComments(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{
