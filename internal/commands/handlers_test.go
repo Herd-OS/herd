@@ -471,6 +471,7 @@ func TestHandleRetry_DispatchError(t *testing.T) {
 	assert.Contains(t, result.Error.Error(), "dispatching worker for #42")
 	// Labels should be rolled back
 	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusInProgress)
 }
 
 // --- Tests for handleReview ---
