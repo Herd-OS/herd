@@ -8,7 +8,6 @@ import (
 
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/issues"
-	"github.com/herd-os/herd/internal/planner"
 	"github.com/herd-os/herd/internal/platform"
 )
 
@@ -106,11 +105,6 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 			return nil, fmt.Errorf("listing completed runs: %w", err)
 		}
 
-		defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("getting default branch: %w", err)
-		}
-
 		for _, issue := range failed {
 			result.FailedIssues++
 
@@ -130,25 +124,13 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 				continue // Backoff not elapsed
 			}
 
-			// Re-dispatch
 			if issue.Milestone == nil {
 				continue
 			}
-			batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
 
-			_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusFailed})
-			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusInProgress})
-			_, err := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
-				"issue_number":    fmt.Sprintf("%d", issue.Number),
-				"batch_branch":    batchBranch,
-				"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
-				"runner_label":    cfg.Workers.RunnerLabel,
-			})
-			if err != nil {
-				_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusInProgress})
-				_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
-				continue
-			}
+			// Post /herd retry command — the comment handler will dispatch
+			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+				"/herd retry %d", issue.Number))
 			result.RedispatchedCount++
 		}
 	} else {
@@ -177,10 +159,8 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		if cfg.Integrator.RequireCI && strings.HasPrefix(pr.Head, "herd/batch/") {
 			ciStatus, err := p.Checks().GetCombinedStatus(ctx, pr.Head)
 			if err == nil && ciStatus == "failure" {
-				if !hasCIMonitorComment(ctx, p, pr.Number) {
-					_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
-						"⚠️ **HerdOS Monitor Alert**\n\nCI is failing on batch branch `%s`. The integrator should have dispatched a fix worker. If this persists, manual intervention may be needed.\n\n%s",
-						pr.Head, buildMentions(cfg.Monitor.NotifyUsers)))
+				if !hasCIFixComment(ctx, p, pr.Number) {
+					_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
 				}
 				result.CIFailures++
 			}
@@ -190,14 +170,14 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 	return result, nil
 }
 
-func hasCIMonitorComment(ctx context.Context, p platform.Platform, prNumber int) bool {
+func hasCIFixComment(ctx context.Context, p platform.Platform, prNumber int) bool {
 	// PR comments are issue comments in GitHub
 	comments, err := p.Issues().ListComments(ctx, prNumber)
 	if err != nil {
 		return false
 	}
 	for _, c := range comments {
-		if strings.Contains(c.Body, monitorCommentSignature) && strings.Contains(c.Body, "CI is failing") {
+		if strings.Contains(c.Body, "/herd fix-ci") {
 			return true
 		}
 	}

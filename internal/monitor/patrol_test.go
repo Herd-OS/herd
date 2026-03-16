@@ -284,9 +284,9 @@ func TestPatrol_FailedIssue_Redispatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.FailedIssues)
 	assert.Equal(t, 1, result.RedispatchedCount)
-	assert.Len(t, wf.dispatched, 1)
-	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusFailed)
-	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusInProgress)
+	assert.Len(t, wf.dispatched, 0) // monitor no longer dispatches directly
+	assert.Len(t, issueSvc.comments[42], 1)
+	assert.Contains(t, issueSvc.comments[42][0], "/herd retry 42")
 }
 
 func TestPatrol_FailedIssue_BackoffNotElapsed(t *testing.T) {
@@ -320,7 +320,7 @@ func TestPatrol_FailedIssue_BackoffNotElapsed(t *testing.T) {
 	result, err := Patrol(context.Background(), mock, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.RedispatchedCount)
-	assert.Len(t, wf.dispatched, 0)
+	assert.Len(t, issueSvc.comments[42], 0)
 }
 
 func TestPatrol_FailedIssue_MaxAttempts(t *testing.T) {
@@ -416,7 +416,7 @@ func TestPatrol_CIFailureOnBatchPR(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.CIFailures)
 	assert.Len(t, prSvc.comments[10], 1)
-	assert.Contains(t, prSvc.comments[10][0], "CI is failing")
+	assert.Contains(t, prSvc.comments[10][0], "/herd fix-ci")
 }
 
 func TestPatrol_CIPassingOnBatchPR(t *testing.T) {
@@ -642,7 +642,9 @@ func TestPatrol_StaleIssueRedispatchedNextCycle(t *testing.T) {
 	result2, err := Patrol(context.Background(), mock2, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result2.RedispatchedCount)
-	assert.Len(t, wf2.dispatched, 1)
+	assert.Len(t, wf2.dispatched, 0) // monitor no longer dispatches directly
+	assert.Len(t, issueSvc2.comments[42], 1)
+	assert.Contains(t, issueSvc2.comments[42][0], "/herd retry 42")
 }
 
 func TestPatrol_TimeoutAndStale_BothRelabel(t *testing.T) {
