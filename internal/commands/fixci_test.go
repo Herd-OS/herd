@@ -99,7 +99,8 @@ func (m *mockPRService) CreateReview(_ context.Context, _ int, _ string, _ platf
 }
 
 type mockWorkflowService struct {
-	dispatched []map[string]string
+	dispatched  []map[string]string
+	dispatchErr error
 }
 
 func (m *mockWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) {
@@ -107,7 +108,7 @@ func (m *mockWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, e
 }
 func (m *mockWorkflowService) Dispatch(_ context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
 	m.dispatched = append(m.dispatched, inputs)
-	return nil, nil
+	return nil, m.dispatchErr
 }
 func (m *mockWorkflowService) GetRun(_ context.Context, _ int64) (*platform.Run, error) {
 	return nil, nil
