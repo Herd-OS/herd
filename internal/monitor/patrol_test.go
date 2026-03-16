@@ -634,8 +634,44 @@ func TestPatrol_CIPassingNoFixCICommentNoDeleteCalled(t *testing.T) {
 	result, err := Patrol(context.Background(), mock, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.CIFailures)
+	// No comments to delete, but label removal is always attempted on CI success.
 	assert.Empty(t, issueSvc.deletedComments)
-	assert.Empty(t, issueSvc.removedLabels[10])
+	assert.Contains(t, issueSvc.removedLabels[10], issues.CIFixPending)
+}
+
+// TestPatrol_CIPassingRemovesStuckLabelEvenWithNoComment is a regression test for the bug
+// where deleteCIFixComments only called RemoveLabels when deleted > 0. If the /herd fix-ci
+// comment was manually deleted (or missed due to pagination/timing), the herd/ci-fix-pending
+// label would persist indefinitely, blocking all future automated CI fix triggering.
+func TestPatrol_CIPassingRemovesStuckLabelEvenWithNoComment(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+	// The /herd fix-ci comment has been manually deleted, but herd/ci-fix-pending label persists.
+	issueSvc.existingComments = map[int][]*platform.Comment{10: {}}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "success"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.CIFailures)
+	// No comments to delete.
+	assert.Empty(t, issueSvc.deletedComments)
+	// Label must be removed unconditionally to unblock future fix-ci triggers.
+	assert.Contains(t, issueSvc.removedLabels[10], issues.CIFixPending)
 }
 
 func TestPatrol_CIFailureAfterCIFixPendingLabelRemoved(t *testing.T) {
