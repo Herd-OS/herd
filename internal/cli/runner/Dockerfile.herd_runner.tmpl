@@ -1,0 +1,19 @@
+# HerdOS Runner — project customization
+# This file is yours to customize — herd init will never overwrite it.
+# Add project-specific tools, languages, and dependencies below.
+#
+# The base image provides: GitHub Actions runner, Claude Code, Herd CLI,
+# curl, jq, git, gh, and Node.js.
+
+FROM herd-runner-base
+
+# Examples — uncomment what your project needs:
+#
+# Go
+# RUN apt-get update && apt-get install -y golang-go && rm -rf /var/lib/apt/lists/*
+#
+# Python
+# RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
+#
+# Rust
+# RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y

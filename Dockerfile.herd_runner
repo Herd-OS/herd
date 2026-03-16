@@ -1,0 +1,10 @@
+# HerdOS Runner — project customization
+# This file is yours to customize — herd init will never overwrite it.
+
+FROM herd-runner-base
+
+# Go toolchain (needed for building, testing, and linting)
+RUN apt-get update && apt-get install -y golang-go && rm -rf /var/lib/apt/lists/*
+
+# golangci-lint
+RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
