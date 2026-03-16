@@ -22,8 +22,11 @@ func (r *Registry) Register(name string, handler HandlerFunc) {
 }
 
 // Handle dispatches a parsed command to its registered handler.
-// Returns an error result if the command is unknown.
+// Returns an error result if the command has a parse error or is unknown.
 func (r *Registry) Handle(ctx *HandlerContext, cmd Command) Result {
+	if cmd.ParseErr != nil {
+		return Result{Message: "⚠️ Unterminated quote in command."}
+	}
 	h, ok := r.handlers[cmd.Name]
 	if !ok {
 		return Result{Error: fmt.Errorf("unknown command: %s", cmd.Name)}

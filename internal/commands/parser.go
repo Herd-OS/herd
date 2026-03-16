@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"strings"
 )
 
@@ -42,6 +43,8 @@ func parseCommandLine(line string) *Command {
 		if end := strings.Index(rest, "\""); end >= 0 {
 			cmd.Prompt = rest[:end]
 			line = strings.TrimSpace(line[:idx])
+		} else {
+			return &Command{ParseErr: errors.New("unterminated quote in command")}
 		}
 	}
 
