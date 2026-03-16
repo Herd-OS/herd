@@ -516,7 +516,8 @@ func TestHandleReview_Approved(t *testing.T) {
 	result := handleReview(hctx, Command{Name: "review"})
 
 	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "✅ Review passed")
+	// integrator.Review already posted the ✅ comment; handler returns empty message
+	assert.Empty(t, result.Message)
 }
 
 func TestHandleReview_WithFixes(t *testing.T) {
@@ -558,7 +559,8 @@ func TestHandleReview_WithFixes(t *testing.T) {
 	result := handleReview(hctx, Command{Name: "review"})
 
 	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "🔍 Review found issues")
+	// integrator.Review already posted the 🔍 findings comment; handler returns empty message
+	assert.Empty(t, result.Message)
 	assert.Len(t, issueSvc.createdIssues, 2)
 }
 

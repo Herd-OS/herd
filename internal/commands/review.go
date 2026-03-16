@@ -25,18 +25,11 @@ func handleReview(hctx *HandlerContext, cmd Command) Result {
 		return Result{Error: err}
 	}
 
-	if result.Approved {
-		return Result{Message: "✅ Review passed — batch PR approved."}
-	}
-	if result.MaxCyclesHit {
-		return Result{Message: "⚠️ Max fix cycles reached. Manual intervention needed."}
-	}
-	if len(result.FixIssues) > 0 {
-		nums := make([]string, len(result.FixIssues))
-		for i, n := range result.FixIssues {
-			nums[i] = fmt.Sprintf("#%d", n)
-		}
-		return Result{Message: fmt.Sprintf("🔍 Review found issues — dispatched fix workers: %s", strings.Join(nums, ", "))}
+	// integrator.Review already posts PR comments for all actionable outcomes
+	// (approved, max cycles hit, findings). Return empty messages here to avoid
+	// duplicate comments being posted by the CLI handler.
+	if result.Approved || result.MaxCyclesHit || len(result.FixIssues) > 0 {
+		return Result{}
 	}
 	return Result{Message: "Review completed (no action taken)."}
 }
