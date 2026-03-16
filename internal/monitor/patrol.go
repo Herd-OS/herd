@@ -190,8 +190,8 @@ func hasCIFixComment(ctx context.Context, p platform.Platform, prNumber int) boo
 	return false
 }
 
-// deleteCIFixComments removes all /herd fix-ci comments from the PR, resetting the
-// dedup state so future CI failures can trigger a new fix cycle.
+// deleteCIFixComments removes all /herd fix-ci comments from the PR and removes
+// the CIFixPending label, resetting state so future CI failures can trigger a new fix cycle.
 func deleteCIFixComments(ctx context.Context, p platform.Platform, prNumber int) {
 	comments, err := p.Issues().ListComments(ctx, prNumber)
 	if err != nil {
@@ -202,6 +202,7 @@ func deleteCIFixComments(ctx context.Context, p platform.Platform, prNumber int)
 			_ = p.Issues().DeleteComment(ctx, c.ID)
 		}
 	}
+	_ = p.Issues().RemoveLabels(ctx, prNumber, []string{issues.CIFixPending})
 }
 
 // BackoffDelay returns the backoff delay for a given failure count.

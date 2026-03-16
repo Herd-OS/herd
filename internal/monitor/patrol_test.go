@@ -580,6 +580,37 @@ func TestPatrol_CIPassingDeletesExistingFixCIComment(t *testing.T) {
 	assert.Contains(t, issueSvc.deletedComments, int64(42))
 }
 
+func TestPatrol_CIPassingRemovesCIFixPendingLabel(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+	// A /herd fix-ci comment exists from a prior fix cycle.
+	issueSvc.existingComments = map[int][]*platform.Comment{
+		10: {{ID: 42, Body: "/herd fix-ci"}},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "success"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.CIFailures)
+	// The CIFixPending label must be removed so future failures can re-trigger.
+	assert.Contains(t, issueSvc.removedLabels[10], issues.CIFixPending)
+}
+
 func TestPatrol_CIPassingNoFixCICommentNoDeleteCalled(t *testing.T) {
 	prSvc := newMockPRService()
 	prSvc.listResult = []*platform.PullRequest{
