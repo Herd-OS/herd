@@ -11,9 +11,10 @@ import (
 
 // Command represents a parsed /herd command.
 type Command struct {
-	Name   string   // e.g., "fix-ci", "retry", "review", "fix"
-	Args   []string // positional arguments (e.g., issue number for retry)
-	Prompt string   // quoted prompt string, empty if not provided
+	Name     string   // e.g., "fix-ci", "retry", "review", "fix"
+	Args     []string // positional arguments (e.g., issue number for retry)
+	Prompt   string   // quoted prompt string, empty if not provided
+	ParseErr error    // non-nil if the command line could not be parsed
 }
 
 // HandlerContext provides everything a command handler needs to execute.
