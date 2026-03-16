@@ -37,6 +37,7 @@ type mockIssueService struct {
 	listResult    []*platform.Issue
 	createdIssues []*platform.Issue
 	comments      map[int][]string
+	reactions     []string
 }
 
 func newMockIssueService() *mockIssueService {
@@ -65,6 +66,10 @@ func (m *mockIssueService) AddComment(_ context.Context, number int, body string
 }
 func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
+}
+func (m *mockIssueService) CreateReaction(_ context.Context, _ int64, reaction string) error {
+	m.reactions = append(m.reactions, reaction)
+	return nil
 }
 
 type mockPRService struct {

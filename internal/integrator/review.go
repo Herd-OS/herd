@@ -145,9 +145,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 
 	// Load integrator role instructions
-	ri, readErr := os.ReadFile(filepath.Join(params.RepoRoot, ".herd", "integrator.md"))
-	if readErr == nil {
-		reviewOpts.SystemPrompt = string(ri)
+	if params.SystemPrompt != "" {
+		reviewOpts.SystemPrompt = params.SystemPrompt
+	} else {
+		ri, readErr := os.ReadFile(filepath.Join(params.RepoRoot, ".herd", "integrator.md"))
+		if readErr == nil {
+			reviewOpts.SystemPrompt = string(ri)
+		}
 	}
 
 	reviewResult, err := ag.Review(ctx, diff, reviewOpts)

@@ -4,50 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// --- mock platform ---
-
-type mockPlatform struct {
-	issues *mockIssueService
-}
-
-func (m *mockPlatform) Issues() platform.IssueService            { return m.issues }
-func (m *mockPlatform) PullRequests() platform.PullRequestService { return nil }
-func (m *mockPlatform) Workflows() platform.WorkflowService       { return nil }
-func (m *mockPlatform) Labels() platform.LabelService             { return nil }
-func (m *mockPlatform) Milestones() platform.MilestoneService     { return nil }
-func (m *mockPlatform) Runners() platform.RunnerService           { return nil }
-func (m *mockPlatform) Repository() platform.RepositoryService    { return nil }
-func (m *mockPlatform) Checks() platform.CheckService             { return nil }
-
-type mockIssueService struct {
-	reactions []string
-}
-
-func (m *mockIssueService) Create(_ context.Context, _, _ string, _ []string, _ *int) (*platform.Issue, error) {
-	return nil, nil
-}
-func (m *mockIssueService) Get(_ context.Context, _ int) (*platform.Issue, error) { return nil, nil }
-func (m *mockIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*platform.Issue, error) {
-	return nil, nil
-}
-func (m *mockIssueService) Update(_ context.Context, _ int, _ platform.IssueUpdate) (*platform.Issue, error) {
-	return nil, nil
-}
-func (m *mockIssueService) AddLabels(_ context.Context, _ int, _ []string) error  { return nil }
-func (m *mockIssueService) RemoveLabels(_ context.Context, _ int, _ []string) error { return nil }
-func (m *mockIssueService) AddComment(_ context.Context, _ int, _ string) error   { return nil }
-func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
-	return nil, nil
-}
-func (m *mockIssueService) CreateReaction(_ context.Context, _ int64, reaction string) error {
-	m.reactions = append(m.reactions, reaction)
-	return nil
-}
 
 // --- tests ---
 
