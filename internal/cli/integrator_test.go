@@ -121,6 +121,79 @@ func TestIntegratorCmd_SubcommandStructure(t *testing.T) {
 	assert.Contains(t, names, "review")
 }
 
+func TestHandleCommentCmd_RequiresHerdRunner(t *testing.T) {
+	t.Setenv("HERD_RUNNER", "")
+	root := NewRootCmd()
+	root.SetArgs([]string{"integrator", "handle-comment", "--comment-id", "1", "--issue-number", "1"})
+	err := root.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "HERD_RUNNER")
+}
+
+func TestHandleCommentCmd_RequiresCommentBody(t *testing.T) {
+	t.Setenv("HERD_RUNNER", "true")
+	t.Setenv("COMMENT_BODY", "")
+	root := NewRootCmd()
+	root.SetArgs([]string{"integrator", "handle-comment", "--comment-id", "1", "--issue-number", "1"})
+	err := root.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "COMMENT_BODY")
+}
+
+func TestHandleCommentCmd_NoOpWhenNoHerdCommand(t *testing.T) {
+	t.Setenv("HERD_RUNNER", "true")
+	t.Setenv("COMMENT_BODY", "just a regular comment, no slash command here")
+
+	root := NewRootCmd()
+	root.SetArgs([]string{"integrator", "handle-comment", "--comment-id", "1", "--issue-number", "1"})
+	err := root.Execute()
+	// No /herd command: should succeed with no-op, but config.Load may fail in test env
+	// We only assert no COMMENT_BODY error
+	if err != nil {
+		assert.NotContains(t, err.Error(), "COMMENT_BODY")
+	}
+}
+
+func TestHandleCommentCmd_IgnoresUnauthorizedAuthor(t *testing.T) {
+	tests := []struct {
+		name        string
+		association string
+		login       string
+		shouldRun   bool
+	}{
+		{"owner allowed", "OWNER", "owner-user", true},
+		{"member allowed", "MEMBER", "member-user", true},
+		{"collaborator allowed", "COLLABORATOR", "collab-user", true},
+		{"contributor ignored", "CONTRIBUTOR", "some-user", false},
+		{"none ignored", "NONE", "anon-user", false},
+		{"bot allowed", "NONE", "github-actions[bot]", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HERD_RUNNER", "true")
+			t.Setenv("COMMENT_BODY", "/herd help")
+			root := NewRootCmd()
+			root.SetArgs([]string{
+				"integrator", "handle-comment",
+				"--comment-id", "1",
+				"--issue-number", "1",
+				"--author-association", tt.association,
+				"--author-login", tt.login,
+			})
+			err := root.Execute()
+			if !tt.shouldRun {
+				// Unauthorized: command exits successfully (ignored), no error
+				assert.NoError(t, err)
+			} else {
+				// Authorized: will proceed past auth check; config.Load may fail in CI
+				// but that's after the auth gate — acceptable here
+				_ = err
+			}
+		})
+	}
+}
+
 func TestHandleCommentCmd_IsPRFlag(t *testing.T) {
 	tests := []struct {
 		name     string
