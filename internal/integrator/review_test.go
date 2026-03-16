@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -781,7 +782,7 @@ func TestReview_DispatchCountAccurateWhenSomeCreatesFail(t *testing.T) {
 	require.NotEmpty(t, prSvc.comments)
 	findingsComment := ""
 	for _, c := range prSvc.comments {
-		if len(c) > 0 && c[0] == '\xf0' { // starts with 🔍
+		if strings.HasPrefix(c, "🔍") {
 			findingsComment = c
 			break
 		}
