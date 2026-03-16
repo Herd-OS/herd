@@ -12,21 +12,24 @@ import (
 
 func TestIsBotUser(t *testing.T) {
 	tests := []struct {
-		login   string
-		allowed bool
+		name     string
+		login    string
+		expected bool
 	}{
-		{"herd-os[bot]", true},
-		{"github-actions[bot]", true},
-		{"dependabot[bot]", false},
-		{"renovate[bot]", false},
-		{"coderabbit[bot]", false},
-		{"random-user", false},
-		{"[bot]", false},
-		{"", false},
+		{"herd-os bot", "herd-os[bot]", true},
+		{"github-actions bot", "github-actions[bot]", true},
+		{"dependabot bot denied", "dependabot[bot]", false},
+		{"renovate bot denied", "renovate[bot]", false},
+		{"coderabbit bot denied", "coderabbit[bot]", false},
+		{"non-allowlisted bot denied", "some-app[bot]", false},
+		{"bot suffix only denied", "[bot]", false},
+		{"bot in middle", "my[bot]user", false},
+		{"regular user", "octocat", false},
+		{"empty login", "", false},
 	}
-	for _, tc := range tests {
-		t.Run(tc.login, func(t *testing.T) {
-			assert.Equal(t, tc.allowed, isBotUser(tc.login))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isBotUser(tt.login))
 		})
 	}
 }
