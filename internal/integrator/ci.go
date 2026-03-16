@@ -16,6 +16,7 @@ type CheckCIParams struct {
 	RunID       int64
 	BatchNumber int // Alternative to RunID — used by check_suite trigger
 	RepoRoot    string
+	UserContext string // Optional extra context from the user, prepended to the fix issue task
 }
 
 // CheckCIResult holds the result of CI checking.
@@ -133,6 +134,11 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 	}
 	batchPR := prs[0]
 
+	taskDesc := "CI is failing on the batch branch. Investigate the failures, fix the issues, and ensure all tests pass."
+	if params.UserContext != "" {
+		taskDesc = fmt.Sprintf("CI is failing on the batch branch. %s\n\nInvestigate the failures, fix the issues, and ensure all tests pass.", params.UserContext)
+	}
+
 	body := issues.RenderBody(issues.IssueBody{
 		FrontMatter: issues.FrontMatter{
 			Version:    1,
@@ -141,7 +147,7 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 			CIFixCycle: nextCycle,
 			BatchPR:    batchPR.Number,
 		},
-		Task:    "CI is failing on the batch branch. Investigate the failures, fix the issues, and ensure all tests pass.",
+		Task:    taskDesc,
 		Context: fmt.Sprintf("CI failed on batch branch `%s` after consolidation (cycle %d).", batchBranch, nextCycle),
 	})
 
