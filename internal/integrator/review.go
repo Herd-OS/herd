@@ -194,7 +194,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// Handle changes requested — determine fix cycle
 	currentCycle := findMaxFixCycle(allIssues)
 
-	if currentCycle >= cfg.Integrator.ReviewMaxFixCycles {
+	if cfg.Integrator.ReviewMaxFixCycles > 0 && currentCycle >= cfg.Integrator.ReviewMaxFixCycles {
 		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found issues but max fix cycles (%d) reached. Manual intervention needed:\n\n",
 			cfg.Integrator.ReviewMaxFixCycles)
 		for _, c := range reviewResult.Comments {
