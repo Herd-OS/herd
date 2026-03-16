@@ -151,6 +151,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		ri, readErr := os.ReadFile(filepath.Join(params.RepoRoot, ".herd", "integrator.md"))
 		if readErr == nil {
 			reviewOpts.SystemPrompt = string(ri)
+		} else if !os.IsNotExist(readErr) {
+			fmt.Printf("Warning: reading .herd/integrator.md: %v\n", readErr)
 		}
 	}
 
