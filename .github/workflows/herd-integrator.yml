@@ -164,7 +164,7 @@ jobs:
       vars.HERD_ENABLED == 'true'
       && github.event_name == 'issue_comment'
       && github.event.action == 'created'
-      && startsWith(github.event.comment.body, '/herd ')
+      && contains(github.event.comment.body, '/herd ')  # intentionally broad: parser scans all lines
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
