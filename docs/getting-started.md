@@ -154,7 +154,7 @@ Once workers are dispatched, the system runs autonomously via GitHub Actions:
 
 1. **Workers execute** — Each worker reads its assigned issue, runs your agent in headless mode on a self-hosted runner, and pushes changes to a worker branch (`herd/worker/<number>-<slug>`). If no changes are needed, the worker marks the issue as done without pushing.
 
-2. **Integrator consolidates** — When a worker completes, the Integrator merges its branch into the batch branch (`herd/batch/<number>-<slug>`) and deletes the worker branch. If a merge conflict is detected, the behavior depends on `integrator.on_conflict`: with `notify` (default), a comment is posted for manual resolution; with `dispatch-resolver`, a conflict-resolution worker is automatically dispatched.
+2. **Integrator consolidates** — When a worker completes, the Integrator merges its branch into the batch branch (`herd/batch/<number>-<slug>`) and deletes the worker branch. If a merge conflict is detected, the behavior depends on `integrator.on_conflict`: with `dispatch-resolver` (default), a conflict-resolution worker is automatically dispatched; with `notify`, a comment is posted for manual resolution instead.
 
 3. **Integrator advances** — After consolidation, the Integrator checks if the current tier is complete. If so, it unblocks and dispatches the next tier. When all tiers are done, it rebases the batch branch onto `main` and opens a single batch PR.
 

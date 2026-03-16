@@ -130,10 +130,21 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 			return handleConflictResolution(ctx, p, cfg, issue, issue.Milestone, workerBranch, batchBranch)
 		}
 
-		// Default: notify — comment on issue and return error
+		// Default: notify — comment on issue with @mentions and return error
+		mentions := ""
+		if len(cfg.Monitor.NotifyUsers) > 0 {
+			parts := make([]string, len(cfg.Monitor.NotifyUsers))
+			for i, u := range cfg.Monitor.NotifyUsers {
+				parts[i] = "@" + u
+			}
+			mentions = "\n\n/cc " + strings.Join(parts, " ")
+		}
 		_ = p.Issues().AddComment(ctx, issueNumber, fmt.Sprintf(
-			"⚠️ **HerdOS Integrator**\n\nMerge conflict detected when consolidating `%s` into `%s`.\n\nManual resolution required.",
-			workerBranch, batchBranch))
+			"⚠️ **HerdOS Integrator**\n\nMerge conflict detected when consolidating `%s` into `%s`.\n\nManual resolution required.%s",
+			workerBranch, batchBranch, mentions))
+		// Relabel from done → failed to block tier advancement
+		_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusDone})
+		_ = p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
 		return &ConsolidateResult{
 			IssueNumber:      issueNumber,
 			WorkerBranch:     workerBranch,
@@ -490,9 +501,20 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 	}
 
 	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
+		mentions := ""
+		if len(cfg.Monitor.NotifyUsers) > 0 {
+			parts := make([]string, len(cfg.Monitor.NotifyUsers))
+			for i, u := range cfg.Monitor.NotifyUsers {
+				parts[i] = "@" + u
+			}
+			mentions = "\n\n/cc " + strings.Join(parts, " ")
+		}
 		_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
-			"⚠️ **HerdOS Integrator**\n\nMerge conflict detected but max resolution attempts (%d) reached. Manual intervention required.\n\nConflicting branches: `%s` ← `%s`",
-			cfg.Integrator.MaxConflictResolutionAttempts, batchBranch, workerBranch))
+			"⚠️ **HerdOS Integrator**\n\nMerge conflict detected but max resolution attempts (%d) reached. Manual intervention required.\n\nConflicting branches: `%s` ← `%s`%s",
+			cfg.Integrator.MaxConflictResolutionAttempts, batchBranch, workerBranch, mentions))
+		// Relabel from done → failed to block tier advancement
+		_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
+		_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
 		return &ConsolidateResult{
 			IssueNumber:      issue.Number,
 			WorkerBranch:     workerBranch,
@@ -524,6 +546,10 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 	if err != nil {
 		return nil, fmt.Errorf("creating conflict-resolution issue: %w", err)
 	}
+
+	// Relabel original issue from done → failed to block tier advancement
+	_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
+	_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
 
 	// Dispatch resolver worker
 	defaultBranch, _ := p.Repository().GetDefaultBranch(ctx)
