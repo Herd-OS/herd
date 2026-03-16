@@ -60,11 +60,11 @@ func Validate(cfg *Config) *ValidationError {
 	if cfg.Integrator.MaxConflictResolutionAttempts <= 0 {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.max_conflict_resolution_attempts must be > 0, got %d", cfg.Integrator.MaxConflictResolutionAttempts))
 	}
-	if cfg.Integrator.ReviewMaxFixCycles <= 0 {
-		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.review_max_fix_cycles must be > 0, got %d", cfg.Integrator.ReviewMaxFixCycles))
+	if cfg.Integrator.ReviewMaxFixCycles < 0 {
+		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.review_max_fix_cycles must be >= 0 (0 = unlimited), got %d", cfg.Integrator.ReviewMaxFixCycles))
 	}
 	if cfg.Integrator.CIMaxFixCycles < 0 {
-		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.ci_max_fix_cycles must be >= 0, got %d", cfg.Integrator.CIMaxFixCycles))
+		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.ci_max_fix_cycles must be >= 0 (0 = unlimited), got %d", cfg.Integrator.CIMaxFixCycles))
 	}
 
 	// Monitor
