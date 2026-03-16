@@ -649,6 +649,25 @@ func TestHandleFix_Success(t *testing.T) {
 	assert.Len(t, wf.dispatched, 1)
 }
 
+// --- Tests for HandlerContext.IsPR ---
+
+func TestHandlerContext_IsPR(t *testing.T) {
+	tests := []struct {
+		name string
+		isPR bool
+	}{
+		{"issue context", false},
+		{"PR context", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hctx := &HandlerContext{IsPR: tt.isPR}
+			assert.Equal(t, tt.isPR, hctx.IsPR)
+		})
+	}
+}
+
 // --- Tests for DefaultRegistry ---
 
 func TestDefaultRegistry(t *testing.T) {

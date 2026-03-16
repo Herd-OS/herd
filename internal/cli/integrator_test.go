@@ -120,3 +120,32 @@ func TestIntegratorCmd_SubcommandStructure(t *testing.T) {
 	assert.Contains(t, names, "advance")
 	assert.Contains(t, names, "review")
 }
+
+func TestHandleCommentCmd_IsPRFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagName string
+		defValue string
+		wantNil  bool
+	}{
+		{"is-pr flag exists with default false", "is-pr", "false", false},
+		{"comment-id flag exists", "comment-id", "0", false},
+		{"issue-number flag exists", "issue-number", "0", false},
+		{"author-login flag exists", "author-login", "", false},
+		{"author-association flag exists", "author-association", "", false},
+		{"unknown flag absent", "unknown-flag", "", true},
+	}
+
+	cmd := newHandleCommentCmd()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flag := cmd.Flags().Lookup(tt.flagName)
+			if tt.wantNil {
+				assert.Nil(t, flag)
+			} else {
+				require.NotNil(t, flag, "expected flag --%s to be defined", tt.flagName)
+				assert.Equal(t, tt.defValue, flag.DefValue)
+			}
+		})
+	}
+}
