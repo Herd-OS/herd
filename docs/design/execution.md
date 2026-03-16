@@ -560,6 +560,34 @@ The user can then dispatch with `herd dispatch --batch <N>`.
 
 ---
 
+## 12. Comment Commands
+
+HerdOS supports `/herd` commands posted as comments on issues and PRs. This provides a unified entry point for both human and automated interactions.
+
+### Architecture
+
+The comment command system is in `internal/commands/`. It is designed as a set of composable functions called through a registry, with two entry points:
+
+1. **Phase 1 (current):** The `issue_comment` webhook triggers the `handle-comment` job in the integrator workflow, which calls `herd integrator handle-comment`. This parses the command and dispatches to the registered handler.
+2. **Phase 2 (future GitHub App):** An agent interprets natural language and calls the same handler functions as tool calls.
+
+### Permission Model
+
+Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` association on the repository, plus bot users (login ending in `[bot]`). Other commenters are silently ignored.
+
+### Acknowledgment Flow
+
+1. User posts `/herd <command>` as a comment
+2. Workflow reacts with 👀 on the comment
+3. Handler executes the command
+4. Result posted as a reply comment (success message or error)
+
+### Monitor Integration
+
+The Monitor posts `/herd retry <N>` and `/herd fix-ci` comments instead of dispatching workflows directly. This ensures all command execution flows through the same handler, maintaining single responsibility.
+
+---
+
 ## Runaway Loop Protection
 
 Every automated feedback loop has a hard cap:

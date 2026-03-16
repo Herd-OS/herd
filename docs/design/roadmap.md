@@ -19,7 +19,16 @@ A user can:
 - GitHub only (Platform interface exists but only GitHub is implemented)
 - Claude Code only (Agent interface exists but only Claude Code is implemented)
 
-## v2 -- Multi-Agent
+## v2 -- GitHub App and Multi-Agent
+
+### GitHub App
+
+- **@herd-os mentions** -- users mention @herd-os in comments with natural language requests (e.g., "@herd-os the CI is broken, I think the Node version file is missing"). An agent interprets the request and calls the same command functions from `internal/commands/` as tool calls.
+- **Webhook-based handling** -- replace the `issue_comment` workflow trigger with a webhook endpoint on the GitHub App. Eliminates runner spin-up latency for command handling.
+- **Dedicated bot identity** -- all HerdOS comments, reactions, and reviews come from the `herd-os[bot]` account instead of the GITHUB_TOKEN identity.
+- **Issue-driven planning** -- users create an issue describing a feature, mention @herd-os, and the agent decomposes and dispatches without the CLI. Multi-turn conversation in the issue thread refines the plan.
+
+### Multi-Agent
 
 Additional agent implementations (Codex, Cursor, Gemini CLI, OpenCode). Users can choose their preferred agent.
 
