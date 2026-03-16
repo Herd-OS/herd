@@ -85,6 +85,8 @@ func handleFix(ctx context.Context, hctx *HandlerContext, cmd *Command) (string,
 		"runner_label":    hctx.Config.Workers.RunnerLabel,
 	})
 	if err != nil {
+		_ = hctx.Platform.Issues().RemoveLabels(ctx, fixIssue.Number, []string{issues.StatusInProgress})
+		_ = hctx.Platform.Issues().AddLabels(ctx, fixIssue.Number, []string{issues.StatusFailed})
 		return "", fmt.Errorf("dispatching worker: %w", err)
 	}
 

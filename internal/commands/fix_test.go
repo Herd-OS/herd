@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -145,7 +146,7 @@ func TestHandleFix_FixCycleIncrement(t *testing.T) {
 }
 
 func TestHandleFix_DispatchFailure(t *testing.T) {
-	mock, _, wf := buildFixMock(0)
+	mock, issueSvc, wf := buildFixMock(0)
 	wf.dispatchErr = fmt.Errorf("workflow dispatch failed")
 	hctx := &HandlerContext{Platform: mock, Config: fixConfig(), PRNumber: 50}
 	cmd := &Command{Name: "fix", Prompt: "fix something"}
@@ -153,6 +154,12 @@ func TestHandleFix_DispatchFailure(t *testing.T) {
 	_, err := handleFix(context.Background(), hctx, cmd)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "dispatching worker")
+
+	// Issue #99 is created by the mock; verify it is cleaned up to failed state.
+	require.Len(t, issueSvc.createdIssues, 1)
+	issueNum := issueSvc.createdIssues[0].Number
+	assert.Contains(t, issueSvc.removedLabels[issueNum], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.addedLabels[issueNum], issues.StatusFailed)
 }
 
 func TestMaxFixCycle(t *testing.T) {

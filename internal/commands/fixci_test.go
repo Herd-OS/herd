@@ -38,11 +38,15 @@ type mockIssueService struct {
 	createdIssues []*platform.Issue
 	comments      map[int][]string
 	reactions     []string
+	addedLabels   map[int][]string
+	removedLabels map[int][]string
 }
 
 func newMockIssueService() *mockIssueService {
 	return &mockIssueService{
-		comments: make(map[int][]string),
+		comments:      make(map[int][]string),
+		addedLabels:   make(map[int][]string),
+		removedLabels: make(map[int][]string),
 	}
 }
 
@@ -58,8 +62,14 @@ func (m *mockIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*
 func (m *mockIssueService) Update(_ context.Context, _ int, _ platform.IssueUpdate) (*platform.Issue, error) {
 	return nil, nil
 }
-func (m *mockIssueService) AddLabels(_ context.Context, _ int, _ []string) error    { return nil }
-func (m *mockIssueService) RemoveLabels(_ context.Context, _ int, _ []string) error { return nil }
+func (m *mockIssueService) AddLabels(_ context.Context, number int, labels []string) error {
+	m.addedLabels[number] = append(m.addedLabels[number], labels...)
+	return nil
+}
+func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []string) error {
+	m.removedLabels[number] = append(m.removedLabels[number], labels...)
+	return nil
+}
 func (m *mockIssueService) AddComment(_ context.Context, number int, body string) error {
 	m.comments[number] = append(m.comments[number], body)
 	return nil
