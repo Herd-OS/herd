@@ -195,6 +195,56 @@ func TestCheckCI(t *testing.T) {
 	}
 }
 
+func TestCheckCI_BeforeDispatch(t *testing.T) {
+	issueSvc, wf, prSvc := baseCIMocks()
+	issueSvc.listResult = []*platform.Issue{}
+
+	created := []*platform.Issue{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			iss := &platform.Issue{Number: 99, Title: title}
+			created = append(created, iss)
+			return iss, nil
+		},
+	}
+
+	checkSvc := &mockCheckService{status: "failure", rerunErr: fmt.Errorf("re-run failed")}
+
+	var callOrder []string
+	mock := &mockPlatformWithChecks{
+		mockPlatform: &mockPlatform{
+			issues:     mockCreate,
+			prs:        prSvc,
+			workflows:  wf,
+			repo:       &mockRepoService{defaultBranch: "main"},
+			milestones: &mockMilestoneService{},
+		},
+		checks: checkSvc,
+	}
+	// Wrap workflows to record dispatch order
+	wf.onDispatch = func() { callOrder = append(callOrder, "dispatch") }
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true, CIMaxFixCycles: 2},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := CheckCI(context.Background(), mock, cfg, CheckCIParams{
+		RunID: 100,
+		BeforeDispatch: func() {
+			callOrder = append(callOrder, "before-dispatch")
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "failure", result.Status)
+	assert.Len(t, created, 1)
+	require.Len(t, callOrder, 2)
+	assert.Equal(t, "before-dispatch", callOrder[0], "BeforeDispatch must be called before dispatch")
+	assert.Equal(t, "dispatch", callOrder[1])
+}
+
 func TestCheckCI_BatchLookup(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.listResult = []*platform.Issue{}

@@ -26,10 +26,20 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 		return Result{Error: fmt.Errorf("parsing batch number from %s: %w", pr.Head, err)}
 	}
 
+	// Add the label BEFORE workers are dispatched (label-first pattern, matching
+	// monitor/patrol.go). If AddLabels fails we warn but still proceed — dedup
+	// via the label may be broken, but we must not silently drop the user's command.
+	beforeDispatch := func() {
+		if labelErr := hctx.Platform.Issues().AddLabels(hctx.Ctx, hctx.IssueNumber, []string{issues.CIFixPending}); labelErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: adding %s label to PR #%d: %v\n", issues.CIFixPending, hctx.IssueNumber, labelErr)
+		}
+	}
+
 	result, err := integrator.CheckCI(hctx.Ctx, hctx.Platform, hctx.Config, integrator.CheckCIParams{
-		BatchNumber: batchNum,
-		RepoRoot:    hctx.RepoRoot,
-		UserContext: cmd.Prompt,
+		BatchNumber:    batchNum,
+		RepoRoot:       hctx.RepoRoot,
+		UserContext:    cmd.Prompt,
+		BeforeDispatch: beforeDispatch,
 	})
 	if err != nil {
 		return Result{Error: err}
@@ -48,9 +58,6 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 		return Result{Message: "⚠️ CI failed — max fix cycles reached. Manual intervention needed."}
 	}
 	if len(result.FixIssues) > 0 {
-		if labelErr := hctx.Platform.Issues().AddLabels(hctx.Ctx, hctx.IssueNumber, []string{issues.CIFixPending}); labelErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: adding %s label to PR #%d: %v\n", issues.CIFixPending, hctx.IssueNumber, labelErr)
-		}
 		nums := make([]string, len(result.FixIssues))
 		for i, n := range result.FixIssues {
 			nums[i] = fmt.Sprintf("#%d", n)

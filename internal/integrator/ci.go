@@ -13,10 +13,11 @@ import (
 
 // CheckCIParams holds parameters for CI failure handling.
 type CheckCIParams struct {
-	RunID       int64
-	BatchNumber int    // Alternative to RunID — used by check_suite trigger
-	RepoRoot    string
-	UserContext string // Optional hint from the user, prepended to fix issue body
+	RunID          int64
+	BatchNumber    int    // Alternative to RunID — used by check_suite trigger
+	RepoRoot       string
+	UserContext    string // Optional hint from the user, prepended to fix issue body
+	BeforeDispatch func() // optional; called once, right before worker dispatch
 }
 
 // CheckCIResult holds the result of CI checking.
@@ -162,6 +163,9 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 	}
 
 	// Dispatch fix worker
+	if params.BeforeDispatch != nil {
+		params.BeforeDispatch()
+	}
 	defaultBranch, _ := p.Repository().GetDefaultBranch(ctx)
 	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
 		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
