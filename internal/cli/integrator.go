@@ -51,7 +51,10 @@ func newConsolidateCmd() *cobra.Command {
 				return fmt.Errorf("creating GitHub client: %w", err)
 			}
 
-			cwd, _ := os.Getwd()
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("getting working directory: %w", err)
+			}
 			g := git.New(cwd)
 
 			result, err := integrator.Consolidate(cmd.Context(), client, g, cfg, integrator.ConsolidateParams{
@@ -102,7 +105,10 @@ func newAdvanceCmd() *cobra.Command {
 				return fmt.Errorf("creating GitHub client: %w", err)
 			}
 
-			cwd, _ := os.Getwd()
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("getting working directory: %w", err)
+			}
 			g := git.New(cwd)
 
 			var result *integrator.AdvanceResult
@@ -189,7 +195,10 @@ func newIntegratorReviewCmd() *cobra.Command {
 			}
 
 			ag := claude.New(cfg.Agent.Binary, cfg.Agent.Model)
-			cwd, _ := os.Getwd()
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("getting working directory: %w", err)
+			}
 			g := git.New(cwd)
 
 			result, err := integrator.Review(cmd.Context(), client, ag, g, cfg, integrator.ReviewParams{
@@ -322,7 +331,10 @@ func newHandleCommentCmd() *cobra.Command {
 				return fmt.Errorf("creating GitHub client: %w", err)
 			}
 
-			cwd, _ := os.Getwd()
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("getting working directory: %w", err)
+			}
 
 			hctx := &commands.HandlerContext{
 				Platform:    client,
@@ -424,7 +436,10 @@ func newIntegratorCheckCICmd() *cobra.Command {
 				}
 			}
 
-			cwd, _ := os.Getwd()
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("getting working directory: %w", err)
+			}
 			result, err := integrator.CheckCI(cmd.Context(), client, cfg, integrator.CheckCIParams{
 				RunID:       runID,
 				BatchNumber: batchNum,
