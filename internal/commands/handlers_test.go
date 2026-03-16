@@ -267,6 +267,44 @@ func baseConfig() *config.Config {
 
 // --- Tests for handleFixCI ---
 
+func TestHandleFixCI_CIFixPendingLabelAlreadyPresent(t *testing.T) {
+	issueSvc := newTestIssueService()
+	// PR issue already has the ci-fix-pending label — simulates a second concurrent
+	// patrol invocation arriving after the first handler added the label.
+	issueSvc.getResult[10] = &platform.Issue{Number: 10, Labels: []string{issues.CIFixPending}}
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			10: {Number: 10, Head: "herd/batch/1-batch"},
+		},
+	}
+	p := &testPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: wf,
+		repo:      &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{
+			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}},
+		},
+		checks: &testCheckService{status: "failure", rerunErr: fmt.Errorf("rerun failed")},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        true,
+	}
+	result := handleFixCI(hctx, Command{Name: "fix-ci"})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "already in progress")
+	// No workers should be dispatched — the fix cycle is already running.
+	assert.Empty(t, issueSvc.createdIssues)
+	assert.Empty(t, wf.dispatched)
+}
+
 func TestHandleFixCI_NotPR(t *testing.T) {
 	p := &testPlatform{issues: newTestIssueService(), prs: &testPRService{}, workflows: &testWorkflowService{}, repo: &testRepoService{defaultBranch: "main"}, milestones: &testMilestoneService{}, checks: &testCheckService{}}
 
