@@ -710,6 +710,85 @@ func TestReview_AgentError(t *testing.T) {
 	assert.Contains(t, err.Error(), "agent review failed")
 }
 
+// mockCapturingPRService wraps mockPRService and captures AddComment calls.
+type mockCapturingPRService struct {
+	*mockPRService
+	comments []string
+}
+
+func (m *mockCapturingPRService) AddComment(_ context.Context, _ int, body string) error {
+	m.comments = append(m.comments, body)
+	return nil
+}
+
+func TestReview_DispatchCountAccurateWhenSomeCreatesFail(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+
+	callCount := 0
+	// First Create succeeds, second fails
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			callCount++
+			if callCount == 2 {
+				return nil, fmt.Errorf("create failed")
+			}
+			return &platform.Issue{Number: 100 + callCount, Title: title}, nil
+		},
+	}
+
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:     mockCreate,
+		prs:        prSvc,
+		workflows:  &mockWorkflowService{runs: map[int64]*platform.Run{}},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Comments: []string{"Issue one", "Issue two"},
+		},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 0, RepoRoot: dir})
+
+	require.NoError(t, err)
+	// Only 1 fix issue created (second Create failed)
+	assert.Len(t, result.FixIssues, 1)
+
+	// The findings comment should report 1 dispatched worker, not 2
+	require.NotEmpty(t, prSvc.comments)
+	findingsComment := ""
+	for _, c := range prSvc.comments {
+		if len(c) > 0 && c[0] == '\xf0' { // starts with 🔍
+			findingsComment = c
+			break
+		}
+	}
+	require.NotEmpty(t, findingsComment, "expected a findings comment")
+	assert.Contains(t, findingsComment, "Dispatching 1 fix workers.")
+	assert.NotContains(t, findingsComment, "Dispatching 2 fix workers.")
+}
+
 func TestParseBatchBranchMilestone(t *testing.T) {
 	tests := []struct {
 		name    string
