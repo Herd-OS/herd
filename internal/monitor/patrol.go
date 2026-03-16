@@ -199,16 +199,12 @@ func deleteCIFixComments(ctx context.Context, p platform.Platform, prNumber int)
 	if err != nil {
 		return
 	}
-	deleted := 0
 	for _, c := range comments {
 		if strings.TrimSpace(c.Body) == "/herd fix-ci" {
 			_ = p.Issues().DeleteComment(ctx, c.ID)
-			deleted++
 		}
 	}
-	if deleted > 0 {
-		_ = p.Issues().RemoveLabels(ctx, prNumber, []string{issues.CIFixPending})
-	}
+	_ = p.Issues().RemoveLabels(ctx, prNumber, []string{issues.CIFixPending})
 }
 
 // BackoffDelay returns the backoff delay for a given failure count.
