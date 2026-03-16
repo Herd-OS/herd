@@ -159,10 +159,14 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		if cfg.Integrator.RequireCI && strings.HasPrefix(pr.Head, "herd/batch/") {
 			ciStatus, err := p.Checks().GetCombinedStatus(ctx, pr.Head)
 			if err == nil && ciStatus == "failure" {
-				if !hasCIFixComment(ctx, p, pr.Number) {
+				if !hasCIFixLabel(ctx, p, pr.Number) {
 					_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
+					_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.CIFixPending})
 				}
 				result.CIFailures++
+			} else if err == nil {
+				// CI is passing — clear the fix-pending label so a future failure can re-trigger.
+				_ = p.Issues().RemoveLabels(ctx, pr.Number, []string{issues.CIFixPending})
 			}
 		}
 	}
@@ -170,18 +174,16 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 	return result, nil
 }
 
-func hasCIFixComment(ctx context.Context, p platform.Platform, prNumber int) bool {
-	// PR comments are issue comments in GitHub
-	comments, err := p.Issues().ListComments(ctx, prNumber)
+// hasCIFixLabel returns true if the PR already has the CIFixPending label,
+// indicating that a /herd fix-ci command was already posted for the current
+// failure cycle. Fails open (returns false on error) so a broken API does not
+// silence future fix triggers.
+func hasCIFixLabel(ctx context.Context, p platform.Platform, prNumber int) bool {
+	issue, err := p.Issues().Get(ctx, prNumber)
 	if err != nil {
 		return false
 	}
-	for _, c := range comments {
-		if strings.Contains(c.Body, "/herd fix-ci") {
-			return true
-		}
-	}
-	return false
+	return issues.HasLabel(issue.Labels, issues.CIFixPending)
 }
 
 // BackoffDelay returns the backoff delay for a given failure count.
