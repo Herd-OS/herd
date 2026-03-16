@@ -45,7 +45,8 @@ func TestHandle(t *testing.T) {
 		}
 
 		resp, err := Handle(context.Background(), hctx, "/herd unknown-cmd", "OWNER")
-		require.NoError(t, err)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrUnknownCommand)
 		assert.Contains(t, resp, "Unknown command")
 		assert.Contains(t, resp, "unknown-cmd")
 	})
