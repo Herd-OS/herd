@@ -156,12 +156,13 @@ func (m *testWorkflowService) CancelRun(_ context.Context, _ int64) error { retu
 // --- Mock RepoService ---
 
 type testRepoService struct {
-	defaultBranch string
+	defaultBranch    string
+	defaultBranchErr error
 }
 
 func (m *testRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
 func (m *testRepoService) GetDefaultBranch(_ context.Context) (string, error) {
-	return m.defaultBranch, nil
+	return m.defaultBranch, m.defaultBranchErr
 }
 func (m *testRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
 func (m *testRepoService) DeleteBranch(_ context.Context, _ string) error     { return nil }
@@ -679,6 +680,72 @@ func TestHandleFix(t *testing.T) {
 			assert.Contains(t, result.Message, tt.wantMsg)
 		})
 	}
+}
+
+func TestHandleFix_GetDefaultBranchError(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Head: "herd/batch/1-batch"},
+		},
+	}
+	p := &testPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &testWorkflowService{},
+		repo:      &testRepoService{defaultBranchErr: fmt.Errorf("branch lookup failed")},
+		milestones: &testMilestoneService{
+			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "My Batch"}},
+		},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 50,
+		AuthorLogin: "octocat",
+		IsPR:        true,
+	}
+	result := handleFix(hctx, Command{Name: "fix", Prompt: "fix something"})
+
+	require.Error(t, result.Error)
+	assert.Contains(t, result.Error.Error(), "getting default branch")
+	assert.Contains(t, result.Error.Error(), "branch lookup failed")
+}
+
+func TestHandleFix_DispatchError(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Head: "herd/batch/1-batch"},
+		},
+	}
+	p := &testPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &testWorkflowService{dispatchErr: fmt.Errorf("workflow dispatch failed")},
+		repo:      &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{
+			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "My Batch"}},
+		},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 50,
+		AuthorLogin: "octocat",
+		IsPR:        true,
+	}
+	result := handleFix(hctx, Command{Name: "fix", Prompt: "fix something"})
+
+	require.Error(t, result.Error)
+	assert.Contains(t, result.Error.Error(), "dispatching worker for fix issue")
+	assert.Contains(t, result.Error.Error(), "workflow dispatch failed")
 }
 
 func TestHandleFix_Success(t *testing.T) {

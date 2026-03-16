@@ -82,13 +82,18 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 	}
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
-	defaultBranch, _ := hctx.Platform.Repository().GetDefaultBranch(hctx.Ctx)
-	_, _ = hctx.Platform.Workflows().Dispatch(hctx.Ctx, "herd-worker.yml", defaultBranch, map[string]string{
+	defaultBranch, err := hctx.Platform.Repository().GetDefaultBranch(hctx.Ctx)
+	if err != nil {
+		return Result{Error: fmt.Errorf("getting default branch: %w", err)}
+	}
+	if _, err := hctx.Platform.Workflows().Dispatch(hctx.Ctx, "herd-worker.yml", defaultBranch, map[string]string{
 		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
 		"batch_branch":    batchBranch,
 		"timeout_minutes": fmt.Sprintf("%d", hctx.Config.Workers.TimeoutMinutes),
 		"runner_label":    hctx.Config.Workers.RunnerLabel,
-	})
+	}); err != nil {
+		return Result{Error: fmt.Errorf("dispatching worker for fix issue #%d: %w", fixIssue.Number, err)}
+	}
 
 	return Result{Message: fmt.Sprintf("🔧 Created fix issue #%d and dispatched worker.", fixIssue.Number)}
 }
