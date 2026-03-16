@@ -555,9 +555,12 @@ func TestOrchestration_WorkerFailure_MonitorRedispatch(t *testing.T) {
 	assert.Equal(t, 1, result.FailedIssues)
 	assert.Equal(t, 1, result.RedispatchedCount)
 
-	// Verify label transition: failed → in-progress
-	assert.True(t, issueSvc.hasLabel(10, issues.StatusInProgress))
-	assert.False(t, issueSvc.hasLabel(10, issues.StatusFailed))
+	// The monitor posts /herd retry as a comment command rather than directly
+	// transitioning labels — label changes are handled by the command handler.
+	// Verify the retry comment was posted and labels remain unchanged.
+	assert.Contains(t, issueSvc.comments[10], "/herd retry 10")
+	assert.False(t, issueSvc.hasLabel(10, issues.StatusInProgress))
+	assert.True(t, issueSvc.hasLabel(10, issues.StatusFailed))
 }
 
 func TestOrchestration_ConflictResolution(t *testing.T) {
