@@ -75,6 +75,8 @@ func handleFix(ctx context.Context, hctx *HandlerContext, cmd *Command) (string,
 
 	defaultBranch, err := hctx.Platform.Repository().GetDefaultBranch(ctx)
 	if err != nil {
+		_ = hctx.Platform.Issues().RemoveLabels(ctx, fixIssue.Number, []string{issues.StatusInProgress})
+		_ = hctx.Platform.Issues().AddLabels(ctx, fixIssue.Number, []string{issues.StatusFailed})
 		return "", fmt.Errorf("getting default branch: %w", err)
 	}
 

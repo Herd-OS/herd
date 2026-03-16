@@ -162,6 +162,23 @@ func TestHandleFix_DispatchFailure(t *testing.T) {
 	assert.Contains(t, issueSvc.addedLabels[issueNum], issues.StatusFailed)
 }
 
+func TestHandleFix_GetDefaultBranchFailure(t *testing.T) {
+	mock, issueSvc, _ := buildFixMock(0)
+	mock.repo.defaultBranchErr = fmt.Errorf("github api error")
+	hctx := &HandlerContext{Platform: mock, Config: fixConfig(), PRNumber: 50}
+	cmd := &Command{Name: "fix", Prompt: "fix something"}
+
+	_, err := handleFix(context.Background(), hctx, cmd)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "getting default branch")
+
+	// Issue should be created but then moved to failed state.
+	require.Len(t, issueSvc.createdIssues, 1)
+	issueNum := issueSvc.createdIssues[0].Number
+	assert.Contains(t, issueSvc.removedLabels[issueNum], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.addedLabels[issueNum], issues.StatusFailed)
+}
+
 func TestMaxFixCycle(t *testing.T) {
 	tests := []struct {
 		name      string

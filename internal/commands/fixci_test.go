@@ -168,12 +168,13 @@ func (m *mockMilestoneService) Update(_ context.Context, _ int, _ platform.Miles
 }
 
 type mockRepoService struct {
-	defaultBranch string
+	defaultBranch    string
+	defaultBranchErr error
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
 func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
-	return m.defaultBranch, nil
+	return m.defaultBranch, m.defaultBranchErr
 }
 func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error    { return nil }
 func (m *mockRepoService) DeleteBranch(_ context.Context, _ string) error        { return nil }
