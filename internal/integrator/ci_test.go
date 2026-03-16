@@ -120,13 +120,13 @@ func TestCheckCI(t *testing.T) {
 			expectMaxHit: true,
 		},
 		{
-			name:         "failure — re-run fails, zero cycles (notify only)",
-			ciStatus:     "failure",
-			rerunErr:     fmt.Errorf("re-run failed"),
-			requireCI:    true,
-			ciMaxCycles:  0,
-			expectStatus: "failure",
-			expectMaxHit: true,
+			name:           "failure — re-run fails, zero cycles (unlimited)",
+			ciStatus:       "failure",
+			rerunErr:       fmt.Errorf("re-run failed"),
+			requireCI:      true,
+			ciMaxCycles:    0,
+			expectStatus:   "failure",
+			expectFixCount: 1,
 		},
 	}
 

@@ -147,7 +147,7 @@ func TestValidateErrors(t *testing.T) {
 		{"negative timeout", func(c *Config) { c.Workers.TimeoutMinutes = -1 }, "workers.timeout_minutes must be > 0"},
 		{"bad strategy", func(c *Config) { c.Integrator.Strategy = "yolo" }, "integrator.strategy must be one of"},
 		{"bad on_conflict", func(c *Config) { c.Integrator.OnConflict = "panic" }, "integrator.on_conflict must be one of"},
-		{"zero fix cycles", func(c *Config) { c.Integrator.ReviewMaxFixCycles = 0 }, "integrator.review_max_fix_cycles must be > 0"},
+		{"negative fix cycles", func(c *Config) { c.Integrator.ReviewMaxFixCycles = -1 }, "integrator.review_max_fix_cycles must be >= 0"},
 		{"negative ci cycles", func(c *Config) { c.Integrator.CIMaxFixCycles = -1 }, "integrator.ci_max_fix_cycles must be >= 0"},
 		{"low patrol", func(c *Config) { c.Monitor.PatrolIntervalMinutes = 3 }, "monitor.patrol_interval_minutes must be >= 5"},
 		{"zero stale", func(c *Config) { c.Monitor.StaleThresholdMinutes = 0 }, "monitor.stale_threshold_minutes must be > 0"},

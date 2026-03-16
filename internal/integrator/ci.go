@@ -112,14 +112,8 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		}
 	}
 
-	// Check caps
-	if cfg.Integrator.CIMaxFixCycles == 0 {
-		// Notify-only mode
-		notifyCI(ctx, p, batchBranch, "CI failed. `ci_max_fix_cycles` is 0 — no fix workers will be dispatched.")
-		return &CheckCIResult{Status: "failure", MaxCyclesHit: true}, nil
-	}
-
-	if currentCycle >= cfg.Integrator.CIMaxFixCycles {
+	// Check caps (0 = unlimited)
+	if cfg.Integrator.CIMaxFixCycles > 0 && currentCycle >= cfg.Integrator.CIMaxFixCycles {
 		notifyCI(ctx, p, batchBranch, fmt.Sprintf(
 			"CI failed but max fix cycles (%d) reached. Manual intervention needed.", cfg.Integrator.CIMaxFixCycles))
 		return &CheckCIResult{Status: "failure", MaxCyclesHit: true}, nil
