@@ -752,9 +752,11 @@ func TestReview_DispatchCountAccurateWhenSomeCreatesFail(t *testing.T) {
 	}
 
 	mock := &mockPlatform{
-		issues:     mockCreate,
-		prs:        prSvc,
-		workflows:  &mockWorkflowService{runs: map[int64]*platform.Run{}},
+		issues: mockCreate,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
+			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+		}},
 		repo:       &mockRepoService{defaultBranch: "main"},
 		milestones: &mockMilestoneService{},
 	}
@@ -769,7 +771,7 @@ func TestReview_DispatchCountAccurateWhenSomeCreatesFail(t *testing.T) {
 	dir, g := initTestRepo(t)
 	result, err := Review(context.Background(), mock, ag, g, &config.Config{
 		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
-	}, ReviewParams{RunID: 0, RepoRoot: dir})
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
 
 	require.NoError(t, err)
 	// Only 1 fix issue created (second Create failed)
