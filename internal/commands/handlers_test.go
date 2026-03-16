@@ -46,6 +46,7 @@ type testIssueService struct {
 	removedLabels map[int][]string
 	createdIssues []*platform.Issue
 	nextIssueNum  int
+	addLabelsErr  error
 }
 
 func newTestIssueService() *testIssueService {
@@ -76,6 +77,9 @@ func (m *testIssueService) Update(_ context.Context, _ int, _ platform.IssueUpda
 	return nil, nil
 }
 func (m *testIssueService) AddLabels(_ context.Context, number int, labels []string) error {
+	if m.addLabelsErr != nil {
+		return m.addLabelsErr
+	}
 	m.addedLabels[number] = append(m.addedLabels[number], labels...)
 	return nil
 }
@@ -366,6 +370,42 @@ func TestHandleFixCI_WithFixDispatch(t *testing.T) {
 	assert.Len(t, issueSvc.createdIssues, 1)
 	assert.Len(t, wf.dispatched, 1)
 	assert.Contains(t, issueSvc.addedLabels[10], issues.CIFixPending)
+}
+
+func TestHandleFixCI_AddLabelsError(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	issueSvc.addLabelsErr = fmt.Errorf("API rate limit exceeded")
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			10: {Number: 10, Head: "herd/batch/1-batch"},
+		},
+		listResult: []*platform.PullRequest{{Number: 10, Head: "herd/batch/1-batch"}},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}}},
+		checks:     &testCheckService{status: "failure", rerunErr: fmt.Errorf("rerun failed")},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        true,
+	}
+	result := handleFixCI(hctx, Command{Name: "fix-ci"})
+
+	require.Error(t, result.Error)
+	assert.Contains(t, result.Error.Error(), issues.CIFixPending)
+	assert.Empty(t, result.Message)
+	// Label must not have been recorded (AddLabels returned error)
+	assert.Empty(t, issueSvc.addedLabels[10])
 }
 
 // --- Tests for handleRetry ---
