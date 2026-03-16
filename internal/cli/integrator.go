@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -353,6 +354,10 @@ func newHandleCommentCmd() *cobra.Command {
 				_ = client.Issues().CreateReaction(cmd.Context(), commentID, "-1")
 				if issueNumber != 0 && response != "" {
 					_ = client.Issues().AddComment(cmd.Context(), issueNumber, response)
+				}
+				if errors.Is(err, commands.ErrUnknownCommand) {
+					// Unknown command is not a system error; don't propagate.
+					return nil
 				}
 				return err
 			}

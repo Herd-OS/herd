@@ -2,12 +2,16 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/platform"
 )
+
+// ErrUnknownCommand is returned by Handle when the command name is not in the registry.
+var ErrUnknownCommand = errors.New("unknown command")
 
 // HandlerContext provides dependencies to command handlers.
 type HandlerContext struct {
@@ -66,7 +70,8 @@ func Handle(ctx context.Context, hctx *HandlerContext, commentBody, authorAssoci
 	// Look up the command in the registry.
 	fn, ok := Registry[cmd.Name]
 	if !ok {
-		return fmt.Sprintf("Unknown command: `%s`. No handler registered for this command.", cmd.Name), nil
+		msg := fmt.Sprintf("Unknown command: `%s`. No handler registered for this command.", cmd.Name)
+		return msg, fmt.Errorf("%w: %s", ErrUnknownCommand, cmd.Name)
 	}
 
 	// Dispatch to the handler.
