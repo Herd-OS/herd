@@ -14,6 +14,9 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 	if cmd.Prompt == "" {
 		return Result{Message: "⚠️ Usage: `/herd fix \"description of what to fix\"`"}
 	}
+	if !hctx.IsPR {
+		return Result{Message: "⚠️ `/herd fix` can only be used on pull requests."}
+	}
 
 	pr, err := hctx.Platform.PullRequests().Get(hctx.Ctx, hctx.IssueNumber)
 	if err != nil {

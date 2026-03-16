@@ -8,6 +8,9 @@ import (
 )
 
 func handleReview(hctx *HandlerContext, cmd Command) Result {
+	if !hctx.IsPR {
+		return Result{Message: "⚠️ `/herd review` can only be used on pull requests."}
+	}
 	pr, err := hctx.Platform.PullRequests().Get(hctx.Ctx, hctx.IssueNumber)
 	if err != nil {
 		return Result{Error: fmt.Errorf("getting PR #%d: %w", hctx.IssueNumber, err)}
