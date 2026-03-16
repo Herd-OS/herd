@@ -401,11 +401,11 @@ func TestHandleFixCI_AddLabelsError(t *testing.T) {
 	}
 	result := handleFixCI(hctx, Command{Name: "fix-ci"})
 
-	require.Error(t, result.Error)
-	assert.Contains(t, result.Error.Error(), issues.CIFixPending)
-	assert.Empty(t, result.Message)
-	// Label must not have been recorded (AddLabels returned error)
-	assert.Empty(t, issueSvc.addedLabels[10])
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "🔧 CI failed — dispatched fix workers")
+	// Workers were dispatched despite the label error
+	assert.Len(t, issueSvc.createdIssues, 1)
+	assert.Len(t, wf.dispatched, 1)
 }
 
 // --- Tests for handleRetry ---

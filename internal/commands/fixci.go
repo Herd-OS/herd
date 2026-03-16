@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/herd-os/herd/internal/integrator"
@@ -48,7 +49,7 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 	}
 	if len(result.FixIssues) > 0 {
 		if labelErr := hctx.Platform.Issues().AddLabels(hctx.Ctx, hctx.IssueNumber, []string{issues.CIFixPending}); labelErr != nil {
-			return Result{Error: fmt.Errorf("adding %s label to PR #%d: %w", issues.CIFixPending, hctx.IssueNumber, labelErr)}
+			fmt.Fprintf(os.Stderr, "warning: adding %s label to PR #%d: %v\n", issues.CIFixPending, hctx.IssueNumber, labelErr)
 		}
 		nums := make([]string, len(result.FixIssues))
 		for i, n := range result.FixIssues {
