@@ -322,15 +322,30 @@ func createRunnerFiles(dir, owner, repo string) error {
 	// Runner infrastructure files are herd-managed — always overwrite to keep
 	// them in sync with the installed herd version.
 
-	// Dockerfile.runner (static)
-	data, err := runner.FS.ReadFile("Dockerfile.runner")
+	// Dockerfile.herd_runner_base (herd-managed, always overwritten)
+	data, err := runner.FS.ReadFile("Dockerfile.herd_runner_base")
 	if err != nil {
-		return fmt.Errorf("reading embedded Dockerfile.runner: %w", err)
+		return fmt.Errorf("reading embedded Dockerfile.herd_runner_base: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "Dockerfile.runner"), data, 0644); err != nil {
-		return fmt.Errorf("writing Dockerfile.runner: %w", err)
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner_base"), data, 0644); err != nil {
+		return fmt.Errorf("writing Dockerfile.herd_runner_base: %w", err)
 	}
-	fmt.Println(display.Success("Installed Dockerfile.runner"))
+	fmt.Println(display.Success("Installed Dockerfile.herd_runner_base"))
+
+	// Dockerfile.herd_runner (user-owned, only created if missing)
+	herdRunnerPath := filepath.Join(dir, "Dockerfile.herd_runner")
+	if _, err := os.Stat(herdRunnerPath); os.IsNotExist(err) {
+		data, err = runner.FS.ReadFile("Dockerfile.herd_runner.tmpl")
+		if err != nil {
+			return fmt.Errorf("reading embedded Dockerfile.herd_runner.tmpl: %w", err)
+		}
+		if err := os.WriteFile(herdRunnerPath, data, 0644); err != nil {
+			return fmt.Errorf("writing Dockerfile.herd_runner: %w", err)
+		}
+		fmt.Println(display.Success("Created Dockerfile.herd_runner"))
+	} else {
+		fmt.Println(display.Success("Dockerfile.herd_runner already exists (not overwritten)"))
+	}
 
 	// entrypoint.herd.sh (static, executable)
 	data, err = runner.FS.ReadFile("entrypoint.herd.sh")
@@ -406,7 +421,8 @@ func commitInitFiles(dir, owner, repo string) error {
 		".gitignore",
 		".herd/",
 		".github/workflows/",
-		"Dockerfile.runner",
+		"Dockerfile.herd_runner_base",
+		"Dockerfile.herd_runner",
 		"entrypoint.herd.sh",
 		"docker-compose.herd.yml",
 		".env.herd.example",
