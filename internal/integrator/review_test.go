@@ -372,6 +372,61 @@ func TestReview_LoadsRoleInstructions(t *testing.T) {
 	assert.Equal(t, "Be strict about error handling", capturedOpts.SystemPrompt)
 }
 
+func TestReview_MissingIntegratorMd(t *testing.T) {
+	// When .herd/integrator.md is absent, review should succeed with empty system prompt
+	dir, g := initTestRepo(t)
+	// Do NOT create .herd/integrator.md
+
+	var capturedOpts agent.ReviewOptions
+	captureAgent := &capturingMockAgent{
+		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		capturedOpts: &capturedOpts,
+	}
+
+	mock := newReviewTestPlatform(
+		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		[]*platform.Issue{
+			{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+		},
+	)
+
+	result, err := Review(context.Background(), mock, captureAgent, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Empty(t, capturedOpts.SystemPrompt)
+}
+
+func TestReview_SystemPromptOverridesIntegratorMd(t *testing.T) {
+	// When SystemPrompt is set in params, it should override .herd/integrator.md
+	dir, g := initTestRepo(t)
+	require.NoError(t, os.MkdirAll(dir+"/.herd", 0755))
+	require.NoError(t, os.WriteFile(dir+"/.herd/integrator.md", []byte("file instructions"), 0644))
+
+	var capturedOpts agent.ReviewOptions
+	captureAgent := &capturingMockAgent{
+		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		capturedOpts: &capturedOpts,
+	}
+
+	mock := newReviewTestPlatform(
+		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		[]*platform.Issue{
+			{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+		},
+	)
+
+	result, err := Review(context.Background(), mock, captureAgent, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir, SystemPrompt: "override instructions"})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, "override instructions", capturedOpts.SystemPrompt)
+}
+
 func TestReview_ByPRNumber(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.listResult = []*platform.Issue{
