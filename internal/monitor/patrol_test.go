@@ -670,12 +670,27 @@ func TestHasCIFixComment(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "fix-ci comment with surrounding whitespace",
+			comments: []*platform.Comment{{ID: 1, Body: "  /herd fix-ci\n"}},
+			expected: true,
+		},
+		{
 			name:     "fix-ci comment among others",
 			comments: []*platform.Comment{
 				{ID: 1, Body: "some other comment"},
 				{ID: 2, Body: "/herd fix-ci"},
 			},
 			expected: true,
+		},
+		{
+			name:     "mention of command in prose should not match",
+			comments: []*platform.Comment{{ID: 1, Body: "I tried `/herd fix-ci` but nothing happened"}},
+			expected: false,
+		},
+		{
+			name:     "command embedded mid-sentence should not match",
+			comments: []*platform.Comment{{ID: 1, Body: "running /herd fix-ci now"}},
+			expected: false,
 		},
 	}
 

@@ -178,7 +178,7 @@ func hasCIFixComment(ctx context.Context, p platform.Platform, prNumber int) boo
 		return false
 	}
 	for _, c := range comments {
-		if strings.Contains(c.Body, "/herd fix-ci") {
+		if strings.TrimSpace(c.Body) == "/herd fix-ci" {
 			return true
 		}
 	}
