@@ -548,6 +548,37 @@ func TestHasMonitorComment_ErrorFallback(t *testing.T) {
 	assert.False(t, hasMonitorComment(context.Background(), mock, 42))
 }
 
+func TestPatrol_FailedIssue_NoMilestone_Skipped(t *testing.T) {
+	issueSvc := newMockIssueService()
+	// Issue with no milestone should be skipped — not retried
+	issueSvc.listResults[issues.StatusFailed] = []*platform.Issue{
+		{Number: 42, Title: "Test", Labels: []string{issues.StatusFailed}, Milestone: nil},
+	}
+
+	wf := &mockWorkflowService{
+		completedRuns: []*platform.Run{
+			{ID: 100, Conclusion: "failure", Inputs: map[string]string{"issue_number": "42"}, CreatedAt: time.Now().Add(-2 * time.Hour)},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{
+		Monitor: config.Monitor{AutoRedispatch: true, MaxRedispatchAttempts: 3},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.FailedIssues)
+	assert.Equal(t, 0, result.RedispatchedCount)
+	assert.Len(t, issueSvc.comments[42], 0)
+}
+
 func TestPatrol_NoDuplicateComments(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.listResults[issues.StatusInProgress] = []*platform.Issue{

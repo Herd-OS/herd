@@ -143,6 +143,11 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 				continue // Backoff not elapsed
 			}
 
+			// Skip issues without a milestone - they are not managed by herd batches.
+			if issue.Milestone == nil {
+				continue
+			}
+
 			// Post /herd retry command; skip if one was recently posted
 			retryCmd := fmt.Sprintf("retry %d", issue.Number)
 			if hasRecentHerdCommand(ctx, p, issue.Number, retryCmd) {
