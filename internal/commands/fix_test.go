@@ -243,6 +243,9 @@ func TestTruncateTitle(t *testing.T) {
 		{"too long", "hello world", 5, "hello..."},
 		{"multiline truncates at newline", "first line\nsecond line", 100, "first line"},
 		{"multiline then truncated", "a very long first line here", 10, "a very lon..."},
+		{"emoji truncation", "hello 🌍🌎🌏 world", 8, "hello 🌍🌎..."},
+		{"CJK truncation", "中文字符测试内容", 5, "中文字符测..."},
+		{"accented latin", "café résumé naïve", 10, "café résum..."},
 	}
 
 	for _, tt := range tests {

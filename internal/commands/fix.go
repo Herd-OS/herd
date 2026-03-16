@@ -113,8 +113,9 @@ func truncateTitle(s string, max int) string {
 	if idx := strings.Index(s, "\n"); idx >= 0 {
 		s = s[:idx]
 	}
-	if len(s) > max {
-		return s[:max] + "..."
+	runes := []rune(s)
+	if len(runes) > max {
+		return string(runes[:max]) + "..."
 	}
 	return s
 }
