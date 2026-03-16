@@ -162,8 +162,9 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		return &ExecResult{NoOp: true}, nil
 	}
 
-	// Push worker branch
-	if err = g.Push("origin", workerBranch); err != nil {
+	// Force push worker branch — previous failed attempts may have left
+	// stale commits on the remote branch that would cause a non-fast-forward rejection.
+	if err = g.ForcePush("origin", workerBranch); err != nil {
 		return nil, fmt.Errorf("pushing worker branch: %w", err)
 	}
 
