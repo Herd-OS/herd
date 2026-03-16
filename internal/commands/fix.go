@@ -96,17 +96,17 @@ func handleFix(ctx context.Context, hctx *HandlerContext, cmd *Command) (string,
 }
 
 func maxFixCycle(allIssues []*platform.Issue) int {
-	max := 0
+	maxCycle := 0
 	for _, issue := range allIssues {
 		parsed, err := issues.ParseBody(issue.Body)
 		if err != nil {
 			continue
 		}
-		if parsed.FrontMatter.FixCycle > max {
-			max = parsed.FrontMatter.FixCycle
+		if parsed.FrontMatter.FixCycle > maxCycle {
+			maxCycle = parsed.FrontMatter.FixCycle
 		}
 	}
-	return max
+	return maxCycle
 }
 
 func truncateTitle(s string, max int) string {
