@@ -17,8 +17,8 @@ integrator:
     max_conflict_resolution_attempts: 2
     require_ci: true
     review: true
-    review_max_fix_cycles: 5
-    ci_max_fix_cycles: 3
+    review_max_fix_cycles: 10
+    ci_max_fix_cycles: 10
 monitor:
     patrol_interval_minutes: 15
     stale_threshold_minutes: 30
