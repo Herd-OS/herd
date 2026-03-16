@@ -159,18 +159,10 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		if cfg.Integrator.RequireCI && strings.HasPrefix(pr.Head, "herd/batch/") {
 			ciStatus, err := p.Checks().GetCombinedStatus(ctx, pr.Head)
 			if err == nil && ciStatus == "failure" {
-				if !hasCIFixPendingLabel(ctx, p, pr.Number) {
-					// Add the label before posting the command. If AddLabels fails,
-					// skip posting the comment so the next patrol cycle doesn't
-					// dispatch a duplicate fix worker.
-					if labelErr := p.Issues().AddLabels(ctx, pr.Number, []string{issues.CIFixPending}); labelErr == nil {
-						_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
-					}
+				if !hasCIFixComment(ctx, p, pr.Number) {
+					_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
 				}
 				result.CIFailures++
-			} else if err == nil && ciStatus == "success" {
-				// CI passed — clear the fix-pending label so a future failure can re-trigger.
-				_ = p.Issues().RemoveLabels(ctx, pr.Number, []string{issues.CIFixPending})
 			}
 		}
 	}
@@ -178,18 +170,15 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 	return result, nil
 }
 
-// hasCIFixPendingLabel returns true if the herd/ci-fix-pending label is present
-// on the PR, indicating that a /herd fix-ci command was already posted for the
-// current failure cycle. The label is removed when CI passes, allowing future
-// failures to re-trigger the command. Fails open (returns false on error) so a
-// broken API does not silence future fix triggers.
-func hasCIFixPendingLabel(ctx context.Context, p platform.Platform, prNumber int) bool {
-	issue, err := p.Issues().Get(ctx, prNumber)
+// hasCIFixComment returns true if a /herd fix-ci comment already exists on the PR.
+// Fails open (returns false on error) so a broken comments API doesn't silence future fix triggers.
+func hasCIFixComment(ctx context.Context, p platform.Platform, prNumber int) bool {
+	comments, err := p.Issues().ListComments(ctx, prNumber)
 	if err != nil {
 		return false
 	}
-	for _, label := range issue.Labels {
-		if label == issues.CIFixPending {
+	for _, c := range comments {
+		if strings.Contains(c.Body, "/herd fix-ci") {
 			return true
 		}
 	}
