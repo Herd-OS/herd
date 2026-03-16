@@ -282,9 +282,10 @@ func TestPatrol_FailedIssue_Redispatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.FailedIssues)
 	assert.Equal(t, 1, result.RedispatchedCount)
-	assert.Len(t, wf.dispatched, 1)
-	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusFailed)
-	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusInProgress)
+	// Monitor posts /herd retry command instead of directly dispatching
+	assert.Len(t, wf.dispatched, 0)
+	assert.Len(t, issueSvc.comments[42], 1)
+	assert.Equal(t, "/herd retry 42", issueSvc.comments[42][0])
 }
 
 func TestPatrol_FailedIssue_BackoffNotElapsed(t *testing.T) {
@@ -414,7 +415,7 @@ func TestPatrol_CIFailureOnBatchPR(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.CIFailures)
 	assert.Len(t, prSvc.comments[10], 1)
-	assert.Contains(t, prSvc.comments[10][0], "CI is failing")
+	assert.Equal(t, "/herd fix-ci", prSvc.comments[10][0])
 }
 
 func TestPatrol_CIPassingOnBatchPR(t *testing.T) {
@@ -640,7 +641,10 @@ func TestPatrol_StaleIssueRedispatchedNextCycle(t *testing.T) {
 	result2, err := Patrol(context.Background(), mock2, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result2.RedispatchedCount)
-	assert.Len(t, wf2.dispatched, 1)
+	// Monitor posts /herd retry command instead of directly dispatching
+	assert.Len(t, wf2.dispatched, 0)
+	assert.Len(t, issueSvc2.comments[42], 1)
+	assert.Equal(t, "/herd retry 42", issueSvc2.comments[42][0])
 }
 
 func TestPatrol_TimeoutAndStale_BothRelabel(t *testing.T) {
@@ -689,4 +693,171 @@ func TestPatrol_TimeoutAndStale_BothRelabel(t *testing.T) {
 			assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
 		})
 	}
+}
+
+func TestHasRecentHerdCommand(t *testing.T) {
+	tests := []struct {
+		name     string
+		comments []*platform.Comment
+		command  string
+		expected bool
+	}{
+		{
+			name:     "no comments",
+			comments: nil,
+			command:  "fix-ci",
+			expected: false,
+		},
+		{
+			name:     "unrelated comment",
+			comments: []*platform.Comment{{ID: 1, Body: "This looks good!", CreatedAt: time.Now()}},
+			command:  "fix-ci",
+			expected: false,
+		},
+		{
+			name: "recent herd command matches",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd fix-ci", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			},
+			command:  "fix-ci",
+			expected: true,
+		},
+		{
+			name: "herd command too old",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd fix-ci", CreatedAt: time.Now().Add(-45 * time.Minute)},
+			},
+			command:  "fix-ci",
+			expected: false,
+		},
+		{
+			name: "different herd command",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd retry 42", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			},
+			command:  "fix-ci",
+			expected: false,
+		},
+		{
+			name: "recent retry command matches",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd retry 42", CreatedAt: time.Now().Add(-10 * time.Minute)},
+			},
+			command:  "retry 42",
+			expected: true,
+		},
+		{
+			name: "retry for different issue",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd retry 99", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			},
+			command:  "retry 42",
+			expected: false,
+		},
+		{
+			name: "exactly at 30 minute boundary",
+			comments: []*platform.Comment{
+				{ID: 1, Body: "/herd fix-ci", CreatedAt: time.Now().Add(-30 * time.Minute)},
+			},
+			command:  "fix-ci",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			if tt.comments != nil {
+				issueSvc.existingComments = map[int][]*platform.Comment{10: tt.comments}
+			}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       newMockPRService(),
+				workflows: &mockWorkflowService{},
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+			assert.Equal(t, tt.expected, hasRecentHerdCommand(context.Background(), mock, 10, tt.command))
+		})
+	}
+}
+
+func TestHasRecentHerdCommand_ErrorFallback(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listCommentsErr = fmt.Errorf("API error")
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	// Should return false (fail open) when ListComments errors
+	assert.False(t, hasRecentHerdCommand(context.Background(), mock, 42, "fix-ci"))
+}
+
+func TestPatrol_NoDuplicateRetryCommand(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusFailed] = []*platform.Issue{
+		{
+			Number: 42, Title: "Test", Labels: []string{issues.StatusFailed},
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	// Simulate a recent /herd retry 42 comment
+	issueSvc.existingComments = map[int][]*platform.Comment{
+		42: {{ID: 1, Body: "/herd retry 42", CreatedAt: time.Now().Add(-5 * time.Minute)}},
+	}
+
+	wf := &mockWorkflowService{
+		completedRuns: []*platform.Run{
+			{ID: 100, Conclusion: "failure", Inputs: map[string]string{"issue_number": "42"}, CreatedAt: time.Now().Add(-2 * time.Hour)},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{
+		Monitor: config.Monitor{AutoRedispatch: true, MaxRedispatchAttempts: 3},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	// Should not post another /herd retry command since one was recently posted
+	assert.Equal(t, 0, result.RedispatchedCount)
+	assert.Len(t, issueSvc.comments[42], 0)
+}
+
+func TestPatrol_NoDuplicateFixCICommand(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+	// Simulate a recent /herd fix-ci comment on PR #10
+	issueSvc.existingComments = map[int][]*platform.Comment{
+		10: {{ID: 1, Body: "/herd fix-ci", CreatedAt: time.Now().Add(-10 * time.Minute)}},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "failure"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	// CIFailures still counted but no new comment posted
+	assert.Equal(t, 1, result.CIFailures)
+	assert.Len(t, prSvc.comments[10], 0)
 }

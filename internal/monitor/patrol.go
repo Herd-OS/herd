@@ -8,7 +8,6 @@ import (
 
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/issues"
-	"github.com/herd-os/herd/internal/planner"
 	"github.com/herd-os/herd/internal/platform"
 )
 
@@ -22,7 +21,10 @@ type PatrolResult struct {
 	CIFailures        int
 }
 
-const monitorCommentSignature = "**HerdOS Monitor Alert**"
+const (
+	monitorCommentSignature = "**HerdOS Monitor Alert**"
+	herdCommandWindow       = 30 * time.Minute
+)
 
 // hasMonitorComment checks if a HerdOS Monitor comment already exists on an issue.
 // Fails open (returns false on error) so a broken comments API doesn't silence the monitor.
@@ -33,6 +35,22 @@ func hasMonitorComment(ctx context.Context, p platform.Platform, number int) boo
 	}
 	for _, c := range comments {
 		if strings.Contains(c.Body, monitorCommentSignature) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRecentHerdCommand checks if a /herd <command> was posted within the last 30 minutes.
+// Fails open (returns false on error) so a broken comments API doesn't silence the monitor.
+func hasRecentHerdCommand(ctx context.Context, p platform.Platform, number int, command string) bool {
+	comments, err := p.Issues().ListComments(ctx, number)
+	if err != nil {
+		return false
+	}
+	prefix := "/herd " + command
+	for _, c := range comments {
+		if strings.HasPrefix(c.Body, prefix) && time.Since(c.CreatedAt) < herdCommandWindow {
 			return true
 		}
 	}
@@ -106,11 +124,6 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 			return nil, fmt.Errorf("listing completed runs: %w", err)
 		}
 
-		defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("getting default branch: %w", err)
-		}
-
 		for _, issue := range failed {
 			result.FailedIssues++
 
@@ -130,25 +143,12 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 				continue // Backoff not elapsed
 			}
 
-			// Re-dispatch
-			if issue.Milestone == nil {
+			// Post /herd retry command; skip if one was recently posted
+			retryCmd := fmt.Sprintf("retry %d", issue.Number)
+			if hasRecentHerdCommand(ctx, p, issue.Number, retryCmd) {
 				continue
 			}
-			batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
-
-			_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusFailed})
-			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusInProgress})
-			_, err := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
-				"issue_number":    fmt.Sprintf("%d", issue.Number),
-				"batch_branch":    batchBranch,
-				"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
-				"runner_label":    cfg.Workers.RunnerLabel,
-			})
-			if err != nil {
-				_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusInProgress})
-				_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
-				continue
-			}
+			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf("/herd retry %d", issue.Number))
 			result.RedispatchedCount++
 		}
 	} else {
@@ -177,10 +177,8 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		if cfg.Integrator.RequireCI && strings.HasPrefix(pr.Head, "herd/batch/") {
 			ciStatus, err := p.Checks().GetCombinedStatus(ctx, pr.Head)
 			if err == nil && ciStatus == "failure" {
-				if !hasCIMonitorComment(ctx, p, pr.Number) {
-					_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
-						"⚠️ **HerdOS Monitor Alert**\n\nCI is failing on batch branch `%s`. The integrator should have dispatched a fix worker. If this persists, manual intervention may be needed.\n\n%s",
-						pr.Head, buildMentions(cfg.Monitor.NotifyUsers)))
+				if !hasRecentHerdCommand(ctx, p, pr.Number, "fix-ci") {
+					_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
 				}
 				result.CIFailures++
 			}
@@ -188,20 +186,6 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 	}
 
 	return result, nil
-}
-
-func hasCIMonitorComment(ctx context.Context, p platform.Platform, prNumber int) bool {
-	// PR comments are issue comments in GitHub
-	comments, err := p.Issues().ListComments(ctx, prNumber)
-	if err != nil {
-		return false
-	}
-	for _, c := range comments {
-		if strings.Contains(c.Body, monitorCommentSignature) && strings.Contains(c.Body, "CI is failing") {
-			return true
-		}
-	}
-	return false
 }
 
 // BackoffDelay returns the backoff delay for a given failure count.

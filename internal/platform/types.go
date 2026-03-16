@@ -67,8 +67,9 @@ type RepoInfo struct {
 }
 
 type Comment struct {
-	ID   int64
-	Body string
+	ID        int64
+	Body      string
+	CreatedAt time.Time
 }
 
 type MergeMethod string

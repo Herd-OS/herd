@@ -138,8 +138,9 @@ func (s *issueService) ListComments(ctx context.Context, number int) ([]*platfor
 		}
 		for _, c := range comments {
 			result = append(result, &platform.Comment{
-				ID:   c.GetID(),
-				Body: c.GetBody(),
+				ID:        c.GetID(),
+				Body:      c.GetBody(),
+				CreatedAt: c.GetCreatedAt().Time,
 			})
 		}
 		if resp.NextPage == 0 {
