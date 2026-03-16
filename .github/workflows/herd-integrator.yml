@@ -193,4 +193,5 @@ jobs:
             --comment-id "$COMMENT_ID" \
             --issue-number "$ISSUE_NUMBER" \
             --author-login "$AUTHOR_LOGIN" \
-            --author-association "$AUTHOR_ASSOCIATION"
+            --author-association "$AUTHOR_ASSOCIATION" \
+            --is-pr "$IS_PR"

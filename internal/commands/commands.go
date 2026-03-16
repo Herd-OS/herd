@@ -32,6 +32,7 @@ type HandlerContext struct {
 	CommentID   int64  // for reactions
 	IssueBody   string // full issue/PR body for future multi-turn commands
 	AuthorLogin string // who posted the command
+	IsPR        bool   // true when the comment was posted on a pull request
 }
 
 // Result holds the outcome of a command execution.
