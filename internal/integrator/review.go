@@ -445,7 +445,10 @@ func buildReviewCycleComment(cycle, maxCycles int, fixIssueNums []int, high, med
 	} else {
 		b.WriteString("🔍 **HerdOS Agent Review**\n\n")
 	}
-	if totalFindings == 1 {
+	if totalFindings == 0 {
+		b.WriteString("No issues found.\n")
+		return b.String()
+	} else if totalFindings == 1 {
 		b.WriteString("Found 1 issue:\n\n")
 	} else {
 		b.WriteString(fmt.Sprintf("Found %d issues:\n\n", totalFindings))

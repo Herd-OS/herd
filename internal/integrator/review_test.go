@@ -1472,8 +1472,8 @@ func TestBuildReviewCycleComment_SingularPlural(t *testing.T) {
 			expected: "Found 2 issues:\n\n",
 		},
 		{
-			name:     "plural with zero findings",
-			expected: "Found 0 issues:\n\n",
+			name:     "no findings",
+			expected: "No issues found.\n",
 		},
 		{
 			name: "plural with many findings",
