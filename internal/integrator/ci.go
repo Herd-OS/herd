@@ -73,6 +73,11 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		batchBranch = fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
 	}
 
+	if isBatchComplete(ms) {
+		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", ms.Number)
+		return &CheckCIResult{Skipped: true}, nil
+	}
+
 	// Get CI status
 	status, err := p.Checks().GetCombinedStatus(ctx, batchBranch)
 	if err != nil {
