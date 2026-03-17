@@ -351,7 +351,7 @@ func TestReportPostedAfterPush(t *testing.T) {
 
 func TestRunValidation_NoGoMod(t *testing.T) {
 	dir := t.TempDir()
-	result := runValidation(dir)
+	result := runValidation(context.Background(), dir)
 	assert.True(t, result.allPassed())
 	assert.True(t, result.BuildOK)
 	assert.True(t, result.TestOK)
@@ -364,7 +364,7 @@ func TestRunValidation_ValidGoProject(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.21\n"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644))
 
-	result := runValidation(dir)
+	result := runValidation(context.Background(), dir)
 	assert.True(t, result.BuildOK)
 	assert.True(t, result.TestOK)
 	assert.True(t, result.VetOK)
@@ -376,10 +376,35 @@ func TestRunValidation_BuildFailure(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.21\n"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() { undefined() }\n"), 0644))
 
-	result := runValidation(dir)
+	result := runValidation(context.Background(), dir)
 	assert.False(t, result.BuildOK)
 	assert.Contains(t, result.Errors, "go build failed")
 	assert.False(t, result.allPassed())
+}
+
+func TestRunValidation_CancelledContext(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.21\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	result := runValidation(ctx, dir)
+	assert.False(t, result.BuildOK, "build should fail with cancelled context")
+	assert.False(t, result.allPassed(), "validation should not pass with cancelled context")
+	assert.Contains(t, result.Errors, "go build failed")
+}
+
+func TestRunValidation_NoGoMod_IgnoresContext(t *testing.T) {
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	// No go.mod — should skip all validation regardless of context
+	result := runValidation(ctx, dir)
+	assert.True(t, result.allPassed())
 }
 
 func TestValidationResult_StatusString(t *testing.T) {

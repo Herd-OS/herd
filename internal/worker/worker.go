@@ -161,7 +161,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	}
 
 	// Run pre-push validation
-	validation := runValidation(params.RepoRoot)
+	validation := runValidation(ctx, params.RepoRoot)
 
 	if !validation.allPassed() {
 		fmt.Printf("Validation failed, re-invoking agent to fix:\n%s\n", validation.Errors)
@@ -181,7 +181,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 
 		// Re-run validation
-		validation = runValidation(params.RepoRoot)
+		validation = runValidation(ctx, params.RepoRoot)
 		if !validation.allPassed() {
 			// Post report with failure info, then fail
 			report := buildWorkerReport(g, batchBranch, rawSummary, validation)
@@ -228,7 +228,7 @@ type validationResult struct {
 
 // runValidation runs Go validation commands in the repo root.
 // Skips all validation if no go.mod exists in repoRoot.
-func runValidation(repoRoot string) *validationResult {
+func runValidation(ctx context.Context, repoRoot string) *validationResult {
 	result := &validationResult{}
 
 	// Skip validation for non-Go repos
@@ -243,7 +243,7 @@ func runValidation(repoRoot string) *validationResult {
 	var errors strings.Builder
 
 	// go build
-	cmd := exec.Command("go", "build", "./...")
+	cmd := exec.CommandContext(ctx, "go", "build", "./...")
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		result.BuildOK = false
@@ -253,7 +253,7 @@ func runValidation(repoRoot string) *validationResult {
 	}
 
 	// go test
-	cmd = exec.Command("go", "test", "./...")
+	cmd = exec.CommandContext(ctx, "go", "test", "./...")
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		result.TestOK = false
@@ -263,7 +263,7 @@ func runValidation(repoRoot string) *validationResult {
 	}
 
 	// go vet
-	cmd = exec.Command("go", "vet", "./...")
+	cmd = exec.CommandContext(ctx, "go", "vet", "./...")
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		result.VetOK = false
@@ -277,7 +277,7 @@ func runValidation(repoRoot string) *validationResult {
 		result.LintOK = true
 		result.LintSkipped = true
 	} else {
-		cmd = exec.Command("golangci-lint", "run", "./...")
+		cmd = exec.CommandContext(ctx, "golangci-lint", "run", "./...")
 		cmd.Dir = repoRoot
 		if out, err := cmd.CombinedOutput(); err != nil {
 			result.LintOK = false
