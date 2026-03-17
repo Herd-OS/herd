@@ -70,6 +70,11 @@ func (g *Git) Diff(base, head string) (string, error) {
 	return g.output("diff", base+"..."+head)
 }
 
+// DiffStat returns the --stat output between two refs.
+func (g *Git) DiffStat(base, head string) (string, error) {
+	return g.output("diff", "--stat", base, head)
+}
+
 func (g *Git) CurrentBranch() (string, error) {
 	return g.output("rev-parse", "--abbrev-ref", "HEAD")
 }
