@@ -156,6 +156,63 @@ func TestDiff(t *testing.T) {
 	assert.Contains(t, diff, "new.txt")
 }
 
+func TestDiffStat(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	// Create feature branch with a new file.
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "new.txt"), []byte("new"), 0644))
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "add new")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	stat, err := g.DiffStat(defaultBranch, "feature")
+	require.NoError(t, err)
+	assert.Contains(t, stat, "new.txt")
+}
+
+func TestDiffStat_ThreeDotSemantics(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	// Create feature branch with a new file.
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0644))
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "add feature")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Add a separate commit on default branch so the branches diverge.
+	require.NoError(t, g.Checkout(defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.txt"), []byte("main"), 0644))
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "add main")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Three-dot diff should show only the feature branch's changes,
+	// NOT the default branch's main.txt.
+	stat, err := g.DiffStat(defaultBranch, "feature")
+	require.NoError(t, err)
+	assert.Contains(t, stat, "feature.txt")
+	assert.NotContains(t, stat, "main.txt")
+}
+
 func TestRebase(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)
