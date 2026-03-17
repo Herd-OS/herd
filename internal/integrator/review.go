@@ -110,19 +110,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Fetch remote refs so the batch branch is available locally
-	_ = g.Fetch("origin") // best-effort — may fail in test environments without a remote
-	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
+	// Use the PR diff from GitHub API — this shows exactly what will be
+	// merged, excluding commits already on main. Using git diff was unreliable
+	// because merging main into the batch branch caused the reviewer to see
+	// changes that were already on main.
+	diff, err := p.PullRequests().GetDiff(ctx, pr.Number)
 	if err != nil {
-		return nil, fmt.Errorf("getting default branch: %w", err)
-	}
-	// Try remote refs first (Actions checkout), fall back to local refs (tests)
-	diff, err := g.Diff("origin/"+defaultBranch, "origin/"+batchBranch)
-	if err != nil {
-		diff, err = g.Diff(defaultBranch, batchBranch)
-		if err != nil {
-			return nil, fmt.Errorf("getting diff: %w", err)
-		}
+		return nil, fmt.Errorf("getting PR diff: %w", err)
 	}
 
 	// Collect acceptance criteria from all milestone issues
