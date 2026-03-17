@@ -394,11 +394,11 @@ func newHandleCommentCmd() *cobra.Command {
 
 			if result.Error != nil {
 				msg := fmt.Sprintf("❌ **HerdOS Command Failed**\n\n`/herd %s` failed: %s", parsed.Name, result.Error)
-				_ = client.Issues().AddComment(cmd.Context(), issueNumber, msg)
+				postCommentWithLog(cmd.Context(), client.Issues(), issueNumber, msg)
 				return result.Error
 			}
 			if result.Message != "" {
-				_ = client.Issues().AddComment(cmd.Context(), issueNumber, result.Message)
+				postCommentWithLog(cmd.Context(), client.Issues(), issueNumber, result.Message)
 			}
 
 			fmt.Println(result.Message)
@@ -494,4 +494,13 @@ func newIntegratorCheckCICmd() *cobra.Command {
 	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID")
 	cmd.Flags().IntVar(&batchNum, "batch", 0, "Batch/milestone number")
 	return cmd
+}
+
+// postCommentWithLog posts a comment to an issue and logs a warning to stderr
+// if the post fails. This ensures comment-posting failures are visible in
+// workflow logs rather than being silently discarded.
+func postCommentWithLog(ctx context.Context, issues platform.IssueService, issueNumber int, body string) {
+	if err := issues.AddComment(ctx, issueNumber, body); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to post comment on issue #%d: %v\n", issueNumber, err)
+	}
 }

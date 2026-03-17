@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/herd-os/herd/internal/platform"
@@ -247,6 +250,69 @@ func TestHandleCommentCmd_IsPRFlag(t *testing.T) {
 				require.NotNil(t, flag, "expected flag --%s to be defined", tt.flagName)
 				assert.Equal(t, tt.defValue, flag.DefValue)
 			}
+		})
+	}
+}
+
+// mockCommentIssueService is a minimal IssueService mock for testing postCommentWithLog.
+type mockCommentIssueService struct {
+	mockDispatchIssueService
+	addCommentErr error
+	addedBody     string
+	addedNumber   int
+}
+
+func (m *mockCommentIssueService) AddComment(_ context.Context, number int, body string) error {
+	m.addedNumber = number
+	m.addedBody = body
+	return m.addCommentErr
+}
+
+func TestPostCommentWithLog(t *testing.T) {
+	tests := []struct {
+		name          string
+		addCommentErr error
+		wantStderr    string
+	}{
+		{
+			name:          "successful comment posts without stderr output",
+			addCommentErr: nil,
+			wantStderr:    "",
+		},
+		{
+			name:          "failed comment logs warning to stderr",
+			addCommentErr: fmt.Errorf("API rate limit exceeded"),
+			wantStderr:    "Warning: failed to post comment on issue #42: API rate limit exceeded\n",
+		},
+		{
+			name:          "network error logs warning to stderr",
+			addCommentErr: fmt.Errorf("connection refused"),
+			wantStderr:    "Warning: failed to post comment on issue #42: connection refused\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockCommentIssueService{addCommentErr: tt.addCommentErr}
+
+			// Capture stderr
+			oldStderr := os.Stderr
+			r, w, err := os.Pipe()
+			require.NoError(t, err)
+			os.Stderr = w
+
+			postCommentWithLog(context.Background(), mock, 42, "test message")
+
+			w.Close()
+			os.Stderr = oldStderr
+
+			var buf bytes.Buffer
+			_, err = buf.ReadFrom(r)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantStderr, buf.String())
+			assert.Equal(t, 42, mock.addedNumber)
+			assert.Equal(t, "test message", mock.addedBody)
 		})
 	}
 }
