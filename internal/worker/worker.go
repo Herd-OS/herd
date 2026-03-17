@@ -194,18 +194,19 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 	}
 
-	// Build and post structured report
+	// Force push worker branch — previous failed attempts may have left
+	// stale commits on the remote branch that would cause a non-fast-forward rejection.
+	// Push BEFORE posting the report so we don't claim success if the push fails.
+	if err = g.ForcePush("origin", workerBranch); err != nil {
+		return nil, fmt.Errorf("pushing worker branch: %w", err)
+	}
+
+	// Build and post structured report (only after successful push)
 	report := buildWorkerReport(g, batchBranch, rawSummary, validation)
 	if rawSummary != "" {
 		report += fmt.Sprintf("\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
 	}
 	_ = p.Issues().AddComment(ctx, params.IssueNumber, report)
-
-	// Force push worker branch — previous failed attempts may have left
-	// stale commits on the remote branch that would cause a non-fast-forward rejection.
-	if err = g.ForcePush("origin", workerBranch); err != nil {
-		return nil, fmt.Errorf("pushing worker branch: %w", err)
-	}
 
 	// Label issue as done
 	_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress, issues.StatusFailed})

@@ -329,6 +329,26 @@ func TestWorkerSuccessLabeling_RemovesFailedAndInProgress(t *testing.T) {
 		"both no-op and success paths should remove in-progress+failed (expected 2 occurrences)")
 }
 
+func TestReportPostedAfterPush(t *testing.T) {
+	// Verify that ForcePush is called BEFORE the report comment is posted.
+	// This prevents posting a report claiming success when the push hasn't
+	// happened yet (or might fail). See issue #255.
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	pushIdx := strings.Index(src, "g.ForcePush(")
+	require.NotEqual(t, -1, pushIdx, "ForcePush call not found in worker.go")
+
+	// Find the report comment post (the one in the success path, not the validation-failure path)
+	// The success-path comment is preceded by "only after successful push"
+	reportIdx := strings.Index(src, "only after successful push")
+	require.NotEqual(t, -1, reportIdx, "post-push report comment not found in worker.go")
+
+	assert.Less(t, pushIdx, reportIdx,
+		"ForcePush must appear before the report comment to avoid posting before push")
+}
+
 func TestRunValidation_NoGoMod(t *testing.T) {
 	dir := t.TempDir()
 	result := runValidation(dir)
