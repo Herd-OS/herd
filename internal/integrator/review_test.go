@@ -1344,7 +1344,50 @@ func TestBuildReviewCycleComment_NoCycle(t *testing.T) {
 	comment := buildReviewCycleComment(0, 3, nil, nil, medium, nil)
 	assert.Contains(t, comment, "🔍 **HerdOS Agent Review**\n\n")
 	assert.NotContains(t, comment, "cycle")
-	assert.Contains(t, comment, "Found 1 issues")
+	assert.Contains(t, comment, "Found 1 issue:")
+	assert.NotContains(t, comment, "Found 1 issues")
+}
+
+func TestBuildReviewCycleComment_SingularPlural(t *testing.T) {
+	tests := []struct {
+		name     string
+		high     []agent.ReviewFinding
+		medium   []agent.ReviewFinding
+		low      []agent.ReviewFinding
+		expected string
+	}{
+		{
+			name:     "singular with one finding",
+			medium:   []agent.ReviewFinding{{Severity: "MEDIUM", Description: "one issue"}},
+			expected: "Found 1 issue:\n\n",
+		},
+		{
+			name:     "plural with two findings",
+			high:     []agent.ReviewFinding{{Severity: "HIGH", Description: "bug"}},
+			low:      []agent.ReviewFinding{{Severity: "LOW", Description: "style"}},
+			expected: "Found 2 issues:\n\n",
+		},
+		{
+			name:     "plural with zero findings",
+			expected: "Found 0 issues:\n\n",
+		},
+		{
+			name: "plural with many findings",
+			high: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "bug1"},
+				{Severity: "HIGH", Description: "bug2"},
+				{Severity: "HIGH", Description: "bug3"},
+			},
+			expected: "Found 3 issues:\n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			comment := buildReviewCycleComment(1, 3, nil, tt.high, tt.medium, tt.low)
+			assert.Contains(t, comment, tt.expected)
+		})
+	}
 }
 
 func TestBuildBatchSummaryComment(t *testing.T) {
