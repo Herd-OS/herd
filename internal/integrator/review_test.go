@@ -1687,19 +1687,103 @@ func TestBuildReviewCycleComment_SingularPlural(t *testing.T) {
 }
 
 func TestBuildBatchSummaryComment(t *testing.T) {
-	allIssues := []*platform.Issue{
-		{Number: 1, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo A\n"},
-		{Number: 2, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo B\n"},
-		{Number: 3, Body: "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 2\n---\n\n## Task\nFix\n"},
-		{Number: 4, Body: "---\nherd:\n  version: 1\n  ci_fix_cycle: 1\n---\n\n## Task\nCI Fix\n"},
+	tests := []struct {
+		name     string
+		issues   []*platform.Issue
+		summary  string
+		expected []string
+	}{
+		{
+			name: "separates review fix and CI fix issues",
+			issues: []*platform.Issue{
+				{Number: 1, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo A\n"},
+				{Number: 2, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo B\n"},
+				{Number: 3, Body: "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 2\n---\n\n## Task\nFix\n"},
+				{Number: 4, Body: "---\nherd:\n  version: 1\n  ci_fix_cycle: 1\n---\n\n## Task\nCI Fix\n"},
+			},
+			summary: "All looks good",
+			expected: []string{
+				"✅ **HerdOS Agent Review**",
+				"All looks good",
+				"Original tasks: 2",
+				"Review fix issues: 1",
+				"CI fix issues: 1",
+				"Review cycles: 2",
+				"CI fix cycles: 1",
+				"Total issues: 4",
+			},
+		},
+		{
+			name:    "no issues",
+			issues:  nil,
+			summary: "Empty batch",
+			expected: []string{
+				"Original tasks: 0",
+				"Review fix issues: 0",
+				"CI fix issues: 0",
+				"Total issues: 0",
+			},
+		},
+		{
+			name: "only original tasks",
+			issues: []*platform.Issue{
+				{Number: 1, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo A\n"},
+			},
+			summary: "Clean",
+			expected: []string{
+				"Original tasks: 1",
+				"Review fix issues: 0",
+				"CI fix issues: 0",
+				"Review cycles: 0",
+				"CI fix cycles: 0",
+			},
+		},
+		{
+			name: "CI fix issue with type fix uses CIFixCycle",
+			issues: []*platform.Issue{
+				{Number: 1, Body: "---\nherd:\n  version: 1\n  type: fix\n  ci_fix_cycle: 2\n---\n\n## Task\nCI fix with type fix\n"},
+			},
+			summary: "Mixed",
+			expected: []string{
+				"Original tasks: 0",
+				"Review fix issues: 0",
+				"CI fix issues: 1",
+				"CI fix cycles: 2",
+			},
+		},
+		{
+			name: "multiple review fix cycles",
+			issues: []*platform.Issue{
+				{Number: 1, Body: "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\nFix 1\n"},
+				{Number: 2, Body: "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 3\n---\n\n## Task\nFix 3\n"},
+			},
+			summary: "Fixes",
+			expected: []string{
+				"Review fix issues: 2",
+				"CI fix issues: 0",
+				"Review cycles: 3",
+			},
+		},
+		{
+			name: "body without front matter counted as original task",
+			issues: []*platform.Issue{
+				{Number: 1, Body: "not a herd issue"},
+				{Number: 2, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo A\n"},
+			},
+			summary: "With junk",
+			expected: []string{
+				"Original tasks: 2",
+				"Total issues: 2",
+			},
+		},
 	}
 
-	comment := buildBatchSummaryComment(allIssues, "All looks good")
-	assert.Contains(t, comment, "✅ **HerdOS Agent Review**")
-	assert.Contains(t, comment, "All looks good")
-	assert.Contains(t, comment, "Original tasks: 2")
-	assert.Contains(t, comment, "Fix issues created: 2")
-	assert.Contains(t, comment, "Review cycles: 2")
-	assert.Contains(t, comment, "CI fix cycles: 1")
-	assert.Contains(t, comment, "Total issues: 4")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			comment := buildBatchSummaryComment(tt.issues, tt.summary)
+			for _, exp := range tt.expected {
+				assert.Contains(t, comment, exp)
+			}
+		})
+	}
 }
