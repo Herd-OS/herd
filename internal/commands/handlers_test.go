@@ -327,6 +327,9 @@ func TestHandleFixCI_NotPR(t *testing.T) {
 
 func TestHandleFixCI_NotBatchPR(t *testing.T) {
 	issueSvc := newTestIssueService()
+	// Populate the issue so the dedup path is traversed; no CIFixPending label
+	// means the handler should proceed past the dedup check.
+	issueSvc.getResult[10] = &platform.Issue{Number: 10, Labels: []string{}}
 	prSvc := &testPRService{
 		getResult: map[int]*platform.PullRequest{
 			10: {Number: 10, Head: "feature/my-feature"},
