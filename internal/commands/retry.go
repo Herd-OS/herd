@@ -9,6 +9,9 @@ import (
 )
 
 func handleRetry(hctx *HandlerContext, cmd Command) Result {
+	if cmd.ParseErr != nil {
+		return Result{Message: "⚠️ Could not parse command: " + cmd.ParseErr.Error()}
+	}
 	if len(cmd.Args) < 1 {
 		return Result{Message: "⚠️ Usage: `/herd retry <issue-number>`"}
 	}
