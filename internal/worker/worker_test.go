@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -305,6 +306,26 @@ func TestExec_EmptySummaryNoComment(t *testing.T) {
 	for _, c := range issueSvc.comments {
 		assert.NotContains(t, c, "Worker Summary")
 	}
+}
+
+func TestWorkerSuccessLabeling_RemovesFailedAndInProgress(t *testing.T) {
+	// Verify that the worker source code removes both StatusFailed and
+	// StatusInProgress on both the no-op and success paths.
+	// This is a code-level assertion since we can't easily run the full
+	// worker lifecycle without a real git repo.
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	// Count occurrences of RemoveLabels with both statuses
+	// Both no-op path and success path should remove failed + in-progress
+	assert.Contains(t, src, `[]string{issues.StatusInProgress, issues.StatusFailed}`,
+		"no-op and success paths should remove both in-progress and failed labels")
+
+	// Should appear exactly twice (no-op path + push success path)
+	count := strings.Count(src, `[]string{issues.StatusInProgress, issues.StatusFailed}`)
+	assert.Equal(t, 2, count,
+		"both no-op and success paths should remove in-progress+failed (expected 2 occurrences)")
 }
 
 func TestPromptTemplate_AllInstructions(t *testing.T) {
