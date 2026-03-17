@@ -137,6 +137,9 @@ func (m *testPRService) AddComment(_ context.Context, _ int, body string) error 
 func (m *testPRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
 	return nil
 }
+func (m *testPRService) GetDiff(_ context.Context, _ int) (string, error) {
+	return "", nil
+}
 
 // --- Mock WorkflowService ---
 
@@ -777,7 +780,10 @@ func TestHandleReview_WithFixes(t *testing.T) {
 	dir, g := initHandlerTestRepo(t)
 	ag := &testAgent{reviewResult: &agent.ReviewResult{
 		Approved: false,
-		Comments: []string{"Fix error handling", "Add tests"},
+		Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "Fix error handling"},
+			{Severity: "HIGH", Description: "Add tests"},
+		},
 	}}
 
 	hctx := &HandlerContext{
@@ -794,7 +800,8 @@ func TestHandleReview_WithFixes(t *testing.T) {
 
 	require.NoError(t, result.Error)
 	assert.Empty(t, result.Message, "Message must be empty to avoid double-posting; integrator.Review posts its own comment")
-	assert.Len(t, issueSvc.createdIssues, 2)
+	// Review now batches all high-severity findings into a single fix issue
+	assert.Len(t, issueSvc.createdIssues, 1)
 }
 
 func TestHandleReview_MaxCyclesHit(t *testing.T) {
@@ -825,7 +832,9 @@ func TestHandleReview_MaxCyclesHit(t *testing.T) {
 	dir, g := initHandlerTestRepo(t)
 	ag := &testAgent{reviewResult: &agent.ReviewResult{
 		Approved: false,
-		Comments: []string{"Fix error handling"},
+		Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "Fix error handling"},
+		},
 	}}
 
 	hctx := &HandlerContext{
@@ -875,7 +884,9 @@ func TestHandleReview_AllCreatesFailed(t *testing.T) {
 	dir, g := initHandlerTestRepo(t)
 	ag := &testAgent{reviewResult: &agent.ReviewResult{
 		Approved: false,
-		Comments: []string{"Fix error handling"},
+		Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "Fix error handling"},
+		},
 	}}
 
 	hctx := &HandlerContext{
