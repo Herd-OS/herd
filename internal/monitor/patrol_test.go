@@ -59,6 +59,7 @@ type mockIssueService struct {
 	existingComments map[int][]*platform.Comment // for ListComments
 	listCommentsErr  error
 	deletedComments  []int64
+	callLog          *[]string // if non-nil, records "issue:AddLabels" etc. for ordering assertions
 }
 
 func newMockIssueService() *mockIssueService {
@@ -97,6 +98,9 @@ func (m *mockIssueService) AddLabels(_ context.Context, number int, labels []str
 		return m.addLabelsErr
 	}
 	m.addedLabels[number] = append(m.addedLabels[number], labels...)
+	if m.callLog != nil {
+		*m.callLog = append(*m.callLog, "issue:AddLabels")
+	}
 	return nil
 }
 func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []string) error {
@@ -124,6 +128,7 @@ func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ s
 type mockPRService struct {
 	listResult []*platform.PullRequest
 	comments   map[int][]string
+	callLog    *[]string // if non-nil, records "pr:AddComment" etc. for ordering assertions
 }
 
 func newMockPRService() *mockPRService {
@@ -151,6 +156,9 @@ func (m *mockPRService) CreateReview(_ context.Context, _ int, _ string, _ platf
 }
 func (m *mockPRService) AddComment(_ context.Context, number int, body string) error {
 	m.comments[number] = append(m.comments[number], body)
+	if m.callLog != nil {
+		*m.callLog = append(*m.callLog, "pr:AddComment")
+	}
 	return nil
 }
 
@@ -437,6 +445,10 @@ func TestPatrol_CIFailureOnBatchPR(t *testing.T) {
 	assert.Equal(t, 1, result.CIFailures)
 	assert.Len(t, prSvc.comments[10], 1)
 	assert.Contains(t, prSvc.comments[10][0], "/herd fix-ci")
+	// Label must be added to the PR before the comment is posted so that a
+	// concurrent patrol run racing past the hasCIFixPendingLabel check sees
+	// the label and skips rather than posting a duplicate /herd fix-ci comment.
+	assert.Contains(t, issueSvc.addedLabels[10], issues.CIFixPending)
 }
 
 func TestPatrol_CIFailureWithExistingCIFixPendingLabel_NoDuplicateCommand(t *testing.T) {
@@ -467,6 +479,42 @@ func TestPatrol_CIFailureWithExistingCIFixPendingLabel_NoDuplicateCommand(t *tes
 	assert.Equal(t, 1, result.CIFailures)
 	// No new /herd fix-ci comment should be posted.
 	assert.Len(t, prSvc.comments[10], 0)
+	// No duplicate label addition — label was already present.
+	assert.Empty(t, issueSvc.addedLabels[10])
+}
+
+func TestPatrol_CIFailure_LabelAddedBeforeCommentPosted(t *testing.T) {
+	// Verifies the label-first ordering: patrol must add herd/ci-fix-pending
+	// BEFORE posting the /herd fix-ci comment so that a concurrent patrol run
+	// racing past the hasCIFixPendingLabel check sees the label and skips.
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	issueSvc := newMockIssueService()
+
+	var opLog []string
+	issueSvc.callLog = &opLog
+	prSvc.callLog = &opLog
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		checks:    &mockCheckService{status: "failure"},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	}
+
+	_, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	// The label add must appear before the comment in the operation log.
+	require.Len(t, opLog, 2, "expected exactly AddLabels then AddComment")
+	assert.Equal(t, "issue:AddLabels", opLog[0], "label must be added first")
+	assert.Equal(t, "pr:AddComment", opLog[1], "comment must be posted second")
 }
 
 func TestPatrol_CIPassingNoCIFixComment(t *testing.T) {

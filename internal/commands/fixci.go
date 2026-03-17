@@ -14,19 +14,6 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 		return Result{Message: "⚠️ `/herd fix-ci` can only be used on pull requests."}
 	}
 
-	// Label-based dedup: if the CI fix label is already present, a prior invocation
-	// of this handler has already claimed the fix cycle. Return early to avoid
-	// dispatching duplicate workers. This handles the race where two concurrent
-	// patrol runs both post /herd fix-ci before either comment is handled — the
-	// first handler adds the label via beforeDispatch; the second sees it here.
-	if prIssue, getErr := hctx.Platform.Issues().Get(hctx.Ctx, hctx.IssueNumber); getErr == nil {
-		for _, label := range prIssue.Labels {
-			if label == issues.CIFixPending {
-				return Result{Message: "ℹ️ CI fix already in progress."}
-			}
-		}
-	}
-
 	pr, err := hctx.Platform.PullRequests().Get(hctx.Ctx, hctx.IssueNumber)
 	if err != nil {
 		return Result{Error: fmt.Errorf("getting PR #%d: %w", hctx.IssueNumber, err)}
@@ -40,9 +27,9 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 		return Result{Error: fmt.Errorf("parsing batch number from %s: %w", pr.Head, err)}
 	}
 
-	// Add the label BEFORE workers are dispatched (label-first pattern, matching
-	// monitor/patrol.go). If AddLabels fails we warn but still proceed — dedup
-	// via the label may be broken, but we must not silently drop the user's command.
+	// Ensure the label is present right before workers are dispatched. The patrol
+	// already adds it before posting the /herd fix-ci comment, so this is typically
+	// idempotent. If AddLabels fails we warn but still proceed.
 	beforeDispatch := func() {
 		if labelErr := hctx.Platform.Issues().AddLabels(hctx.Ctx, hctx.IssueNumber, []string{issues.CIFixPending}); labelErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: adding %s label to PR #%d: %v\n", issues.CIFixPending, hctx.IssueNumber, labelErr)

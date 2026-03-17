@@ -271,15 +271,22 @@ func baseConfig() *config.Config {
 
 // --- Tests for handleFixCI ---
 
-func TestHandleFixCI_CIFixPendingLabelAlreadyPresent(t *testing.T) {
+func TestHandleFixCI_ProceedsWhenCIFixPendingLabelAlreadySet(t *testing.T) {
+	// Patrol adds herd/ci-fix-pending before posting /herd fix-ci, so the label
+	// is always present when the handler runs. The handler must proceed and
+	// dispatch workers rather than treating the label as a "already in progress"
+	// signal. Dedup for the rare two-comment race is handled by the workflow
+	// concurrency group serialising handlers and CheckCI's pending-status guard.
 	issueSvc := newTestIssueService()
-	// PR issue already has the ci-fix-pending label — simulates a second concurrent
-	// patrol invocation arriving after the first handler added the label.
 	issueSvc.getResult[10] = &platform.Issue{Number: 10, Labels: []string{issues.CIFixPending}}
 	wf := &testWorkflowService{}
 	prSvc := &testPRService{
 		getResult: map[int]*platform.PullRequest{
 			10: {Number: 10, Head: "herd/batch/1-batch"},
+		},
+		// listResult is needed by CheckCI to locate the batch PR.
+		listResult: []*platform.PullRequest{
+			{Number: 10, Head: "herd/batch/1-batch"},
 		},
 	}
 	p := &testPlatform{
@@ -303,10 +310,10 @@ func TestHandleFixCI_CIFixPendingLabelAlreadyPresent(t *testing.T) {
 	result := handleFixCI(hctx, Command{Name: "fix-ci"})
 
 	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "already in progress")
-	// No workers should be dispatched — the fix cycle is already running.
-	assert.Empty(t, issueSvc.createdIssues)
-	assert.Empty(t, wf.dispatched)
+	// Handler should proceed to dispatch workers, not return "already in progress".
+	assert.Contains(t, result.Message, "dispatched fix workers")
+	assert.NotEmpty(t, issueSvc.createdIssues)
+	assert.NotEmpty(t, wf.dispatched)
 }
 
 func TestHandleFixCI_NotPR(t *testing.T) {
