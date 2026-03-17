@@ -36,6 +36,7 @@ GitLab and Gitea/Forgejo implementations of the Platform interface. Platform aut
 
 ## Future
 
+- **Daily Codebase Review** -- a scheduled workflow that runs the agent reviewer against the full codebase (or recent changes on main) on a daily cadence. Catches cross-cutting bugs, accumulated tech debt, security issues, and stale patterns that slip through individual PR reviews. Creates fix issues automatically, giving the team a daily health report.
 - **Federation** -- coordinating HerdOS instances across organizations
 - **Marketplace** -- shareable formulas and worker templates
 - **Model A/B Testing** -- run different AI models on similar tasks and compare outcomes
