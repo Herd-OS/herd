@@ -239,7 +239,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// Collect open fix issues for dedup
 	var openFixIssues []*platform.Issue
 	for _, iss := range allIssues {
-		if iss.State == "closed" || issues.HasLabel(iss.Labels, issues.StatusDone) {
+		if iss.State == "closed" {
 			continue
 		}
 		parsed, parseErr := issues.ParseBody(iss.Body)
