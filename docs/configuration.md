@@ -48,6 +48,23 @@ pull_requests:
   co_author_email: ""            # Co-authored-by email (set after installing the GitHub App)
 ```
 
+## Review Strictness
+
+Controls how aggressively the agent reviewer flags issues:
+
+| Level | Behavior |
+|-------|----------|
+| `standard` (default) | Flags bugs, security issues, missing error handling. Ignores style preferences. |
+| `strict` | Also flags style issues, missing edge cases, code quality improvements. |
+| `lenient` | Only flags critical bugs and security vulnerabilities. |
+
+Findings are classified by severity:
+- **HIGH**: Bugs, security vulnerabilities, race conditions, missing critical error handling — triggers fix workers
+- **MEDIUM**: Missing edge cases, suboptimal error handling — informational only
+- **LOW**: Style preferences, naming suggestions — informational only
+
+Only HIGH severity findings create fix issues and dispatch workers. MEDIUM and LOW findings are listed in the PR comment for reference.
+
 ## Managing Configuration
 
 ```bash

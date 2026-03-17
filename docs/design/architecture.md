@@ -75,6 +75,16 @@ User describes feature
 
 The entire flow after `herd plan` is self-driving. The Planner dispatches Tier 0 automatically, the Integrator advances tiers, and the user only intervenes if something fails or when the batch PR is ready for human review.
 
+### Review and Fix Details
+
+Agent review classifies findings by severity (HIGH, MEDIUM, LOW). Only HIGH severity findings — bugs, security issues, race conditions — trigger fix workers. MEDIUM and LOW findings are included in the PR comment for reference but do not block merge or create fix issues.
+
+Each review cycle creates at most one batch fix issue containing all HIGH findings, rather than one issue per finding. The agent submits a Request Changes review to block merge while fix cycles are active. When the review passes, the agent approves and posts a batch summary with statistics (files reviewed, findings by severity, fix cycles used).
+
+Workers run pre-push validation before pushing changes. For Go repositories, this includes `go build`, `go test`, `go vet`, and `golangci-lint` (if available). If validation fails, the agent is retried once with the error output. Workers post structured reports on their issues with files changed, a summary of work done, and validation results.
+
+When the Integrator processes commands (Consolidate, Advance, AdvanceByBatch, CheckCI), it skips batches whose milestones are already closed, avoiding redundant work on completed batches.
+
 ### Worker, Consolidate, PR flow
 
 ```

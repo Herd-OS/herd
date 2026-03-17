@@ -102,6 +102,26 @@ Worker commits attribute both the human and HerdOS:
 If `.herd/worker.md` exists in the repository, its contents are appended to the
 worker's system prompt. Convention-based, no configuration needed.
 
+### Pre-Push Validation
+
+Before pushing changes, workers run validation commands:
+1. `go build ./...`
+2. `go test ./...`
+3. `go vet ./...`
+4. `golangci-lint run ./...` (if available)
+
+If validation fails, the agent is re-invoked with the error output. If it fails again after retry, the worker is marked as failed.
+
+Validation is Go-specific — it only runs when a `go.mod` file exists in the repository root.
+
+### Worker Reports
+
+After completing a task, workers post a structured report on the issue:
+- Files changed (git diff stat)
+- Summary of work done
+- Validation results (build/test/vet/lint status)
+- Full agent output in a collapsible details block
+
 ### Concurrency
 
 Multiple workers run simultaneously on separate branches. Concurrency is bounded
@@ -228,23 +248,36 @@ When all tiers complete and the batch PR opens, the Integrator dispatches an
 agent to review the consolidated diff. The agent checks acceptance criteria,
 looks for bugs, security issues, and style violations.
 
+### Severity-Based Filtering
+
+Review findings are classified by severity:
+
+| Severity | Examples | Action |
+|----------|----------|--------|
+| HIGH | Bugs, security vulnerabilities, race conditions, missing critical error handling | Creates fix issues, dispatches workers |
+| MEDIUM | Missing edge cases, suboptimal error handling | Listed in PR comment, no fix workers |
+| LOW | Style preferences, naming suggestions | Listed in PR comment, no fix workers |
+
+The `review_strictness` setting (standard/strict/lenient) controls which issues the agent flags. See [Configuration](../configuration.md#review-strictness) for details.
+
 ### Review Outcomes
 
 | Result | Action |
 |--------|--------|
-| Approved | PR is ready for human review (or auto-merge) |
-| Changes requested | Integrator dispatches fix workers for each issue found |
+| Approved | Agent posts a batch summary with statistics (files reviewed, findings by severity, fix cycles used). PR is ready for human review (or auto-merge). |
+| Changes requested | Agent submits a Request Changes review to block merge. Integrator creates a single batch fix issue for all HIGH findings. |
 
 ### Fix Cycle Flow
 
 ```
-Agent review finds issues
+Agent review finds HIGH severity issues
         |
         v
-Integrator creates fix issues in the same milestone
+Integrator creates one batch fix issue in the same milestone
+(all HIGH findings combined into a single issue)
         |
         v
-Workers execute fixes, push to worker branches
+Worker executes fixes, pushes to worker branch
         |
         v
 Integrator consolidates fixes into batch branch
@@ -253,12 +286,13 @@ Integrator consolidates fixes into batch branch
 Agent re-reviews
         |
         v
-Clean --> ready to merge
+Clean --> approved with batch summary
 ```
 
 Fix issues are labeled `herd/type:fix`, have no dependencies (run in parallel),
 and track which review cycle spawned them via a `fix_cycle` field and a
-`batch_pr` reference back to the PR.
+`batch_pr` reference back to the PR. Findings are deduplicated against open fix
+issues to avoid creating duplicate work.
 
 This cycle repeats until the agent approves or `review_max_fix_cycles` (default
 3) is reached, at which point the Integrator comments on the PR with the
