@@ -36,6 +36,7 @@ linters-settings:
       - (*github.com/spf13/cobra.Command).MarkFlagRequired
 
 issues:
+  exclude-use-default: false
   exclude-rules:
     # Test files can skip error checks on encode/decode in mock handlers
     - path: "_test.go"
