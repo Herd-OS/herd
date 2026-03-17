@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -467,11 +468,17 @@ func TestHandleRetry(t *testing.T) {
 	tests := []struct {
 		name        string
 		args        []string
+		parseErr    error
 		setupIssue  *platform.Issue
 		dispatchErr error
 		wantMsg     string
 		wantErr     bool
 	}{
+		{
+			name:     "parse error",
+			parseErr: errors.New("unterminated quote in command"),
+			wantMsg:  "Could not parse command",
+		},
 		{
 			name:    "missing arg",
 			args:    []string{},
@@ -528,7 +535,7 @@ func TestHandleRetry(t *testing.T) {
 				Platform: p,
 				Config:   baseConfig(),
 			}
-			result := handleRetry(hctx, Command{Name: "retry", Args: tt.args})
+			result := handleRetry(hctx, Command{Name: "retry", Args: tt.args, ParseErr: tt.parseErr})
 
 			if tt.wantErr {
 				assert.Error(t, result.Error)
