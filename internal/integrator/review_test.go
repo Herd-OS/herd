@@ -1475,6 +1475,39 @@ func TestDedupFindings(t *testing.T) {
 			},
 			wantDedupLen: 0,
 		},
+		{
+			name: "short description does not false-positive on substring",
+			findings: []agent.ReviewFinding{
+				{Severity: "MEDIUM", Description: "bug"},
+			},
+			openFixes: []*platform.Issue{
+				{Number: 90, Title: "Fix: debug logging bug in scheduler",
+					Body: "1. debug logging bug in scheduler\n"},
+			},
+			wantDescs:    []string{"bug"},
+			wantDedupLen: 1,
+		},
+		{
+			name: "short description exact match still deduplicates",
+			findings: []agent.ReviewFinding{
+				{Severity: "MEDIUM", Description: "bug"},
+			},
+			openFixes: []*platform.Issue{
+				{Number: 91, Title: "bug", Body: "fix it"},
+			},
+			wantDedupLen: 0,
+		},
+		{
+			name: "short description exact match in body line deduplicates",
+			findings: []agent.ReviewFinding{
+				{Severity: "MEDIUM", Description: "bug"},
+			},
+			openFixes: []*platform.Issue{
+				{Number: 92, Title: "Review fixes (cycle 1)",
+					Body: "1. bug\n2. other issue\n"},
+			},
+			wantDedupLen: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1484,6 +1517,64 @@ func TestDedupFindings(t *testing.T) {
 			for i, desc := range tt.wantDescs {
 				assert.Equal(t, desc, result[i].Description)
 			}
+		})
+	}
+}
+
+func TestDescriptionMatch(t *testing.T) {
+	tests := []struct {
+		name       string
+		text       string
+		descPrefix string
+		want       bool
+	}{
+		{
+			name:       "long prefix uses substring match",
+			text:       "some context about missing error handling in auth.go and more",
+			descPrefix: "missing error handling in auth.go",
+			want:       true,
+		},
+		{
+			name:       "long prefix no match",
+			text:       "something completely different here",
+			descPrefix: "missing error handling in auth.go",
+			want:       false,
+		},
+		{
+			name:       "short prefix requires exact match",
+			text:       "debug logging bug in scheduler",
+			descPrefix: "bug",
+			want:       false,
+		},
+		{
+			name:       "short prefix exact match succeeds",
+			text:       "bug",
+			descPrefix: "bug",
+			want:       true,
+		},
+		{
+			name:       "empty prefix matches empty text",
+			text:       "",
+			descPrefix: "",
+			want:       true,
+		},
+		{
+			name:       "prefix at boundary length uses substring",
+			text:       "xx 01234567890123456789 yy",
+			descPrefix: "01234567890123456789",
+			want:       true,
+		},
+		{
+			name:       "prefix just under boundary uses equality",
+			text:       "xx 0123456789012345678 yy",
+			descPrefix: "0123456789012345678",
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, descriptionMatch(tt.text, tt.descPrefix))
 		})
 	}
 }
