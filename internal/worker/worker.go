@@ -157,7 +157,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 
 	if diff == "" {
 		// No changes — label done without pushing
-		_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress})
+		_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress, issues.StatusFailed})
 		_ = p.Issues().AddLabels(ctx, params.IssueNumber, []string{issues.StatusDone})
 		return &ExecResult{NoOp: true}, nil
 	}
@@ -169,7 +169,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	}
 
 	// Label issue as done
-	_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress})
+	_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress, issues.StatusFailed})
 	_ = p.Issues().AddLabels(ctx, params.IssueNumber, []string{issues.StatusDone})
 
 	return &ExecResult{
