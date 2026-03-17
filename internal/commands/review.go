@@ -28,25 +28,10 @@ func handleReview(hctx *HandlerContext, cmd Command) Result {
 		return Result{Error: err}
 	}
 
-	if result.Approved {
-		return Result{Message: fmt.Sprintf("✅ Review approved batch PR #%d.", result.BatchPRNumber)}
-	}
-	if result.MaxCyclesHit {
-		return Result{Message: fmt.Sprintf("⚠️ Review found issues on batch PR #%d but max fix cycles reached. See PR for details.", result.BatchPRNumber)}
-	}
-	if len(result.FixIssues) > 0 {
-		return Result{Message: fmt.Sprintf("🔍 Review found %d %s on batch PR #%d. Fix workers dispatched.",
-			len(result.FixIssues), pluralize("issue", len(result.FixIssues)), result.BatchPRNumber)}
-	}
+	// integrator.Review already posts detailed comments on the PR.
+	// Return empty Message to avoid the CLI posting a duplicate comment.
 	if result.AllCreatesFailed {
 		return Result{Error: fmt.Errorf("review found %d issues but all fix-issue creations failed", result.FindingsCount)}
 	}
-	return Result{Message: "Review completed (no action taken)."}
-}
-
-func pluralize(word string, n int) string {
-	if n == 1 {
-		return word
-	}
-	return word + "s"
+	return Result{}
 }
