@@ -1103,12 +1103,15 @@ func TestReview_DedupFindings(t *testing.T) {
 		Labels:    []string{issues.StatusDone},
 		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 	}
-	// Include an open fix issue that matches one of the findings
+	// Include an open fix issue (StatusDone) that should be excluded from dedup,
+	// and another open fix issue (no StatusDone) that should still dedup.
 	issueSvc.listResult = []*platform.Issue{
 		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
 		{Number: 80, State: "open", Title: "Review fixes (cycle 1)",
 			Labels: []string{issues.StatusDone},
 			Body:   "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\nFix: Missing error handling in auth.go\n"},
+		{Number: 81, State: "open", Title: "Review fixes (cycle 2)",
+			Body: "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 2\n---\n\n## Task\nFix: Race condition in worker pool\n"},
 	}
 
 	createCalled := false
