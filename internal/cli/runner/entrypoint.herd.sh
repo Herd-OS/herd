@@ -29,7 +29,9 @@ echo "Installed herd $(herd --version 2>/dev/null || echo 'unknown')"
 
 # Install or update Claude Code
 echo "Installing Claude Code..."
-npm install -g @anthropic-ai/claude-code 2>/dev/null
+npm config set prefix /home/runner/.npm-global 2>/dev/null
+export PATH="/home/runner/.npm-global/bin:$PATH"
+npm install -g @anthropic-ai/claude-code
 echo "Installed claude $(claude --version 2>/dev/null || echo 'unknown')"
 
 REPO_OWNER=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\1|')
