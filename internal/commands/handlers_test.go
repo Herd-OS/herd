@@ -456,9 +456,46 @@ func TestHandleFixCI_AddLabelsError(t *testing.T) {
 
 	require.NoError(t, result.Error)
 	assert.Contains(t, result.Message, "🔧 CI failed — dispatched fix workers")
+	// Label warning must be surfaced in the result message, not swallowed
+	assert.Contains(t, result.Message, "Warning: failed to add")
+	assert.Contains(t, result.Message, "API rate limit exceeded")
 	// Workers were dispatched despite the label error
 	assert.Len(t, issueSvc.createdIssues, 1)
 	assert.Len(t, wf.dispatched, 1)
+}
+
+func TestHandleFixCI_NoLabelWarningOnSuccess(t *testing.T) {
+	// When AddLabels succeeds, no warning should appear in the result message.
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			10: {Number: 10, Head: "herd/batch/1-batch"},
+		},
+		listResult: []*platform.PullRequest{{Number: 10, Head: "herd/batch/1-batch"}},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}}},
+		checks:     &testCheckService{status: "failure", rerunErr: fmt.Errorf("rerun failed")},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        true,
+	}
+	result := handleFixCI(hctx, Command{Name: "fix-ci"})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "🔧 CI failed — dispatched fix workers")
+	assert.NotContains(t, result.Message, "Warning")
 }
 
 // --- Tests for handleRetry ---
