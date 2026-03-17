@@ -130,6 +130,9 @@ func (m *mockPRService) AddComment(_ context.Context, number int, body string) e
 	m.comments[number] = append(m.comments[number], body)
 	return nil
 }
+func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) {
+	return "", nil
+}
 
 type mockWorkflowService struct {
 	activeRuns    []*platform.Run

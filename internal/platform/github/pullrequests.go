@@ -132,6 +132,14 @@ func (s *pullRequestService) AddComment(ctx context.Context, number int, body st
 	return nil
 }
 
+func (s *pullRequestService) GetDiff(ctx context.Context, number int) (string, error) {
+	diff, _, err := s.c.gh.PullRequests.GetRaw(ctx, s.c.owner, s.c.repo, number, gh.RawOptions{Type: gh.Diff})
+	if err != nil {
+		return "", fmt.Errorf("getting diff for pull request #%d: %w", number, err)
+	}
+	return diff, nil
+}
+
 func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 	return &platform.PullRequest{
 		Number:    pr.GetNumber(),

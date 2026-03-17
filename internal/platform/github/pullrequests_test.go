@@ -248,6 +248,21 @@ func TestPullRequestAddComment(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestPullRequestGetDiff(t *testing.T) {
+	mux := http.NewServeMux()
+	// go-github's GetRaw sends Accept header for diff format
+	mux.HandleFunc("GET /repos/test-org/test-repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("diff --git a/file.go b/file.go\n+added line\n"))
+	})
+
+	client, _ := newTestClient(t, mux)
+	diff, err := client.PullRequests().GetDiff(context.Background(), 42)
+	require.NoError(t, err)
+	assert.Contains(t, diff, "diff --git")
+	assert.Contains(t, diff, "+added line")
+}
+
 func TestMapPullRequest(t *testing.T) {
 	ts := gh.Timestamp{Time: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)}
 	pr := mapPullRequest(&gh.PullRequest{
