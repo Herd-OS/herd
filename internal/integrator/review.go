@@ -403,7 +403,8 @@ func buildBatchSummaryComment(allIssues []*platform.Issue, reviewSummary string)
 
 	// Count statistics from issues
 	originalTasks := 0
-	fixIssues := 0
+	reviewFixIssues := 0
+	ciFixIssues := 0
 	maxFixCycle := 0
 	maxCIFixCycle := 0
 	for _, iss := range allIssues {
@@ -411,9 +412,12 @@ func buildBatchSummaryComment(allIssues []*platform.Issue, reviewSummary string)
 		if err != nil {
 			continue
 		}
-		if parsed.FrontMatter.Type == "fix" || parsed.FrontMatter.CIFixCycle > 0 {
-			fixIssues++
-		} else {
+		switch {
+		case parsed.FrontMatter.CIFixCycle > 0:
+			ciFixIssues++
+		case parsed.FrontMatter.Type == "fix":
+			reviewFixIssues++
+		default:
 			originalTasks++
 		}
 		if parsed.FrontMatter.FixCycle > maxFixCycle {
@@ -426,7 +430,8 @@ func buildBatchSummaryComment(allIssues []*platform.Issue, reviewSummary string)
 
 	b.WriteString("\n📊 **Batch Summary**\n\n")
 	b.WriteString(fmt.Sprintf("- Original tasks: %d\n", originalTasks))
-	b.WriteString(fmt.Sprintf("- Fix issues created: %d\n", fixIssues))
+	b.WriteString(fmt.Sprintf("- Review fix issues: %d\n", reviewFixIssues))
+	b.WriteString(fmt.Sprintf("- CI fix issues: %d\n", ciFixIssues))
 	b.WriteString(fmt.Sprintf("- Review cycles: %d\n", maxFixCycle))
 	b.WriteString(fmt.Sprintf("- CI fix cycles: %d\n", maxCIFixCycle))
 	b.WriteString(fmt.Sprintf("- Total issues: %d\n", len(allIssues)))
