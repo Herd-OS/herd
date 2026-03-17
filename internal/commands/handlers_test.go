@@ -698,7 +698,7 @@ func TestHandleReview_Approved(t *testing.T) {
 	result := handleReview(hctx, Command{Name: "review"})
 
 	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "✅ Review approved batch PR #50")
+	assert.Empty(t, result.Message, "Message must be empty to avoid double-posting; integrator.Review posts its own comment")
 }
 
 func TestHandleReview_WithFixes(t *testing.T) {
@@ -741,8 +741,7 @@ func TestHandleReview_WithFixes(t *testing.T) {
 	result := handleReview(hctx, Command{Name: "review"})
 
 	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "🔍 Review found 2 issues on batch PR #50")
-	assert.Contains(t, result.Message, "Fix workers dispatched")
+	assert.Empty(t, result.Message, "Message must be empty to avoid double-posting; integrator.Review posts its own comment")
 	assert.Len(t, issueSvc.createdIssues, 2)
 }
 
@@ -790,7 +789,7 @@ func TestHandleReview_MaxCyclesHit(t *testing.T) {
 	result := handleReview(hctx, Command{Name: "review"})
 
 	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "⚠️ Review found issues on batch PR #50 but max fix cycles reached")
+	assert.Empty(t, result.Message, "Message must be empty to avoid double-posting; integrator.Review posts its own comment")
 	// The PR should have received the warning comment from integrator.Review.
 	require.NotEmpty(t, prSvc.comments, "expected integrator to post a PR comment on MaxCyclesHit")
 	assert.Contains(t, prSvc.comments[0], "max fix cycles")
@@ -1141,29 +1140,9 @@ func TestHandleReview_SingleFixIssue(t *testing.T) {
 	result := handleReview(hctx, Command{Name: "review"})
 
 	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "1 issue on batch PR #50")
-	// Singular "issue" not "issues"
-	assert.NotContains(t, result.Message, "issues")
+	assert.Empty(t, result.Message, "Message must be empty to avoid double-posting; integrator.Review posts its own comment")
 }
 
-func TestPluralize(t *testing.T) {
-	tests := []struct {
-		word string
-		n    int
-		want string
-	}{
-		{"issue", 0, "issues"},
-		{"issue", 1, "issue"},
-		{"issue", 2, "issues"},
-		{"worker", 1, "worker"},
-		{"worker", 5, "workers"},
-	}
-	for _, tt := range tests {
-		t.Run(fmt.Sprintf("%s_%d", tt.word, tt.n), func(t *testing.T) {
-			assert.Equal(t, tt.want, pluralize(tt.word, tt.n))
-		})
-	}
-}
 
 type capturingTestAgent struct {
 	result       *agent.ReviewResult
