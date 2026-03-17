@@ -166,7 +166,7 @@ jobs:
       && github.event.action == 'created'
       && contains(github.event.comment.body, '/herd ')
     concurrency:
-      group: herd-fix-ci-${{ github.event.issue.number }}
+      group: herd-comment-${{ github.event.issue.number }}
       cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
