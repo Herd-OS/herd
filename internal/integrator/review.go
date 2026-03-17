@@ -424,7 +424,7 @@ func buildBatchSummaryComment(allIssues []*platform.Issue, reviewSummary string)
 		}
 	}
 
-	b.WriteString(fmt.Sprintf("\n📊 **Batch Summary**\n\n"))
+	b.WriteString("\n📊 **Batch Summary**\n\n")
 	b.WriteString(fmt.Sprintf("- Original tasks: %d\n", originalTasks))
 	b.WriteString(fmt.Sprintf("- Fix issues created: %d\n", fixIssues))
 	b.WriteString(fmt.Sprintf("- Review cycles: %d\n", maxFixCycle))
