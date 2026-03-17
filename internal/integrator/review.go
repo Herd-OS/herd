@@ -515,6 +515,21 @@ func extractFindingLines(body string) []string {
 	return lines
 }
 
+// minSubstringLen is the minimum description prefix length for substring
+// matching in dedupFindings. Descriptions shorter than this use equality
+// to avoid false positives (e.g. "bug" matching any line containing "bug").
+const minSubstringLen = 20
+
+// descriptionMatch reports whether text contains a match for descPrefix.
+// For short prefixes (< minSubstringLen) it requires equality; for longer
+// ones it uses substring containment.
+func descriptionMatch(text, descPrefix string) bool {
+	if len(descPrefix) < minSubstringLen {
+		return text == descPrefix
+	}
+	return strings.Contains(text, descPrefix)
+}
+
 // dedupFindings removes findings that are similar to existing open fix issues.
 func dedupFindings(findings []agent.ReviewFinding, openFixIssues []*platform.Issue) []agent.ReviewFinding {
 	var deduped []agent.ReviewFinding
@@ -525,7 +540,7 @@ func dedupFindings(findings []agent.ReviewFinding, openFixIssues []*platform.Iss
 		}
 		duplicate := false
 		for _, iss := range openFixIssues {
-			if strings.Contains(iss.Title, descPrefix) {
+			if descriptionMatch(iss.Title, descPrefix) {
 				fmt.Printf("Skipping duplicate finding: similar to #%d\n", iss.Number)
 				duplicate = true
 				break
@@ -533,7 +548,7 @@ func dedupFindings(findings []agent.ReviewFinding, openFixIssues []*platform.Iss
 			// Match against individual finding lines rather than the
 			// raw body to avoid false positives in batched issues.
 			for _, line := range extractFindingLines(iss.Body) {
-				if strings.Contains(line, descPrefix) {
+				if descriptionMatch(line, descPrefix) {
 					fmt.Printf("Skipping duplicate finding: similar to #%d\n", iss.Number)
 					duplicate = true
 					break
