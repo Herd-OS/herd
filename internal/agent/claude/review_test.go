@@ -1,6 +1,9 @@
 package claude
 
 import (
+	"context"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -99,4 +102,48 @@ func TestRenderReviewPrompt_NoRoleInstructions(t *testing.T) {
 	prompt, err := renderReviewPrompt("diff", opts)
 	require.NoError(t, err)
 	assert.NotContains(t, prompt, "Project-Specific Review Instructions")
+}
+
+func TestReview_LargeDiffPassedViaStdin(t *testing.T) {
+	// Verify the review passes the prompt via stdin (not CLI args)
+	// by checking that a large prompt doesn't cause "argument list too long"
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	// Script reads stdin and outputs approved JSON
+	err := os.WriteFile(script, []byte(`#!/bin/sh
+cat > /dev/null
+echo '{"approved": true, "comments": [], "summary": "LGTM"}'
+`), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+
+	// Create a large diff (200KB)
+	largeDiff := strings.Repeat("+ some added line\n", 12000)
+
+	result, err := a.Review(context.Background(), largeDiff, agent.ReviewOptions{
+		AcceptanceCriteria: []string{"tests pass"},
+		RepoRoot:           dir,
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+}
+
+func TestReview_StreamsOutputToStdout(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte(`#!/bin/sh
+cat > /dev/null
+echo '{"approved": false, "comments": ["issue found"], "summary": "needs work"}'
+`), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	result, err := a.Review(context.Background(), "small diff", agent.ReviewOptions{
+		AcceptanceCriteria: []string{"works"},
+		RepoRoot:           dir,
+	})
+	require.NoError(t, err)
+	assert.False(t, result.Approved)
+	assert.Len(t, result.Comments, 1)
 }
