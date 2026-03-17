@@ -507,9 +507,20 @@ func extractFindingLines(body string) []string {
 			if dotIdx > 0 && dotIdx <= 4 {
 				prefix := line[:dotIdx]
 				if _, err := strconv.Atoi(prefix); err == nil {
-					lines = append(lines, line[dotIdx+2:])
+					text := strings.TrimSpace(line[dotIdx+2:])
+					if text != "" {
+						lines = append(lines, text)
+					}
 					continue
 				}
+			}
+		}
+		// Skip bare numbered-list markers (e.g. "1." with no content after
+		// trimming). These arise when a list item like "1. " is trimmed to
+		// "1." and falls through the dot-space detection above.
+		if len(line) >= 2 && len(line) <= 5 && line[len(line)-1] == '.' {
+			if _, err := strconv.Atoi(line[:len(line)-1]); err == nil {
+				continue
 			}
 		}
 		// Also include raw non-empty lines for simple (non-batched) bodies

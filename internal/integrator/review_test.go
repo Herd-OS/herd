@@ -1612,6 +1612,16 @@ func TestExtractFindingLines(t *testing.T) {
 			body: "Header\n1. Finding one\nplain line\n2. Finding two\n",
 			want: []string{"Header", "Finding one", "plain line", "Finding two"},
 		},
+		{
+			name: "numbered item with empty text after prefix",
+			body: "1. \n2. Real finding\n",
+			want: []string{"Real finding"},
+		},
+		{
+			name: "numbered item with only whitespace after prefix",
+			body: "1.   \n2. Keep this\n",
+			want: []string{"Keep this"},
+		},
 	}
 
 	for _, tt := range tests {
