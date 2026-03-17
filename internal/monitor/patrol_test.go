@@ -392,8 +392,9 @@ func TestPatrol_FailedIssue_RedispatchAddsRetryPendingLabelBeforeComment(t *test
 	_, err := Patrol(context.Background(), mock, cfg)
 	require.NoError(t, err)
 	// The label add must appear before the comment in the operation log.
-	require.Len(t, opLog, 1, "expected exactly one AddLabels call logged")
+	require.Len(t, opLog, 2, "expected exactly AddLabels then AddComment")
 	assert.Equal(t, "issue:AddLabels", opLog[0], "label must be added first")
+	assert.Equal(t, "issue:AddComment", opLog[1], "comment must be posted second")
 	assert.Contains(t, issueSvc.addedLabels[42], issues.RetryPending)
 	assert.Len(t, issueSvc.comments[42], 1)
 	assert.Contains(t, issueSvc.comments[42][0], "/herd retry 42")
