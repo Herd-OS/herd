@@ -26,7 +26,7 @@ ENV PATH="/home/runner/.npm-global/bin:/opt/herd/bin:${PATH}"
 
 # Runner must not run as root
 RUN useradd -m -d /home/runner runner \
-    && chown -R runner:runner /runner /opt/herd /home/runner/.npm-global
+    && chown -R runner:runner /runner /opt/herd /home/runner
 
 WORKDIR /runner
 COPY entrypoint.herd.sh .
