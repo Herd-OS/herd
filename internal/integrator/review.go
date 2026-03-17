@@ -488,6 +488,33 @@ func buildReviewCycleComment(cycle, maxCycles int, fixIssueNums []int, high, med
 	return b.String()
 }
 
+// extractFindingLines extracts individual finding descriptions from a fix
+// issue body. Findings are stored as numbered list items ("1. description").
+// Matching against individual lines avoids false-positive substring matches
+// when multiple findings are concatenated in a single batched issue body.
+func extractFindingLines(body string) []string {
+	var lines []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		// Strip leading number+dot prefix (e.g. "1. ", "12. ")
+		if len(line) > 2 {
+			dotIdx := strings.Index(line, ". ")
+			if dotIdx > 0 && dotIdx <= 4 {
+				prefix := line[:dotIdx]
+				if _, err := strconv.Atoi(prefix); err == nil {
+					lines = append(lines, line[dotIdx+2:])
+					continue
+				}
+			}
+		}
+		// Also include raw non-empty lines for simple (non-batched) bodies
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
 // dedupFindings removes findings that are similar to existing open fix issues.
 func dedupFindings(findings []agent.ReviewFinding, openFixIssues []*platform.Issue) []agent.ReviewFinding {
 	var deduped []agent.ReviewFinding
@@ -498,9 +525,21 @@ func dedupFindings(findings []agent.ReviewFinding, openFixIssues []*platform.Iss
 		}
 		duplicate := false
 		for _, iss := range openFixIssues {
-			if strings.Contains(iss.Title, descPrefix) || strings.Contains(iss.Body, descPrefix) {
+			if strings.Contains(iss.Title, descPrefix) {
 				fmt.Printf("Skipping duplicate finding: similar to #%d\n", iss.Number)
 				duplicate = true
+				break
+			}
+			// Match against individual finding lines rather than the
+			// raw body to avoid false positives in batched issues.
+			for _, line := range extractFindingLines(iss.Body) {
+				if strings.Contains(line, descPrefix) {
+					fmt.Printf("Skipping duplicate finding: similar to #%d\n", iss.Number)
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
 				break
 			}
 		}

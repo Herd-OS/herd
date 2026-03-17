@@ -1420,16 +1420,108 @@ func TestFilterFindingsBySeverity(t *testing.T) {
 }
 
 func TestDedupFindings(t *testing.T) {
-	findings := []agent.ReviewFinding{
-		{Severity: "HIGH", Description: "Missing error handling in auth.go"},
-		{Severity: "HIGH", Description: "Race condition in worker pool"},
+	tests := []struct {
+		name          string
+		findings      []agent.ReviewFinding
+		openFixes     []*platform.Issue
+		wantDescs     []string
+		wantDedupLen  int
+	}{
+		{
+			name: "title match deduplicates",
+			findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Missing error handling in auth.go"},
+				{Severity: "HIGH", Description: "Race condition in worker pool"},
+			},
+			openFixes: []*platform.Issue{
+				{Number: 80, Title: "Fix: Missing error handling in auth.go", Body: "Fix it"},
+			},
+			wantDescs:    []string{"Race condition in worker pool"},
+			wantDedupLen: 1,
+		},
+		{
+			name: "batched body matches individual lines not raw body",
+			findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Race condition in worker pool"},
+				{Severity: "HIGH", Description: "New unrelated finding"},
+			},
+			openFixes: []*platform.Issue{
+				{Number: 80, Title: "Review fixes (cycle 1)",
+					Body: "---\nherd:\n  version: 1\n  type: fix\n---\n\n## Task\nFix the following issues found during agent review:\n\n1. Race condition in worker pool\n2. Missing error handling in auth.go\n"},
+			},
+			wantDescs:    []string{"New unrelated finding"},
+			wantDedupLen: 1,
+		},
+		{
+			name: "no false positive on partial substring across batched findings",
+			findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "pool timeout is too short"},
+			},
+			openFixes: []*platform.Issue{
+				{Number: 80, Title: "Review fixes (cycle 1)",
+					Body: "---\nherd:\n  version: 1\n  type: fix\n---\n\n## Task\nFix the following issues found during agent review:\n\n1. Race condition in worker pool\n2. timeout is too long in scheduler\n"},
+			},
+			wantDescs:    []string{"pool timeout is too short"},
+			wantDedupLen: 1,
+		},
+		{
+			name: "all findings deduped returns empty",
+			findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Missing error handling in auth.go"},
+			},
+			openFixes: []*platform.Issue{
+				{Number: 80, Title: "Review fixes (cycle 1)",
+					Body: "1. Missing error handling in auth.go\n"},
+			},
+			wantDedupLen: 0,
+		},
 	}
-	openFixes := []*platform.Issue{
-		{Number: 80, Title: "Fix: Missing error handling in auth.go", Body: "Fix it"},
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := dedupFindings(tt.findings, tt.openFixes)
+			assert.Len(t, result, tt.wantDedupLen)
+			for i, desc := range tt.wantDescs {
+				assert.Equal(t, desc, result[i].Description)
+			}
+		})
 	}
-	result := dedupFindings(findings, openFixes)
-	assert.Len(t, result, 1)
-	assert.Equal(t, "Race condition in worker pool", result[0].Description)
+}
+
+func TestExtractFindingLines(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "numbered list",
+			body: "Fix the following:\n\n1. First finding\n2. Second finding\n",
+			want: []string{"Fix the following:", "First finding", "Second finding"},
+		},
+		{
+			name: "empty body",
+			body: "",
+			want: nil,
+		},
+		{
+			name: "plain text lines",
+			body: "Fix: something broken\n",
+			want: []string{"Fix: something broken"},
+		},
+		{
+			name: "mixed numbered and plain",
+			body: "Header\n1. Finding one\nplain line\n2. Finding two\n",
+			want: []string{"Header", "Finding one", "plain line", "Finding two"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFindingLines(tt.body)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 func TestBuildReviewCycleComment(t *testing.T) {
