@@ -35,7 +35,7 @@ func handleReview(hctx *HandlerContext, cmd Command) Result {
 		return Result{}
 	}
 	if result.AllCreatesFailed {
-		return Result{Error: fmt.Errorf("review found issues but all fix-issue creations failed")}
+		return Result{Error: fmt.Errorf("review found %d issues but all fix-issue creations failed", result.FindingsCount)}
 	}
 	return Result{Message: "Review completed (no action taken)."}
 }

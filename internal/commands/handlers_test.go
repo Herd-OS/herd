@@ -800,6 +800,7 @@ func TestHandleReview_AllCreatesFailed(t *testing.T) {
 
 	require.Error(t, result.Error)
 	assert.Contains(t, result.Error.Error(), "all fix-issue creations failed")
+	assert.Contains(t, result.Error.Error(), "found 1 issues")
 	assert.Empty(t, result.Message)
 }
 

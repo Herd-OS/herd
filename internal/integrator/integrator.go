@@ -61,6 +61,7 @@ type ReviewResult struct {
 	MaxCyclesHit    bool
 	BatchPRNumber   int
 	AllCreatesFailed bool // true when issues were found but every fix-issue Create call failed
+	FindingsCount    int  // number of review findings (agent comments); set when AllCreatesFailed is true
 }
 
 // Consolidate merges a completed worker branch into the batch branch.

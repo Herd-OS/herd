@@ -218,6 +218,8 @@ func newIntegratorReviewCmd() *cobra.Command {
 				fmt.Println("Max fix cycles reached. Manual intervention needed.")
 			} else if len(result.FixIssues) > 0 {
 				fmt.Printf("Created %d fix issues and dispatched workers.\n", len(result.FixIssues))
+			} else if result.AllCreatesFailed {
+				fmt.Printf("Review found %d issues but all fix-issue creations failed.\n", result.FindingsCount)
 			}
 			return nil
 		},
