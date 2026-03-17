@@ -317,6 +317,141 @@ func TestPatrol_FailedIssue_Redispatch(t *testing.T) {
 	assert.Contains(t, issueSvc.comments[42][0], "/herd retry 42")
 }
 
+func TestPatrol_FailedIssue_RedispatchWithRetryPendingLabel_NoDuplicateCommand(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusFailed] = []*platform.Issue{
+		{
+			Number: 42, Title: "Test", Labels: []string{issues.StatusFailed},
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	// Simulate herd/retry-pending label already present from a prior patrol run.
+	issueSvc.getResults[42] = &platform.Issue{Number: 42, Labels: []string{issues.RetryPending}}
+
+	wf := &mockWorkflowService{
+		completedRuns: []*platform.Run{
+			{ID: 100, Conclusion: "failure", Inputs: map[string]string{"issue_number": "42"}, CreatedAt: time.Now().Add(-2 * time.Hour)},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{
+		Monitor: config.Monitor{AutoRedispatch: true, MaxRedispatchAttempts: 3},
+		Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.FailedIssues)
+	// No retry comment should be posted — label acts as dedup.
+	assert.Equal(t, 0, result.RedispatchedCount)
+	assert.Len(t, issueSvc.comments[42], 0)
+	// No duplicate label addition.
+	assert.Empty(t, issueSvc.addedLabels[42])
+}
+
+func TestPatrol_FailedIssue_RedispatchAddsRetryPendingLabelBeforeComment(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusFailed] = []*platform.Issue{
+		{
+			Number: 42, Title: "Test", Labels: []string{issues.StatusFailed},
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+
+	wf := &mockWorkflowService{
+		completedRuns: []*platform.Run{
+			{ID: 100, Conclusion: "failure", Inputs: map[string]string{"issue_number": "42"}, CreatedAt: time.Now().Add(-2 * time.Hour)},
+		},
+	}
+
+	var opLog []string
+	issueSvc.callLog = &opLog
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{
+		Monitor: config.Monitor{AutoRedispatch: true, MaxRedispatchAttempts: 3},
+		Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	_, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	// The label add must appear before the comment in the operation log.
+	require.Len(t, opLog, 1, "expected exactly one AddLabels call logged")
+	assert.Equal(t, "issue:AddLabels", opLog[0], "label must be added first")
+	assert.Contains(t, issueSvc.addedLabels[42], issues.RetryPending)
+	assert.Len(t, issueSvc.comments[42], 1)
+	assert.Contains(t, issueSvc.comments[42][0], "/herd retry 42")
+}
+
+func TestHasRetryPendingLabel(t *testing.T) {
+	tests := []struct {
+		name     string
+		labels   []string
+		expected bool
+	}{
+		{
+			name:     "no labels",
+			labels:   nil,
+			expected: false,
+		},
+		{
+			name:     "unrelated label only",
+			labels:   []string{issues.StatusFailed},
+			expected: false,
+		},
+		{
+			name:     "retry-pending label present",
+			labels:   []string{issues.RetryPending},
+			expected: true,
+		},
+		{
+			name:     "retry-pending label among others",
+			labels:   []string{issues.StatusFailed, issues.RetryPending, "other"},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.getResults[42] = &platform.Issue{Number: 42, Labels: tt.labels}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       newMockPRService(),
+				workflows: &mockWorkflowService{},
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+			assert.Equal(t, tt.expected, hasRetryPendingLabel(context.Background(), mock, 42))
+		})
+	}
+}
+
+func TestHasRetryPendingLabel_ErrorFallback(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getErr = fmt.Errorf("API error")
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	// Should return false (fail open) when Issues().Get() errors.
+	assert.False(t, hasRetryPendingLabel(context.Background(), mock, 42))
+}
+
 func TestPatrol_FailedIssue_BackoffNotElapsed(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.listResults[issues.StatusFailed] = []*platform.Issue{
