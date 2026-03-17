@@ -1153,6 +1153,76 @@ func TestReview_DedupFindings(t *testing.T) {
 	assert.Len(t, result.FixIssues, 1)
 }
 
+func TestReview_AllFindingsDeduped_Approves(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	// Open fix issue whose body matches ALL high findings
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+		{Number: 80, State: "open", Title: "Review fixes (cycle 1)",
+			Labels: []string{issues.StatusDone},
+			Body:   "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\nFix: Missing error handling in auth.go\nFix: Race condition in worker pool\n"},
+	}
+
+	createCalled := false
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createCalled = true
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues: mockCreate,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
+			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+		}},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Missing error handling in auth.go"},
+				{Severity: "HIGH", Description: "Race condition in worker pool"},
+			},
+			Comments: []string{"Missing error handling in auth.go", "Race condition in worker pool"},
+		},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved, "Should approve when all findings are deduped")
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.False(t, createCalled, "Should not create new fix issues")
+
+	// Should post an informational comment
+	require.NotEmpty(t, prSvc.comments)
+	assert.Contains(t, prSvc.comments[0], "already covered by existing fix workers")
+
+	// Should submit an approval review
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewApprove, prSvc.reviews[0].event)
+}
+
 func TestReview_SkipsCompletedBatch(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
