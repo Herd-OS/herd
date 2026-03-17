@@ -109,6 +109,9 @@ func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []
 }
 func (m *mockIssueService) AddComment(_ context.Context, number int, body string) error {
 	m.comments[number] = append(m.comments[number], body)
+	if m.callLog != nil {
+		*m.callLog = append(*m.callLog, "issue:AddComment")
+	}
 	return nil
 }
 func (m *mockIssueService) DeleteComment(_ context.Context, commentID int64) error {
@@ -415,9 +418,9 @@ func TestPatrol_StuckPR(t *testing.T) {
 	result, err := Patrol(context.Background(), mock, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.StuckPRs)
-	assert.Len(t, prSvc.comments[10], 1)
-	assert.Contains(t, prSvc.comments[10][0], "open for over 48 hours")
-	assert.Len(t, prSvc.comments[11], 0) // non-herd PR not flagged
+	assert.Len(t, issueSvc.comments[10], 1)
+	assert.Contains(t, issueSvc.comments[10][0], "open for over 48 hours")
+	assert.Len(t, issueSvc.comments[11], 0) // non-herd PR not flagged
 }
 
 func TestPatrol_CIFailureOnBatchPR(t *testing.T) {
@@ -443,8 +446,8 @@ func TestPatrol_CIFailureOnBatchPR(t *testing.T) {
 	result, err := Patrol(context.Background(), mock, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.CIFailures)
-	assert.Len(t, prSvc.comments[10], 1)
-	assert.Contains(t, prSvc.comments[10][0], "/herd fix-ci")
+	assert.Len(t, issueSvc.comments[10], 1)
+	assert.Contains(t, issueSvc.comments[10][0], "/herd fix-ci")
 	// Label must be added to the PR before the comment is posted so that a
 	// concurrent patrol run racing past the hasCIFixPendingLabel check sees
 	// the label and skips rather than posting a duplicate /herd fix-ci comment.
@@ -514,7 +517,7 @@ func TestPatrol_CIFailure_LabelAddedBeforeCommentPosted(t *testing.T) {
 	// The label add must appear before the comment in the operation log.
 	require.Len(t, opLog, 2, "expected exactly AddLabels then AddComment")
 	assert.Equal(t, "issue:AddLabels", opLog[0], "label must be added first")
-	assert.Equal(t, "pr:AddComment", opLog[1], "comment must be posted second")
+	assert.Equal(t, "issue:AddComment", opLog[1], "comment must be posted second")
 }
 
 func TestPatrol_CIPassingNoCIFixComment(t *testing.T) {
@@ -748,8 +751,8 @@ func TestPatrol_CIFailureAfterCIFixPendingLabelRemoved(t *testing.T) {
 	result, err := Patrol(context.Background(), mock, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.CIFailures)
-	assert.Len(t, prSvc.comments[10], 1)
-	assert.Contains(t, prSvc.comments[10][0], "/herd fix-ci")
+	assert.Len(t, issueSvc.comments[10], 1)
+	assert.Contains(t, issueSvc.comments[10][0], "/herd fix-ci")
 }
 
 func TestPatrol_CINotCheckedWhenRequireCIFalse(t *testing.T) {
