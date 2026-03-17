@@ -38,8 +38,6 @@ jobs:
         with:
           version: v1.64.8
           install-mode: goinstall
-        env:
-          GOTOOLCHAIN: go1.26.1
 
   integration:
     runs-on: ubuntu-latest
