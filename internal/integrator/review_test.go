@@ -1139,7 +1139,7 @@ func TestReview_DedupFindings(t *testing.T) {
 	// is still open — it should still dedup to prevent duplicate fix work.
 	issueSvc.listResult = []*platform.Issue{
 		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
-		{Number: 80, State: "closed", Title: "Review fixes (cycle 1)",
+		{Number: 80, State: "open", Title: "Review fixes (cycle 1)",
 			Labels: []string{issues.StatusDone},
 			Body:   "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\nFix: Missing error handling in auth.go\n"},
 		{Number: 81, State: "open", Title: "Review fixes (cycle 2)",
@@ -1147,10 +1147,12 @@ func TestReview_DedupFindings(t *testing.T) {
 	}
 
 	createCalled := false
+	var createdBody string
 	mockCreate := &mockIssueServiceWithCreate{
 		mockIssueService: issueSvc,
 		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
 			createCalled = true
+			createdBody = body
 			return &platform.Issue{Number: 100, Title: title}, nil
 		},
 	}
@@ -1187,6 +1189,11 @@ func TestReview_DedupFindings(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, createCalled, "Should create fix issue for non-duplicate finding")
 	assert.Len(t, result.FixIssues, 1)
+	// Only "SQL injection in query builder" should survive dedup — the other
+	// two findings match open fix issues #80 and #81 respectively.
+	assert.Contains(t, createdBody, "SQL injection in query builder")
+	assert.NotContains(t, createdBody, "Missing error handling in auth.go")
+	assert.NotContains(t, createdBody, "Race condition in worker pool")
 }
 
 func TestReview_AllFindingsDeduped_Approves(t *testing.T) {
