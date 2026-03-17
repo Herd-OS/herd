@@ -1,64 +1,71 @@
-run:
-  timeout: 5m
-
+version: "2"
 linters:
   enable:
-    - staticcheck
-    - govet
-    - errcheck
-    - ineffassign
-    - unused
     - gocritic
-    - revive
     - gosec
+    - revive
     - unconvert
     - unparam
-
-linters-settings:
-  revive:
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*github.com/spf13/cobra.Command).MarkFlagRequired
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+    staticcheck:
+      checks:
+        - all
+        - -QF1012
+        - -ST1000
+        - -ST1003
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: exported
-        disabled: true
-      - name: package-comments
-        disabled: true
-  gocritic:
-    disabled-checks:
-      - ifElseChain
-  staticcheck:
-    checks:
-      - "all"
-      - "-QF1012"  # allow WriteString(fmt.Sprintf(...)) — pre-existing style throughout codebase
-      - "-ST1000"  # package comments — covered by revive with rule disabled
-      - "-ST1003"  # underscore in names — pre-existing style in some test helpers
-  errcheck:
-    exclude-functions:
-      - (*github.com/spf13/cobra.Command).MarkFlagRequired
-
-issues:
-  exclude-rules:
-    # Test files can skip error checks on encode/decode in mock handlers
-    - path: "_test.go"
-      linters:
-        - errcheck
-        - gosec
-    # G204: subprocess with variable — expected for CLI tool
-    - linters: [gosec]
-      text: "G204"
-    # G301: directory permissions 0750 — 0755 is standard
-    - linters: [gosec]
-      text: "G301"
-    # G304: file inclusion via variable — expected for config/template reads
-    - linters: [gosec]
-      text: "G304"
-    # G104: errors unhandled — covered by errcheck with better granularity
-    - linters: [gosec]
-      text: "G104"
-    # G302: file permissions 0600 — 0644 is standard for non-secret files
-    - linters: [gosec]
-      text: "G302"
-    # G306: WriteFile permissions 0600 — 0644 is standard for non-secret files
-    - linters: [gosec]
-      text: "G306"
-    # G702: command injection via taint analysis — expected for editor/CLI commands
-    - linters: [gosec]
-      text: "G702"
+      - linters:
+          - errcheck
+          - gosec
+        path: _test.go
+      - linters:
+          - gosec
+        text: G204
+      - linters:
+          - gosec
+        text: G301
+      - linters:
+          - gosec
+        text: G304
+      - linters:
+          - gosec
+        text: G104
+      - linters:
+          - gosec
+        text: G302
+      - linters:
+          - gosec
+        text: G306
+      - linters:
+          - gosec
+        text: G702
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -188,7 +188,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if reviewResult.Approved {
 		_ = p.PullRequests().AddComment(ctx, pr.Number,
 			fmt.Sprintf("✅ **HerdOS Review**\n\n%s", reviewResult.Summary))
-		_ = p.PullRequests().CreateReview(ctx, pr.Number, reviewResult.Summary, platform.ReviewApprove)
+		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
 		if cfg.PullRequests.AutoMerge {
 			if _, err := p.PullRequests().Merge(ctx, pr.Number, platform.MergeMethod(cfg.Integrator.Strategy)); err != nil {
 				return nil, fmt.Errorf("auto-merging batch PR #%d: %w", pr.Number, err)
