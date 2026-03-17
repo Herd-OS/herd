@@ -164,7 +164,7 @@ jobs:
       vars.HERD_ENABLED == 'true'
       && github.event_name == 'issue_comment'
       && github.event.action == 'created'
-      && contains(github.event.comment.body, '/herd ')
+      && startsWith(github.event.comment.body, '/herd ')
     concurrency:
       group: herd-comment-${{ github.event.issue.number }}
       cancel-in-progress: false
