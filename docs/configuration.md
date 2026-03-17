@@ -31,6 +31,7 @@ integrator:
   require_ci: true
   review: true                   # agent reviews batch PRs before merge
   review_max_fix_cycles: 3       # max fix-and-re-review cycles
+  review_strictness: "standard"  # standard | strict | lenient
   ci_max_fix_cycles: 2           # max CI-failure fix cycles (0 = notify-only)
 
 monitor:
@@ -46,6 +47,23 @@ pull_requests:
   auto_merge: false              # auto-merge batch PRs after review passes
   co_author_email: ""            # Co-authored-by email (set after installing the GitHub App)
 ```
+
+## Review Strictness
+
+Controls how aggressively the agent reviewer flags issues:
+
+| Level | Behavior |
+|-------|----------|
+| `standard` (default) | Flags bugs, security issues, missing error handling. Ignores style preferences. |
+| `strict` | Also flags style issues, missing edge cases, code quality improvements. |
+| `lenient` | Only flags critical bugs and security vulnerabilities. |
+
+Findings are classified by severity:
+- **HIGH**: Bugs, security vulnerabilities, race conditions, missing critical error handling — triggers fix workers
+- **MEDIUM**: Missing edge cases, suboptimal error handling — informational only
+- **LOW**: Style preferences, naming suggestions — informational only
+
+Only HIGH severity findings create fix issues and dispatch workers. MEDIUM and LOW findings are listed in the PR comment for reference.
 
 ## Managing Configuration
 
@@ -64,5 +82,6 @@ herd config edit                              # open in $EDITOR
 | `HERD_RUNNER_LABEL` | `workers.runner_label` |
 | `HERD_MODEL` | `agent.model` |
 | `HERD_TIMEOUT` | `workers.timeout_minutes` |
+| `HERD_REVIEW_STRICTNESS` | `integrator.review_strictness` |
 
 Environment variables take precedence over `.herdos.yml`.

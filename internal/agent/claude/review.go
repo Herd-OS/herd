@@ -14,8 +14,11 @@ import (
 	"github.com/herd-os/herd/internal/agent"
 )
 
-const reviewPromptTemplate = `Review the following code changes. Check each acceptance criterion and look for bugs, security issues, missing edge cases, and style violations.
-
+const reviewPromptTemplate = `Review the following code changes. Check each acceptance criterion and look for issues.
+{{if .Strictness}}
+## Review Strictness: {{.StrictnessUpper}}
+{{if eq .Strictness "lenient"}}Only flag critical bugs and security vulnerabilities. Ignore style, code quality, and minor issues.{{end}}{{if eq .Strictness "standard"}}Flag real bugs, security issues, and missing error handling. Ignore style preferences and minor code quality issues.{{end}}{{if eq .Strictness "strict"}}Flag bugs, security issues, missing error handling, style issues, missing edge cases, and code quality improvements.{{end}}
+{{end}}
 ## Acceptance Criteria
 {{range .AcceptanceCriteria}}- {{.}}
 {{end}}
@@ -26,21 +29,28 @@ const reviewPromptTemplate = `Review the following code changes. Check each acce
 ` + "```" + `
 
 Respond with ONLY a JSON object (no markdown fencing, no extra text):
-{"approved": true, "comments": [], "summary": "brief summary"}
+{"approved": true, "findings": [], "summary": "brief summary"}
 
-If you find issues, set approved to false and list each issue in comments:
-{"approved": false, "comments": ["issue 1 description", "issue 2 description"], "summary": "brief summary of findings"}
+If you find issues, set approved to false and classify each finding as HIGH, MEDIUM, or LOW severity:
+{"approved": false, "findings": [{"severity": "HIGH", "description": "issue description"}, {"severity": "MEDIUM", "description": "minor issue"}], "summary": "brief summary of findings"}
+
+Severity guide:
+- HIGH: Bugs, security vulnerabilities, data loss risks, race conditions, missing critical error handling
+- MEDIUM: Missing edge cases, suboptimal error handling, potential performance issues
+- LOW: Style preferences, naming suggestions, minor code quality improvements
 {{if .RoleInstructions}}
 ## Project-Specific Review Instructions
 {{.RoleInstructions}}
 {{end}}`
 
-const reviewSystemPrompt = `You are a HerdOS code reviewer. Your job is to review a batch of changes produced by AI workers and identify bugs, security issues, missing edge cases, and style violations. Be thorough but practical — only flag real issues, not stylistic preferences. Respond with JSON only.`
+const reviewSystemPrompt = `You are a HerdOS code reviewer. Your job is to review a batch of changes produced by AI workers and identify issues. Classify each finding by severity: HIGH (bugs, security), MEDIUM (edge cases, error handling), LOW (style, naming). Respond with JSON only.`
 
 type reviewPromptData struct {
 	AcceptanceCriteria []string
 	Diff               string
 	RoleInstructions   string
+	Strictness         string
+	StrictnessUpper    string
 }
 
 // Review runs the configured agent in headless mode to review a diff.
@@ -89,9 +99,16 @@ func renderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 		return "", fmt.Errorf("parsing review template: %w", err)
 	}
 
+	strictness := opts.Strictness
+	if strictness == "" {
+		strictness = "standard"
+	}
+
 	data := reviewPromptData{
 		AcceptanceCriteria: opts.AcceptanceCriteria,
 		Diff:               diff,
+		Strictness:         strictness,
+		StrictnessUpper:    strings.ToUpper(strictness),
 	}
 
 	// Use role instructions passed by the caller (integrator loads .herd/integrator.md)
@@ -120,5 +137,25 @@ func parseReviewOutput(output string) (*agent.ReviewResult, error) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		return nil, fmt.Errorf("parsing review JSON: %w", err)
 	}
+
+	// Backward compatibility: if Findings is populated but Comments is not,
+	// populate Comments from Findings descriptions.
+	if len(result.Findings) > 0 && len(result.Comments) == 0 {
+		for _, f := range result.Findings {
+			result.Comments = append(result.Comments, f.Description)
+		}
+	}
+
+	// Backward compatibility: if Comments is populated but Findings is not
+	// (old agent format), create Findings with HIGH severity for each.
+	if len(result.Comments) > 0 && len(result.Findings) == 0 {
+		for _, c := range result.Comments {
+			result.Findings = append(result.Findings, agent.ReviewFinding{
+				Severity:    "HIGH",
+				Description: c,
+			})
+		}
+	}
+
 	return &result, nil
 }

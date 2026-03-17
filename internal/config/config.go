@@ -46,6 +46,7 @@ type Integrator struct {
 	RequireCI                      bool   `yaml:"require_ci"`
 	Review                         bool   `yaml:"review"`
 	ReviewMaxFixCycles             int    `yaml:"review_max_fix_cycles"`
+	ReviewStrictness               string `yaml:"review_strictness"` // "standard", "strict", "lenient"
 	CIMaxFixCycles                 int    `yaml:"ci_max_fix_cycles"`
 }
 
@@ -106,6 +107,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("HERD_MODEL"); v != "" {
 		cfg.Agent.Model = v
+	}
+	if v := os.Getenv("HERD_REVIEW_STRICTNESS"); v != "" {
+		cfg.Integrator.ReviewStrictness = v
 	}
 	if v := os.Getenv("HERD_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

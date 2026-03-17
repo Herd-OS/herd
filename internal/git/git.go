@@ -70,6 +70,12 @@ func (g *Git) Diff(base, head string) (string, error) {
 	return g.output("diff", base+"..."+head)
 }
 
+// DiffStat returns the --stat output for changes introduced by head since
+// its merge base with base (three-dot diff), matching the semantics of Diff.
+func (g *Git) DiffStat(base, head string) (string, error) {
+	return g.output("diff", "--stat", base+"..."+head)
+}
+
 func (g *Git) CurrentBranch() (string, error) {
 	return g.output("rev-parse", "--abbrev-ref", "HEAD")
 }

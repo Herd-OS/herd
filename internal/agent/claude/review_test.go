@@ -112,7 +112,7 @@ func TestReview_LargeDiffPassedViaStdin(t *testing.T) {
 	// Script reads stdin and outputs approved JSON
 	err := os.WriteFile(script, []byte(`#!/bin/sh
 cat > /dev/null
-echo '{"approved": true, "comments": [], "summary": "LGTM"}'
+echo '{"approved": true, "findings": [], "summary": "LGTM"}'
 `), 0755)
 	require.NoError(t, err)
 
@@ -134,7 +134,7 @@ func TestReview_StreamsOutputToStdout(t *testing.T) {
 	script := dir + "/test-agent.sh"
 	err := os.WriteFile(script, []byte(`#!/bin/sh
 cat > /dev/null
-echo '{"approved": false, "comments": ["issue found"], "summary": "needs work"}'
+echo '{"approved": false, "findings": [{"severity": "HIGH", "description": "issue found"}], "summary": "needs work"}'
 `), 0755)
 	require.NoError(t, err)
 
@@ -146,4 +146,74 @@ echo '{"approved": false, "comments": ["issue found"], "summary": "needs work"}'
 	require.NoError(t, err)
 	assert.False(t, result.Approved)
 	assert.Len(t, result.Comments, 1)
+	assert.Len(t, result.Findings, 1)
+	assert.Equal(t, "HIGH", result.Findings[0].Severity)
+}
+
+func TestParseReviewOutput_NewFindingsFormat(t *testing.T) {
+	output := `{"approved": false, "findings": [{"severity": "HIGH", "description": "SQL injection"}, {"severity": "LOW", "description": "typo in comment"}], "summary": "Found issues"}`
+	result, err := parseReviewOutput(output)
+	require.NoError(t, err)
+	assert.False(t, result.Approved)
+	assert.Len(t, result.Findings, 2)
+	assert.Equal(t, "HIGH", result.Findings[0].Severity)
+	assert.Equal(t, "SQL injection", result.Findings[0].Description)
+	assert.Equal(t, "LOW", result.Findings[1].Severity)
+	// Backward compat: Comments populated from Findings
+	assert.Len(t, result.Comments, 2)
+	assert.Equal(t, "SQL injection", result.Comments[0])
+}
+
+func TestParseReviewOutput_OldCommentsFormat_BackwardCompat(t *testing.T) {
+	// Old format with "comments" instead of "findings"
+	output := `{"approved": false, "comments": ["bug found", "missing test"], "summary": "issues"}`
+	result, err := parseReviewOutput(output)
+	require.NoError(t, err)
+	assert.Len(t, result.Comments, 2)
+	// Findings created from Comments with HIGH severity
+	assert.Len(t, result.Findings, 2)
+	assert.Equal(t, "HIGH", result.Findings[0].Severity)
+	assert.Equal(t, "bug found", result.Findings[0].Description)
+}
+
+func TestParseReviewOutput_ApprovedNewFormat(t *testing.T) {
+	output := `{"approved": true, "findings": [], "summary": "All good"}`
+	result, err := parseReviewOutput(output)
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Empty(t, result.Findings)
+	assert.Empty(t, result.Comments)
+}
+
+func TestRenderReviewPrompt_WithStrictness(t *testing.T) {
+	tests := []struct {
+		name       string
+		strictness string
+		contains   string
+	}{
+		{"standard", "standard", "Flag real bugs, security issues, and missing error handling"},
+		{"strict", "strict", "Flag bugs, security issues, missing error handling, style issues"},
+		{"lenient", "lenient", "Only flag critical bugs and security vulnerabilities"},
+		{"empty defaults to standard", "", "Flag real bugs, security issues, and missing error handling"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := agent.ReviewOptions{
+				AcceptanceCriteria: []string{"works"},
+				Strictness:         tt.strictness,
+			}
+			prompt, err := renderReviewPrompt("diff", opts)
+			require.NoError(t, err)
+			assert.Contains(t, prompt, tt.contains)
+		})
+	}
+}
+
+func TestRenderReviewPrompt_SeverityGuide(t *testing.T) {
+	opts := agent.ReviewOptions{AcceptanceCriteria: []string{"works"}}
+	prompt, err := renderReviewPrompt("diff", opts)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "HIGH: Bugs, security vulnerabilities")
+	assert.Contains(t, prompt, "MEDIUM: Missing edge cases")
+	assert.Contains(t, prompt, "LOW: Style preferences")
 }

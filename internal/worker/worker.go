@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -139,14 +141,10 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		return nil, fmt.Errorf("agent execution failed: %w", err)
 	}
 
-	// Post agent summary as a comment on the issue
+	// Capture raw agent summary for report
+	rawSummary := ""
 	if agentResult != nil && agentResult.Summary != "" {
-		summary := agentResult.Summary
-		if len(summary) > 60000 {
-			summary = summary[:60000] + "\n\n... (truncated)"
-		}
-		_ = p.Issues().AddComment(ctx, params.IssueNumber, fmt.Sprintf(
-			"**Worker Summary**\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", summary))
+		rawSummary = agentResult.Summary
 	}
 
 	// Check for no-op (no commits made)
@@ -162,11 +160,53 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		return &ExecResult{NoOp: true}, nil
 	}
 
+	// Run pre-push validation
+	validation := runValidation(ctx, params.RepoRoot)
+
+	if !validation.allPassed() {
+		fmt.Printf("Validation failed, re-invoking agent to fix:\n%s\n", validation.Errors)
+
+		// Re-invoke agent with validation errors
+		retrySpec := agent.TaskSpec{
+			IssueNumber: params.IssueNumber,
+			Title:       "Fix validation failures",
+			Body:        fmt.Sprintf("The following validation commands failed after your changes. Please fix all errors:\n\n```\n%s\n```\n\nDo not add new features — only fix the validation errors.", validation.Errors),
+		}
+		retryResult, retryErr := ag.Execute(ctx, retrySpec, execOpts)
+		if retryErr != nil {
+			return nil, fmt.Errorf("agent retry after validation failure: %w", retryErr)
+		}
+		if retryResult != nil && retryResult.Summary != "" {
+			rawSummary += "\n\n--- Retry output ---\n" + retryResult.Summary
+		}
+
+		// Re-run validation
+		validation = runValidation(ctx, params.RepoRoot)
+		if !validation.allPassed() {
+			// Post report with failure info, then fail
+			report := buildWorkerReport(g, batchBranch, rawSummary, validation)
+			report += "\n\n⚠️ Validation failed after retry. Worker marked as failed."
+			if rawSummary != "" {
+				report += fmt.Sprintf("\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
+			}
+			_ = p.Issues().AddComment(ctx, params.IssueNumber, report)
+			return nil, fmt.Errorf("validation failed after retry: %s", validation.Errors)
+		}
+	}
+
 	// Force push worker branch — previous failed attempts may have left
 	// stale commits on the remote branch that would cause a non-fast-forward rejection.
+	// Push BEFORE posting the report so we don't claim success if the push fails.
 	if err = g.ForcePush("origin", workerBranch); err != nil {
 		return nil, fmt.Errorf("pushing worker branch: %w", err)
 	}
+
+	// Build and post structured report (only after successful push)
+	report := buildWorkerReport(g, batchBranch, rawSummary, validation)
+	if rawSummary != "" {
+		report += fmt.Sprintf("\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
+	}
+	_ = p.Issues().AddComment(ctx, params.IssueNumber, report)
 
 	// Label issue as done
 	_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress, issues.StatusFailed})
@@ -175,6 +215,141 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	return &ExecResult{
 		WorkerBranch: workerBranch,
 	}, nil
+}
+
+type validationResult struct {
+	BuildOK     bool
+	TestOK      bool
+	VetOK       bool
+	LintOK      bool
+	LintSkipped bool   // true if golangci-lint not in PATH
+	Errors      string // combined error output from failed commands
+}
+
+// runValidation runs Go validation commands in the repo root.
+// Skips all validation if no go.mod exists in repoRoot.
+func runValidation(ctx context.Context, repoRoot string) *validationResult {
+	result := &validationResult{}
+
+	// Skip validation for non-Go repos
+	if _, err := os.Stat(filepath.Join(repoRoot, "go.mod")); os.IsNotExist(err) {
+		result.BuildOK = true
+		result.TestOK = true
+		result.VetOK = true
+		result.LintOK = true
+		return result
+	}
+
+	var errors strings.Builder
+
+	// go build
+	cmd := exec.CommandContext(ctx, "go", "build", "./...")
+	cmd.Dir = repoRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		result.BuildOK = false
+		fmt.Fprintf(&errors, "go build failed:\n%s\n", string(out))
+	} else {
+		result.BuildOK = true
+	}
+
+	// go test
+	cmd = exec.CommandContext(ctx, "go", "test", "./...")
+	cmd.Dir = repoRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		result.TestOK = false
+		fmt.Fprintf(&errors, "go test failed:\n%s\n", string(out))
+	} else {
+		result.TestOK = true
+	}
+
+	// go vet
+	cmd = exec.CommandContext(ctx, "go", "vet", "./...")
+	cmd.Dir = repoRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		result.VetOK = false
+		fmt.Fprintf(&errors, "go vet failed:\n%s\n", string(out))
+	} else {
+		result.VetOK = true
+	}
+
+	// golangci-lint (optional — skip if not installed)
+	if _, lookErr := exec.LookPath("golangci-lint"); lookErr != nil {
+		result.LintOK = true
+		result.LintSkipped = true
+	} else {
+		cmd = exec.CommandContext(ctx, "golangci-lint", "run", "./...")
+		cmd.Dir = repoRoot
+		if out, err := cmd.CombinedOutput(); err != nil {
+			result.LintOK = false
+			fmt.Fprintf(&errors, "golangci-lint failed:\n%s\n", string(out))
+		} else {
+			result.LintOK = true
+		}
+	}
+
+	result.Errors = errors.String()
+	return result
+}
+
+func (v *validationResult) allPassed() bool {
+	return v.BuildOK && v.TestOK && v.VetOK && v.LintOK
+}
+
+func (v *validationResult) statusString() string {
+	icon := func(ok bool) string {
+		if ok {
+			return "✅"
+		}
+		return "❌"
+	}
+	s := fmt.Sprintf("%s build | %s test | %s vet", icon(v.BuildOK), icon(v.TestOK), icon(v.VetOK))
+	if !v.LintSkipped {
+		s += fmt.Sprintf(" | %s lint", icon(v.LintOK))
+	}
+	return s
+}
+
+func buildWorkerReport(g *git.Git, batchBranch string, agentSummary string, validation *validationResult) string {
+	var b strings.Builder
+	b.WriteString("**Worker Report**\n\n")
+
+	// Files changed
+	diffStat, err := g.DiffStat(batchBranch, "HEAD")
+	if err == nil && diffStat != "" {
+		b.WriteString("**Files changed:**\n```\n")
+		b.WriteString(diffStat)
+		b.WriteString("\n```\n\n")
+	}
+
+	// Agent summary (first paragraph, truncated to 500 chars)
+	if agentSummary != "" {
+		short := agentSummary
+		if idx := strings.Index(short, "\n\n"); idx >= 0 {
+			short = short[:idx]
+		}
+		if len(short) > 500 {
+			short = short[:500] + "..."
+		}
+		b.WriteString("**Summary:** ")
+		b.WriteString(short)
+		b.WriteString("\n\n")
+	}
+
+	// Validation
+	if validation != nil {
+		b.WriteString("**Validation:** ")
+		b.WriteString(validation.statusString())
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func truncateOutput(s string, max int) string {
+	if len(s) > max {
+		return s[:max] + "\n\n... (truncated)"
+	}
+	return s
 }
 
 func renderWorkerPrompt(title, body string, issueNumber int, repoRoot string, cfg *config.Config) (string, error) {

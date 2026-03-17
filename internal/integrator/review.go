@@ -96,6 +96,12 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		pr = prs[0]
 	}
 
+	// Skip if batch already complete
+	if isBatchComplete(ms) {
+		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", ms.Number)
+		return &ReviewResult{BatchPRNumber: pr.Number}, nil
+	}
+
 	// Check if review is enabled
 	if !cfg.Integrator.Review {
 		// Skip review, just check auto-merge
@@ -158,6 +164,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	reviewOpts := agent.ReviewOptions{
 		AcceptanceCriteria: allCriteria,
 		RepoRoot:           params.RepoRoot,
+		Strictness:         cfg.Integrator.ReviewStrictness,
 	}
 
 	// Load integrator role instructions
@@ -178,10 +185,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return nil, fmt.Errorf("agent review failed: %w", err)
 	}
 
+	// Partition findings by severity
+	highFindings, mediumFindings, lowFindings := filterFindingsBySeverity(reviewResult.Findings)
+
 	// Handle approved
 	if reviewResult.Approved {
-		_ = p.PullRequests().AddComment(ctx, pr.Number,
-			fmt.Sprintf("✅ **HerdOS Review**\n\n%s", reviewResult.Summary))
+		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
+		_ = p.PullRequests().AddComment(ctx, pr.Number, summaryComment)
 		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
 		if cfg.PullRequests.AutoMerge {
 			if _, err := p.PullRequests().Merge(ctx, pr.Number, platform.MergeMethod(cfg.Integrator.Strategy)); err != nil {
@@ -200,74 +210,107 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if cfg.Integrator.ReviewMaxFixCycles > 0 && currentCycle >= cfg.Integrator.ReviewMaxFixCycles {
 		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found issues but max fix cycles (%d) reached. Manual intervention needed:\n\n",
 			cfg.Integrator.ReviewMaxFixCycles)
-		for _, c := range reviewResult.Comments {
-			comment += fmt.Sprintf("- %s\n", c)
+		for _, f := range reviewResult.Findings {
+			comment += fmt.Sprintf("- **%s** %s\n", f.Severity, f.Description)
 		}
 		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Safety valve
-	if len(reviewResult.Comments) > safetyValveLimit {
-		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found %d issues in a single pass. "+
+	// Safety valve — check HIGH findings count only
+	if len(highFindings) > safetyValveLimit {
+		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found %d high-severity issues in a single pass. "+
 			"This exceeds the safety limit (%d). Creating fix workers was skipped to prevent runaway agent invocations.",
-			len(reviewResult.Comments), safetyValveLimit)
+			len(highFindings), safetyValveLimit)
 		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Post findings comment (dispatch count posted after loop with accurate count)
-	nextCycle := currentCycle + 1
-	var findingsMsg strings.Builder
-	findingsMsg.WriteString(fmt.Sprintf("🔍 **HerdOS Review** (cycle %d)\n\n", nextCycle))
-	for _, comment := range reviewResult.Comments {
-		findingsMsg.WriteString(fmt.Sprintf("- %s\n", comment))
+	// No high-severity findings — approve with informational comment and batch summary
+	if len(highFindings) == 0 {
+		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings)
+		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
+		_ = p.PullRequests().AddComment(ctx, pr.Number, summaryComment)
+		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
+		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Create fix issues and dispatch workers
-	var fixIssueNums []int
+	// Collect open fix issues for dedup
+	var openFixIssues []*platform.Issue
+	for _, iss := range allIssues {
+		if iss.State == "closed" {
+			continue
+		}
+		parsed, parseErr := issues.ParseBody(iss.Body)
+		if parseErr != nil {
+			continue
+		}
+		if parsed.FrontMatter.Type == "fix" {
+			openFixIssues = append(openFixIssues, iss)
+		}
+	}
+
+	highFindings = dedupFindings(highFindings, openFixIssues)
+	if len(highFindings) == 0 {
+		// All findings are covered by existing fix issues — approve to unblock
+		// any previous REQUEST_CHANGES review and post an informational comment.
+		fmt.Println("All high-severity findings are duplicates of existing fix issues, approving.")
+		comment := "✅ **HerdOS Agent Review**\n\nAll high-severity findings are already covered by existing fix workers. Approving to unblock the PR."
+		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
+		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
+	}
+
+	// Create single batched fix issue with ALL high-severity findings
+	nextCycle := currentCycle + 1
+
+	var fixTaskBuilder strings.Builder
+	fixTaskBuilder.WriteString("Fix the following issues found during agent review:\n\n")
+	for i, f := range highFindings {
+		fixTaskBuilder.WriteString(fmt.Sprintf("%d. %s\n", i+1, f.Description))
+	}
+
+	fixBody := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:  1,
+			Batch:    ms.Number,
+			Type:     "fix",
+			FixCycle: nextCycle,
+			BatchPR:  pr.Number,
+		},
+		Task:    fixTaskBuilder.String(),
+		Context: fmt.Sprintf("Found during agent review of batch PR #%d ([herd] %s), cycle %d.", pr.Number, ms.Title, nextCycle),
+	})
+
+	fixTitle := fmt.Sprintf("Review fixes (cycle %d)", nextCycle)
 
 	defaultBranchForDispatch, _ := p.Repository().GetDefaultBranch(ctx)
 
-	for _, comment := range reviewResult.Comments {
-		body := issues.RenderBody(issues.IssueBody{
-			FrontMatter: issues.FrontMatter{
-				Version:  1,
-				Batch:    ms.Number,
-				Type:     "fix",
-				FixCycle: nextCycle,
-				BatchPR:  pr.Number,
-			},
-			Task:    comment,
-			Context: fmt.Sprintf("Found during agent review of batch PR #%d ([herd] %s).", pr.Number, ms.Title),
-		})
-
-		fixIssue, err := p.Issues().Create(ctx, "Fix: "+truncate(comment, 60), body,
-			[]string{issues.TypeFix, issues.StatusInProgress}, &ms.Number)
-		if err != nil {
-			continue
-		}
-		fixIssueNums = append(fixIssueNums, fixIssue.Number)
-
-		// Dispatch fix worker
-		_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
-			"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
-			"batch_branch":    batchBranch,
-			"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
-			"runner_label":    cfg.Workers.RunnerLabel,
-		})
+	fixIssue, err := p.Issues().Create(ctx, fixTitle, fixBody,
+		[]string{issues.TypeFix, issues.StatusInProgress}, &ms.Number)
+	if err != nil {
+		// Failed to create the fix issue
+		return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: len(highFindings)}, nil
 	}
 
-	n := len(fixIssueNums)
-	if n == 0 {
-		// All issue creates failed — nothing was dispatched. Return without
-		// posting a comment to avoid a misleading "Dispatching 0 fix workers."
-		// message and the double-comment situation when invoked via /herd review.
-		return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: len(reviewResult.Comments)}, nil
-	}
+	// Dispatch single fix worker
+	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
+		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
+		"batch_branch":    batchBranch,
+		"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+		"runner_label":    cfg.Workers.RunnerLabel,
+	})
 
-	findingsMsg.WriteString(fmt.Sprintf("\nDispatching %d fix %s.", n, map[bool]string{true: "worker", false: "workers"}[n == 1]))
-	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsMsg.String())
+	fixIssueNums := []int{fixIssue.Number}
+
+	// Post structured findings comment
+	findingsComment := buildReviewCycleComment(nextCycle, cfg.Integrator.ReviewMaxFixCycles, fixIssueNums, highFindings, mediumFindings, lowFindings)
+	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsComment)
+
+	// Block merge with Request Changes review
+	reviewBody := fmt.Sprintf("Found %d high-severity issues. Fix worker dispatched → #%d.", len(highFindings), fixIssue.Number)
+	_ = p.PullRequests().CreateReview(ctx, pr.Number, reviewBody, platform.ReviewRequestChanges)
 
 	return &ReviewResult{
 		FixIssues:     fixIssueNums,
@@ -336,4 +379,204 @@ func truncate(s string, max int) string {
 		return s[:max] + "..."
 	}
 	return s
+}
+
+// filterFindingsBySeverity partitions findings into high, medium, and low.
+func filterFindingsBySeverity(findings []agent.ReviewFinding) (high, medium, low []agent.ReviewFinding) {
+	for _, f := range findings {
+		switch strings.ToUpper(f.Severity) {
+		case "HIGH":
+			high = append(high, f)
+		case "MEDIUM":
+			medium = append(medium, f)
+		default:
+			low = append(low, f)
+		}
+	}
+	return
+}
+
+// buildBatchSummaryComment creates the approval comment with batch statistics.
+func buildBatchSummaryComment(allIssues []*platform.Issue, reviewSummary string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("✅ **HerdOS Agent Review**\n\n%s\n", reviewSummary))
+
+	// Count statistics from issues
+	originalTasks := 0
+	reviewFixIssues := 0
+	ciFixIssues := 0
+	maxFixCycle := 0
+	maxCIFixCycle := 0
+	for _, iss := range allIssues {
+		parsed, err := issues.ParseBody(iss.Body)
+		if err != nil {
+			continue
+		}
+		switch {
+		case parsed.FrontMatter.CIFixCycle > 0:
+			ciFixIssues++
+		case parsed.FrontMatter.Type == "fix":
+			reviewFixIssues++
+		default:
+			originalTasks++
+		}
+		if parsed.FrontMatter.FixCycle > maxFixCycle {
+			maxFixCycle = parsed.FrontMatter.FixCycle
+		}
+		if parsed.FrontMatter.CIFixCycle > maxCIFixCycle {
+			maxCIFixCycle = parsed.FrontMatter.CIFixCycle
+		}
+	}
+
+	b.WriteString("\n📊 **Batch Summary**\n\n")
+	b.WriteString(fmt.Sprintf("- Original tasks: %d\n", originalTasks))
+	b.WriteString(fmt.Sprintf("- Review fix issues: %d\n", reviewFixIssues))
+	b.WriteString(fmt.Sprintf("- CI fix issues: %d\n", ciFixIssues))
+	b.WriteString(fmt.Sprintf("- Review cycles: %d\n", maxFixCycle))
+	b.WriteString(fmt.Sprintf("- CI fix cycles: %d\n", maxCIFixCycle))
+	b.WriteString(fmt.Sprintf("- Total issues: %d\n", len(allIssues)))
+
+	return b.String()
+}
+
+// buildReviewCycleComment creates a structured PR comment for a review cycle.
+func buildReviewCycleComment(cycle, maxCycles int, fixIssueNums []int, high, medium, low []agent.ReviewFinding) string {
+	var b strings.Builder
+
+	totalFindings := len(high) + len(medium) + len(low)
+
+	if cycle > 0 {
+		b.WriteString(fmt.Sprintf("🔍 **HerdOS Agent Review** (cycle %d of %d)\n\n", cycle, maxCycles))
+	} else {
+		b.WriteString("🔍 **HerdOS Agent Review**\n\n")
+	}
+	if totalFindings == 0 {
+		b.WriteString("No issues found.\n")
+		return b.String()
+	} else if totalFindings == 1 {
+		b.WriteString("Found 1 issue:\n\n")
+	} else {
+		b.WriteString(fmt.Sprintf("Found %d issues:\n\n", totalFindings))
+	}
+
+	if len(high) > 0 {
+		if len(fixIssueNums) > 0 {
+			nums := make([]string, len(fixIssueNums))
+			for i, n := range fixIssueNums {
+				nums[i] = fmt.Sprintf("#%d", n)
+			}
+			b.WriteString(fmt.Sprintf("**HIGH** (fix worker dispatched → %s):\n", strings.Join(nums, ", ")))
+		} else {
+			b.WriteString("**HIGH**:\n")
+		}
+		for _, f := range high {
+			b.WriteString(fmt.Sprintf("- %s\n", f.Description))
+		}
+		b.WriteString("\n")
+	}
+
+	if len(medium) > 0 {
+		b.WriteString("**MEDIUM** (informational):\n")
+		for _, f := range medium {
+			b.WriteString(fmt.Sprintf("- %s\n", f.Description))
+		}
+		b.WriteString("\n")
+	}
+
+	if len(low) > 0 {
+		b.WriteString("**LOW** (informational):\n")
+		for _, f := range low {
+			b.WriteString(fmt.Sprintf("- %s\n", f.Description))
+		}
+	}
+
+	return b.String()
+}
+
+// extractFindingLines extracts individual finding descriptions from a fix
+// issue body. Findings are stored as numbered list items ("1. description").
+// Matching against individual lines avoids false-positive substring matches
+// when multiple findings are concatenated in a single batched issue body.
+func extractFindingLines(body string) []string {
+	var lines []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		// Strip leading number+dot prefix (e.g. "1. ", "12. ")
+		if len(line) > 2 {
+			dotIdx := strings.Index(line, ". ")
+			if dotIdx > 0 && dotIdx <= 4 {
+				prefix := line[:dotIdx]
+				if _, err := strconv.Atoi(prefix); err == nil {
+					text := strings.TrimSpace(line[dotIdx+2:])
+					if text != "" {
+						lines = append(lines, text)
+					}
+					continue
+				}
+			}
+		}
+		// Skip bare numbered-list markers (e.g. "1." with no content after
+		// trimming). These arise when a list item like "1. " is trimmed to
+		// "1." and falls through the dot-space detection above.
+		if len(line) >= 2 && len(line) <= 5 && line[len(line)-1] == '.' {
+			if _, err := strconv.Atoi(line[:len(line)-1]); err == nil {
+				continue
+			}
+		}
+		// Also include raw non-empty lines for simple (non-batched) bodies
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// minSubstringLen is the minimum description prefix length for substring
+// matching in dedupFindings. Descriptions shorter than this use equality
+// to avoid false positives (e.g. "bug" matching any line containing "bug").
+const minSubstringLen = 20
+
+// descriptionMatch reports whether text contains a match for descPrefix.
+// For short prefixes (< minSubstringLen) it requires equality; for longer
+// ones it uses substring containment.
+func descriptionMatch(text, descPrefix string) bool {
+	if len(descPrefix) < minSubstringLen {
+		return text == descPrefix
+	}
+	return strings.Contains(text, descPrefix)
+}
+
+// dedupFindings removes findings that are similar to existing open fix issues.
+func dedupFindings(findings []agent.ReviewFinding, openFixIssues []*platform.Issue) []agent.ReviewFinding {
+	var deduped []agent.ReviewFinding
+	for _, f := range findings {
+		descPrefix := f.Description
+		if len(descPrefix) > 100 {
+			descPrefix = descPrefix[:100]
+		}
+		duplicate := false
+		for _, iss := range openFixIssues {
+			if descriptionMatch(iss.Title, descPrefix) {
+				fmt.Printf("Skipping duplicate finding: similar to #%d\n", iss.Number)
+				duplicate = true
+				break
+			}
+			// Match against individual finding lines rather than the
+			// raw body to avoid false positives in batched issues.
+			for _, line := range extractFindingLines(iss.Body) {
+				if descriptionMatch(line, descPrefix) {
+					fmt.Printf("Skipping duplicate finding: similar to #%d\n", iss.Number)
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				break
+			}
+		}
+		if !duplicate {
+			deduped = append(deduped, f)
+		}
+	}
+	return deduped
 }

@@ -91,6 +91,10 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	if issue.Milestone == nil {
 		return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
 	}
+	if isBatchComplete(issue.Milestone) {
+		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", issue.Milestone.Number)
+		return &ConsolidateResult{IssueNumber: issueNumber, NoOp: true}, nil
+	}
 
 	workerBranch := fmt.Sprintf("herd/worker/%d-%s", issueNumber, planner.Slugify(issue.Title))
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
@@ -195,6 +199,11 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 	}
 
 	ms := issue.Milestone
+	if isBatchComplete(ms) {
+		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", ms.Number)
+		return &AdvanceResult{}, nil
+	}
+
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
 
 	// List all issues in the milestone
@@ -371,6 +380,10 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 	if err != nil {
 		return nil, fmt.Errorf("getting milestone #%d: %w", batchNumber, err)
 	}
+	if isBatchComplete(ms) {
+		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", ms.Number)
+		return &AdvanceResult{}, nil
+	}
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
 
@@ -480,6 +493,11 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 		TierComplete:    true,
 		DispatchedCount: dispatched,
 	}, nil
+}
+
+// isBatchComplete checks if the milestone is closed (batch already merged).
+func isBatchComplete(ms *platform.Milestone) bool {
+	return ms != nil && ms.State == "closed"
 }
 
 func findIssue(allIssues []*platform.Issue, number int) *platform.Issue {

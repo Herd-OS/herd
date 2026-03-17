@@ -62,14 +62,22 @@ type ExecResult struct {
 	Summary       string
 }
 
+// ReviewFinding represents a single finding from a code review with severity.
+type ReviewFinding struct {
+	Severity    string `json:"severity"`    // "HIGH", "MEDIUM", "LOW"
+	Description string `json:"description"`
+}
+
 type ReviewOptions struct {
 	AcceptanceCriteria []string
 	RepoRoot           string
 	SystemPrompt       string
+	Strictness         string // "standard", "strict", "lenient" — controls review aggressiveness
 }
 
 type ReviewResult struct {
-	Approved bool
-	Comments []string
-	Summary  string
+	Approved bool            `json:"approved"`
+	Findings []ReviewFinding `json:"findings"`
+	Comments []string        `json:"comments"` // Deprecated: populated from Findings for backward compatibility
+	Summary  string          `json:"summary"`
 }

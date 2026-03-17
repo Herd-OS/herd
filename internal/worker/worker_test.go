@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -302,9 +303,9 @@ func TestExec_EmptySummaryNoComment(t *testing.T) {
 		IssueNumber: 42,
 		RepoRoot:    t.TempDir(),
 	})
-	// No summary = no comment (only failure labels, no "Worker Summary" comment)
+	// No summary = no comment (only failure labels, no "Worker Report" comment)
 	for _, c := range issueSvc.comments {
-		assert.NotContains(t, c, "Worker Summary")
+		assert.NotContains(t, c, "Worker Report")
 	}
 }
 
@@ -326,6 +327,150 @@ func TestWorkerSuccessLabeling_RemovesFailedAndInProgress(t *testing.T) {
 	count := strings.Count(src, `[]string{issues.StatusInProgress, issues.StatusFailed}`)
 	assert.Equal(t, 2, count,
 		"both no-op and success paths should remove in-progress+failed (expected 2 occurrences)")
+}
+
+func TestReportPostedAfterPush(t *testing.T) {
+	// Verify that ForcePush is called BEFORE the report comment is posted.
+	// This prevents posting a report claiming success when the push hasn't
+	// happened yet (or might fail). See issue #255.
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	pushIdx := strings.Index(src, "g.ForcePush(")
+	require.NotEqual(t, -1, pushIdx, "ForcePush call not found in worker.go")
+
+	// Find the report comment post (the one in the success path, not the validation-failure path)
+	// The success-path comment is preceded by "only after successful push"
+	reportIdx := strings.Index(src, "only after successful push")
+	require.NotEqual(t, -1, reportIdx, "post-push report comment not found in worker.go")
+
+	assert.Less(t, pushIdx, reportIdx,
+		"ForcePush must appear before the report comment to avoid posting before push")
+}
+
+func TestRunValidation_NoGoMod(t *testing.T) {
+	dir := t.TempDir()
+	result := runValidation(context.Background(), dir)
+	assert.True(t, result.allPassed())
+	assert.True(t, result.BuildOK)
+	assert.True(t, result.TestOK)
+	assert.True(t, result.VetOK)
+	assert.True(t, result.LintOK)
+}
+
+func TestRunValidation_ValidGoProject(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.21\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644))
+
+	result := runValidation(context.Background(), dir)
+	assert.True(t, result.BuildOK)
+	assert.True(t, result.TestOK)
+	assert.True(t, result.VetOK)
+	assert.Empty(t, result.Errors)
+}
+
+func TestRunValidation_BuildFailure(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.21\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() { undefined() }\n"), 0644))
+
+	result := runValidation(context.Background(), dir)
+	assert.False(t, result.BuildOK)
+	assert.Contains(t, result.Errors, "go build failed")
+	assert.False(t, result.allPassed())
+}
+
+func TestRunValidation_CancelledContext(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.21\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	result := runValidation(ctx, dir)
+	assert.False(t, result.BuildOK, "build should fail with cancelled context")
+	assert.False(t, result.allPassed(), "validation should not pass with cancelled context")
+	assert.Contains(t, result.Errors, "go build failed")
+}
+
+func TestRunValidation_NoGoMod_IgnoresContext(t *testing.T) {
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	// No go.mod — should skip all validation regardless of context
+	result := runValidation(ctx, dir)
+	assert.True(t, result.allPassed())
+}
+
+func TestValidationResult_StatusString(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   validationResult
+		contains []string
+		excludes []string
+	}{
+		{
+			"all pass",
+			validationResult{BuildOK: true, TestOK: true, VetOK: true, LintOK: true},
+			[]string{"✅ build", "✅ test", "✅ vet", "✅ lint"},
+			nil,
+		},
+		{
+			"build fail",
+			validationResult{BuildOK: false, TestOK: true, VetOK: true, LintOK: true},
+			[]string{"❌ build", "✅ test"},
+			nil,
+		},
+		{
+			"lint skipped",
+			validationResult{BuildOK: true, TestOK: true, VetOK: true, LintOK: true, LintSkipped: true},
+			[]string{"✅ build"},
+			[]string{"lint"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := tt.result.statusString()
+			for _, c := range tt.contains {
+				assert.Contains(t, s, c)
+			}
+			for _, c := range tt.excludes {
+				assert.NotContains(t, s, c)
+			}
+		})
+	}
+}
+
+func TestValidationResult_AllPassed(t *testing.T) {
+	tests := []struct {
+		name   string
+		result validationResult
+		want   bool
+	}{
+		{"all true", validationResult{BuildOK: true, TestOK: true, VetOK: true, LintOK: true}, true},
+		{"build false", validationResult{BuildOK: false, TestOK: true, VetOK: true, LintOK: true}, false},
+		{"test false", validationResult{BuildOK: true, TestOK: false, VetOK: true, LintOK: true}, false},
+		{"vet false", validationResult{BuildOK: true, TestOK: true, VetOK: false, LintOK: true}, false},
+		{"lint false", validationResult{BuildOK: true, TestOK: true, VetOK: true, LintOK: false}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.result.allPassed())
+		})
+	}
+}
+
+func TestTruncateOutput(t *testing.T) {
+	assert.Equal(t, "hello", truncateOutput("hello", 100))
+	long := strings.Repeat("x", 200)
+	result := truncateOutput(long, 100)
+	assert.Len(t, result, 100+len("\n\n... (truncated)"))
+	assert.Contains(t, result, "... (truncated)")
 }
 
 func TestPromptTemplate_AllInstructions(t *testing.T) {
