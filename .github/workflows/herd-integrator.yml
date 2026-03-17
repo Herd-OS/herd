@@ -197,4 +197,4 @@ jobs:
             --issue-number "$ISSUE_NUMBER" \
             --author-login "$AUTHOR_LOGIN" \
             --author-association "$AUTHOR_ASSOCIATION" \
-            --is-pr="$IS_PR"
+            --is-pr "$IS_PR"
