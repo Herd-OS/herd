@@ -162,6 +162,12 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 				switch ciStatus {
 				case "failure":
 					if !hasCIFixPendingLabel(ctx, p, pr.Number) {
+						// Add the label BEFORE posting the comment so that a second
+						// concurrent patrol run racing past the hasCIFixPendingLabel
+						// check sees the label and skips, rather than posting a
+						// duplicate /herd fix-ci comment. The handler's beforeDispatch
+						// will re-add the label idempotently when workers are dispatched.
+						_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.CIFixPending})
 						_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
 					}
 					result.CIFailures++
@@ -177,8 +183,8 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 
 // hasCIFixPendingLabel returns true if the herd/ci-fix-pending label is present on the PR.
 // Fails open (returns false on error) so a broken labels API doesn't silence future fix triggers.
-// The label is added atomically in handleFixCI.beforeDispatch before workers are dispatched,
-// so a second patrol firing between comment post and handler execution will still see the label.
+// The patrol adds the label before posting the /herd fix-ci comment so that a concurrent
+// patrol run sees the label and skips, narrowing the duplicate-comment race window.
 func hasCIFixPendingLabel(ctx context.Context, p platform.Platform, prNumber int) bool {
 	issue, err := p.Issues().Get(ctx, prNumber)
 	if err != nil {
