@@ -323,6 +323,13 @@ func newHandleCommentCmd() *cobra.Command {
 				return fmt.Errorf("herd integrator handle-comment is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
 
+			if commentID <= 0 {
+				return fmt.Errorf("--comment-id must be greater than 0, got %d", commentID)
+			}
+			if issueNumber <= 0 {
+				return fmt.Errorf("--issue-number must be greater than 0, got %d", issueNumber)
+			}
+
 			commentBody := os.Getenv("COMMENT_BODY")
 			issueBody := os.Getenv("ISSUE_BODY")
 
