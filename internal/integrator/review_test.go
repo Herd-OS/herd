@@ -841,6 +841,7 @@ func TestReview_NoCommentWhenAllCreatesFail(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, result.FixIssues)
+	assert.True(t, result.AllCreatesFailed, "AllCreatesFailed must be true when all issue creates fail")
 
 	// No findings comment should be posted when all creates fail
 	for _, c := range prSvc.comments {

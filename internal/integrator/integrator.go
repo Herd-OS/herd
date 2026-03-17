@@ -55,11 +55,12 @@ type ReviewParams struct {
 
 // ReviewResult holds the result of a batch PR review.
 type ReviewResult struct {
-	Approved      bool
-	FixIssues     []int
-	FixCycle      int
-	MaxCyclesHit  bool
-	BatchPRNumber int
+	Approved        bool
+	FixIssues       []int
+	FixCycle        int
+	MaxCyclesHit    bool
+	BatchPRNumber   int
+	AllCreatesFailed bool // true when issues were found but every fix-issue Create call failed
 }
 
 // Consolidate merges a completed worker branch into the batch branch.

@@ -47,6 +47,7 @@ type testIssueService struct {
 	createdIssues []*platform.Issue
 	nextIssueNum  int
 	addLabelsErr  error
+	createErr     error
 }
 
 func newTestIssueService() *testIssueService {
@@ -59,6 +60,9 @@ func newTestIssueService() *testIssueService {
 }
 
 func (m *testIssueService) Create(_ context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+	if m.createErr != nil {
+		return nil, m.createErr
+	}
 	iss := &platform.Issue{Number: m.nextIssueNum, Title: title, Body: body, Labels: labels}
 	m.nextIssueNum++
 	m.createdIssues = append(m.createdIssues, iss)
@@ -739,6 +743,54 @@ func TestHandleReview_MaxCyclesHit(t *testing.T) {
 	// The PR should have received the warning comment from integrator.Review.
 	require.NotEmpty(t, prSvc.comments, "expected integrator to post a PR comment on MaxCyclesHit")
 	assert.Contains(t, prSvc.comments[0], "max fix cycles")
+}
+
+func TestHandleReview_AllCreatesFailed(t *testing.T) {
+	// The agent finds issues but every Issues().Create call fails.
+	// handleReview must return an error rather than the misleading
+	// "Review completed (no action taken)." message.
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.createErr = fmt.Errorf("API error: issue creation failed")
+
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Head: "herd/batch/1-batch", Base: "main"},
+		},
+	}
+	p := &testPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &testWorkflowService{},
+		repo:      &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{
+			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}},
+		},
+	}
+
+	dir, g := initHandlerTestRepo(t)
+	ag := &testAgent{reviewResult: &agent.ReviewResult{
+		Approved: false,
+		Comments: []string{"Fix error handling"},
+	}}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Agent:       ag,
+		Git:         g,
+		Config:      baseConfig(),
+		IssueNumber: 50,
+		RepoRoot:    dir,
+		IsPR:        true,
+	}
+	result := handleReview(hctx, Command{Name: "review"})
+
+	require.Error(t, result.Error)
+	assert.Contains(t, result.Error.Error(), "all fix-issue creations failed")
+	assert.Empty(t, result.Message)
 }
 
 // --- Tests for handleFix ---

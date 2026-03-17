@@ -34,5 +34,8 @@ func handleReview(hctx *HandlerContext, cmd Command) Result {
 	if result.Approved || result.MaxCyclesHit || len(result.FixIssues) > 0 {
 		return Result{}
 	}
+	if result.AllCreatesFailed {
+		return Result{Error: fmt.Errorf("review found issues but all fix-issue creations failed")}
+	}
 	return Result{Message: "Review completed (no action taken)."}
 }
