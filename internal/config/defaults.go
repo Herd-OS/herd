@@ -22,6 +22,7 @@ func Default() *Config {
 			RequireCI:                     true,
 			Review:                        true,
 			ReviewMaxFixCycles:            10,
+			ReviewStrictness:              "standard",
 			CIMaxFixCycles:                10,
 		},
 		Monitor: Monitor{

@@ -22,6 +22,7 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, true, cfg.Integrator.RequireCI)
 	assert.Equal(t, true, cfg.Integrator.Review)
 	assert.Equal(t, 10, cfg.Integrator.ReviewMaxFixCycles)
+	assert.Equal(t, "standard", cfg.Integrator.ReviewStrictness)
 	assert.Equal(t, 10, cfg.Integrator.CIMaxFixCycles)
 	assert.Equal(t, 15, cfg.Monitor.PatrolIntervalMinutes)
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
@@ -257,6 +258,45 @@ platform:
 	// Invalid numbers should be silently ignored, keeping defaults
 	assert.Equal(t, 3, cfg.Workers.MaxConcurrent)
 	assert.Equal(t, 30, cfg.Workers.TimeoutMinutes)
+}
+
+func TestValidate_ReviewStrictness(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		wantError bool
+	}{
+		{"standard is valid", "standard", false},
+		{"strict is valid", "strict", false},
+		{"lenient is valid", "lenient", false},
+		{"empty is invalid", "", true},
+		{"unknown is invalid", "relaxed", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Integrator.ReviewStrictness = tt.value
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), "review_strictness")
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
+func TestDefault_ReviewStrictness(t *testing.T) {
+	cfg := Default()
+	assert.Equal(t, "standard", cfg.Integrator.ReviewStrictness)
+}
+
+func TestEnvOverride_ReviewStrictness(t *testing.T) {
+	t.Setenv("HERD_REVIEW_STRICTNESS", "lenient")
+	cfg := Default()
+	applyEnvOverrides(cfg)
+	assert.Equal(t, "lenient", cfg.Integrator.ReviewStrictness)
 }
 
 func TestValidateMultipleErrors(t *testing.T) {

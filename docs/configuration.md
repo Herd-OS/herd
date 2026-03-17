@@ -31,6 +31,7 @@ integrator:
   require_ci: true
   review: true                   # agent reviews batch PRs before merge
   review_max_fix_cycles: 3       # max fix-and-re-review cycles
+  review_strictness: "standard"  # standard | strict | lenient
   ci_max_fix_cycles: 2           # max CI-failure fix cycles (0 = notify-only)
 
 monitor:
@@ -64,5 +65,6 @@ herd config edit                              # open in $EDITOR
 | `HERD_RUNNER_LABEL` | `workers.runner_label` |
 | `HERD_MODEL` | `agent.model` |
 | `HERD_TIMEOUT` | `workers.timeout_minutes` |
+| `HERD_REVIEW_STRICTNESS` | `integrator.review_strictness` |
 
 Environment variables take precedence over `.herdos.yml`.

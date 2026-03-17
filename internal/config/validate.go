@@ -63,6 +63,11 @@ func Validate(cfg *Config) *ValidationError {
 	if cfg.Integrator.ReviewMaxFixCycles < 0 {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.review_max_fix_cycles must be >= 0 (0 = unlimited), got %d", cfg.Integrator.ReviewMaxFixCycles))
 	}
+	switch cfg.Integrator.ReviewStrictness {
+	case "standard", "strict", "lenient":
+	default:
+		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.review_strictness must be one of: standard, strict, lenient — got %q", cfg.Integrator.ReviewStrictness))
+	}
 	if cfg.Integrator.CIMaxFixCycles < 0 {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.ci_max_fix_cycles must be >= 0 (0 = unlimited), got %d", cfg.Integrator.CIMaxFixCycles))
 	}
