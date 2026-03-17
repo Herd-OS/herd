@@ -1134,8 +1134,9 @@ func TestReview_DedupFindings(t *testing.T) {
 		Labels:    []string{issues.StatusDone},
 		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 	}
-	// Include a closed fix issue that should be excluded from dedup,
-	// and an open fix issue that should still dedup.
+	// Include open fix issues (one with StatusDone, one without) that both
+	// participate in dedup. StatusDone means the worker finished but the issue
+	// is still open — it should still dedup to prevent duplicate fix work.
 	issueSvc.listResult = []*platform.Issue{
 		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
 		{Number: 80, State: "closed", Title: "Review fixes (cycle 1)",
@@ -1172,8 +1173,9 @@ func TestReview_DedupFindings(t *testing.T) {
 			Findings: []agent.ReviewFinding{
 				{Severity: "HIGH", Description: "Missing error handling in auth.go"},
 				{Severity: "HIGH", Description: "Race condition in worker pool"},
+				{Severity: "HIGH", Description: "SQL injection in query builder"},
 			},
-			Comments: []string{"Missing error handling in auth.go", "Race condition in worker pool"},
+			Comments: []string{"Missing error handling in auth.go", "Race condition in worker pool", "SQL injection in query builder"},
 		},
 	}
 
