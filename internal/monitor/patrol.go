@@ -148,7 +148,7 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		}
 		if cfg.Monitor.MaxPRHAgeHours > 0 && time.Since(pr.CreatedAt) > time.Duration(cfg.Monitor.MaxPRHAgeHours)*time.Hour {
 			if !hasMonitorComment(ctx, p, pr.Number) {
-				_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
+				_ = p.Issues().AddComment(ctx, pr.Number, fmt.Sprintf(
 					"⚠️ **HerdOS Monitor Alert**\n\nThis batch PR has been open for over %d hours.\n\n%s",
 					cfg.Monitor.MaxPRHAgeHours, buildMentions(cfg.Monitor.NotifyUsers)))
 			}
@@ -168,7 +168,7 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 						// duplicate /herd fix-ci comment. The handler's beforeDispatch
 						// will re-add the label idempotently when workers are dispatched.
 						_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.CIFixPending})
-						_ = p.PullRequests().AddComment(ctx, pr.Number, "/herd fix-ci")
+						_ = p.Issues().AddComment(ctx, pr.Number, "/herd fix-ci")
 					}
 					result.CIFailures++
 				case "success":
