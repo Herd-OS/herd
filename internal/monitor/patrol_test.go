@@ -933,9 +933,10 @@ func TestDeleteCIFixComments_ErrorFallback(t *testing.T) {
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main"},
 	}
-	// Should not panic on error
+	// Should not panic on error, and must still remove the label
 	deleteCIFixComments(context.Background(), mock, 10)
 	assert.Empty(t, issueSvc.deletedComments)
+	assert.Contains(t, issueSvc.removedLabels[10], issues.CIFixPending)
 }
 
 func TestPatrol_NoDuplicateComments(t *testing.T) {
