@@ -131,7 +131,7 @@ Configure at **org level** (recommended for multi-repo) or **repo level**:
 
 The runner image uses a two-layer Dockerfile system:
 
-- **`Dockerfile.herd_runner_base`** — herd-managed, always overwritten by `herd init`. Provides the GitHub Actions runner, Claude Code, Herd CLI (downloaded at startup), and base tools (curl, jq, git, gh, Node.js).
+- **`Dockerfile.herd_runner_base`** — herd-managed, always overwritten by `herd init`. Provides the GitHub Actions runner and base tools (curl, jq, git, gh, Node.js). Both the Herd CLI and Claude Code are downloaded at container startup by `entrypoint.herd.sh` to avoid Docker layer caching stale versions.
 - **`Dockerfile.herd_runner`** — user-owned, created once by `herd init`, never overwritten. Extends the base with `FROM herd-runner-base` and adds project-specific tools (Go, Python, Rust, linters, etc.).
 
 Edit `Dockerfile.herd_runner` to add your project's toolchain. For example, a Go project might add:

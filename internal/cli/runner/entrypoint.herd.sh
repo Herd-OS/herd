@@ -27,6 +27,11 @@ curl -fsSL "$HERD_URL" -o /opt/herd/bin/herd
 chmod +x /opt/herd/bin/herd
 echo "Installed herd $(herd --version 2>/dev/null || echo 'unknown')"
 
+# Install or update Claude Code
+echo "Installing Claude Code..."
+npm install -g @anthropic-ai/claude-code 2>/dev/null
+echo "Installed claude $(claude --version 2>/dev/null || echo 'unknown')"
+
 REPO_OWNER=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\1|')
 REPO_NAME=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\2|')
 
