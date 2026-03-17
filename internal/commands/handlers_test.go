@@ -654,8 +654,7 @@ func TestHandleReview_Approved(t *testing.T) {
 	result := handleReview(hctx, Command{Name: "review"})
 
 	require.NoError(t, result.Error)
-	// integrator.Review already posted the ✅ comment; handler returns empty message
-	assert.Empty(t, result.Message)
+	assert.Contains(t, result.Message, "✅ Review approved batch PR #50")
 }
 
 func TestHandleReview_WithFixes(t *testing.T) {
@@ -698,8 +697,8 @@ func TestHandleReview_WithFixes(t *testing.T) {
 	result := handleReview(hctx, Command{Name: "review"})
 
 	require.NoError(t, result.Error)
-	// integrator.Review already posted the 🔍 findings comment; handler returns empty message
-	assert.Empty(t, result.Message)
+	assert.Contains(t, result.Message, "🔍 Review found 2 issues on batch PR #50")
+	assert.Contains(t, result.Message, "Fix workers dispatched")
 	assert.Len(t, issueSvc.createdIssues, 2)
 }
 
@@ -747,9 +746,7 @@ func TestHandleReview_MaxCyclesHit(t *testing.T) {
 	result := handleReview(hctx, Command{Name: "review"})
 
 	require.NoError(t, result.Error)
-	// integrator.Review posts the max-cycles warning directly on the PR; handler
-	// must return an empty message to avoid posting a duplicate comment.
-	assert.Empty(t, result.Message)
+	assert.Contains(t, result.Message, "⚠️ Review found issues on batch PR #50 but max fix cycles reached")
 	// The PR should have received the warning comment from integrator.Review.
 	require.NotEmpty(t, prSvc.comments, "expected integrator to post a PR comment on MaxCyclesHit")
 	assert.Contains(t, prSvc.comments[0], "max fix cycles")
@@ -1058,6 +1055,70 @@ func TestHandleReview_ExtraInstructions(t *testing.T) {
 	require.NoError(t, result.Error)
 	assert.Contains(t, capturedOpts.SystemPrompt, "Base instructions")
 	assert.Contains(t, capturedOpts.SystemPrompt, "Focus on security issues")
+}
+
+func TestHandleReview_SingleFixIssue(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Head: "herd/batch/1-batch", Base: "main"},
+		},
+	}
+	wf := &testWorkflowService{}
+	p := &testPlatform{
+		issues:  issueSvc,
+		prs:     prSvc,
+		workflows: wf,
+		repo:    &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{
+			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}},
+		},
+	}
+
+	dir, g := initHandlerTestRepo(t)
+	ag := &testAgent{reviewResult: &agent.ReviewResult{
+		Approved: false,
+		Comments: []string{"Fix error handling"},
+	}}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Agent:       ag,
+		Git:         g,
+		Config:      baseConfig(),
+		IssueNumber: 50,
+		RepoRoot:    dir,
+		IsPR:        true,
+	}
+	result := handleReview(hctx, Command{Name: "review"})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "1 issue on batch PR #50")
+	// Singular "issue" not "issues"
+	assert.NotContains(t, result.Message, "issues")
+}
+
+func TestPluralize(t *testing.T) {
+	tests := []struct {
+		word string
+		n    int
+		want string
+	}{
+		{"issue", 0, "issues"},
+		{"issue", 1, "issue"},
+		{"issue", 2, "issues"},
+		{"worker", 1, "worker"},
+		{"worker", 5, "workers"},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s_%d", tt.word, tt.n), func(t *testing.T) {
+			assert.Equal(t, tt.want, pluralize(tt.word, tt.n))
+		})
+	}
 }
 
 type capturingTestAgent struct {
