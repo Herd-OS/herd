@@ -121,6 +121,34 @@ func TestIntegratorCmd_SubcommandStructure(t *testing.T) {
 	assert.Contains(t, names, "review")
 }
 
+func TestHandleCommentCmd_ValidatesCommentIDAndIssueNumber(t *testing.T) {
+	tests := []struct {
+		name        string
+		commentID   string
+		issueNumber string
+		wantErrMsg  string
+	}{
+		{"zero comment-id rejected", "0", "1", "--comment-id must be greater than 0"},
+		{"zero issue-number rejected", "1", "0", "--issue-number must be greater than 0"},
+		{"both zero rejected", "0", "0", "--comment-id must be greater than 0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HERD_RUNNER", "true")
+			root := NewRootCmd()
+			root.SetArgs([]string{
+				"integrator", "handle-comment",
+				"--comment-id", tt.commentID,
+				"--issue-number", tt.issueNumber,
+			})
+			err := root.Execute()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrMsg)
+		})
+	}
+}
+
 func TestHandleCommentCmd_RequiresHerdRunner(t *testing.T) {
 	t.Setenv("HERD_RUNNER", "")
 	root := NewRootCmd()
