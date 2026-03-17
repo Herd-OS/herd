@@ -954,16 +954,36 @@ func (m *mockIssueServiceWithCreate) Create(_ context.Context, title, body strin
 // --- New Tests ---
 
 func TestReview_OnlyMediumLowFindings_Approves(t *testing.T) {
-	mock := newReviewTestPlatform(
-		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
-		[]*platform.Issue{
-			{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
 		},
-	)
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
+			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+		}},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
 
 	ag := &mockReviewAgent{
 		reviewResult: &agent.ReviewResult{
 			Approved: false,
+			Summary:  "Looks good overall",
 			Findings: []agent.ReviewFinding{
 				{Severity: "MEDIUM", Description: "Could handle edge case"},
 				{Severity: "LOW", Description: "Typo in comment"},
@@ -979,6 +999,17 @@ func TestReview_OnlyMediumLowFindings_Approves(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, result.Approved, "Should approve when no HIGH findings")
+
+	// Verify both review cycle comment and batch summary comment are posted
+	require.Len(t, prSvc.comments, 2, "Expected review cycle comment and batch summary comment")
+
+	assert.True(t, strings.HasPrefix(prSvc.comments[0], "🔍"), "First comment should be review cycle comment")
+	assert.True(t, strings.Contains(prSvc.comments[1], "Batch Summary"), "Second comment should be batch summary")
+	assert.Contains(t, prSvc.comments[1], "Looks good overall")
+
+	// Verify approve review was submitted
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewApprove, prSvc.reviews[0].event)
 }
 
 func TestReview_RequestChangesReview(t *testing.T) {

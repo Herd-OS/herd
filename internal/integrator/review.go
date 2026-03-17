@@ -226,10 +226,12 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// No high-severity findings — approve with informational comment
+	// No high-severity findings — approve with informational comment and batch summary
 	if len(highFindings) == 0 {
 		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings)
 		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
+		_ = p.PullRequests().AddComment(ctx, pr.Number, summaryComment)
 		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
