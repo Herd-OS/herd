@@ -584,6 +584,58 @@ func TestHandleRetry(t *testing.T) {
 	}
 }
 
+func TestHandleRetry_RemovesRetryPendingLabel(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Labels: []string{issues.StatusFailed, issues.RetryPending},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	wf := &testWorkflowService{}
+	p := &testPlatform{
+		issues:    issueSvc,
+		workflows: wf,
+		repo:      &testRepoService{defaultBranch: "main"},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:      context.Background(),
+		Platform: p,
+		Config:   baseConfig(),
+	}
+	result := handleRetry(hctx, Command{Name: "retry", Args: []string{"42"}})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "Re-dispatched worker for issue #42")
+	// RetryPending label must be removed so the monitor can retry again if this attempt fails.
+	assert.Contains(t, issueSvc.removedLabels[42], issues.RetryPending)
+}
+
+func TestHandleRetry_RemovesRetryPendingLabelEvenWhenNotFailed(t *testing.T) {
+	// If the issue is no longer failed (e.g., already retried), the handler
+	// should still remove the retry-pending label to avoid it persisting.
+	issueSvc := newTestIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Labels: []string{issues.StatusInProgress, issues.RetryPending},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	p := &testPlatform{
+		issues:    issueSvc,
+		workflows: &testWorkflowService{},
+		repo:      &testRepoService{defaultBranch: "main"},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:      context.Background(),
+		Platform: p,
+		Config:   baseConfig(),
+	}
+	result := handleRetry(hctx, Command{Name: "retry", Args: []string{"42"}})
+
+	// Handler should report "not failed" but still remove the label.
+	assert.Contains(t, result.Message, "not failed")
+	assert.Contains(t, issueSvc.removedLabels[42], issues.RetryPending)
+}
+
 func TestHandleRetry_DispatchError(t *testing.T) {
 	issueSvc := newTestIssueService()
 	issueSvc.getResult[42] = &platform.Issue{

@@ -128,6 +128,15 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 				continue
 			}
 
+			if hasRetryPendingLabel(ctx, p, issue.Number) {
+				continue
+			}
+
+			// Add the label BEFORE posting the comment so that a second
+			// concurrent patrol run racing past the hasRetryPendingLabel
+			// check sees the label and skips, rather than posting a
+			// duplicate /herd retry comment.
+			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.RetryPending})
 			// Post /herd retry command — the comment handler will dispatch
 			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
 				"/herd retry %d", issue.Number))
@@ -179,6 +188,21 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 	}
 
 	return result, nil
+}
+
+// hasRetryPendingLabel returns true if the herd/retry-pending label is present on the issue.
+// Fails open (returns false on error) so a broken labels API doesn't silence future retry triggers.
+func hasRetryPendingLabel(ctx context.Context, p platform.Platform, issueNumber int) bool {
+	issue, err := p.Issues().Get(ctx, issueNumber)
+	if err != nil {
+		return false
+	}
+	for _, label := range issue.Labels {
+		if label == issues.RetryPending {
+			return true
+		}
+	}
+	return false
 }
 
 // hasCIFixPendingLabel returns true if the herd/ci-fix-pending label is present on the PR.

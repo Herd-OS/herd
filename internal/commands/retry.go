@@ -25,6 +25,10 @@ func handleRetry(hctx *HandlerContext, cmd Command) Result {
 		return Result{Error: fmt.Errorf("getting issue #%d: %w", issueNum, err)}
 	}
 
+	// Always remove the retry-pending label so the monitor can post a new
+	// retry comment if this attempt fails and the issue returns to failed.
+	_ = hctx.Platform.Issues().RemoveLabels(hctx.Ctx, issueNum, []string{issues.RetryPending})
+
 	status := issues.StatusLabel(issue.Labels)
 	if status != issues.StatusFailed {
 		return Result{Message: fmt.Sprintf("⚠️ Issue #%d is not failed (status: %s).", issueNum, status)}
