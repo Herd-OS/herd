@@ -253,9 +253,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	highFindings = dedupFindings(highFindings, openFixIssues)
 	if len(highFindings) == 0 {
-		// All findings were duplicates of existing fix issues
-		fmt.Println("All high-severity findings are duplicates of existing fix issues, skipping.")
-		return &ReviewResult{BatchPRNumber: pr.Number}, nil
+		// All findings are covered by existing fix issues — approve to unblock
+		// any previous REQUEST_CHANGES review and post an informational comment.
+		fmt.Println("All high-severity findings are duplicates of existing fix issues, approving.")
+		comment := "✅ **HerdOS Agent Review**\n\nAll high-severity findings are already covered by existing fix workers. Approving to unblock the PR."
+		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
+		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
 	// Create single batched fix issue with ALL high-severity findings
