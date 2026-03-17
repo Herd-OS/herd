@@ -6,7 +6,7 @@ platform:
 agent:
     provider: claude
     binary: ""
-    model: ""
+    model: "opus"
 workers:
     max_concurrent: 3
     runner_label: herd-worker

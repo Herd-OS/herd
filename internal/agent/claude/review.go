@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"text/template"
@@ -50,17 +52,20 @@ func (c *ClaudeAgent) Review(ctx context.Context, diff string, opts agent.Review
 		return nil, fmt.Errorf("rendering review prompt: %w", err)
 	}
 
-	args := []string{"-p", prompt, "--dangerously-skip-permissions", "--system-prompt", reviewSystemPrompt}
+	// Pass prompt via stdin to avoid "argument list too long" on large diffs.
+	args := []string{"--dangerously-skip-permissions", "--system-prompt", reviewSystemPrompt}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}
+	args = append(args, "-p")
 
 	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
 	cmd.Dir = opts.RepoRoot
+	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("agent review exited with error: %w\n%s", err, stderr.String())
