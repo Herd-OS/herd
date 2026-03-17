@@ -8,7 +8,6 @@ import (
 
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/issues"
-	"github.com/herd-os/herd/internal/planner"
 	"github.com/herd-os/herd/internal/platform"
 )
 
@@ -106,11 +105,6 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 			return nil, fmt.Errorf("listing completed runs: %w", err)
 		}
 
-		defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("getting default branch: %w", err)
-		}
-
 		for _, issue := range failed {
 			result.FailedIssues++
 
@@ -130,25 +124,22 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 				continue // Backoff not elapsed
 			}
 
-			// Re-dispatch
 			if issue.Milestone == nil {
 				continue
 			}
-			batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
 
-			_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusFailed})
-			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusInProgress})
-			_, err := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
-				"issue_number":    fmt.Sprintf("%d", issue.Number),
-				"batch_branch":    batchBranch,
-				"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
-				"runner_label":    cfg.Workers.RunnerLabel,
-			})
-			if err != nil {
-				_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusInProgress})
-				_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
+			if hasRetryPendingLabel(ctx, p, issue.Number) {
 				continue
 			}
+
+			// Add the label BEFORE posting the comment so that a second
+			// concurrent patrol run racing past the hasRetryPendingLabel
+			// check sees the label and skips, rather than posting a
+			// duplicate /herd retry comment.
+			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.RetryPending})
+			// Post /herd retry command — the comment handler will dispatch
+			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+				"/herd retry %d", issue.Number))
 			result.RedispatchedCount++
 		}
 	} else {
@@ -166,7 +157,7 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		}
 		if cfg.Monitor.MaxPRHAgeHours > 0 && time.Since(pr.CreatedAt) > time.Duration(cfg.Monitor.MaxPRHAgeHours)*time.Hour {
 			if !hasMonitorComment(ctx, p, pr.Number) {
-				_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
+				_ = p.Issues().AddComment(ctx, pr.Number, fmt.Sprintf(
 					"⚠️ **HerdOS Monitor Alert**\n\nThis batch PR has been open for over %d hours.\n\n%s",
 					cfg.Monitor.MaxPRHAgeHours, buildMentions(cfg.Monitor.NotifyUsers)))
 			}
@@ -176,13 +167,22 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		// CI failure detection on batch PRs
 		if cfg.Integrator.RequireCI && strings.HasPrefix(pr.Head, "herd/batch/") {
 			ciStatus, err := p.Checks().GetCombinedStatus(ctx, pr.Head)
-			if err == nil && ciStatus == "failure" {
-				if !hasCIMonitorComment(ctx, p, pr.Number) {
-					_ = p.PullRequests().AddComment(ctx, pr.Number, fmt.Sprintf(
-						"⚠️ **HerdOS Monitor Alert**\n\nCI is failing on batch branch `%s`. The integrator should have dispatched a fix worker. If this persists, manual intervention may be needed.\n\n%s",
-						pr.Head, buildMentions(cfg.Monitor.NotifyUsers)))
+			if err == nil {
+				switch ciStatus {
+				case "failure":
+					if !hasCIFixPendingLabel(ctx, p, pr.Number) {
+						// Add the label BEFORE posting the comment so that a second
+						// concurrent patrol run racing past the hasCIFixPendingLabel
+						// check sees the label and skips, rather than posting a
+						// duplicate /herd fix-ci comment. The handler's beforeDispatch
+						// will re-add the label idempotently when workers are dispatched.
+						_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.CIFixPending})
+						_ = p.Issues().AddComment(ctx, pr.Number, "/herd fix-ci")
+					}
+					result.CIFailures++
+				case "success":
+					deleteCIFixComments(ctx, p, pr.Number)
 				}
-				result.CIFailures++
 			}
 		}
 	}
@@ -190,18 +190,53 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 	return result, nil
 }
 
-func hasCIMonitorComment(ctx context.Context, p platform.Platform, prNumber int) bool {
-	// PR comments are issue comments in GitHub
-	comments, err := p.Issues().ListComments(ctx, prNumber)
+// hasRetryPendingLabel returns true if the herd/retry-pending label is present on the issue.
+// Fails open (returns false on error) so a broken labels API doesn't silence future retry triggers.
+func hasRetryPendingLabel(ctx context.Context, p platform.Platform, issueNumber int) bool {
+	issue, err := p.Issues().Get(ctx, issueNumber)
 	if err != nil {
 		return false
 	}
-	for _, c := range comments {
-		if strings.Contains(c.Body, monitorCommentSignature) && strings.Contains(c.Body, "CI is failing") {
+	for _, label := range issue.Labels {
+		if label == issues.RetryPending {
 			return true
 		}
 	}
 	return false
+}
+
+// hasCIFixPendingLabel returns true if the herd/ci-fix-pending label is present on the PR.
+// Fails open (returns false on error) so a broken labels API doesn't silence future fix triggers.
+// The patrol adds the label before posting the /herd fix-ci comment so that a concurrent
+// patrol run sees the label and skips, narrowing the duplicate-comment race window.
+func hasCIFixPendingLabel(ctx context.Context, p platform.Platform, prNumber int) bool {
+	issue, err := p.Issues().Get(ctx, prNumber)
+	if err != nil {
+		return false
+	}
+	for _, label := range issue.Labels {
+		if label == issues.CIFixPending {
+			return true
+		}
+	}
+	return false
+}
+
+// deleteCIFixComments removes all /herd fix-ci comments from the PR and removes
+// the CIFixPending label, resetting state so future CI failures can trigger a new fix cycle.
+func deleteCIFixComments(ctx context.Context, p platform.Platform, prNumber int) {
+	defer func() {
+		_ = p.Issues().RemoveLabels(ctx, prNumber, []string{issues.CIFixPending})
+	}()
+	comments, err := p.Issues().ListComments(ctx, prNumber)
+	if err != nil {
+		return
+	}
+	for _, c := range comments {
+		if strings.TrimSpace(c.Body) == "/herd fix-ci" {
+			_ = p.Issues().DeleteComment(ctx, c.ID)
+		}
+	}
 }
 
 // BackoffDelay returns the backoff delay for a given failure count.

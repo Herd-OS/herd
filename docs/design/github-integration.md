@@ -119,6 +119,7 @@ Batch PR merged    -> pull_request.closed     -> Issues closed, cleanup
                                                       |
 Cron fires         -> schedule                -> Monitor patrols
 Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
+Comment posted     -> issue_comment.created   -> handle-comment parses and executes
 ```
 
 ### Event Types
@@ -130,6 +131,7 @@ Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
 - **pull_request_review** -- triggers the Integrator to merge batch PRs after human approval + CI pass.
 - **pull_request** -- triggers cleanup when a batch PR is merged (branch deletion, milestone closure).
 - **schedule** -- triggers Monitor patrol. GitHub may delay or skip scheduled runs under load; the Monitor is stateless and catches up on the next patrol.
+- **issue_comment** -- triggers the Integrator's `handle-comment` job when a comment starting with `/herd ` is posted. The workflow validates the commenter's permissions, parses the command, and executes it. This is the entry point for both user-initiated commands and Monitor-posted commands (retry, fix-ci).
 
 All workflows require the `HERD_ENABLED` repository variable to be set to `true`. This prevents workflow storms when `herd init` pushes workflow files before runners are configured. All `${{ }}` expressions in `run:` blocks are passed through environment variables to prevent shell injection.
 
@@ -249,6 +251,10 @@ Runner registration requires admin access to the repository (for the registratio
 **Public repos (caution):** Self-hosted runners are a security risk. Fork PRs can trigger workflows, potentially executing arbitrary code on your runner and exposing secrets. Recommendations: use GitHub-hosted runners instead, disable fork PR triggers, run in containers with no host access, use a dedicated machine, and rotate credentials if compromised.
 
 For maximum isolation, run each runner in a container with ephemeral mode so it is destroyed after each job.
+
+### Comment Command Permissions
+
+Comment commands (`/herd`) are restricted to users with `OWNER`, `MEMBER`, or `COLLABORATOR` association on the repository, plus bot accounts. This is enforced by the CLI, not by GitHub's native permissions. The `author_association` field from the webhook payload is used for validation.
 
 ### Rate Limits and Audit
 

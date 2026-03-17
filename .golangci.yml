@@ -25,14 +25,12 @@ linters-settings:
   gocritic:
     disabled-checks:
       - ifElseChain
-  gosec:
-    excludes:
-      - G204  # subprocess with variable — expected for CLI tool
-      - G301  # directory permissions 0750 — 0755 is standard
-      - G304  # file inclusion via variable — expected for config/template reads
-      - G104  # errors unhandled — covered by errcheck with better granularity
-      - G302  # file permissions 0600 — 0644 is standard for non-secret files
-      - G306  # WriteFile permissions 0600 — 0644 is standard for non-secret files
+  staticcheck:
+    checks:
+      - "all"
+      - "-QF1012"  # allow WriteString(fmt.Sprintf(...)) — pre-existing style throughout codebase
+      - "-ST1000"  # package comments — covered by revive with rule disabled
+      - "-ST1003"  # underscore in names — pre-existing style in some test helpers
   errcheck:
     exclude-functions:
       - (*github.com/spf13/cobra.Command).MarkFlagRequired
@@ -41,7 +39,28 @@ issues:
   exclude-use-default: false
   exclude-rules:
     # Test files can skip error checks on encode/decode in mock handlers
-    - path: _test\.go
+    - path: "_test.go"
       linters:
         - errcheck
         - gosec
+    # G204: subprocess with variable — expected for CLI tool
+    - linters: [gosec]
+      text: "G204"
+    # G301: directory permissions 0750 — 0755 is standard
+    - linters: [gosec]
+      text: "G301"
+    # G304: file inclusion via variable — expected for config/template reads
+    - linters: [gosec]
+      text: "G304"
+    # G104: errors unhandled — covered by errcheck with better granularity
+    - linters: [gosec]
+      text: "G104"
+    # G302: file permissions 0600 — 0644 is standard for non-secret files
+    - linters: [gosec]
+      text: "G302"
+    # G306: WriteFile permissions 0600 — 0644 is standard for non-secret files
+    - linters: [gosec]
+      text: "G306"
+    # G702: command injection via taint analysis — expected for editor/CLI commands
+    - linters: [gosec]
+      text: "G702"

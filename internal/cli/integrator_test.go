@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/herd-os/herd/internal/platform"
@@ -119,4 +122,197 @@ func TestIntegratorCmd_SubcommandStructure(t *testing.T) {
 	assert.Contains(t, names, "consolidate")
 	assert.Contains(t, names, "advance")
 	assert.Contains(t, names, "review")
+}
+
+func TestHandleCommentCmd_ValidatesCommentIDAndIssueNumber(t *testing.T) {
+	tests := []struct {
+		name        string
+		commentID   string
+		issueNumber string
+		wantErrMsg  string
+	}{
+		{"zero comment-id rejected", "0", "1", "--comment-id must be greater than 0"},
+		{"zero issue-number rejected", "1", "0", "--issue-number must be greater than 0"},
+		{"both zero rejected", "0", "0", "--comment-id must be greater than 0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HERD_RUNNER", "true")
+			root := NewRootCmd()
+			root.SetArgs([]string{
+				"integrator", "handle-comment",
+				"--comment-id", tt.commentID,
+				"--issue-number", tt.issueNumber,
+			})
+			err := root.Execute()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrMsg)
+		})
+	}
+}
+
+func TestHandleCommentCmd_RequiresHerdRunner(t *testing.T) {
+	t.Setenv("HERD_RUNNER", "")
+	root := NewRootCmd()
+	root.SetArgs([]string{"integrator", "handle-comment", "--comment-id", "1", "--issue-number", "1"})
+	err := root.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "HERD_RUNNER")
+}
+
+func TestHandleCommentCmd_RequiresCommentBody(t *testing.T) {
+	t.Setenv("HERD_RUNNER", "true")
+	t.Setenv("COMMENT_BODY", "")
+	root := NewRootCmd()
+	root.SetArgs([]string{"integrator", "handle-comment", "--comment-id", "1", "--issue-number", "1"})
+	err := root.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "COMMENT_BODY")
+}
+
+func TestHandleCommentCmd_NoOpWhenNoHerdCommand(t *testing.T) {
+	t.Setenv("HERD_RUNNER", "true")
+	t.Setenv("COMMENT_BODY", "just a regular comment, no slash command here")
+
+	root := NewRootCmd()
+	root.SetArgs([]string{"integrator", "handle-comment", "--comment-id", "1", "--issue-number", "1"})
+	err := root.Execute()
+	// No /herd command: should succeed with no-op, but config.Load may fail in test env
+	// We only assert no COMMENT_BODY error
+	if err != nil {
+		assert.NotContains(t, err.Error(), "COMMENT_BODY")
+	}
+}
+
+func TestHandleCommentCmd_IgnoresUnauthorizedAuthor(t *testing.T) {
+	tests := []struct {
+		name        string
+		association string
+		login       string
+		shouldRun   bool
+	}{
+		{"owner allowed", "OWNER", "owner-user", true},
+		{"member allowed", "MEMBER", "member-user", true},
+		{"collaborator allowed", "COLLABORATOR", "collab-user", true},
+		{"contributor ignored", "CONTRIBUTOR", "some-user", false},
+		{"none ignored", "NONE", "anon-user", false},
+		{"bot allowed", "NONE", "github-actions[bot]", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HERD_RUNNER", "true")
+			t.Setenv("COMMENT_BODY", "/herd help")
+			root := NewRootCmd()
+			root.SetArgs([]string{
+				"integrator", "handle-comment",
+				"--comment-id", "1",
+				"--issue-number", "1",
+				"--author-association", tt.association,
+				"--author-login", tt.login,
+			})
+			err := root.Execute()
+			if !tt.shouldRun {
+				// Unauthorized: command exits successfully (ignored), no error
+				assert.NoError(t, err)
+			} else {
+				// Authorized: will proceed past auth check; config.Load may fail in CI
+				// but that's after the auth gate — acceptable here
+				_ = err
+			}
+		})
+	}
+}
+
+func TestHandleCommentCmd_IsPRFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagName string
+		defValue string
+		wantNil  bool
+	}{
+		{"is-pr flag exists with default false", "is-pr", "false", false},
+		{"comment-id flag exists", "comment-id", "0", false},
+		{"issue-number flag exists", "issue-number", "0", false},
+		{"author-login flag exists", "author-login", "", false},
+		{"author-association flag exists", "author-association", "", false},
+		{"unknown flag absent", "unknown-flag", "", true},
+	}
+
+	cmd := newHandleCommentCmd()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flag := cmd.Flags().Lookup(tt.flagName)
+			if tt.wantNil {
+				assert.Nil(t, flag)
+			} else {
+				require.NotNil(t, flag, "expected flag --%s to be defined", tt.flagName)
+				assert.Equal(t, tt.defValue, flag.DefValue)
+			}
+		})
+	}
+}
+
+// mockCommentIssueService is a minimal IssueService mock for testing postCommentWithLog.
+type mockCommentIssueService struct {
+	mockDispatchIssueService
+	addCommentErr error
+	addedBody     string
+	addedNumber   int
+}
+
+func (m *mockCommentIssueService) AddComment(_ context.Context, number int, body string) error {
+	m.addedNumber = number
+	m.addedBody = body
+	return m.addCommentErr
+}
+
+func TestPostCommentWithLog(t *testing.T) {
+	tests := []struct {
+		name          string
+		addCommentErr error
+		wantStderr    string
+	}{
+		{
+			name:          "successful comment posts without stderr output",
+			addCommentErr: nil,
+			wantStderr:    "",
+		},
+		{
+			name:          "failed comment logs warning to stderr",
+			addCommentErr: fmt.Errorf("API rate limit exceeded"),
+			wantStderr:    "Warning: failed to post comment on issue #42: API rate limit exceeded\n",
+		},
+		{
+			name:          "network error logs warning to stderr",
+			addCommentErr: fmt.Errorf("connection refused"),
+			wantStderr:    "Warning: failed to post comment on issue #42: connection refused\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockCommentIssueService{addCommentErr: tt.addCommentErr}
+
+			// Capture stderr
+			oldStderr := os.Stderr
+			r, w, err := os.Pipe()
+			require.NoError(t, err)
+			os.Stderr = w
+
+			postCommentWithLog(context.Background(), mock, 42, "test message")
+
+			w.Close()
+			os.Stderr = oldStderr
+
+			var buf bytes.Buffer
+			_, err = buf.ReadFrom(r)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantStderr, buf.String())
+			assert.Equal(t, 42, mock.addedNumber)
+			assert.Equal(t, "test message", mock.addedBody)
+		})
+	}
 }

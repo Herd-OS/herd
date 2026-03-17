@@ -155,8 +155,12 @@ func (s *statefulIssueService) AddComment(_ context.Context, number int, body st
 	s.comments[number] = append(s.comments[number], body)
 	return nil
 }
+func (s *statefulIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
 func (s *statefulIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
+}
+func (s *statefulIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
+	return nil
 }
 
 func (s *statefulIssueService) hasLabel(number int, label string) bool {
@@ -555,9 +559,12 @@ func TestOrchestration_WorkerFailure_MonitorRedispatch(t *testing.T) {
 	assert.Equal(t, 1, result.FailedIssues)
 	assert.Equal(t, 1, result.RedispatchedCount)
 
-	// Verify label transition: failed → in-progress
-	assert.True(t, issueSvc.hasLabel(10, issues.StatusInProgress))
-	assert.False(t, issueSvc.hasLabel(10, issues.StatusFailed))
+	// The monitor posts /herd retry as a comment command rather than directly
+	// transitioning labels — label changes are handled by the command handler.
+	// Verify the retry comment was posted and labels remain unchanged.
+	assert.Contains(t, issueSvc.comments[10], "/herd retry 10")
+	assert.False(t, issueSvc.hasLabel(10, issues.StatusInProgress))
+	assert.True(t, issueSvc.hasLabel(10, issues.StatusFailed))
 }
 
 func TestOrchestration_ConflictResolution(t *testing.T) {

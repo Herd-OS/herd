@@ -67,8 +67,10 @@ type RepoInfo struct {
 }
 
 type Comment struct {
-	ID   int64
-	Body string
+	ID                int64
+	Body              string
+	AuthorLogin       string
+	AuthorAssociation string // "OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE", etc.
 }
 
 type MergeMethod string

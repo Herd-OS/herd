@@ -126,6 +126,14 @@ func (s *issueService) AddComment(ctx context.Context, number int, body string) 
 	return nil
 }
 
+func (s *issueService) DeleteComment(ctx context.Context, commentID int64) error {
+	_, err := s.c.gh.Issues.DeleteComment(ctx, s.c.owner, s.c.repo, commentID)
+	if err != nil {
+		return fmt.Errorf("deleting comment %d: %w", commentID, err)
+	}
+	return nil
+}
+
 func (s *issueService) ListComments(ctx context.Context, number int) ([]*platform.Comment, error) {
 	opts := &gh.IssueListCommentsOptions{
 		ListOptions: gh.ListOptions{PerPage: 100},
@@ -138,8 +146,10 @@ func (s *issueService) ListComments(ctx context.Context, number int) ([]*platfor
 		}
 		for _, c := range comments {
 			result = append(result, &platform.Comment{
-				ID:   c.GetID(),
-				Body: c.GetBody(),
+				ID:                c.GetID(),
+				Body:              c.GetBody(),
+				AuthorLogin:       c.GetUser().GetLogin(),
+				AuthorAssociation: c.GetAuthorAssociation(),
 			})
 		}
 		if resp.NextPage == 0 {
@@ -148,6 +158,14 @@ func (s *issueService) ListComments(ctx context.Context, number int) ([]*platfor
 		opts.Page = resp.NextPage
 	}
 	return result, nil
+}
+
+func (s *issueService) CreateCommentReaction(ctx context.Context, commentID int64, reaction string) error {
+	_, _, err := s.c.gh.Reactions.CreateIssueCommentReaction(ctx, s.c.owner, s.c.repo, commentID, reaction)
+	if err != nil {
+		return fmt.Errorf("creating reaction on comment %d: %w", commentID, err)
+	}
+	return nil
 }
 
 func mapIssue(i *gh.Issue) *platform.Issue {

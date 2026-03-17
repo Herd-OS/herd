@@ -13,9 +13,11 @@ import (
 
 // CheckCIParams holds parameters for CI failure handling.
 type CheckCIParams struct {
-	RunID       int64
-	BatchNumber int // Alternative to RunID — used by check_suite trigger
-	RepoRoot    string
+	RunID          int64
+	BatchNumber    int    // Alternative to RunID — used by check_suite trigger
+	RepoRoot       string
+	UserContext    string // Optional hint from the user, prepended to fix issue body
+	BeforeDispatch func() // optional; called once, right before worker dispatch
 }
 
 // CheckCIResult holds the result of CI checking.
@@ -127,6 +129,11 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 	}
 	batchPR := prs[0]
 
+	taskText := "CI is failing on the batch branch. Investigate the failures, fix the issues, and ensure all tests pass."
+	if params.UserContext != "" {
+		taskText = params.UserContext + "\n\n" + taskText
+	}
+
 	body := issues.RenderBody(issues.IssueBody{
 		FrontMatter: issues.FrontMatter{
 			Version:    1,
@@ -135,7 +142,7 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 			CIFixCycle: nextCycle,
 			BatchPR:    batchPR.Number,
 		},
-		Task:    "CI is failing on the batch branch. Investigate the failures, fix the issues, and ensure all tests pass.",
+		Task:    taskText,
 		Context: fmt.Sprintf("CI failed on batch branch `%s` after consolidation (cycle %d).", batchBranch, nextCycle),
 	})
 
@@ -150,6 +157,9 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 	}
 
 	// Dispatch fix worker
+	if params.BeforeDispatch != nil {
+		params.BeforeDispatch()
+	}
 	defaultBranch, _ := p.Repository().GetDefaultBranch(ctx)
 	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
 		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),

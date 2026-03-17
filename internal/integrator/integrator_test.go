@@ -83,8 +83,12 @@ func (m *mockIssueService) AddComment(_ context.Context, number int, body string
 	m.comments[number] = append(m.comments[number], body)
 	return nil
 }
+func (m *mockIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
 func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
+}
+func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
+	return nil
 }
 
 type mockPRService struct {
@@ -140,10 +144,14 @@ type mockWorkflowService struct {
 	runs         map[int64]*platform.Run
 	listResult   []*platform.Run
 	dispatched   []map[string]string
+	onDispatch   func() // optional; called before recording each dispatch
 }
 
 func (m *mockWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) { return 0, nil }
 func (m *mockWorkflowService) Dispatch(_ context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
+	if m.onDispatch != nil {
+		m.onDispatch()
+	}
 	m.dispatched = append(m.dispatched, inputs)
 	return nil, nil
 }

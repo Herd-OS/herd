@@ -9,6 +9,18 @@ const (
 	StatusBlocked    = "herd/status:blocked"
 )
 
+// PR state labels
+const (
+	// CIFixPending is added to a batch PR when the monitor posts /herd fix-ci.
+	// It is removed once CI passes, allowing future failures to re-trigger the command.
+	CIFixPending = "herd/ci-fix-pending"
+
+	// RetryPending is added to a failed issue when the monitor posts /herd retry.
+	// It is removed by the retry handler, preventing duplicate retry comments
+	// when two patrol runs execute before the first retry is processed.
+	RetryPending = "herd/retry-pending"
+)
+
 // Type labels
 const (
 	TypeFeature = "herd/type:feature"
@@ -39,6 +51,8 @@ func AllLabels() []LabelDef {
 		{TypeBugfix, "D93F0B", "Bug fix"},
 		{TypeFix, "E99695", "Auto-generated fix from agent review or conflict resolution"},
 		{TypeManual, "BFD4F2", "Requires human action — not dispatched to workers"},
+		{CIFixPending, "E4E669", "CI fix cycle in progress for this batch PR"},
+		{RetryPending, "D4C5F9", "Monitor-posted retry pending processing"},
 	}
 }
 
