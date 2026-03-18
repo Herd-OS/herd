@@ -953,7 +953,7 @@ func (m *mockIssueServiceWithCreate) Create(_ context.Context, title, body strin
 
 // --- New Tests ---
 
-func TestReview_OnlyMediumLowFindings_Approves(t *testing.T) {
+func TestReview_OnlyLowFindings_Approves(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
 		Number: 42, Title: "Test",
@@ -985,10 +985,9 @@ func TestReview_OnlyMediumLowFindings_Approves(t *testing.T) {
 			Approved: false,
 			Summary:  "Looks good overall",
 			Findings: []agent.ReviewFinding{
-				{Severity: "MEDIUM", Description: "Could handle edge case"},
 				{Severity: "LOW", Description: "Typo in comment"},
 			},
-			Comments: []string{"Could handle edge case", "Typo in comment"},
+			Comments: []string{"Typo in comment"},
 		},
 	}
 
@@ -998,14 +997,13 @@ func TestReview_OnlyMediumLowFindings_Approves(t *testing.T) {
 	}, ReviewParams{RunID: 100, RepoRoot: dir})
 
 	require.NoError(t, err)
-	assert.True(t, result.Approved, "Should approve when no HIGH findings")
+	assert.True(t, result.Approved, "Should approve when only LOW findings")
 
 	// Verify both review cycle comment and batch summary comment are posted
 	require.Len(t, prSvc.comments, 2, "Expected review cycle comment and batch summary comment")
 
 	assert.True(t, strings.HasPrefix(prSvc.comments[0], "🔍"), "First comment should be review cycle comment")
 	assert.True(t, strings.Contains(prSvc.comments[1], "Batch Summary"), "Second comment should be batch summary")
-	assert.Contains(t, prSvc.comments[1], "Looks good overall")
 
 	// Verify approve review was submitted
 	require.Len(t, prSvc.reviews, 1)
@@ -1065,7 +1063,7 @@ func TestReview_RequestChangesReview(t *testing.T) {
 	// Verify CreateReview was called with REQUEST_CHANGES
 	require.Len(t, prSvc.reviews, 1)
 	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
-	assert.Contains(t, prSvc.reviews[0].body, "high-severity issues")
+	assert.Contains(t, prSvc.reviews[0].body, "actionable issues")
 }
 
 func TestReview_BatchFixIssue_SingleIssue(t *testing.T) {
@@ -1641,7 +1639,7 @@ func TestBuildReviewCycleComment(t *testing.T) {
 	assert.Contains(t, comment, "cycle 2 of 5")
 	assert.Contains(t, comment, "Found 3 issues")
 	assert.Contains(t, comment, "**HIGH** (fix worker dispatched → #100)")
-	assert.Contains(t, comment, "**MEDIUM** (informational)")
+	assert.Contains(t, comment, "**MEDIUM** (fix worker dispatched")
 	assert.Contains(t, comment, "**LOW** (informational)")
 }
 
