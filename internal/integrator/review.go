@@ -227,7 +227,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 
 	// Combine HIGH and MEDIUM findings for fix dispatch — only LOW is informational
-	actionableFindings := append(highFindings, mediumFindings...)
+	actionableFindings := make([]agent.ReviewFinding, 0, len(highFindings)+len(mediumFindings))
+	actionableFindings = append(actionableFindings, highFindings...)
+	actionableFindings = append(actionableFindings, mediumFindings...)
 
 	// No actionable findings — approve with informational comment and batch summary
 	if len(actionableFindings) == 0 {
