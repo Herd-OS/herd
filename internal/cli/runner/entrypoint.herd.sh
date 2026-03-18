@@ -39,7 +39,7 @@ REPO_NAME=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\2|')
 
 # Remove stale config from previous run (ephemeral runners leave config behind on restart)
 if [ -f .runner ]; then
-  ./config.sh remove --token "$(get_token)" || true
+  ./config.sh remove --token "$(get_token)" || rm -f .runner .credentials .credentials_rsaparams
 fi
 
 ./config.sh \
