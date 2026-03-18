@@ -226,8 +226,11 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// No high-severity findings — approve with informational comment and batch summary
-	if len(highFindings) == 0 {
+	// Combine HIGH and MEDIUM findings for fix dispatch — only LOW is informational
+	actionableFindings := append(highFindings, mediumFindings...)
+
+	// No actionable findings — approve with informational comment and batch summary
+	if len(actionableFindings) == 0 {
 		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings)
 		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
@@ -251,24 +254,24 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		}
 	}
 
-	highFindings = dedupFindings(highFindings, openFixIssues)
-	if len(highFindings) == 0 {
+	actionableFindings = dedupFindings(actionableFindings, openFixIssues)
+	if len(actionableFindings) == 0 {
 		// All findings are covered by existing fix issues — approve to unblock
 		// any previous REQUEST_CHANGES review and post an informational comment.
-		fmt.Println("All high-severity findings are duplicates of existing fix issues, approving.")
-		comment := "✅ **HerdOS Agent Review**\n\nAll high-severity findings are already covered by existing fix workers. Approving to unblock the PR."
+		fmt.Println("All actionable findings are duplicates of existing fix issues, approving.")
+		comment := "✅ **HerdOS Agent Review**\n\nAll findings are already covered by existing fix workers. Approving to unblock the PR."
 		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
 		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Create single batched fix issue with ALL high-severity findings
+	// Create single batched fix issue with all actionable findings (HIGH + MEDIUM)
 	nextCycle := currentCycle + 1
 
 	var fixTaskBuilder strings.Builder
 	fixTaskBuilder.WriteString("Fix the following issues found during agent review:\n\n")
-	for i, f := range highFindings {
-		fixTaskBuilder.WriteString(fmt.Sprintf("%d. %s\n", i+1, f.Description))
+	for i, f := range actionableFindings {
+		fixTaskBuilder.WriteString(fmt.Sprintf("%d. **[%s]** %s\n", i+1, f.Severity, f.Description))
 	}
 
 	fixBody := issues.RenderBody(issues.IssueBody{
@@ -291,7 +294,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		[]string{issues.TypeFix, issues.StatusInProgress}, &ms.Number)
 	if err != nil {
 		// Failed to create the fix issue
-		return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: len(highFindings)}, nil
+		return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: len(actionableFindings)}, nil
 	}
 
 	// Dispatch single fix worker
@@ -309,7 +312,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsComment)
 
 	// Block merge with Request Changes review
-	reviewBody := fmt.Sprintf("Found %d high-severity issues. Fix worker dispatched → #%d.", len(highFindings), fixIssue.Number)
+	reviewBody := fmt.Sprintf("Found %d actionable issues (HIGH+MEDIUM). Fix worker dispatched → #%d.", len(actionableFindings), fixIssue.Number)
 	_ = p.PullRequests().CreateReview(ctx, pr.Number, reviewBody, platform.ReviewRequestChanges)
 
 	return &ReviewResult{
@@ -476,7 +479,15 @@ func buildReviewCycleComment(cycle, maxCycles int, fixIssueNums []int, high, med
 	}
 
 	if len(medium) > 0 {
-		b.WriteString("**MEDIUM** (informational):\n")
+		if len(fixIssueNums) > 0 {
+			nums := make([]string, len(fixIssueNums))
+			for i, n := range fixIssueNums {
+				nums[i] = fmt.Sprintf("#%d", n)
+			}
+			b.WriteString(fmt.Sprintf("**MEDIUM** (fix worker dispatched → %s):\n", strings.Join(nums, ", ")))
+		} else {
+			b.WriteString("**MEDIUM**:\n")
+		}
 		for _, f := range medium {
 			b.WriteString(fmt.Sprintf("- %s\n", f.Description))
 		}
