@@ -122,6 +122,10 @@ After completing a task, workers post a structured report on the issue:
 - Validation results (build/test/vet/lint status)
 - Full agent output in a collapsible details block
 
+Workers also post a report on the no-op path (when no changes are needed). The
+no-op report includes a "No changes were needed" message with the agent output
+in a collapsible details block.
+
 ### Concurrency
 
 Multiple workers run simultaneously on separate branches. Concurrency is bounded
@@ -135,7 +139,7 @@ GitHub Actions limits.
 | Worker crashes mid-task | Action fails; worker triggers Monitor via workflow_dispatch for immediate response; Monitor re-dispatches or escalates |
 | Worker produces bad code | Integrator re-runs failed CI once (transient filter), then dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
-| Work already done (no-op) | Labels issue done without creating a branch; Integrator advances normally |
+| Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |
 | Runner offline | Action queues until a runner is available; no special handling |
 
 ---
@@ -472,7 +476,7 @@ with 👤 in status output.
 
 Manual tasks participate fully in the DAG:
 
-- **Not dispatched** -- `herd dispatch` skips them
+- **Not dispatched** -- `herd dispatch` skips them, and the internal `dispatchIssue` helper (used by `herd plan` and the Integrator) also skips them
 - **Unblocked on tier advancement** -- when the previous tier completes, manual tasks transition from `blocked` to `ready` like any other task, but are not dispatched to workers
 - **Completed by closing** -- a human closes the issue (or labels it
   `herd/status:done`); the Integrator's `advance-on-close` job detects the

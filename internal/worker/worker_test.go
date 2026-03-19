@@ -349,6 +349,25 @@ func TestReportPostedAfterPush(t *testing.T) {
 		"ForcePush must appear before the report comment to avoid posting before push")
 }
 
+func TestWorkerNoOpPath_PostsReport(t *testing.T) {
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	// The no-op path (diff == "") should post a comment
+	noOpIdx := strings.Index(src, `if diff == ""`)
+	require.NotEqual(t, -1, noOpIdx, "no-op check not found")
+
+	// Find the next return statement after the no-op check
+	noOpBlock := src[noOpIdx : noOpIdx+600]
+	assert.Contains(t, noOpBlock, "AddComment",
+		"no-op path must post a worker report comment")
+	assert.Contains(t, noOpBlock, "Worker Report",
+		"no-op comment should include Worker Report header")
+	assert.Contains(t, noOpBlock, "No changes were needed",
+		"no-op comment should explain that no changes were needed")
+}
+
 func TestRunValidation_NoGoMod(t *testing.T) {
 	dir := t.TempDir()
 	result := runValidation(context.Background(), dir)
