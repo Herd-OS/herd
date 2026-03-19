@@ -209,19 +209,21 @@ When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the
 | Command | Where | Description |
 |---------|-------|-------------|
 | `/herd fix-ci` | Batch PR | Checks CI status and dispatches fix workers if failing |
-| `/herd fix-ci "hint"` | Batch PR | Same as above, with context passed to the fix worker |
+| `/herd fix-ci <hint>` | Batch PR | Same as above, with context passed to the fix worker |
 | `/herd retry <issue-number>` | Any issue/PR | Re-dispatches a failed issue |
 | `/herd review` | Batch PR | Triggers agent review of the batch PR |
-| `/herd review "focus area"` | Batch PR | Same as above, with extra review instructions |
-| `/herd fix "description"` | Batch PR | Creates a fix issue and dispatches a worker |
+| `/herd review <focus area>` | Batch PR | Same as above, with extra review instructions |
+| `/herd fix <description>` | Batch PR | Creates a fix issue and dispatches a worker |
 
 ### Examples
 
 ```
-/herd fix-ci "the Node version file is missing from the Docker image"
+/herd fix-ci the Node version file is missing from the Docker image
 /herd retry 42
-/herd review "focus on error handling in the auth module"
-/herd fix "add missing error check in auth.go line 42"
+/herd review focus on error handling in the auth module
+/herd fix add missing error check in auth.go line 42
 ```
+
+Quotes around the prompt text are optional. You can paste error logs, JSON snippets, or any text directly after the command — everything after the command name (including subsequent lines) is treated as the prompt. The quoted format (`/herd fix "description"`) is also still supported.
 
 The Monitor also uses comment commands internally — it posts `/herd retry <N>` and `/herd fix-ci` comments instead of dispatching directly, keeping all command execution flowing through a single handler.
