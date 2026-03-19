@@ -322,3 +322,53 @@ fi
 	require.NoError(t, reviewErr)
 	assert.True(t, result.Approved)
 }
+
+func TestRenderReviewPrompt_PriorReviewComments(t *testing.T) {
+	tests := []struct {
+		name                string
+		priorReviewComments []string
+		wantSection         bool
+	}{
+		{
+			name:                "nil omits section",
+			priorReviewComments: nil,
+			wantSection:         false,
+		},
+		{
+			name:                "empty slice omits section",
+			priorReviewComments: []string{},
+			wantSection:         false,
+		},
+		{
+			name:                "one comment includes section",
+			priorReviewComments: []string{"🔍 **HerdOS Agent Review** (cycle 1 of 3)\n\nFound 1 issue:\n\n**HIGH**:\n- Missing error handling"},
+			wantSection:         true,
+		},
+		{
+			name:                "multiple comments lists all",
+			priorReviewComments: []string{"🔍 **HerdOS Agent Review** (cycle 1 of 3)\n\nFound 1 issue", "✅ **HerdOS Agent Review** (cycle 2 of 3)\n\nAll good"},
+			wantSection:         true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := agent.ReviewOptions{
+				AcceptanceCriteria:  []string{"works"},
+				PriorReviewComments: tt.priorReviewComments,
+			}
+			prompt, err := renderReviewPrompt("diff", opts)
+			require.NoError(t, err)
+
+			if tt.wantSection {
+				assert.Contains(t, prompt, "## Prior Review History")
+				assert.Contains(t, prompt, "Do NOT contradict prior review decisions")
+				for _, comment := range tt.priorReviewComments {
+					assert.Contains(t, prompt, comment)
+				}
+			} else {
+				assert.NotContains(t, prompt, "## Prior Review History")
+				assert.NotContains(t, prompt, "Do NOT contradict prior review decisions")
+			}
+		})
+	}
+}

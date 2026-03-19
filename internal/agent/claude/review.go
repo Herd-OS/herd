@@ -29,6 +29,15 @@ The following changes were explicitly requested by the user via /herd fix comman
 {{range .UserFixRequests}}- {{.}}
 {{end}}
 {{end}}
+{{if .PriorReviewComments}}
+## Prior Review History
+The following review comments were posted in previous cycles on this PR. Do NOT contradict prior review decisions. If a previous cycle requested a change and a worker implemented it, do not flag that change as an issue. Only flag genuinely new issues not covered by prior reviews:
+{{range .PriorReviewComments}}
+---
+{{.}}
+---
+{{end}}
+{{end}}
 ## Diff
 
 ` + "```diff" + `
@@ -53,12 +62,13 @@ Severity guide:
 const reviewSystemPrompt = `You are a HerdOS code reviewer. Your job is to review a batch of changes produced by AI workers and identify issues. Classify each finding by severity: HIGH (bugs, security), MEDIUM (edge cases, error handling), LOW (style, naming). Respond with JSON only.`
 
 type reviewPromptData struct {
-	AcceptanceCriteria []string
-	Diff               string
-	RoleInstructions   string
-	Strictness         string
-	StrictnessUpper    string
-	UserFixRequests    []string
+	AcceptanceCriteria  []string
+	Diff                string
+	RoleInstructions    string
+	Strictness          string
+	StrictnessUpper     string
+	UserFixRequests     []string
+	PriorReviewComments []string
 }
 
 // Review runs the configured agent in headless mode to review a diff.
@@ -136,11 +146,12 @@ func renderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 	}
 
 	data := reviewPromptData{
-		AcceptanceCriteria: opts.AcceptanceCriteria,
-		Diff:               diff,
-		Strictness:         strictness,
-		StrictnessUpper:    strings.ToUpper(strictness),
-		UserFixRequests:    opts.UserFixRequests,
+		AcceptanceCriteria:  opts.AcceptanceCriteria,
+		Diff:                diff,
+		Strictness:          strictness,
+		StrictnessUpper:     strings.ToUpper(strictness),
+		UserFixRequests:     opts.UserFixRequests,
+		PriorReviewComments: opts.PriorReviewComments,
 	}
 
 	// Use role instructions passed by the caller (integrator loads .herd/integrator.md)
