@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -53,7 +54,8 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 		prompt = opts.SystemPrompt
 	}
 
-	args := []string{"--dangerously-skip-permissions", "--debug"}
+	debugFile := filepath.Join(opts.RepoRoot, "claude-debug.log")
+	args := []string{"--dangerously-skip-permissions", "--debug", "--debug-file", debugFile}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}
@@ -83,8 +85,13 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 	}
 
 	if isSuspiciousOutput(stdout) {
+		// Dump debug log if available
+		if debugData, readErr := os.ReadFile(debugFile); readErr == nil && len(debugData) > 0 {
+			fmt.Printf("=== Claude debug log (attempt 1) ===\n%s\n=== End debug log ===\n", string(debugData))
+		}
 		fmt.Printf("Agent returned suspicious output (len=%d), retrying in %s...\nstdout: %s\nstderr: %s\n",
 			len(strings.TrimSpace(stdout)), retryDelay, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+		_ = os.Remove(debugFile) // clear for retry
 		time.Sleep(retryDelay)
 
 		stdout, stderr, err = runOnce()
@@ -92,6 +99,10 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 			return nil, err
 		}
 		if isSuspiciousOutput(stdout) {
+			// Dump debug log for retry attempt
+			if debugData, readErr := os.ReadFile(debugFile); readErr == nil && len(debugData) > 0 {
+				fmt.Printf("=== Claude debug log (attempt 2) ===\n%s\n=== End debug log ===\n", string(debugData))
+			}
 			return nil, fmt.Errorf("agent returned suspicious output after retry: stdout=%q stderr=%q",
 				strings.TrimSpace(stdout), strings.TrimSpace(stderr))
 		}
