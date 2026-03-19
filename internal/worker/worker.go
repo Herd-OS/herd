@@ -157,7 +157,12 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	}
 
 	if diff == "" {
-		// No changes — label done without pushing
+		// No changes — post report and label done without pushing
+		noOpReport := "**Worker Report**\n\nNo changes were needed — acceptance criteria already satisfied.\n"
+		if rawSummary != "" {
+			noOpReport += fmt.Sprintf("\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
+		}
+		_ = p.Issues().AddComment(ctx, params.IssueNumber, noOpReport)
 		_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress, issues.StatusFailed})
 		_ = p.Issues().AddLabels(ctx, params.IssueNumber, []string{issues.StatusDone})
 		return &ExecResult{NoOp: true}, nil
