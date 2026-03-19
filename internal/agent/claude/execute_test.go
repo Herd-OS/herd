@@ -2,8 +2,10 @@ package claude
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -103,8 +105,8 @@ func TestExecute_YAMLFrontmatterPrompt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			script := dir + "/test-agent.sh"
-			// Capture stdin verbatim to verify it arrives intact
-			err := os.WriteFile(script, []byte("#!/bin/sh\ncat"), 0755)
+			// Capture stdin verbatim with a prefix to avoid triggering suspicious output detection
+			err := os.WriteFile(script, []byte("#!/bin/sh\necho -n 'STDIN_CONTENT_RECEIVED:'\ncat"), 0755)
 			require.NoError(t, err)
 
 			a := New(script, "")
@@ -113,7 +115,7 @@ func TestExecute_YAMLFrontmatterPrompt(t *testing.T) {
 
 			result, err := a.Execute(context.Background(), task, opts)
 			require.NoError(t, err, "prompt starting with %q should not cause a CLI error", tt.body[:min(len(tt.body), 20)])
-			assert.Equal(t, tt.body, result.Summary, "prompt should arrive via stdin verbatim")
+			assert.Equal(t, "STDIN_CONTENT_RECEIVED:"+tt.body, result.Summary, "prompt should arrive via stdin verbatim")
 		})
 	}
 }
@@ -182,4 +184,83 @@ func TestExecute_CapturesOutput(t *testing.T) {
 	result, err := a.Execute(context.Background(), task, opts)
 	require.NoError(t, err)
 	assert.Contains(t, result.Summary, "task completed successfully")
+}
+
+func TestIsSuspiciousOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"empty string", "", true},
+		{"whitespace only", "   \n  ", true},
+		{"execution error", "Execution error", true},
+		{"execution error mixed case", "execution error", true},
+		{"execution error with whitespace", "  Execution error  \n", true},
+		{"short single line", "Error", true},
+		{"short no newline under threshold", "Something bad", true},
+		{"valid short with newline", "line1\nline2", false},
+		{"valid long output", "This is a real agent summary that describes work done on the task", false},
+		{"exactly at threshold single line", strings.Repeat("x", minValidOutputLen), false},
+		{"below threshold single line", strings.Repeat("x", minValidOutputLen-1), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isSuspiciousOutput(tt.output))
+		})
+	}
+}
+
+func TestExecute_SuspiciousOutputReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte("#!/bin/sh\ncat > /dev/null\necho 'Execution error'"), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	task := agent.TaskSpec{Body: "do work"}
+	opts := agent.ExecOptions{RepoRoot: dir}
+
+	_, execErr := a.Execute(context.Background(), task, opts)
+	assert.Error(t, execErr)
+	assert.Contains(t, execErr.Error(), "suspicious output after retry")
+}
+
+func TestExecute_EmptyOutputReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte("#!/bin/sh\ncat > /dev/null"), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	task := agent.TaskSpec{Body: "do work"}
+	opts := agent.ExecOptions{RepoRoot: dir}
+
+	_, execErr := a.Execute(context.Background(), task, opts)
+	assert.Error(t, execErr)
+	assert.Contains(t, execErr.Error(), "suspicious output after retry")
+}
+
+func TestExecute_RetrySucceedsOnSecondAttempt(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	marker := dir + "/attempt"
+	err := os.WriteFile(script, []byte(fmt.Sprintf(`#!/bin/sh
+cat > /dev/null
+if [ -f "%s" ]; then
+  echo "Task completed successfully with detailed output"
+else
+  touch "%s"
+  echo "Execution error"
+fi
+`, marker, marker)), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	task := agent.TaskSpec{Body: "do work"}
+	opts := agent.ExecOptions{RepoRoot: dir}
+
+	result, execErr := a.Execute(context.Background(), task, opts)
+	require.NoError(t, execErr)
+	assert.Contains(t, result.Summary, "Task completed successfully")
 }

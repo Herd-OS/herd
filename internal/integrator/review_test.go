@@ -717,12 +717,15 @@ func TestReview_AgentError(t *testing.T) {
 	}
 
 	dir, g := initTestRepo(t)
-	_, err := Review(context.Background(), mock, ag, g, &config.Config{
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
 		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
 	}, ReviewParams{RunID: 100, RepoRoot: dir})
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "agent review failed")
+	// Agent errors now return a neutral result (not an error) so the workflow
+	// succeeds and the review retries on the next trigger.
+	require.NoError(t, err)
+	assert.False(t, result.Approved)
+	assert.Empty(t, result.FixIssues)
 }
 
 // mockCapturingPRService wraps mockPRService and captures AddComment and CreateReview calls.

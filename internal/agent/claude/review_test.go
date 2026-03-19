@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -216,4 +217,58 @@ func TestRenderReviewPrompt_SeverityGuide(t *testing.T) {
 	assert.Contains(t, prompt, "HIGH: Bugs, security vulnerabilities")
 	assert.Contains(t, prompt, "MEDIUM: Missing edge cases")
 	assert.Contains(t, prompt, "LOW: Style preferences")
+}
+
+func TestReview_SuspiciousOutputReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte("#!/bin/sh\ncat > /dev/null\necho 'Execution error'"), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	_, reviewErr := a.Review(context.Background(), "diff", agent.ReviewOptions{
+		AcceptanceCriteria: []string{"works"},
+		RepoRoot:           dir,
+	})
+	assert.Error(t, reviewErr)
+	assert.Contains(t, reviewErr.Error(), "suspicious output after retry")
+}
+
+func TestReview_EmptyOutputReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte("#!/bin/sh\ncat > /dev/null"), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	_, reviewErr := a.Review(context.Background(), "diff", agent.ReviewOptions{
+		AcceptanceCriteria: []string{"works"},
+		RepoRoot:           dir,
+	})
+	assert.Error(t, reviewErr)
+	assert.Contains(t, reviewErr.Error(), "suspicious output after retry")
+}
+
+func TestReview_RetrySucceedsOnSecondAttempt(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	marker := dir + "/attempt"
+	err := os.WriteFile(script, []byte(fmt.Sprintf(`#!/bin/sh
+cat > /dev/null
+if [ -f "%s" ]; then
+  echo '{"approved": true, "findings": [], "summary": "LGTM"}'
+else
+  touch "%s"
+  echo "Execution error"
+fi
+`, marker, marker)), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	result, reviewErr := a.Review(context.Background(), "diff", agent.ReviewOptions{
+		AcceptanceCriteria: []string{"works"},
+		RepoRoot:           dir,
+	})
+	require.NoError(t, reviewErr)
+	assert.True(t, result.Approved)
 }

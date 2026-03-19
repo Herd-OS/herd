@@ -138,6 +138,9 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 
 	agentResult, err := ag.Execute(ctx, taskSpec, execOpts)
 	if err != nil {
+		_ = p.Issues().AddComment(ctx, params.IssueNumber,
+			fmt.Sprintf("**Worker failed:** agent returned an error.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
+				truncateOutput(err.Error(), 2000)))
 		return nil, fmt.Errorf("agent execution failed: %w", err)
 	}
 
@@ -174,6 +177,9 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 		retryResult, retryErr := ag.Execute(ctx, retrySpec, execOpts)
 		if retryErr != nil {
+			_ = p.Issues().AddComment(ctx, params.IssueNumber,
+				fmt.Sprintf("**Worker failed:** agent returned an error during validation retry.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
+					truncateOutput(retryErr.Error(), 2000)))
 			return nil, fmt.Errorf("agent retry after validation failure: %w", retryErr)
 		}
 		if retryResult != nil && retryResult.Summary != "" {
