@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 )
@@ -69,24 +70,47 @@ func (c *ClaudeAgent) Review(ctx context.Context, diff string, opts agent.Review
 	}
 	args = append(args, "-p")
 
-	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
-	cmd.Dir = opts.RepoRoot
-	cmd.Stdin = strings.NewReader(prompt)
+	runOnce := func() (string, string, error) {
+		cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
+		cmd.Dir = opts.RepoRoot
+		cmd.Stdin = strings.NewReader(prompt)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+		cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("agent review exited with error: %w\n%s", err, stderr.String())
+		if err := cmd.Run(); err != nil {
+			return "", stderr.String(), fmt.Errorf("agent review exited with error: %w\n%s", err, stderr.String())
+		}
+		return stdout.String(), stderr.String(), nil
 	}
 
-	result, err := parseReviewOutput(stdout.String())
+	stdout, stderr, err := runOnce()
+	if err != nil {
+		return nil, err
+	}
+
+	if isSuspiciousOutput(stdout) {
+		fmt.Printf("Review agent returned suspicious output (len=%d), retrying in %s...\nstdout: %s\nstderr: %s\n",
+			len(strings.TrimSpace(stdout)), retryDelay, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+		time.Sleep(retryDelay)
+
+		stdout, stderr, err = runOnce()
+		if err != nil {
+			return nil, err
+		}
+		if isSuspiciousOutput(stdout) {
+			return nil, fmt.Errorf("review agent returned suspicious output after retry: stdout=%q stderr=%q",
+				strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+		}
+	}
+
+	result, err := parseReviewOutput(stdout)
 	if err != nil {
 		// If JSON parsing fails, treat as non-approved with raw output
 		return &agent.ReviewResult{
 			Approved: false,
-			Summary:  fmt.Sprintf("Failed to parse agent output as JSON: %s\nRaw output: %s", err, stdout.String()),
+			Summary:  fmt.Sprintf("Failed to parse agent output as JSON: %s\nRaw output: %s", err, stdout),
 		}, nil
 	}
 

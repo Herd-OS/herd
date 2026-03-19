@@ -484,7 +484,20 @@ Manual tasks participate fully in the DAG:
 
 ---
 
-## 10. Failure Modes
+## 10. Agent Error Resilience
+
+The claude agent package validates output from every agent invocation. When Claude Code exits with code 0 but returns suspicious output (empty, "Execution error", or very short single-line output under 20 characters), the system:
+
+1. **Retries once** after a 5-second delay
+2. If the retry also returns suspicious output, **returns an error** instead of treating it as a successful result
+3. The worker posts a **"Worker failed"** comment on the issue explaining what happened
+4. The deferred error handler labels the issue as `failed` and triggers the Monitor
+
+This prevents the system from marking issues as done when the agent didn't actually do any work (e.g., during API instability). The integrator also handles review agent failures gracefully -- if the review agent fails, the review cycle is skipped entirely (no approval, no fix issues) and will retry on the next trigger.
+
+---
+
+## 11. Failure Modes
 
 ### Worker Fails to Complete
 

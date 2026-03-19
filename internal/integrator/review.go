@@ -182,7 +182,18 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	reviewResult, err := ag.Review(ctx, diff, reviewOpts)
 	if err != nil {
-		return nil, fmt.Errorf("agent review failed: %w", err)
+		// Agent failed (e.g., API error, suspicious output). Don't propagate the
+		// error — return a neutral result so the workflow succeeds and the review
+		// retries on the next trigger.
+		fmt.Printf("Review agent failed: %s. Will retry on next trigger.\n", err)
+		return &ReviewResult{BatchPRNumber: pr.Number}, nil
+	}
+
+	// Guard against failed review that returned a result instead of an error
+	// (backward compatibility with older claude package).
+	if strings.HasPrefix(reviewResult.Summary, "Failed to parse") {
+		fmt.Printf("Review agent returned unparseable output. Will retry on next trigger.\n")
+		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
 
 	// Partition findings by severity

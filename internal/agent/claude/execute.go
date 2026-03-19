@@ -8,17 +8,46 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 )
 
+const (
+	// minValidOutputLen is the minimum stdout length for agent output to be
+	// considered valid. Shorter single-line output is treated as suspicious
+	// (e.g., "Execution error" from API failures).
+	minValidOutputLen = 20
+
+	// retryDelay is the wait time before retrying after suspicious output.
+	retryDelay = 5 * time.Second
+)
+
+// isSuspiciousOutput returns true if the agent's stdout looks like an error
+// rather than real work output. This catches cases where Claude's API returns
+// exit code 0 with just "Execution error" or similar short error messages.
+func isSuspiciousOutput(stdout string) bool {
+	trimmed := strings.TrimSpace(stdout)
+	if trimmed == "" {
+		return true
+	}
+	if strings.EqualFold(trimmed, "Execution error") {
+		return true
+	}
+	// Short single-line output is suspicious — real agent work produces
+	// multi-line summaries or at least a substantive single line.
+	if len(trimmed) < minValidOutputLen && !strings.Contains(trimmed, "\n") {
+		return true
+	}
+	return false
+}
+
 // Execute runs the configured agent in headless mode to complete a task.
 // The task body is passed as the prompt (-p), and the system prompt provides
 // worker instructions. The agent commits as it works in the repo.
+// If the agent returns suspicious output (empty, "Execution error", or very
+// short), Execute retries once after a 5s delay before returning an error.
 func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
-	// Build the prompt: system prompt wraps the task body, so we pass
-	// the full rendered prompt via -p. The task body may start with ---
-	// (YAML front matter) which some CLI parsers misinterpret as a flag.
 	prompt := task.Body
 	if opts.SystemPrompt != "" {
 		prompt = opts.SystemPrompt
@@ -31,25 +60,44 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
 	}
-	// Use -p (print mode) which reads the prompt from stdin, avoiding the
-	// issue body's YAML front matter (---) being misinterpreted as a CLI flag.
 	args = append(args, "-p")
 
-	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
-	cmd.Dir = opts.RepoRoot
-	cmd.Stdin = strings.NewReader(prompt)
+	runOnce := func() (string, string, error) {
+		cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
+		cmd.Dir = opts.RepoRoot
+		cmd.Stdin = strings.NewReader(prompt)
 
-	// Stream to both stdout/stderr (visible in Docker logs and Actions logs)
-	// and capture in buffers for the summary comment.
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+		cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("agent exited with error: %w\n%s", err, stderr.String())
+		if err := cmd.Run(); err != nil {
+			return "", stderr.String(), fmt.Errorf("agent exited with error: %w\n%s", err, stderr.String())
+		}
+		return stdout.String(), stderr.String(), nil
+	}
+
+	stdout, stderr, err := runOnce()
+	if err != nil {
+		return nil, err
+	}
+
+	if isSuspiciousOutput(stdout) {
+		fmt.Printf("Agent returned suspicious output (len=%d), retrying in %s...\nstdout: %s\nstderr: %s\n",
+			len(strings.TrimSpace(stdout)), retryDelay, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+		time.Sleep(retryDelay)
+
+		stdout, stderr, err = runOnce()
+		if err != nil {
+			return nil, err
+		}
+		if isSuspiciousOutput(stdout) {
+			return nil, fmt.Errorf("agent returned suspicious output after retry: stdout=%q stderr=%q",
+				strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+		}
 	}
 
 	return &agent.ExecResult{
-		Summary: stdout.String(),
+		Summary: stdout,
 	}, nil
 }
