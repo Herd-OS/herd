@@ -167,8 +167,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		Strictness:         cfg.Integrator.ReviewStrictness,
 	}
 
-	// Collect /herd fix requests from PR comments
-	reviewOpts.UserFixRequests = collectFixRequests(ctx, p, pr.Number)
+	// Fetch PR comments once for fix requests and prior review context
+	prComments, commentErr := p.Issues().ListComments(ctx, pr.Number)
+	if commentErr != nil {
+		fmt.Printf("Warning: failed to list PR comments: %s\n", commentErr)
+	}
+	reviewOpts.UserFixRequests = collectFixRequestsFromComments(prComments)
+	reviewOpts.PriorReviewComments = collectPriorReviewComments(prComments)
 
 	// Load integrator role instructions
 	ri, readErr := os.ReadFile(filepath.Join(params.RepoRoot, ".herd", "integrator.md"))
@@ -369,6 +374,12 @@ func collectFixRequests(ctx context.Context, p platform.Platform, prNumber int) 
 		fmt.Printf("Warning: failed to list PR comments for fix request collection: %s\n", err)
 		return nil
 	}
+	return collectFixRequestsFromComments(comments)
+}
+
+// collectFixRequestsFromComments extracts the prompt/description from any
+// /herd fix commands in the given comments.
+func collectFixRequestsFromComments(comments []*platform.Comment) []string {
 	var fixes []string
 	for _, c := range comments {
 		body := strings.TrimSpace(c.Body)
@@ -391,6 +402,21 @@ func collectFixRequests(ctx context.Context, p platform.Platform, prNumber int) 
 		}
 	}
 	return fixes
+}
+
+// collectPriorReviewComments returns the full body of any previous HerdOS
+// agent review comments. These are identified by the emoji markers used in
+// buildReviewCycleComment and buildBatchSummaryComment.
+func collectPriorReviewComments(comments []*platform.Comment) []string {
+	var prior []string
+	for _, c := range comments {
+		body := strings.TrimSpace(c.Body)
+		if strings.HasPrefix(body, "🔍 **HerdOS Agent Review**") ||
+			strings.HasPrefix(body, "✅ **HerdOS Agent Review**") {
+			prior = append(prior, body)
+		}
+	}
+	return prior
 }
 
 func findMaxFixCycle(allIssues []*platform.Issue) int {

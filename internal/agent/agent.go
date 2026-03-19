@@ -69,11 +69,12 @@ type ReviewFinding struct {
 }
 
 type ReviewOptions struct {
-	AcceptanceCriteria []string
-	RepoRoot           string
-	SystemPrompt       string
-	Strictness         string   // "standard", "strict", "lenient" — controls review aggressiveness
-	UserFixRequests    []string // Descriptions from /herd fix comments on the batch PR
+	AcceptanceCriteria  []string
+	RepoRoot            string
+	SystemPrompt        string
+	Strictness          string   // "standard", "strict", "lenient" — controls review aggressiveness
+	UserFixRequests     []string // Descriptions from /herd fix comments on the batch PR
+	PriorReviewComments []string // Full text of previous HerdOS review comments on this PR
 }
 
 type ReviewResult struct {

@@ -30,7 +30,7 @@ integrator:
   max_conflict_resolution_attempts: 2
   require_ci: true
   review: true                   # agent reviews batch PRs before merge
-  review_max_fix_cycles: 3       # max fix-and-re-review cycles
+  review_max_fix_cycles: 3       # max fix-and-re-review cycles (reviewer reads its prior comments to avoid contradictions)
   review_strictness: "standard"  # standard | strict | lenient
   ci_max_fix_cycles: 2           # max CI-failure fix cycles (0 = notify-only)
 

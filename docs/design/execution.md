@@ -290,7 +290,7 @@ Worker executes fixes, pushes to worker branch
 Integrator consolidates fixes into batch branch
         |
         v
-Agent re-reviews
+Agent re-reviews (with prior review comments as context to avoid contradictions)
         |
         v
 Clean --> approved with batch summary
@@ -301,9 +301,11 @@ and track which review cycle spawned them via a `fix_cycle` field and a
 `batch_pr` reference back to the PR. Findings are deduplicated against open fix
 issues to avoid creating duplicate work.
 
-This cycle repeats until the agent approves or `review_max_fix_cycles` (default
-3) is reached, at which point the Integrator comments on the PR with the
-remaining issues and waits for human intervention.
+On each re-review, the reviewer receives its prior review comments as context to
+maintain consistency and avoid contradicting previous decisions. This cycle
+repeats until the agent approves or `review_max_fix_cycles` (default 3) is
+reached, at which point the Integrator comments on the PR with the remaining
+issues and waits for human intervention.
 
 ### Safety Valve
 
