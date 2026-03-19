@@ -16,10 +16,10 @@ func TestParse(t *testing.T) {
 	}{
 		{"simple command", "/herd fix-ci", &Command{Name: "fix-ci"}, false},
 		{"command with prompt", `/herd fix-ci "the Node version is wrong"`, &Command{Name: "fix-ci", Prompt: "the Node version is wrong"}, false},
-		{"command with arg", "/herd retry 42", &Command{Name: "retry", Args: []string{"42"}}, false},
+		{"command with arg", "/herd retry 42", &Command{Name: "retry", Args: []string{"42"}, Prompt: "42"}, false},
 		{"command with prompt and no args", `/herd review "focus on error handling"`, &Command{Name: "review", Prompt: "focus on error handling"}, false},
 		{"command with arg and prompt", `/herd fix "add missing error check"`, &Command{Name: "fix", Prompt: "add missing error check"}, false},
-		{"command mid-comment", "Some context\n/herd fix-ci\nMore text", &Command{Name: "fix-ci"}, false},
+		{"command mid-comment", "Some context\n/herd fix-ci\nMore text", &Command{Name: "fix-ci", Prompt: "More text"}, false},
 		{"no command", "just a regular comment", nil, false},
 		{"empty herd prefix", "/herd ", nil, false},
 		{"herd without space", "/herdfix-ci", nil, false},
@@ -31,6 +31,16 @@ func TestParse(t *testing.T) {
 		{"unclosed quote", `/herd fix "unclosed`, &Command{}, true},
 		{"unclosed quote no command name before", `/herd "unclosed`, &Command{}, true},
 		{"unclosed quote with spaces", `/herd fix "some prompt without closing`, &Command{}, true},
+		{"unquoted prompt", "/herd fix add error check in auth.go", &Command{Name: "fix", Args: []string{"add", "error", "check", "in", "auth.go"}, Prompt: "add error check in auth.go"}, false},
+		{"unquoted prompt with special chars", "/herd fix check the \"timeout\" in {config} and `utils`", &Command{Name: "fix", Args: []string{"check", "the", "\"timeout\"", "in", "{config}", "and", "`utils`"}, Prompt: "check the \"timeout\" in {config} and `utils`"}, false},
+		{"multi-line unquoted prompt", "/herd fix this is broken\nError: something failed\n  at line 42", &Command{Name: "fix", Args: []string{"this", "is", "broken"}, Prompt: "this is broken\nError: something failed\n  at line 42"}, false},
+		{"multi-line only subsequent lines", "/herd fix\nthe error is on line 5\nstack trace here", &Command{Name: "fix", Prompt: "the error is on line 5\nstack trace here"}, false},
+		{"unquoted fix-ci", "/herd fix-ci the Node version is wrong, check .nvmrc", &Command{Name: "fix-ci", Args: []string{"the", "Node", "version", "is", "wrong,", "check", ".nvmrc"}, Prompt: "the Node version is wrong, check .nvmrc"}, false},
+		{"unquoted review", "/herd review focus on error handling in auth", &Command{Name: "review", Args: []string{"focus", "on", "error", "handling", "in", "auth"}, Prompt: "focus on error handling in auth"}, false},
+		{"quoted prompt still works", `/herd fix "old style prompt"`, &Command{Name: "fix", Prompt: "old style prompt"}, false},
+		{"retry with arg still works", "/herd retry 42", &Command{Name: "retry", Args: []string{"42"}, Prompt: "42"}, false},
+		{"bare command no trailing text", "/herd fix-ci", &Command{Name: "fix-ci"}, false},
+		{"prompt with json blob", `/herd fix {"error": "timeout", "code": 504}`, &Command{Name: "fix", Args: []string{"{\"error\":", "\"timeout\",", "\"code\":", "504}"}, Prompt: "{\"error\": \"timeout\", \"code\": 504}"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -49,9 +59,7 @@ func TestParse(t *testing.T) {
 			if len(tt.want.Args) > 0 {
 				assert.Equal(t, tt.want.Args, got.Args)
 			}
-			if tt.want.Prompt != "" {
-				assert.Equal(t, tt.want.Prompt, got.Prompt)
-			}
+			assert.Equal(t, tt.want.Prompt, got.Prompt)
 		})
 	}
 }
