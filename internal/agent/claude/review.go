@@ -23,6 +23,12 @@ const reviewPromptTemplate = `Review the following code changes. Check each acce
 ## Acceptance Criteria
 {{range .AcceptanceCriteria}}- {{.}}
 {{end}}
+{{if .UserFixRequests}}
+## User-Requested Fixes
+The following changes were explicitly requested by the user via /herd fix commands on this PR. Do NOT flag these as acceptance criteria violations:
+{{range .UserFixRequests}}- {{.}}
+{{end}}
+{{end}}
 ## Diff
 
 ` + "```diff" + `
@@ -52,6 +58,7 @@ type reviewPromptData struct {
 	RoleInstructions   string
 	Strictness         string
 	StrictnessUpper    string
+	UserFixRequests    []string
 }
 
 // Review runs the configured agent in headless mode to review a diff.
@@ -133,6 +140,7 @@ func renderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 		Diff:               diff,
 		Strictness:         strictness,
 		StrictnessUpper:    strings.ToUpper(strictness),
+		UserFixRequests:    opts.UserFixRequests,
 	}
 
 	// Use role instructions passed by the caller (integrator loads .herd/integrator.md)

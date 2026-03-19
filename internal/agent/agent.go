@@ -72,7 +72,8 @@ type ReviewOptions struct {
 	AcceptanceCriteria []string
 	RepoRoot           string
 	SystemPrompt       string
-	Strictness         string // "standard", "strict", "lenient" — controls review aggressiveness
+	Strictness         string   // "standard", "strict", "lenient" — controls review aggressiveness
+	UserFixRequests    []string // Descriptions from /herd fix comments on the batch PR
 }
 
 type ReviewResult struct {
