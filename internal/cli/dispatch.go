@@ -205,6 +205,12 @@ func dispatchIssue(ctx context.Context, client platform.Platform, cfg *config.Co
 		return fmt.Errorf("getting issue #%d: %w", issueNumber, err)
 	}
 
+	// Skip manual tasks — they require human action, not a worker.
+	if issues.HasLabel(issue.Labels, issues.TypeManual) {
+		fmt.Printf("Skipping issue #%d: manual task\n", issueNumber)
+		return nil
+	}
+
 	status := issues.StatusLabel(issue.Labels)
 	if status != issues.StatusReady && status != issues.StatusFailed {
 		return fmt.Errorf("issue #%d is %q, expected ready or failed", issueNumber, status)

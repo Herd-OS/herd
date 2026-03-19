@@ -71,6 +71,24 @@ func TestDispatchIssue_FailedIssueCanBeDispatched(t *testing.T) {
 	assert.Equal(t, []string{issues.StatusInProgress}, mock.issues.addedLabels[42])
 }
 
+func TestDispatchIssue_ManualTaskSkipped(t *testing.T) {
+	mock := newMockPlatformForDispatch()
+	mock.issues.getResult = &platform.Issue{
+		Number: 42,
+		Labels: []string{issues.StatusReady, issues.TypeManual},
+		Milestone: &platform.Milestone{Number: 1, Title: "Test"},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30}}
+	err := dispatchIssue(context.Background(), mock, cfg, 42, "herd/batch/1-test")
+	require.NoError(t, err)
+
+	// Should not have changed any labels or dispatched a workflow
+	assert.Empty(t, mock.issues.removedLabels)
+	assert.Empty(t, mock.issues.addedLabels)
+	assert.Empty(t, mock.workflows.dispatched)
+}
+
 func TestCountActiveWorkers(t *testing.T) {
 	mock := newMockPlatformForDispatch()
 	mock.workflows.runs = []*platform.Run{
