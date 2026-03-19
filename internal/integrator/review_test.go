@@ -1697,6 +1697,136 @@ func TestBuildReviewCycleComment_SingularPlural(t *testing.T) {
 	}
 }
 
+func TestCollectFixRequests(t *testing.T) {
+	tests := []struct {
+		name     string
+		comments []*platform.Comment
+		want     []string
+	}{
+		{
+			name:     "no comments",
+			comments: nil,
+			want:     nil,
+		},
+		{
+			name: "quoted description",
+			comments: []*platform.Comment{
+				{Body: `/herd fix "make the logo bigger"`},
+			},
+			want: []string{"make the logo bigger"},
+		},
+		{
+			name: "unquoted description",
+			comments: []*platform.Comment{
+				{Body: "/herd fix make the logo bigger"},
+			},
+			want: []string{"make the logo bigger"},
+		},
+		{
+			name: "mixed fix and non-fix comments",
+			comments: []*platform.Comment{
+				{Body: "looks good to me"},
+				{Body: `/herd fix "fix the typo"`},
+				{Body: "nice work"},
+				{Body: "/herd fix add error handling"},
+			},
+			want: []string{"fix the typo", "add error handling"},
+		},
+		{
+			name: "empty description skipped",
+			comments: []*platform.Comment{
+				{Body: "/herd fix"},
+			},
+			want: nil,
+		},
+		{
+			name: "/herd fixci not matched",
+			comments: []*platform.Comment{
+				{Body: "/herd fixci something"},
+			},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.listCommentsResult = tt.comments
+			mock := &mockPlatform{
+				issues: issueSvc,
+			}
+			got := collectFixRequests(context.Background(), mock, 1)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestReview_PassesFixRequestsToAgent(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: `/herd fix "use larger font"`},
+	}
+
+	var capturedOpts agent.ReviewOptions
+	captureAgent := &capturingMockAgent{
+		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		capturedOpts: &capturedOpts,
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	dir, g := initTestRepo(t)
+	_, err := Review(context.Background(), mock, captureAgent, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"use larger font"}, capturedOpts.UserFixRequests)
+}
+
+func TestReview_NoFixComments_EmptyUserFixRequests(t *testing.T) {
+	var capturedOpts agent.ReviewOptions
+	captureAgent := &capturingMockAgent{
+		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		capturedOpts: &capturedOpts,
+	}
+
+	mock := newReviewTestPlatform(
+		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		[]*platform.Issue{
+			{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+		},
+	)
+
+	dir, g := initTestRepo(t)
+	_, err := Review(context.Background(), mock, captureAgent, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Nil(t, capturedOpts.UserFixRequests)
+}
+
 func TestBuildBatchSummaryComment(t *testing.T) {
 	tests := []struct {
 		name     string

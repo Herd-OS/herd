@@ -167,6 +167,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		Strictness:         cfg.Integrator.ReviewStrictness,
 	}
 
+	// Collect /herd fix requests from PR comments
+	reviewOpts.UserFixRequests = collectFixRequests(ctx, p, pr.Number)
+
 	// Load integrator role instructions
 	ri, readErr := os.ReadFile(filepath.Join(params.RepoRoot, ".herd", "integrator.md"))
 	if readErr == nil {
@@ -356,6 +359,38 @@ func postMergeCleanup(ctx context.Context, p platform.Platform, msNumber int, ba
 	_ = p.Repository().DeleteBranch(ctx, batchBranch)
 
 	return nil
+}
+
+// collectFixRequests fetches comments on the given issue/PR number and
+// extracts the prompt/description from any /herd fix commands.
+func collectFixRequests(ctx context.Context, p platform.Platform, prNumber int) []string {
+	comments, err := p.Issues().ListComments(ctx, prNumber)
+	if err != nil {
+		fmt.Printf("Warning: failed to list PR comments for fix request collection: %s\n", err)
+		return nil
+	}
+	var fixes []string
+	for _, c := range comments {
+		body := strings.TrimSpace(c.Body)
+		if !strings.HasPrefix(body, "/herd fix") {
+			continue
+		}
+		// Ensure exact command match (not e.g. "/herd fixci")
+		rest := strings.TrimPrefix(body, "/herd fix")
+		if rest != "" && rest[0] != ' ' && rest[0] != '\t' && rest[0] != '\n' {
+			continue
+		}
+		// Extract the description after "/herd fix"
+		desc := strings.TrimSpace(rest)
+		// Strip surrounding quotes if present
+		if len(desc) >= 2 && desc[0] == '"' && desc[len(desc)-1] == '"' {
+			desc = desc[1 : len(desc)-1]
+		}
+		if desc != "" {
+			fixes = append(fixes, desc)
+		}
+	}
+	return fixes
 }
 
 func findMaxFixCycle(allIssues []*platform.Issue) int {
