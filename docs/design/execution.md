@@ -250,7 +250,10 @@ branches are kept for debugging until re-dispatch or batch cancellation.
 
 When all tiers complete and the batch PR opens, the Integrator dispatches an
 agent to review the consolidated diff. The agent checks acceptance criteria,
-looks for bugs, security issues, and style violations.
+looks for bugs, security issues, and style violations. Before reviewing, the
+reviewer collects any `/herd fix` comments from the batch PR and includes them
+as context, so that user-requested changes are not flagged as acceptance
+criteria violations.
 
 ### Severity-Based Filtering
 

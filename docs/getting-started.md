@@ -213,7 +213,7 @@ When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the
 | `/herd retry <issue-number>` | Any issue/PR | Re-dispatches a failed issue |
 | `/herd review` | Batch PR | Triggers agent review of the batch PR |
 | `/herd review <focus area>` | Batch PR | Same as above, with extra review instructions |
-| `/herd fix <description>` | Batch PR | Creates a fix issue and dispatches a worker |
+| `/herd fix <description>` | Batch PR | Creates a fix issue and dispatches a worker. The reviewer automatically recognizes these fixes and will not flag them as acceptance criteria violations. |
 
 ### Examples
 
