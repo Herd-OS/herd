@@ -264,3 +264,41 @@ fi
 	require.NoError(t, execErr)
 	assert.Contains(t, result.Summary, "Task completed successfully")
 }
+
+func TestExecute_DebugModeDisabledByDefault(t *testing.T) {
+	// Ensure HERD_AGENT_DEBUG is not set
+	t.Setenv("HERD_AGENT_DEBUG", "")
+
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte("#!/bin/sh\ncat > /dev/null\necho \"$@\""), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	task := agent.TaskSpec{Body: "test"}
+	opts := agent.ExecOptions{RepoRoot: dir}
+
+	result, execErr := a.Execute(context.Background(), task, opts)
+	require.NoError(t, execErr)
+	// Should NOT contain --debug flag
+	assert.NotContains(t, result.Summary, "--debug")
+}
+
+func TestExecute_DebugModeEnabledByEnvVar(t *testing.T) {
+	t.Setenv("HERD_AGENT_DEBUG", "true")
+
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte("#!/bin/sh\ncat > /dev/null\necho \"$@\""), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	task := agent.TaskSpec{Body: "test"}
+	opts := agent.ExecOptions{RepoRoot: dir}
+
+	result, execErr := a.Execute(context.Background(), task, opts)
+	require.NoError(t, execErr)
+	// Should contain --debug flag and --debug-file
+	assert.Contains(t, result.Summary, "--debug")
+	assert.Contains(t, result.Summary, "--debug-file")
+}

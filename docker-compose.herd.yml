@@ -27,5 +27,6 @@ services:
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - HERD_VERSION=${HERD_VERSION:-}
+      - HERD_AGENT_DEBUG=${HERD_AGENT_DEBUG:-}
     deploy:
       replicas: 3
