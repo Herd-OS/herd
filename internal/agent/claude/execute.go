@@ -53,7 +53,7 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 		prompt = opts.SystemPrompt
 	}
 
-	args := []string{"--dangerously-skip-permissions"}
+	args := []string{"--dangerously-skip-permissions", "--debug"}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}
