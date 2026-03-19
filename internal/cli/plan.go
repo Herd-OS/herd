@@ -268,13 +268,13 @@ func confirmPlan(plan *agent.Plan, tiers [][]int) (*agent.Plan, error) {
 			}
 		}
 
-		fmt.Print("\nCreate batch with issues? [y/n/edit] ")
+		fmt.Print("\nCreate batch with issues? [Y/n/edit] ")
 		if !scanner.Scan() {
 			return nil, fmt.Errorf("cancelled")
 		}
 
 		switch strings.TrimSpace(strings.ToLower(scanner.Text())) {
-		case "y", "yes":
+		case "", "y", "yes":
 			return plan, nil
 		case "n", "no":
 			return nil, fmt.Errorf("plan rejected by user")

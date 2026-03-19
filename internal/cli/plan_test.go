@@ -198,6 +198,58 @@ func TestRunPlanFromFile_BatchNameOverride(t *testing.T) {
 	}
 }
 
+func TestConfirmPlan(t *testing.T) {
+	plan := &agent.Plan{
+		BatchName: "Test",
+		Tasks: []agent.PlannedTask{
+			{Title: "A", Complexity: "low", DependsOn: []int{}},
+		},
+	}
+	tiers := [][]int{{0}}
+
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{name: "empty input defaults to yes", input: "\n"},
+		{name: "y confirms", input: "y\n"},
+		{name: "yes confirms", input: "yes\n"},
+		{name: "Y confirms", input: "Y\n"},
+		{name: "YES confirms", input: "YES\n"},
+		{name: "n rejects", input: "n\n", wantErr: "plan rejected by user"},
+		{name: "no rejects", input: "no\n", wantErr: "plan rejected by user"},
+		{name: "NO rejects", input: "NO\n", wantErr: "plan rejected by user"},
+		{name: "garbage then yes", input: "blah\ny\n"},
+		{name: "EOF cancels", input: "", wantErr: "cancelled"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, w, err := os.Pipe()
+			require.NoError(t, err)
+			defer r.Close()
+
+			origStdin := os.Stdin
+			os.Stdin = r
+			defer func() { os.Stdin = origStdin }()
+
+			_, err = w.WriteString(tc.input)
+			require.NoError(t, err)
+			w.Close()
+
+			result, err := confirmPlan(plan, tiers)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, plan, result)
+			}
+		})
+	}
+}
+
 func TestSlugifyUsedInBatchBranch(t *testing.T) {
 	// Verify the batch branch format matches expectations
 	slug := planner.Slugify("Add JWT authentication")
