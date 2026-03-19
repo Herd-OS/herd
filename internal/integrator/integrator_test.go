@@ -37,12 +37,13 @@ func (m *mockPlatform) Repository() platform.RepositoryService     { return m.re
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 type mockIssueService struct {
-	getResult      map[int]*platform.Issue
-	listResult     []*platform.Issue
-	addedLabels    map[int][]string
-	removedLabels  map[int][]string
-	updatedIssues  map[int]platform.IssueUpdate
-	comments       map[int][]string
+	getResult          map[int]*platform.Issue
+	listResult         []*platform.Issue
+	addedLabels        map[int][]string
+	removedLabels      map[int][]string
+	updatedIssues      map[int]platform.IssueUpdate
+	comments           map[int][]string
+	listCommentsResult []*platform.Comment
 }
 
 func newMockIssueService() *mockIssueService {
@@ -85,7 +86,7 @@ func (m *mockIssueService) AddComment(_ context.Context, number int, body string
 }
 func (m *mockIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
 func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
-	return nil, nil
+	return m.listCommentsResult, nil
 }
 func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
 	return nil
