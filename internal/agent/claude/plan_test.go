@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -95,6 +96,10 @@ func TestRenderPrompt_Basic(t *testing.T) {
 	assert.Contains(t, prompt, "Exact file paths")
 	assert.Contains(t, prompt, "context_from_dependencies")
 	assert.NotContains(t, prompt, "Project-Specific Instructions")
+	assert.NotContains(t, prompt, "Repository Structure")
+	assert.NotContains(t, prompt, "Project Overview")
+	assert.NotContains(t, prompt, "Recent Changes")
+	assert.NotContains(t, prompt, "Active Batches")
 }
 
 func TestRenderPrompt_WithRoleInstructions(t *testing.T) {
@@ -151,6 +156,87 @@ func TestPlanJSONRoundTrip(t *testing.T) {
 	var got agent.Plan
 	require.NoError(t, json.Unmarshal(data, &got))
 	assert.Equal(t, plan, got)
+}
+
+func TestRenderPrompt_WithRepoContext(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Create README.md
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "README.md"), []byte("# My Project\nA test project"), 0o644))
+
+	// Create go.mod
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.com/foo\n\ngo 1.22"), 0o644))
+
+	// Create subdirectory cmd/app/
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "cmd", "app"), 0o755))
+
+	// Init git repo and make a commit
+	cmds := [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "add", "."},
+		{"git", "commit", "-m", "initial commit"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = tmp
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, out)
+	}
+
+	opts := agent.PlanOptions{
+		RepoRoot:   tmp,
+		OutputPath: filepath.Join(tmp, "plan.json"),
+		Context:    map[string]string{},
+	}
+
+	prompt, err := renderPrompt(opts)
+	require.NoError(t, err)
+
+	assert.Contains(t, prompt, "## Repository Structure")
+	assert.Contains(t, prompt, "cmd/")
+	assert.Contains(t, prompt, "## Project Overview")
+	assert.Contains(t, prompt, "# My Project")
+	assert.Contains(t, prompt, "## Tech Stack (go.mod)")
+	assert.Contains(t, prompt, "module example.com/foo")
+	assert.Contains(t, prompt, "## Recent Changes")
+}
+
+func TestRenderPrompt_WithMilestones(t *testing.T) {
+	opts := agent.PlanOptions{
+		RepoRoot:   "/home/user/project",
+		OutputPath: "/tmp/plan.json",
+		Context: map[string]string{
+			"milestones": "- Batch #5: Add auth (3 open, 1 closed)",
+		},
+	}
+
+	prompt, err := renderPrompt(opts)
+	require.NoError(t, err)
+
+	assert.Contains(t, prompt, "## Active Batches")
+	assert.Contains(t, prompt, "- Batch #5: Add auth (3 open, 1 closed)")
+}
+
+func TestRenderPrompt_SkipsHerdOSConfig(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Create .herdos.yml — should not get its own dedicated section
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, ".herdos.yml"), []byte("version: 1"), 0o644))
+
+	opts := agent.PlanOptions{
+		RepoRoot:   tmp,
+		OutputPath: filepath.Join(tmp, "plan.json"),
+		Context:    map[string]string{},
+	}
+
+	prompt, err := renderPrompt(opts)
+	require.NoError(t, err)
+
+	// .herdos.yml should not be rendered as a tech stack or special section
+	assert.NotContains(t, prompt, "Tech Stack (.herdos.yml)")
+	assert.NotContains(t, prompt, "version: 1")
 }
 
 func writeTempPlan(t *testing.T, plan agent.Plan) string {

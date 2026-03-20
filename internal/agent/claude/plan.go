@@ -16,7 +16,32 @@ const planningPromptTemplate = `You are a planning assistant for HerdOS. Your jo
 
 ## Repository
 Working directory: {{.RepoRoot}}
-
+{{if .DirTree}}
+## Repository Structure
+` + "`" + "`" + "`" + `
+{{.DirTree}}
+` + "`" + "`" + "`" + `
+{{end}}
+{{- if .ReadmeContents}}
+## Project Overview (README.md)
+{{.ReadmeContents}}
+{{end}}
+{{- if .ManifestContents}}
+## Tech Stack ({{.ManifestName}})
+` + "`" + "`" + "`" + `
+{{.ManifestContents}}
+` + "`" + "`" + "`" + `
+{{end}}
+{{- if .GitLog}}
+## Recent Changes
+` + "`" + "`" + "`" + `
+{{.GitLog}}
+` + "`" + "`" + "`" + `
+{{end}}
+{{- if .Milestones}}
+## Active Batches
+{{.Milestones}}
+{{end}}
 ## Instructions
 - Ask clarifying questions before decomposing. Do not guess requirements.
 - Read the codebase to understand architecture, patterns, and conventions before proposing tasks.
@@ -110,6 +135,12 @@ type promptData struct {
 	RepoRoot         string
 	OutputPath       string
 	RoleInstructions string
+	DirTree          string
+	ReadmeContents   string
+	ManifestName     string
+	ManifestContents string
+	GitLog           string
+	Milestones       string
 }
 
 // Plan launches Claude Code in interactive mode for a planning session.
@@ -157,6 +188,20 @@ func renderPrompt(opts agent.PlanOptions) (string, error) {
 	}
 	if ri, ok := opts.Context["role_instructions"]; ok {
 		data.RoleInstructions = ri
+	}
+	if ms, ok := opts.Context["milestones"]; ok {
+		data.Milestones = ms
+	}
+
+	// Gather repository context (best-effort)
+	data.DirTree = gatherDirTree(opts.RepoRoot)
+	data.ReadmeContents = gatherKeyFile(opts.RepoRoot, "README.md", maxFileChars)
+	data.GitLog = gatherGitLog(opts.RepoRoot)
+
+	manifest := detectManifestFile(opts.RepoRoot)
+	if manifest != "" {
+		data.ManifestName = manifest
+		data.ManifestContents = gatherKeyFile(opts.RepoRoot, manifest, maxFileChars)
 	}
 
 	var buf bytes.Buffer
