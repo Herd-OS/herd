@@ -15,6 +15,7 @@ import (
 	"github.com/herd-os/herd/internal/agent/claude"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/display"
+	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/planner"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -131,6 +132,18 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 		return err
 	}
 
+	// Create platform client early for context gathering
+	client, err := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
+	if err != nil {
+		return err
+	}
+
+	// Fetch open milestones (best-effort)
+	milestonesCtx := ""
+	if milestones, err := client.Milestones().List(ctx); err == nil {
+		milestonesCtx = formatOpenMilestones(milestones)
+	}
+
 	// Generate plan ID and output path
 	planID := fmt.Sprintf("%d", time.Now().UnixNano())
 	stateDir := filepath.Join(".", ".herd", "state")
@@ -158,6 +171,9 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 	}
 	if roleInstructions != "" {
 		opts.Context["role_instructions"] = roleInstructions
+	}
+	if milestonesCtx != "" {
+		opts.Context["milestones"] = milestonesCtx
 	}
 
 	// Create agent and launch planning session
@@ -187,12 +203,6 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 	if dryRun {
 		printDryRun(plan, tiers)
 		return nil
-	}
-
-	// Create platform client
-	client, err := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
-	if err != nil {
-		return err
 	}
 
 	// Create issues, milestone, and batch branch
@@ -363,4 +373,18 @@ func printDryRun(plan *agent.Plan, tiers [][]int) {
 		}
 	}
 	fmt.Printf("Would dispatch Tier 0 (%d issues)\n", len(tiers[0]))
+}
+
+// formatOpenMilestones formats open milestones as a newline-separated string.
+// Milestones with a state other than "open" are filtered out.
+func formatOpenMilestones(milestones []*platform.Milestone) string {
+	var lines []string
+	for _, ms := range milestones {
+		if ms.State != "open" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- Batch #%d: %s (%d open, %d closed)",
+			ms.Number, ms.Title, ms.OpenIssues, ms.ClosedIssues))
+	}
+	return strings.Join(lines, "\n")
 }
