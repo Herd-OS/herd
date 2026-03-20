@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/planner"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -246,6 +247,69 @@ func TestConfirmPlan(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, plan, result)
 			}
+		})
+	}
+}
+
+func TestFormatOpenMilestones(t *testing.T) {
+	tests := []struct {
+		name       string
+		milestones []*platform.Milestone
+		want       string
+	}{
+		{
+			name:       "nil milestones",
+			milestones: nil,
+			want:       "",
+		},
+		{
+			name:       "empty milestones",
+			milestones: []*platform.Milestone{},
+			want:       "",
+		},
+		{
+			name: "single open milestone",
+			milestones: []*platform.Milestone{
+				{Number: 5, Title: "Add auth", State: "open", OpenIssues: 3, ClosedIssues: 1},
+			},
+			want: "- Batch #5: Add auth (3 open, 1 closed)",
+		},
+		{
+			name: "multiple open milestones",
+			milestones: []*platform.Milestone{
+				{Number: 5, Title: "Add auth", State: "open", OpenIssues: 3, ClosedIssues: 1},
+				{Number: 6, Title: "Fix bugs", State: "open", OpenIssues: 2, ClosedIssues: 4},
+			},
+			want: "- Batch #5: Add auth (3 open, 1 closed)\n- Batch #6: Fix bugs (2 open, 4 closed)",
+		},
+		{
+			name: "filters out closed milestones",
+			milestones: []*platform.Milestone{
+				{Number: 3, Title: "Old batch", State: "closed", OpenIssues: 0, ClosedIssues: 5},
+				{Number: 5, Title: "Current batch", State: "open", OpenIssues: 3, ClosedIssues: 1},
+			},
+			want: "- Batch #5: Current batch (3 open, 1 closed)",
+		},
+		{
+			name: "all closed returns empty",
+			milestones: []*platform.Milestone{
+				{Number: 3, Title: "Old batch", State: "closed", OpenIssues: 0, ClosedIssues: 5},
+			},
+			want: "",
+		},
+		{
+			name: "zero issues milestone",
+			milestones: []*platform.Milestone{
+				{Number: 7, Title: "New batch", State: "open", OpenIssues: 0, ClosedIssues: 0},
+			},
+			want: "- Batch #7: New batch (0 open, 0 closed)",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatOpenMilestones(tc.milestones)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }

@@ -84,7 +84,7 @@ Decompose a feature into tasks with an interactive agent session:
 herd plan "Add user authentication"
 ```
 
-The agent asks clarifying questions, then produces a decomposition with tasks, dependencies, and tier assignments. You can confirm, reject, or edit the plan in `$EDITOR`.
+The planner automatically reads the repository structure, README, tech stack manifest, recent git history, and active batches to give the agent context about your project. The agent asks clarifying questions, then produces a decomposition with tasks, dependencies, and tier assignments. You can confirm, reject, or edit the plan in `$EDITOR`.
 
 To plan without auto-dispatching Tier 0:
 
