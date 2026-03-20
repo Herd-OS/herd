@@ -60,10 +60,10 @@ Controls how aggressively the agent reviewer flags issues:
 
 Findings are classified by severity:
 - **HIGH**: Bugs, security vulnerabilities, race conditions, missing critical error handling — triggers fix workers
-- **MEDIUM**: Missing edge cases, suboptimal error handling — informational only
+- **MEDIUM**: Missing edge cases, suboptimal error handling — triggers fix workers
 - **LOW**: Style preferences, naming suggestions — informational only
 
-Only HIGH severity findings create fix issues and dispatch workers. MEDIUM and LOW findings are listed in the PR comment for reference.
+HIGH and MEDIUM severity findings create fix issues and dispatch workers. LOW findings are listed in the PR comment for reference.
 
 ## Managing Configuration
 

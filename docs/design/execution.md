@@ -263,7 +263,7 @@ Review findings are classified by severity:
 | Severity | Examples | Action |
 |----------|----------|--------|
 | HIGH | Bugs, security vulnerabilities, race conditions, missing critical error handling | Creates fix issues, dispatches workers |
-| MEDIUM | Missing edge cases, suboptimal error handling | Listed in PR comment, no fix workers |
+| MEDIUM | Missing edge cases, suboptimal error handling | Creates fix issues, dispatches workers |
 | LOW | Style preferences, naming suggestions | Listed in PR comment, no fix workers |
 
 The `review_strictness` setting (standard/strict/lenient) controls which issues the agent flags. See [Configuration](../configuration.md#review-strictness) for details.
