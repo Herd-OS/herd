@@ -75,7 +75,9 @@ jobs:
           git config user.name "herd-bot"
           git config user.email "herd-bot@users.noreply.github.com"
 
-          if git diff --quiet; then
+          git add -A
+
+          if git diff --cached --quiet; then
             echo "No changes to sync"
             exit 0
           fi
@@ -84,7 +86,6 @@ jobs:
           BRANCH="herd/sync-docs-${SHORT_SHA}"
 
           git checkout -b "$BRANCH"
-          git add -A
           git commit -m "Sync docs from herd@${SHORT_SHA}"
           git push -u origin "$BRANCH"
 
