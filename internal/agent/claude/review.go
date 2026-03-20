@@ -23,12 +23,6 @@ const reviewPromptTemplate = `Review the following code changes. Check each acce
 ## Acceptance Criteria
 {{range .AcceptanceCriteria}}- {{.}}
 {{end}}
-{{if .UserFixRequests}}
-## User-Requested Fixes
-The following changes were explicitly requested by the user via /herd fix commands on this PR. Do NOT flag these as acceptance criteria violations:
-{{range .UserFixRequests}}- {{.}}
-{{end}}
-{{end}}
 {{if .PriorReviewComments}}
 ## Prior Review History
 The following review comments were posted in previous cycles on this PR. Do NOT contradict prior review decisions. If a previous cycle requested a change and a worker implemented it, do not flag that change as an issue. Only flag genuinely new issues not covered by prior reviews:
@@ -67,7 +61,6 @@ type reviewPromptData struct {
 	RoleInstructions    string
 	Strictness          string
 	StrictnessUpper     string
-	UserFixRequests     []string
 	PriorReviewComments []string
 }
 
@@ -150,7 +143,6 @@ func renderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 		Diff:                diff,
 		Strictness:          strictness,
 		StrictnessUpper:     strings.ToUpper(strictness),
-		UserFixRequests:     opts.UserFixRequests,
 		PriorReviewComments: opts.PriorReviewComments,
 	}
 

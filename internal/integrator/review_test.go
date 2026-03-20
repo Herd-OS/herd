@@ -1801,10 +1801,10 @@ func TestReview_PassesFixRequestsToAgent(t *testing.T) {
 	}, ReviewParams{RunID: 100, RepoRoot: dir})
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"use larger font"}, capturedOpts.UserFixRequests)
+	assert.Contains(t, capturedOpts.AcceptanceCriteria, "User requested: use larger font")
 }
 
-func TestReview_NoFixComments_EmptyUserFixRequests(t *testing.T) {
+func TestReview_NoFixComments_NoCriteriaAdded(t *testing.T) {
 	var capturedOpts agent.ReviewOptions
 	captureAgent := &capturingMockAgent{
 		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
@@ -1824,7 +1824,9 @@ func TestReview_NoFixComments_EmptyUserFixRequests(t *testing.T) {
 	}, ReviewParams{RunID: 100, RepoRoot: dir})
 
 	require.NoError(t, err)
-	assert.Nil(t, capturedOpts.UserFixRequests)
+	for _, c := range capturedOpts.AcceptanceCriteria {
+		assert.NotContains(t, c, "User requested:")
+	}
 }
 
 func TestCollectPriorReviewComments(t *testing.T) {
@@ -1923,8 +1925,8 @@ func TestReview_PassesPriorReviewCommentsToAgent(t *testing.T) {
 		"🔍 **HerdOS Agent Review** (cycle 1 of 3)\n\nFound 1 issue:\n\n**HIGH**:\n- Missing error handling",
 		"✅ **HerdOS Agent Review** (cycle 2 of 3)\n\nAll good",
 	}, capturedOpts.PriorReviewComments)
-	// Also verify fix requests still work
-	assert.Equal(t, []string{"use larger font"}, capturedOpts.UserFixRequests)
+	// Also verify fix requests are merged into acceptance criteria
+	assert.Contains(t, capturedOpts.AcceptanceCriteria, "User requested: use larger font")
 }
 
 func TestReview_NoPriorReviewComments_EmptyField(t *testing.T) {

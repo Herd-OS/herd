@@ -160,20 +160,23 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		allCriteria = append(allCriteria, parsed.Criteria...)
 	}
 
-	// Run agent review
-	reviewOpts := agent.ReviewOptions{
-		AcceptanceCriteria: allCriteria,
-		RepoRoot:           params.RepoRoot,
-		Strictness:         cfg.Integrator.ReviewStrictness,
-	}
-
 	// Fetch PR comments once for fix requests and prior review context
 	prComments, commentErr := p.Issues().ListComments(ctx, pr.Number)
 	if commentErr != nil {
 		fmt.Printf("Warning: failed to list PR comments: %s\n", commentErr)
 	}
-	reviewOpts.UserFixRequests = collectFixRequestsFromComments(prComments)
-	reviewOpts.PriorReviewComments = collectPriorReviewComments(prComments)
+	for _, fix := range collectFixRequestsFromComments(prComments) {
+		allCriteria = append(allCriteria, "User requested: "+fix)
+	}
+	priorReviewComments := collectPriorReviewComments(prComments)
+
+	// Run agent review
+	reviewOpts := agent.ReviewOptions{
+		AcceptanceCriteria:  allCriteria,
+		RepoRoot:            params.RepoRoot,
+		Strictness:          cfg.Integrator.ReviewStrictness,
+		PriorReviewComments: priorReviewComments,
+	}
 
 	// Load integrator role instructions
 	ri, readErr := os.ReadFile(filepath.Join(params.RepoRoot, ".herd", "integrator.md"))

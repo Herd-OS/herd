@@ -219,51 +219,35 @@ func TestRenderReviewPrompt_SeverityGuide(t *testing.T) {
 	assert.Contains(t, prompt, "LOW: Style preferences")
 }
 
-func TestRenderReviewPrompt_UserFixRequests(t *testing.T) {
+func TestRenderReviewPrompt_FixRequestsInCriteria(t *testing.T) {
 	tests := []struct {
-		name            string
-		userFixRequests []string
-		wantSection     bool
+		name     string
+		criteria []string
+		wantFix  bool
 	}{
 		{
-			name:            "no fix requests omits section",
-			userFixRequests: nil,
-			wantSection:     false,
+			name:     "no fix requests in criteria",
+			criteria: []string{"works"},
+			wantFix:  false,
 		},
 		{
-			name:            "empty slice omits section",
-			userFixRequests: []string{},
-			wantSection:     false,
-		},
-		{
-			name:            "one fix request includes section",
-			userFixRequests: []string{"Fix typo in README"},
-			wantSection:     true,
-		},
-		{
-			name:            "multiple fix requests lists all",
-			userFixRequests: []string{"Fix typo in README", "Add missing import"},
-			wantSection:     true,
+			name:     "fix request appears in criteria section",
+			criteria: []string{"works", "User requested: make logo bigger"},
+			wantFix:  true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := agent.ReviewOptions{
-				AcceptanceCriteria: []string{"works"},
-				UserFixRequests:    tt.userFixRequests,
+				AcceptanceCriteria: tt.criteria,
 			}
 			prompt, err := renderReviewPrompt("diff", opts)
 			require.NoError(t, err)
 
-			if tt.wantSection {
-				assert.Contains(t, prompt, "## User-Requested Fixes")
-				assert.Contains(t, prompt, "Do NOT flag these as acceptance criteria violations")
-				for _, req := range tt.userFixRequests {
-					assert.Contains(t, prompt, "- "+req)
-				}
-			} else {
-				assert.NotContains(t, prompt, "## User-Requested Fixes")
-				assert.NotContains(t, prompt, "Do NOT flag these as acceptance criteria violations")
+			assert.NotContains(t, prompt, "## User-Requested Fixes")
+			assert.Contains(t, prompt, "## Acceptance Criteria")
+			if tt.wantFix {
+				assert.Contains(t, prompt, "- User requested: make logo bigger")
 			}
 		})
 	}
