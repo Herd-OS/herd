@@ -44,6 +44,24 @@ func TestGatherDirTree_ExcludesAllDirs(t *testing.T) {
 	assert.NotContains(t, out, "bin/\n")
 }
 
+func TestGatherDirTree_ExcludesNestedDirs(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Create a top-level dir with an excluded child dir
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "cmd", ".git"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "cmd", "node_modules"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "cmd", "vendor"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "cmd", "src"), 0o755))
+
+	out := gatherDirTree(tmp)
+
+	assert.Contains(t, out, "cmd/")
+	assert.Contains(t, out, "  src/")
+	assert.NotContains(t, out, ".git")
+	assert.NotContains(t, out, "node_modules")
+	assert.NotContains(t, out, "vendor")
+}
+
 func TestGatherDirTree_Truncation(t *testing.T) {
 	tmp := t.TempDir()
 
@@ -83,7 +101,20 @@ func TestGatherKeyFile_Truncation(t *testing.T) {
 
 	out := gatherKeyFile(tmp, "big.txt", maxFileChars)
 
-	assert.LessOrEqual(t, len(out), maxFileChars+len("\n... (truncated)"))
+	assert.LessOrEqual(t, len([]rune(out)), maxFileChars+len([]rune("\n... (truncated)")))
+	assert.True(t, strings.HasSuffix(out, "... (truncated)"))
+}
+
+func TestGatherKeyFile_UTF8Truncation(t *testing.T) {
+	tmp := t.TempDir()
+	// Each character is 3 bytes in UTF-8; 10 runes = 30 bytes
+	content := strings.Repeat("日", 10)
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "utf8.txt"), []byte(content), 0o644))
+
+	out := gatherKeyFile(tmp, "utf8.txt", 5)
+
+	// Should contain exactly 5 runes + suffix, not split mid-rune
+	assert.Equal(t, "日日日日日\n... (truncated)", out)
 	assert.True(t, strings.HasSuffix(out, "... (truncated)"))
 }
 
@@ -174,10 +205,10 @@ func TestDetectManifestFile(t *testing.T) {
 
 func TestTruncate(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		max      int
-		want     string
+		name      string
+		input     string
+		max       int
+		want      string
 		truncated bool
 	}{
 		{
@@ -198,6 +229,19 @@ func TestTruncate(t *testing.T) {
 			max:       5,
 			want:      "hello\n... (truncated)",
 			truncated: true,
+		},
+		{
+			name:      "multi-byte runes not split",
+			input:     "日本語テスト",
+			max:       3,
+			want:      "日本語\n... (truncated)",
+			truncated: true,
+		},
+		{
+			name:  "multi-byte under limit unchanged",
+			input: "日本",
+			max:   5,
+			want:  "日本",
 		},
 	}
 

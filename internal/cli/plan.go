@@ -132,16 +132,13 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 		return err
 	}
 
-	// Create platform client early for context gathering
-	client, err := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
-	if err != nil {
-		return err
-	}
-
-	// Fetch open milestones (best-effort)
+	// Fetch open milestones (best-effort: client creation or API failure is silently ignored)
 	milestonesCtx := ""
-	if milestones, err := client.Milestones().List(ctx); err == nil {
-		milestonesCtx = formatOpenMilestones(milestones)
+	client, clientErr := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
+	if clientErr == nil {
+		if milestones, err := client.Milestones().List(ctx); err == nil {
+			milestonesCtx = formatOpenMilestones(milestones)
+		}
 	}
 
 	// Generate plan ID and output path
@@ -203,6 +200,15 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 	if dryRun {
 		printDryRun(plan, tiers)
 		return nil
+	}
+
+	// Ensure we have a platform client for issue creation and dispatch.
+	// Unlike the earlier best-effort milestone fetch, this is required.
+	if clientErr != nil {
+		client, clientErr = newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
+		if clientErr != nil {
+			return clientErr
+		}
 	}
 
 	// Create issues, milestone, and batch branch

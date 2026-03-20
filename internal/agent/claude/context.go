@@ -55,6 +55,9 @@ func gatherDirTree(repoRoot string) string {
 		var childDirs, childFiles []string
 		for _, c := range children {
 			if c.IsDir() {
+				if excludedDirs[c.Name()] {
+					continue
+				}
 				childDirs = append(childDirs, c.Name())
 			} else {
 				childFiles = append(childFiles, c.Name())
@@ -108,10 +111,12 @@ func detectManifestFile(repoRoot string) string {
 	return ""
 }
 
-// truncate truncates s to maxChars, appending "\n... (truncated)" if needed.
+// truncate truncates s to maxChars runes, appending "\n... (truncated)" if needed.
+// It operates on runes rather than bytes to avoid splitting multi-byte UTF-8 characters.
 func truncate(s string, maxChars int) string {
-	if len(s) <= maxChars {
+	runes := []rune(s)
+	if len(runes) <= maxChars {
 		return s
 	}
-	return s[:maxChars] + "\n... (truncated)"
+	return string(runes[:maxChars]) + "\n... (truncated)"
 }
