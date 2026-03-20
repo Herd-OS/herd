@@ -77,7 +77,7 @@ The entire flow after `herd plan` is self-driving. The Planner dispatches Tier 0
 
 ### Review and Fix Details
 
-Agent review collects `/herd fix` comments from the batch PR before reviewing, so user-requested fixes are not flagged as violations. It then classifies findings by severity (HIGH, MEDIUM, LOW). Only HIGH severity findings — bugs, security issues, race conditions — trigger fix workers. MEDIUM and LOW findings are included in the PR comment for reference but do not block merge or create fix issues.
+Agent review collects `/herd fix` comments from the batch PR before reviewing, so user-requested fixes are not flagged as violations. It then classifies findings by severity (HIGH, MEDIUM, LOW). HIGH and MEDIUM severity findings trigger fix workers. LOW findings are included in the PR comment for reference but do not block merge or create fix issues.
 
 Each review cycle creates at most one batch fix issue containing all HIGH findings, rather than one issue per finding. The agent submits a Request Changes review to block merge while fix cycles are active. When the review passes, the agent approves and posts a batch summary with statistics (files reviewed, findings by severity, fix cycles used).
 
