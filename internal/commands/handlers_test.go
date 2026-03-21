@@ -41,14 +41,15 @@ func (m *testPlatform) Checks() platform.CheckService            { return m.chec
 // --- Mock IssueService ---
 
 type testIssueService struct {
-	getResult     map[int]*platform.Issue
-	listResult    []*platform.Issue
-	addedLabels   map[int][]string
-	removedLabels map[int][]string
-	createdIssues []*platform.Issue
-	nextIssueNum  int
-	addLabelsErr  error
-	createErr     error
+	getResult          map[int]*platform.Issue
+	listResult         []*platform.Issue
+	addedLabels        map[int][]string
+	removedLabels      map[int][]string
+	createdIssues      []*platform.Issue
+	nextIssueNum       int
+	addLabelsErr       error
+	createErr          error
+	listCommentsResult []*platform.Comment
 }
 
 func newTestIssueService() *testIssueService {
@@ -95,7 +96,7 @@ func (m *testIssueService) RemoveLabels(_ context.Context, number int, labels []
 func (m *testIssueService) AddComment(_ context.Context, _ int, _ string) error  { return nil }
 func (m *testIssueService) DeleteComment(_ context.Context, _ int64) error       { return nil }
 func (m *testIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
-	return nil, nil
+	return m.listCommentsResult, nil
 }
 func (m *testIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
 	return nil
@@ -1079,6 +1080,125 @@ func TestHandleFix_Success(t *testing.T) {
 	assert.Contains(t, result.Message, "🔧 Created fix issue #200")
 	assert.Len(t, issueSvc.createdIssues, 1)
 	assert.Len(t, wf.dispatched, 1)
+}
+
+func TestHandleFix_IncludesConversationHistory(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{ID: 1, AuthorLogin: "alice", Body: "This endpoint is broken"},
+		{ID: 2, AuthorLogin: "herd-bot", Body: "I'll take a look at this"},
+		{ID: 3, AuthorLogin: "bob", Body: "Please also fix the validation"},
+	}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Head: "herd/batch/1-batch"},
+		},
+	}
+	p := &testPlatform{
+		issues:  issueSvc,
+		prs:     prSvc,
+		workflows: &testWorkflowService{},
+		repo:    &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{
+			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "My Batch"}},
+		},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 50,
+		AuthorLogin: "alice",
+		IsPR:        true,
+	}
+	result := handleFix(hctx, Command{Name: "fix", Prompt: "Fix the broken endpoint"})
+
+	require.NoError(t, result.Error)
+	require.Len(t, issueSvc.createdIssues, 1)
+
+	body := issueSvc.createdIssues[0].Body
+	assert.Contains(t, body, "## Conversation History")
+	assert.Contains(t, body, "**@alice:**")
+	assert.Contains(t, body, "This endpoint is broken")
+	assert.Contains(t, body, "**@herd-bot:**")
+	assert.Contains(t, body, "I'll take a look at this")
+	assert.Contains(t, body, "**@bob:**")
+	assert.Contains(t, body, "Please also fix the validation")
+}
+
+func TestHandleFix_NoCommentsOmitsHistory(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	issueSvc.listCommentsResult = nil
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Head: "herd/batch/1-batch"},
+		},
+	}
+	p := &testPlatform{
+		issues:  issueSvc,
+		prs:     prSvc,
+		workflows: &testWorkflowService{},
+		repo:    &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{
+			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "My Batch"}},
+		},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 50,
+		AuthorLogin: "alice",
+		IsPR:        true,
+	}
+	result := handleFix(hctx, Command{Name: "fix", Prompt: "Fix something"})
+
+	require.NoError(t, result.Error)
+	require.Len(t, issueSvc.createdIssues, 1)
+
+	body := issueSvc.createdIssues[0].Body
+	assert.NotContains(t, body, "## Conversation History")
+}
+
+func TestFormatCommentHistory(t *testing.T) {
+	tests := []struct {
+		name     string
+		comments []*platform.Comment
+		want     string
+	}{
+		{
+			name:     "empty slice",
+			comments: []*platform.Comment{},
+			want:     "",
+		},
+		{
+			name: "single comment",
+			comments: []*platform.Comment{
+				{ID: 1, AuthorLogin: "alice", Body: "Hello world"},
+			},
+			want: "**@alice:**\n\nHello world\n",
+		},
+		{
+			name: "multiple comments separated by horizontal rules",
+			comments: []*platform.Comment{
+				{ID: 1, AuthorLogin: "alice", Body: "First comment"},
+				{ID: 2, AuthorLogin: "bob", Body: "Second comment"},
+				{ID: 3, AuthorLogin: "charlie", Body: "Third comment"},
+			},
+			want: "**@alice:**\n\nFirst comment\n\n---\n\n**@bob:**\n\nSecond comment\n\n---\n\n**@charlie:**\n\nThird comment\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatCommentHistory(tt.comments)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 // --- Tests for HandlerContext.IsPR ---
