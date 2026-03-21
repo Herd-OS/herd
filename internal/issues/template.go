@@ -31,6 +31,7 @@ type IssueBody struct {
 	ContextFromDeps       []string
 	Criteria              []string
 	Context               string
+	ConversationHistory   string
 	FilesToModify         []string
 }
 
@@ -125,6 +126,13 @@ func RenderBody(body IssueBody) string {
 	if body.Context != "" {
 		b.WriteString("## Context\n\n")
 		b.WriteString(body.Context)
+		b.WriteString("\n\n")
+	}
+
+	// Conversation History
+	if body.ConversationHistory != "" {
+		b.WriteString("## Conversation History\n\n")
+		b.WriteString(body.ConversationHistory)
 		b.WriteString("\n\n")
 	}
 

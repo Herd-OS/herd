@@ -55,6 +55,17 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 	}
 	nextCycle := currentCycle + 1
 
+	// Fetch PR comment history for context
+	comments, err := hctx.Platform.Issues().ListComments(hctx.Ctx, hctx.IssueNumber)
+	if err != nil {
+		return Result{Error: fmt.Errorf("listing PR #%d comments: %w", hctx.IssueNumber, err)}
+	}
+
+	var history string
+	if len(comments) > 0 {
+		history = formatCommentHistory(comments)
+	}
+
 	body := issues.RenderBody(issues.IssueBody{
 		FrontMatter: issues.FrontMatter{
 			Version:  1,
@@ -63,8 +74,9 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 			FixCycle: nextCycle,
 			BatchPR:  pr.Number,
 		},
-		Task:    cmd.Prompt,
-		Context: fmt.Sprintf("Requested by @%s via `/herd fix` on batch PR #%d.", hctx.AuthorLogin, pr.Number),
+		Task:                cmd.Prompt,
+		Context:             fmt.Sprintf("Requested by @%s via `/herd fix` on batch PR #%d.", hctx.AuthorLogin, pr.Number),
+		ConversationHistory: history,
 	})
 
 	truncated := truncateRunes(cmd.Prompt, 60)
@@ -93,6 +105,18 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 	}
 
 	return Result{Message: fmt.Sprintf("🔧 Created fix issue #%d and dispatched worker.", fixIssue.Number)}
+}
+
+// formatCommentHistory formats PR comments into a markdown conversation log.
+func formatCommentHistory(comments []*platform.Comment) string {
+	var b strings.Builder
+	for i, c := range comments {
+		if i > 0 {
+			b.WriteString("\n---\n\n")
+		}
+		b.WriteString(fmt.Sprintf("**@%s:**\n\n%s\n", c.AuthorLogin, c.Body))
+	}
+	return b.String()
 }
 
 // truncateRunes truncates s to at most n runes, appending "..." if truncated.

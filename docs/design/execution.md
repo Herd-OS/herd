@@ -259,6 +259,11 @@ and track which review cycle spawned them via a `fix_cycle` field and a
 `batch_pr` reference back to the PR. Findings are deduplicated against open fix
 issues to avoid creating duplicate work.
 
+When `/herd fix` creates a fix issue, all comments from the batch PR are
+included as a `## Conversation History` section in the issue body. Each comment
+is formatted as `**@author:**` followed by the comment body, separated by `---`.
+This gives the fix worker full context of prior fix requests and review feedback.
+
 On each re-review, the reviewer receives its prior review comments as context to
 maintain consistency and avoid contradicting previous decisions. This cycle
 repeats until the agent approves or `review_max_fix_cycles` (default 3) is
