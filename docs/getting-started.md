@@ -101,7 +101,7 @@ To bypass all pre-flight checks:
 herd plan --skip-preflight "Add user authentication"
 ```
 
-The planner automatically reads the repository structure, README, tech stack manifest, recent git history, and active batches to give the agent context about your project. The agent asks clarifying questions, then produces a decomposition with tasks, dependencies, and tier assignments. You can confirm, reject, or edit the plan in `$EDITOR`.
+The planner automatically reads the repository structure, README, tech stack manifest, recent git history, and active batches to give the agent context about your project. The agent asks clarifying questions, then produces a decomposition with tasks, dependencies, and tier assignments. You can confirm, reject, or edit the plan in `$EDITOR`. When you exit the session, herd automatically creates issues and dispatches Tier 0 workers — no extra commands needed.
 
 To plan without auto-dispatching Tier 0:
 
@@ -115,13 +115,11 @@ Preview what would be created:
 herd plan --dry-run "Add user authentication"
 ```
 
-Retry a failed plan from a preserved plan file:
+If issue creation fails after planning (e.g., duplicate milestone), the plan file is preserved and the exact `--from-file` command is printed. Use it to retry without re-running the agent session:
 
 ```bash
 herd plan --from-file .herd/state/1234567890.json
 ```
-
-If issue creation fails (e.g., duplicate milestone), the plan file is preserved and the exact `--from-file` command is printed. This skips the agent session and goes straight to confirmation and creation.
 
 ## Dispatching Workers
 

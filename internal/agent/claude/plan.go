@@ -124,7 +124,7 @@ The JSON schema:
 
 Set "manual": true for tasks that require human action outside the repository (e.g., creating external repos, configuring secrets, UI operations, third-party service setup). Manual tasks are tracked as GitHub Issues but not dispatched to workers. They block dependent tiers until a human closes them.
 
-After writing the file, inform the user the plan is saved and they should exit the session.
+After writing the file, inform the user the plan is saved. Tell them to exit the session (Ctrl-C or /exit) to proceed — exiting will automatically move to issue creation and dispatch. Mention that if anything goes wrong, they can re-run with ` + "`" + `herd plan --from-file <path>` + "`" + ` as a fallback, but this is not normally needed.
 Do not accept further prompts after the plan is finalized.
 {{if .RoleInstructions}}
 ## Project-Specific Instructions
