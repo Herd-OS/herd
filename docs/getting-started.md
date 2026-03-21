@@ -84,6 +84,23 @@ Decompose a feature into tasks with an interactive agent session:
 herd plan "Add user authentication"
 ```
 
+### Pre-Flight Git Checks
+
+Before launching the planning session, `herd plan` runs pre-flight git checks to ensure your local repository is in a clean, up-to-date state:
+
+1. **Fetches from origin** — always runs; a fetch failure is non-fatal.
+2. **Branch check** — if you're on a branch other than the default branch, prompts: *"You're on branch 'foo'. Switch to '\<default\>' and pull latest? [Y/n]"*
+3. **Behind remote check** — if your local branch is behind the remote, prompts: *"Local is N commits behind origin/\<branch\>. Pull latest? [Y/n]"*
+4. **Dirty working tree warning** — if you have uncommitted changes, shows: *"Working tree has uncommitted changes. The planner will see your local state."*
+
+If you accept a prompt to switch branches or pull but have a dirty working tree, the command exits with an error asking you to stash or commit first.
+
+To bypass all pre-flight checks:
+
+```bash
+herd plan --skip-preflight "Add user authentication"
+```
+
 The planner automatically reads the repository structure, README, tech stack manifest, recent git history, and active batches to give the agent context about your project. The agent asks clarifying questions, then produces a decomposition with tasks, dependencies, and tier assignments. You can confirm, reject, or edit the plan in `$EDITOR`.
 
 To plan without auto-dispatching Tier 0:

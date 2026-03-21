@@ -11,6 +11,17 @@ The Planner is HerdOS's local planning and orchestration component. It runs on y
 
 The Planner is not a persistent process. It runs when you invoke a `herd` command and exits when done. There is no daemon, no background polling.
 
+## Pre-Flight Git Checks
+
+Before launching the agent session, `herd plan` runs pre-flight checks to ensure the local repository is in a good state. This prevents planning against stale or diverged code.
+
+1. **Fetch from origin** — always runs; failure is non-fatal.
+2. **Branch check** — prompts to switch to the default branch if on a different branch.
+3. **Behind remote check** — prompts to pull if local is behind the remote.
+4. **Dirty working tree** — warns that the planner will see uncommitted local state. Switching or pulling with a dirty tree is a hard error.
+
+Use `--skip-preflight` to bypass all checks (e.g., when intentionally planning from a feature branch).
+
 ## Planning Modes
 
 `herd plan` always launches an interactive agent session. The configured agent (Claude Code, Codex, Cursor, Gemini CLI, OpenCode) is started in interactive mode with a planning-focused system prompt and repository context.
