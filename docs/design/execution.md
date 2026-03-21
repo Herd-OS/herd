@@ -224,6 +224,8 @@ Rebase batch branch onto latest main
 Open single PR: batch branch -> main
 ```
 
+Opening the batch PR is idempotent: if concurrent advance-on-close triggers race, the second call detects the existing PR (via listing or by handling a 422 "already exists" error) and returns its number instead of failing.
+
 ### Run-to-Branch Resolution
 
 Given a completed workflow run ID, the Integrator resolves the worker branch:

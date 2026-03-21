@@ -93,15 +93,19 @@ func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ s
 }
 
 type mockPRService struct {
-	listResult []*platform.PullRequest
-	getResult  map[int]*platform.PullRequest
-	created    *platform.PullRequest
-	merged     bool
-	diffResult string
-	comments   map[int][]string
+	listResult  []*platform.PullRequest
+	getResult   map[int]*platform.PullRequest
+	created     *platform.PullRequest
+	merged      bool
+	diffResult  string
+	comments    map[int][]string
+	onCreateErr error // if set, Create returns this error
 }
 
 func (m *mockPRService) Create(_ context.Context, title, body, head, base string) (*platform.PullRequest, error) {
+	if m.onCreateErr != nil {
+		return nil, m.onCreateErr
+	}
 	m.created = &platform.PullRequest{Number: 100, Title: title, Body: body, Head: head, Base: base}
 	return m.created, nil
 }
@@ -1353,6 +1357,199 @@ func TestAdvanceByBatch(t *testing.T) {
 	assert.Equal(t, 1, result.DispatchedCount)
 	assert.Len(t, wf.dispatched, 1)
 	assert.Equal(t, "11", wf.dispatched[0]["issue_number"])
+}
+
+func TestAdvance_AllComplete_PRAlreadyExists(t *testing.T) {
+	// Test that when openBatchPR hits a 422 race (PR already exists),
+	// it falls back to listing and returns the existing PR number.
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[10] = &platform.Issue{
+		Number: 10, Title: "Task A",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Task A", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+	}
+
+	existingPR := &platform.PullRequest{Number: 42, Head: "herd/batch/1-batch"}
+	prSvc := &mockPRService{
+		onCreateErr: fmt.Errorf("creating pull request: A pull request already exists for owner:herd/batch/1-batch"),
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "10"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	// Create a repo with a bare origin so fetch works but rebase will conflict
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	// Initial commit
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("original"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create batch branch
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file.txt"), []byte("batch content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "batch change")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	g := git.New(dir)
+
+	// Initially List returns empty (simulating the race: first List sees no PR),
+	// but after Create fails with 422, the retry List will find the PR.
+	// We use a counter to track calls.
+	listCallCount := 0
+	originalList := prSvc.listResult
+	prSvc.listResult = nil // First List returns empty
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	// Override List to return empty first, then the existing PR on retry
+	_ = originalList
+	_ = listCallCount
+	// The mock List always returns listResult. For the race scenario:
+	// - First call to List (in openBatchPR) should return empty -> proceeds to Create
+	// - Create fails with 422
+	// - Second call to List (fallback) should return the existing PR
+	// We need a stateful mock for this. Let's use a wrapper.
+	statefulPR := &statefulMockPRService{
+		inner:      prSvc,
+		listCalls:  0,
+		listByCall: map[int][]*platform.PullRequest{
+			0: {},                            // first List: no PR found
+			1: {existingPR},                  // second List (fallback): PR found
+		},
+	}
+	mock.prs = statefulPR
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, g, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.AllComplete)
+	assert.Equal(t, 42, result.BatchPRNumber)
+}
+
+func TestAdvance_AllComplete_PRAlreadyOpen(t *testing.T) {
+	// Test that when a PR already exists (found by List), openBatchPR returns it without calling Create.
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[10] = &platform.Issue{
+		Number: 10, Title: "Task A",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Task A", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+	}
+
+	existingPR := &platform.PullRequest{Number: 42, Head: "herd/batch/1-batch"}
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{existingPR},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "10"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	// Create a repo with a bare origin
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("original"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file.txt"), []byte("batch content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "batch change")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	g := git.New(dir)
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, g, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.AllComplete)
+	assert.Equal(t, 42, result.BatchPRNumber)
+	// Create should NOT have been called since List found the existing PR
+	assert.Nil(t, prSvc.created)
+}
+
+// statefulMockPRService wraps mockPRService but returns different List results on each call.
+type statefulMockPRService struct {
+	inner      *mockPRService
+	listCalls  int
+	listByCall map[int][]*platform.PullRequest
+}
+
+func (s *statefulMockPRService) Create(ctx context.Context, title, body, head, base string) (*platform.PullRequest, error) {
+	return s.inner.Create(ctx, title, body, head, base)
+}
+func (s *statefulMockPRService) Get(ctx context.Context, number int) (*platform.PullRequest, error) {
+	return s.inner.Get(ctx, number)
+}
+func (s *statefulMockPRService) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
+	result := s.listByCall[s.listCalls]
+	s.listCalls++
+	return result, nil
+}
+func (s *statefulMockPRService) Update(ctx context.Context, n int, t2, b *string) (*platform.PullRequest, error) {
+	return s.inner.Update(ctx, n, t2, b)
+}
+func (s *statefulMockPRService) Merge(ctx context.Context, n int, m platform.MergeMethod) (*platform.MergeResult, error) {
+	return s.inner.Merge(ctx, n, m)
+}
+func (s *statefulMockPRService) UpdateBranch(ctx context.Context, n int) error {
+	return s.inner.UpdateBranch(ctx, n)
+}
+func (s *statefulMockPRService) AddComment(ctx context.Context, number int, body string) error {
+	return s.inner.AddComment(ctx, number, body)
+}
+func (s *statefulMockPRService) GetDiff(ctx context.Context, n int) (string, error) {
+	return s.inner.GetDiff(ctx, n)
+}
+func (s *statefulMockPRService) CreateReview(ctx context.Context, n int, body string, event platform.ReviewEvent) error {
+	return s.inner.CreateReview(ctx, n, body, event)
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
