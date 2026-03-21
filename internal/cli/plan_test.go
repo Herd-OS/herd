@@ -106,7 +106,7 @@ func TestRunPlanFromFile_MissingFile(t *testing.T) {
 	require.NoError(t, os.Chdir(dir))
 	defer os.Chdir(origDir)
 
-	err := runPlanFromFile(t.Context(), "/nonexistent/plan.json", "", true, false)
+	err := runPlanFromFile(t.Context(), "/nonexistent/plan.json", "", true, false, true)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "reading plan file")
 }
@@ -121,7 +121,7 @@ func TestRunPlanFromFile_InvalidJSON(t *testing.T) {
 	path := dir + "/bad.json"
 	require.NoError(t, os.WriteFile(path, []byte("not json"), 0644))
 
-	err := runPlanFromFile(t.Context(), path, "", true, false)
+	err := runPlanFromFile(t.Context(), path, "", true, false, true)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "parsing plan JSON")
 }
@@ -167,7 +167,7 @@ func TestRunPlanFromFile_PreservesFileOnError(t *testing.T) {
 
 	// This will fail at confirmPlan (reads stdin) or validation, but the file
 	// should still exist after the error
-	_ = runPlanFromFile(t.Context(), path, "", true, false)
+	_ = runPlanFromFile(t.Context(), path, "", true, false, true)
 
 	// File should still exist (not deleted)
 	_, err := os.Stat(path)
@@ -192,7 +192,7 @@ func TestRunPlanFromFile_BatchNameOverride(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte(plan), 0644))
 
 	// Will error at confirmPlan (stdin) or later, but NOT at parsing
-	err := runPlanFromFile(t.Context(), path, "Overridden name", true, false)
+	err := runPlanFromFile(t.Context(), path, "Overridden name", true, false, true)
 	if err != nil {
 		assert.NotContains(t, err.Error(), "reading plan file")
 		assert.NotContains(t, err.Error(), "parsing plan JSON")
