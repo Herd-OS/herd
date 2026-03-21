@@ -4,73 +4,41 @@
 
 HerdOS has two halves: a local CLI (the Planner) and GitHub infrastructure (everything else). The CLI plans and dispatches. GitHub executes, tracks, and reports.
 
-```
-+------------------------------------------------------------------+
-|                        YOUR MACHINE                               |
-|                                                                   |
-|  +------------------------+                                       |
-|  |     herd CLI            |                                       |
-|  |     (Planner)           |                                       |
-|  |                         |                                       |
-|  |  - Decomposes work      |         +------------------------+   |
-|  |  - Creates issues       |-------->|   Self-Hosted Runner    |   |
-|  |  - Dispatches workers   |         |   (optional, on same   |   |
-|  |  - Monitors progress    |         |    or different host)   |   |
-|  +-----------+-------------+         +------------------------+   |
-|              |                                                     |
-+------------------------------------------------------------------+
-               | GitHub API
-               v
-+------------------------------------------------------------------+
-|                         GITHUB                                    |
-|                                                                   |
-|  +---------------+    +----------------+    +------------------+  |
-|  |   Issues       |    |   Actions       |    |   Batch PR        |  |
-|  |               |    |                |    |                  |  |
-|  |  Work items   |--->|  Workers        |--->|  Consolidated    |  |
-|  |  with labels  |    |  (agent)        |    |  code changes    |  |
-|  |  & structure  |    |                |    |  ready for review|  |
-|  +---------------+    +----------------+    +--------+---------+  |
-|                                                      |            |
-|  +---------------+    +----------------+             |            |
-|  |  Milestones    |    |  Monitor        |             |            |
-|  |               |    |  (cron+on-demand)|             |            |
-|  |  Batch        |    |  Health          |             v            |
-|  |  tracking     |    |  monitoring      |    +------------------+  |
-|  +---------------+    +----------------+    |  Integrator        |  |
-|                                             |  Consolidate       |  |
-|                                             |  Review & merge    |  |
-|                                             +------------------+  |
-+------------------------------------------------------------------+
+```mermaid
+graph TD
+    subgraph Local["YOUR MACHINE"]
+        CLI["herd CLI (Planner)<br>Decomposes work<br>Creates issues<br>Dispatches workers<br>Monitors progress"]
+        Runner["Self-Hosted Runner<br>(optional, on same<br>or different host)"]
+        CLI --> Runner
+    end
+
+    subgraph Cloud["GITHUB"]
+        Issues["Issues<br>Work items with<br>labels & structure"]
+        Actions["Actions<br>Workers (agent)"]
+        BatchPR["Batch PR<br>Consolidated code<br>changes ready for review"]
+        Milestones["Milestones<br>Batch tracking"]
+        Monitor["Monitor<br>(cron + on-demand)<br>Health monitoring"]
+        Integrator["Integrator<br>Consolidate<br>Review & merge"]
+
+        Issues --> Actions
+        Actions --> BatchPR
+        BatchPR --> Integrator
+    end
+
+    CLI -->|GitHub API| Issues
 ```
 
 ## Data Flow
 
 ### Default flow (plan, dispatch, land)
 
-```
-User describes feature
-        |
-        v
-   herd plan "Add dark mode support"
-        |
-        |  Interactive session: agent asks questions,
-        |  user refines, agent produces plan
-        v
-   User approves -> creates GitHub Issues, batch branch, dispatches Tier 0
-        |
-        |  User walks away
-        v
-   Workers execute on runners
-   Integrator consolidates worker branches into batch branch
-   When a tier completes, Integrator dispatches next tier
-        |
-        v
-   Cycle continues until all tiers are done
-        |
-        v
-   Batch PR opened, agent reviews, human reviews (or auto-merged if enabled)
-   User notified
+```mermaid
+graph TD
+    A["User describes feature"] --> B["herd plan 'Add dark mode support'"]
+    B -->|"Interactive session: agent asks<br>questions, user refines, agent<br>produces plan"| C["User approves → creates GitHub Issues,<br>batch branch, dispatches Tier 0"]
+    C -->|"User walks away"| D["Workers execute on runners<br>Integrator consolidates worker branches<br>When a tier completes, dispatch next tier"]
+    D --> E["Cycle continues until all tiers done"]
+    E --> F["Batch PR opened, agent reviews,<br>human reviews (or auto-merge)<br>User notified"]
 ```
 
 The entire flow after `herd plan` is self-driving. The Planner dispatches Tier 0 automatically, the Integrator advances tiers, and the user only intervenes if something fails or when the batch PR is ready for human review.
@@ -89,40 +57,26 @@ Opening a batch PR is idempotent: if two concurrent integrator runs both attempt
 
 ### Worker, Consolidate, PR flow
 
-```
-   Batch branch created from main
-         |
-         v
-   Tier 0: Workers with no dependencies
-   +------------+  +------------+
-   | Worker 1   |  | Worker 2   |
-   | Issue #42  |  | Issue #43  |
-   +------+-----+  +------+-----+
-          |               |
-          +-------+-------+
-                  v
-   Integrator consolidates into batch branch
-                  |
-                  v
-   Tier 1: Workers whose dependencies are done
-   +------------+
-   | Worker 3   |
-   | Issue #44  |  (depends on #42, #43)
-   +------+-----+
-          |
-          v
-   Integrator consolidates into batch branch
-                  |
-                  v
-   Single PR: batch branch -> main
-                  |
-                  v
-   Agent reviews on the PR
-   (dispatches fix workers if needed)
-                  |
-                  v
-   Human reviews (or auto-merge if enabled)
-   Issues closed, batch landed
+```mermaid
+graph TD
+    A["Batch branch created from main"] --> B
+
+    subgraph B["Tier 0 — no dependencies"]
+        W1["Worker 1<br>Issue #42"]
+        W2["Worker 2<br>Issue #43"]
+    end
+
+    B --> C["Integrator consolidates<br>into batch branch"]
+
+    subgraph D["Tier 1 — dependencies done"]
+        W3["Worker 3<br>Issue #44<br>(depends on #42, #43)"]
+    end
+
+    C --> D
+    D --> E["Integrator consolidates<br>into batch branch"]
+    E --> F["Single PR: batch branch → main"]
+    F --> G["Agent reviews on the PR<br>(dispatches fix workers if needed)"]
+    G --> H["Human reviews (or auto-merge)<br>Issues closed, batch landed"]
 ```
 
 ## Component Boundaries
@@ -157,25 +111,18 @@ The runner is where the agent actually executes. The Action workflow orchestrate
 
 ## What Runs Where
 
-```
-LOCAL                          GITHUB                       RUNNER
------                          ------                       ------
+```mermaid
+sequenceDiagram
+    participant Local
+    participant GitHub
+    participant Runner
 
-herd plan ----------------> Issues created + Tier 0 dispatched
-                                |
-                                v
-                         workflow_dispatch -------> Worker starts
-                                                    agent runs
-                                                    commits pushed
-                           Worker done <----------- pushes to worker branch
-                           Integrator consolidates into batch branch
-                           tier.complete --> dispatch next tier
-                           all tiers done --> batch PR opened
-                           agent reviews on PR
-                           batch PR merged --> issues closed
-                           Monitor patrols (cron or worker-triggered)
-
-herd status <--------------  reads Issues/PRs/Actions
+    Local->>GitHub: herd plan (Issues created, Tier 0 dispatched)
+    GitHub->>Runner: workflow_dispatch
+    Note over Runner: Worker starts<br>Agent runs<br>Commits pushed
+    Runner->>GitHub: pushes to worker branch
+    Note over GitHub: Integrator consolidates into batch branch<br>tier complete → dispatch next tier<br>all tiers done → batch PR opened<br>agent reviews on PR<br>batch PR merged → issues closed<br>Monitor patrols (cron or worker-triggered)
+    Local->>GitHub: herd status (reads Issues/PRs/Actions)
 ```
 
 ## Key Design Decisions
@@ -190,17 +137,23 @@ herd status <--------------  reads Issues/PRs/Actions
 
 HerdOS has two abstraction boundaries: the **Platform** (where work is tracked and executed) and the **Agent** (what does the thinking). Both are interfaces with swappable implementations.
 
-```
-+----------------------------------+
-|  CLI Commands                    |  Agnostic to both
-|  (plan, dispatch, status)        |
-+----------------+-----------------+
-| Agent Interface| Platform Interface|  <-- boundaries
-+----------------+-----------------+
-| Claude Code    | GitHub           |  v1.0 implementations
-| (Codex, etc.   | (GitLab,         |
-|  coming soon)  |  Gitea -- later) |
-+----------------+-----------------+
+```mermaid
+graph TD
+    subgraph Top["CLI Commands (plan, dispatch, status)"]
+        CLI["Agnostic to both"]
+    end
+    subgraph Middle["Interfaces"]
+        AI["Agent Interface"]
+        PI["Platform Interface"]
+    end
+    subgraph Bottom["v1.0 Implementations"]
+        CC["Claude Code<br>(Codex, etc. coming soon)"]
+        GH["GitHub<br>(GitLab, Gitea — later)"]
+    end
+    Top --> AI
+    Top --> PI
+    AI --> CC
+    PI --> GH
 ```
 
 The CLI does not hardcode GitHub API calls or Claude Code invocations. All platform interactions go through a Platform interface. All agent interactions go through an Agent interface. v1.0 ships with GitHub and Claude Code implementations. Other implementations can be added later without touching core logic.
