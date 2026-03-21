@@ -645,6 +645,14 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 
 	pr, err := p.PullRequests().Create(ctx, title, body, batchBranch, defaultBranch)
 	if err != nil {
+		// Handle race condition: another integrator run created the PR between our List and Create.
+		// GitHub returns 422 with "A pull request already exists" in this case.
+		if strings.Contains(strings.ToLower(err.Error()), "pull request already exists") {
+			existing, listErr := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
+			if listErr == nil && len(existing) > 0 {
+				return existing[0].Number, nil
+			}
+		}
 		return 0, fmt.Errorf("creating batch PR: %w", err)
 	}
 
