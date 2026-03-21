@@ -85,6 +85,8 @@ Workers run pre-push validation before pushing changes. For Go repositories, thi
 
 When the Integrator processes commands (Consolidate, Advance, AdvanceByBatch, CheckCI), it skips batches whose milestones are already closed, avoiding redundant work on completed batches.
 
+Opening a batch PR is idempotent: if two concurrent integrator runs both attempt to create the PR, the second detects the existing one (via listing or by handling a 422 race) and returns the existing PR number.
+
 ### Worker, Consolidate, PR flow
 
 ```
