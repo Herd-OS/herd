@@ -7,6 +7,7 @@ const (
 	StatusDone       = "herd/status:done"
 	StatusFailed     = "herd/status:failed"
 	StatusBlocked    = "herd/status:blocked"
+	StatusCancelled  = "herd/status:cancelled"
 )
 
 // PR state labels
@@ -31,7 +32,7 @@ const (
 
 // AllStatusLabels returns all status labels.
 func AllStatusLabels() []string {
-	return []string{StatusReady, StatusInProgress, StatusDone, StatusFailed, StatusBlocked}
+	return []string{StatusReady, StatusInProgress, StatusDone, StatusFailed, StatusBlocked, StatusCancelled}
 }
 
 // AllTypeLabels returns all type labels.
@@ -47,6 +48,7 @@ func AllLabels() []LabelDef {
 		{StatusDone, "6F42C1", "Worker completed, branch ready for consolidation"},
 		{StatusFailed, "D93F0B", "Worker failed — needs re-dispatch or manual fix"},
 		{StatusBlocked, "C5DEF5", "Waiting for a dependency to complete"},
+		{StatusCancelled, "B60205", "Batch PR closed without merging — task was not completed"},
 		{TypeFeature, "1D76DB", "New functionality"},
 		{TypeBugfix, "D93F0B", "Bug fix"},
 		{TypeFix, "E99695", "Auto-generated fix from agent review or conflict resolution"},

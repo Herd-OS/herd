@@ -132,19 +132,59 @@ func TestMergeApproved_MergeFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "merging batch PR")
 }
 
-func TestCleanupMerged(t *testing.T) {
+func TestCleanupClosed(t *testing.T) {
 	tests := []struct {
-		name          string
-		pr            *platform.PullRequest
-		expectCleanup bool
+		name             string
+		pr               *platform.PullRequest
+		merged           bool
+		issues           []*platform.Issue
+		expectCleanup    bool
+		expectCancelled  []int
+		expectNotLabeled []int
 	}{
 		{
-			name: "success — closes issues, milestone, deletes branch",
+			name: "merged — closes issues without cancelling",
 			pr: &platform.PullRequest{
 				Number: 100, Title: "[herd] Add auth (3 tasks)",
 				State: "closed", Head: "herd/batch/5-add-auth",
 			},
-			expectCleanup: true,
+			merged: true,
+			issues: []*platform.Issue{
+				{Number: 10, Title: "Task", Labels: []string{issues.StatusDone}},
+			},
+			expectCleanup:    true,
+			expectCancelled:  nil,
+			expectNotLabeled: []int{10},
+		},
+		{
+			name: "closed without merge — cancels non-done issues",
+			pr: &platform.PullRequest{
+				Number: 100, Title: "[herd] Add auth (3 tasks)",
+				State: "closed", Head: "herd/batch/5-add-auth",
+			},
+			merged: false,
+			issues: []*platform.Issue{
+				{Number: 10, Title: "Done task", Labels: []string{issues.StatusDone}},
+				{Number: 11, Title: "In-progress task", Labels: []string{issues.StatusInProgress}},
+				{Number: 12, Title: "Ready task", Labels: []string{issues.StatusReady}},
+			},
+			expectCleanup:    true,
+			expectCancelled:  []int{11, 12},
+			expectNotLabeled: []int{10},
+		},
+		{
+			name: "closed without merge — all done issues stay done",
+			pr: &platform.PullRequest{
+				Number: 100, Title: "[herd] Add auth (3 tasks)",
+				State: "closed", Head: "herd/batch/5-add-auth",
+			},
+			merged: false,
+			issues: []*platform.Issue{
+				{Number: 10, Title: "Done task", Labels: []string{issues.StatusDone}},
+			},
+			expectCleanup:    true,
+			expectCancelled:  nil,
+			expectNotLabeled: []int{10},
 		},
 		{
 			name: "skip — non-herd PR",
@@ -152,6 +192,7 @@ func TestCleanupMerged(t *testing.T) {
 				Number: 100, Title: "Fix typo",
 				State: "closed", Head: "fix-typo",
 			},
+			merged:        false,
 			expectCleanup: false,
 		},
 		{
@@ -160,6 +201,7 @@ func TestCleanupMerged(t *testing.T) {
 				Number: 100, Title: "[herd] Add auth",
 				State: "open", Head: "herd/batch/5-add-auth",
 			},
+			merged:        false,
 			expectCleanup: false,
 		},
 		{
@@ -168,6 +210,7 @@ func TestCleanupMerged(t *testing.T) {
 				Number: 100, Title: "[herd] Something",
 				State: "closed", Head: "not-a-batch-branch",
 			},
+			merged:        false,
 			expectCleanup: false,
 		},
 	}
@@ -178,8 +221,10 @@ func TestCleanupMerged(t *testing.T) {
 				getResult: map[int]*platform.PullRequest{tt.pr.Number: tt.pr},
 			}
 			issueSvc := newMockIssueService()
-			issueSvc.listResult = []*platform.Issue{
-				{Number: 10, Title: "Task", Labels: []string{issues.StatusDone}},
+			if tt.issues != nil {
+				issueSvc.listResult = tt.issues
+			} else {
+				issueSvc.listResult = []*platform.Issue{}
 			}
 			msSvc := &mockMilestoneService{
 				getResult: map[int]*platform.Milestone{5: {Number: 5, Title: "Add auth"}},
@@ -193,14 +238,29 @@ func TestCleanupMerged(t *testing.T) {
 				milestones: msSvc,
 			}
 
-			err := CleanupMerged(context.Background(), mock, CleanupParams{PRNumber: tt.pr.Number})
+			err := CleanupClosed(context.Background(), mock, CleanupParams{
+				PRNumber: tt.pr.Number,
+				Merged:   tt.merged,
+			})
 			require.NoError(t, err)
 
 			if tt.expectCleanup {
 				assert.Contains(t, msSvc.updatedStates, "closed")
-				assert.Equal(t, "herd/batch/5-add-auth", repoSvc.deletedBranch)
+				assert.Equal(t, tt.pr.Head, repoSvc.deletedBranch)
 			} else {
 				assert.Empty(t, msSvc.updatedStates)
+				return
+			}
+
+			for _, num := range tt.expectCancelled {
+				assert.Contains(t, issueSvc.addedLabels[num], issues.StatusCancelled,
+					"issue #%d should have cancelled label", num)
+			}
+			for _, num := range tt.expectNotLabeled {
+				if labels, ok := issueSvc.addedLabels[num]; ok {
+					assert.NotContains(t, labels, issues.StatusCancelled,
+						"issue #%d should NOT have cancelled label", num)
+				}
 			}
 		})
 	}

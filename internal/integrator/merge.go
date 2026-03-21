@@ -60,22 +60,23 @@ func MergeApproved(ctx context.Context, p platform.Platform, cfg *config.Config,
 	return &MergeApprovedResult{Merged: true}, nil
 }
 
-// CleanupParams holds parameters for post-merge cleanup of externally merged PRs.
+// CleanupParams holds parameters for post-close cleanup of batch PRs.
 type CleanupParams struct {
 	PRNumber int
+	Merged   bool
 }
 
-// CleanupMerged handles post-merge cleanup for a batch PR that was merged
-// externally (not by HerdOS auto-merge). It closes all milestone issues,
-// closes the milestone, and deletes the batch branch.
-// Non-herd PRs, non-merged PRs, and unparseable branches are silently skipped.
-func CleanupMerged(ctx context.Context, p platform.Platform, params CleanupParams) error {
+// CleanupClosed handles cleanup for a batch PR that was closed (merged or not).
+// For merged PRs: closes all open milestone issues, closes the milestone,
+// and deletes the batch branch (same as before).
+// For closed-without-merge PRs: labels non-done open issues as cancelled,
+// closes all open milestone issues, closes the milestone, and deletes the branch.
+func CleanupClosed(ctx context.Context, p platform.Platform, params CleanupParams) error {
 	pr, err := p.PullRequests().Get(ctx, params.PRNumber)
 	if err != nil {
 		return fmt.Errorf("getting PR #%d: %w", params.PRNumber, err)
 	}
 
-	// Only handle merged herd batch PRs
 	if !strings.HasPrefix(pr.Title, "[herd]") {
 		return nil
 	}
@@ -85,8 +86,11 @@ func CleanupMerged(ctx context.Context, p platform.Platform, params CleanupParam
 
 	msNumber, err := ParseBatchBranchMilestone(pr.Head)
 	if err != nil {
-		return nil // Not a batch branch, skip
+		return nil
 	}
 
-	return postMergeCleanup(ctx, p, msNumber, pr.Head)
+	if params.Merged {
+		return postMergeCleanup(ctx, p, msNumber, pr.Head)
+	}
+	return postCloseCleanup(ctx, p, msNumber, pr.Head)
 }

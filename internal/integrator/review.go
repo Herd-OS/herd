@@ -346,6 +346,37 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}, nil
 }
 
+// postCloseCleanup closes all issues in the milestone (labeling non-done ones
+// as cancelled), closes the milestone, and deletes the batch branch.
+// Used when a batch PR is closed without merging.
+func postCloseCleanup(ctx context.Context, p platform.Platform, msNumber int, batchBranch string) error {
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+		State:     "open",
+		Milestone: &msNumber,
+	})
+	if err != nil {
+		return fmt.Errorf("listing milestone issues: %w", err)
+	}
+
+	closed := "closed"
+	for _, issue := range allIssues {
+		if !issues.HasLabel(issue.Labels, issues.StatusDone) {
+			currentStatus := issues.StatusLabel(issue.Labels)
+			if currentStatus != "" {
+				_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{currentStatus})
+			}
+			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusCancelled})
+		}
+		_, _ = p.Issues().Update(ctx, issue.Number, platform.IssueUpdate{State: &closed})
+	}
+
+	_, _ = p.Milestones().Update(ctx, msNumber, platform.MilestoneUpdate{State: &closed})
+
+	_ = p.Repository().DeleteBranch(ctx, batchBranch)
+
+	return nil
+}
+
 // postMergeCleanup closes all issues in the milestone, closes the milestone,
 // and deletes the batch branch.
 func postMergeCleanup(ctx context.Context, p platform.Platform, msNumber int, batchBranch string) error {
