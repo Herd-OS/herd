@@ -10,38 +10,18 @@ agent review, conflict resolution, monitoring, and batch management.
 
 The happy path from user request to merged code:
 
-```
-1. PLAN        User describes a feature
-                       |
-                       v
-2. DECOMPOSE   Planner breaks it into tasks (DAG)
-                       |
-                       v
-3. CREATE      Issues created with labels and milestone
-                       |
-                       v
-4. DISPATCH    Batch branch created, Tier 0 workers triggered
-                       |
-                       v
-5. EXECUTE     Workers run agent, push to worker branches
-                       |
-                       v
-6. CONSOLIDATE Integrator merges worker branches into batch branch
-                       |
-                       v
-7. NEXT TIER   Dispatch workers for next tier, repeat 5-6
-                       |
-                       v
-8. PR          Single batch PR opened against main
-                       |
-                       v
-9. REVIEW      Agent reviews, dispatches fix workers if needed
-                       |
-                       v
-10. APPROVE    Human reviews (or auto-merge if enabled)
-                       |
-                       v
-11. LAND       Batch PR merged, issues closed, user notified
+```mermaid
+graph TD
+    S1["1. PLAN<br>User describes a feature"] --> S2["2. DECOMPOSE<br>Planner breaks it into tasks (DAG)"]
+    S2 --> S3["3. CREATE<br>Issues created with labels and milestone"]
+    S3 --> S4["4. DISPATCH<br>Batch branch created, Tier 0 workers triggered"]
+    S4 --> S5["5. EXECUTE<br>Workers run agent, push to worker branches"]
+    S5 --> S6["6. CONSOLIDATE<br>Integrator merges worker branches into batch branch"]
+    S6 --> S7["7. NEXT TIER<br>Dispatch workers for next tier, repeat 5–6"]
+    S7 --> S8["8. PR<br>Single batch PR opened against main"]
+    S8 --> S9["9. REVIEW<br>Agent reviews, dispatches fix workers if needed"]
+    S9 --> S10["10. APPROVE<br>Human reviews (or auto-merge if enabled)"]
+    S10 --> S11["11. LAND<br>Batch PR merged, issues closed, user notified"]
 ```
 
 The user runs `herd plan` and the system handles everything from there. The
@@ -60,24 +40,16 @@ ephemeral -- GitHub Actions handles scheduling, logging, and cleanup.
 
 ### Lifecycle
 
-```
-Dispatch                    Execution                    Completion
---------                    ---------                    ----------
+```mermaid
+sequenceDiagram
+    participant CLI
+    participant GitHub Actions
+    participant Runner
 
-herd dispatch #42           Action starts on runner
-        |                          |
-        v                          v
-workflow_dispatch ---->   1. Checkout batch branch
-                          2. herd worker exec 42:
-                             a. Read issue #42 body
-                             b. Label issue: herd/status:in-progress
-                             c. Create worker branch: herd/worker/42-<slug>
-                             d. Run agent in headless mode
-                                (agent commits as it works)
-                             e. Push worker branch
-                             f. Label issue: herd/status:done (or failed)
-                          3. Exit
-                          (Integrator consolidates into batch branch)
+    CLI->>GitHub Actions: herd dispatch #42 (workflow_dispatch)
+    GitHub Actions->>Runner: Action starts
+    Note over Runner: 1. Checkout batch branch<br>2. herd worker exec 42:<br>  a. Read issue #42 body<br>  b. Label in-progress<br>  c. Create worker branch<br>     herd/worker/42-slug<br>  d. Run agent headlessly<br>     (agent commits as it works)<br>  e. Push worker branch<br>  f. Label done (or failed)<br>3. Exit
+    Note over GitHub Actions: Integrator consolidates<br>into batch branch
 ```
 
 ### Headless Permissions
@@ -149,17 +121,21 @@ GitHub Actions limits.
 Tasks in a batch form a directed acyclic graph based on their `depends_on`
 declarations. The DAG determines execution order:
 
-```
-                Task 1 (add models)           <-- Tier 0: no deps
-                    |
-        +-----------+-----------+
-        v           v           v
-    Task 2       Task 3      Task 4           <-- Tier 1: all depend on 1
-    (API)        (UI)        (tests)
-        |           |           |
-        +-----------+-----------+
-                    v
-               Task 5 (integration)           <-- Tier 2: depends on 2,3,4
+```mermaid
+graph TD
+    T1["Task 1 (add models)<br>Tier 0: no deps"] --> T2["Task 2 (API)"]
+    T1 --> T3["Task 3 (UI)"]
+    T1 --> T4["Task 4 (tests)"]
+
+    subgraph Tier1["Tier 1 — all depend on Task 1"]
+        T2
+        T3
+        T4
+    end
+
+    T2 --> T5["Task 5 (integration)<br>Tier 2: depends on 2, 3, 4"]
+    T3 --> T5
+    T4 --> T5
 ```
 
 Tasks within a tier run in parallel. Tiers execute sequentially.
@@ -205,23 +181,13 @@ batch PR against main.
 
 ### Consolidation Flow
 
-```
-Tier 0 workers complete
-        |
-        v
-Integrator merges worker branches into batch branch
-Resolves any conflicts between parallel workers
-        |
-        v
-Tier 1 workers branch from updated batch branch
-(which already contains Tier 0's work)
-        |
-        v
-... continues until all tiers complete ...
-        |
-        v
-Rebase batch branch onto latest main
-Open single PR: batch branch -> main
+```mermaid
+graph TD
+    A["Tier 0 workers complete"] --> B["Integrator merges worker branches<br>into batch branch<br>Resolves any conflicts between<br>parallel workers"]
+    B --> C["Tier 1 workers branch from<br>updated batch branch<br>(contains Tier 0's work)"]
+    C --> D["... continues until all tiers complete ..."]
+    D --> E["Rebase batch branch onto latest main"]
+    E --> F["Open single PR: batch branch → main"]
 ```
 
 Opening the batch PR is idempotent: if concurrent advance-on-close triggers race, the second call detects the existing PR (via listing or by handling a 422 "already exists" error) and returns its number instead of failing.
@@ -279,24 +245,13 @@ The `review_strictness` setting (standard/strict/lenient) controls which issues 
 
 ### Fix Cycle Flow
 
-```
-Agent review finds HIGH severity issues
-        |
-        v
-Integrator creates one batch fix issue in the same milestone
-(all HIGH findings combined into a single issue)
-        |
-        v
-Worker executes fixes, pushes to worker branch
-        |
-        v
-Integrator consolidates fixes into batch branch
-        |
-        v
-Agent re-reviews (with prior review comments as context to avoid contradictions)
-        |
-        v
-Clean --> approved with batch summary
+```mermaid
+graph TD
+    A["Agent review finds HIGH severity issues"] --> B["Integrator creates one batch fix issue<br>(all HIGH findings in a single issue)"]
+    B --> C["Worker executes fixes,<br>pushes to worker branch"]
+    C --> D["Integrator consolidates fixes<br>into batch branch"]
+    D --> E["Agent re-reviews<br>(with prior review comments as context)"]
+    E --> F["Clean → approved with batch summary"]
 ```
 
 Fix issues are labeled `herd/type:fix`, have no dependencies (run in parallel),
@@ -369,34 +324,28 @@ everything from the GitHub API.
 
 Each cycle:
 
-```
-Monitor Action starts
-        |
-        v
-Query: all issues with herd/* labels
-        |
-        v
-No active issues? --> exit early
-        |
-        v
-For each in-progress issue:
-  +-- Is there an active Action run?
-  |   +-- No --> Mark stale, re-dispatch or escalate
-  +-- Has the Action run completed?
-  |   +-- Success but issue still open --> check for PR
-  |   +-- Failure --> re-dispatch or escalate
-  +-- Has the worker been running too long?
-      +-- Yes (> timeout_minutes) --> cancel and re-dispatch
-        |
-        v
-For each open batch PR:
-  +-- Open > max_pr_age? --> comment once asking for review/merge
-  +-- CI failing? --> check for existing /herd fix-ci comment
-       +-- Comment present --> fix cycle in progress, skip (dedup via comment)
-       +-- Comment absent --> post /herd fix-ci comment
-        |
-        v
-Done -- patrol complete
+```mermaid
+graph TD
+    A["Monitor Action starts"] --> B["Query: all issues with herd/* labels"]
+    B --> C{"No active issues?"}
+    C -->|Yes| EXIT["Exit early"]
+    C -->|No| D["For each in-progress issue"]
+
+    D --> D1{"Active Action run?"}
+    D1 -->|No| D1a["Mark stale, re-dispatch or escalate"]
+    D1 -->|Completed| D2{"Run conclusion?"}
+    D2 -->|Success, issue open| D2a["Check for PR"]
+    D2 -->|Failure| D2b["Re-dispatch or escalate"]
+    D1 -->|Running too long| D3["Cancel and re-dispatch"]
+
+    D --> E["For each open batch PR"]
+    E --> E1{"Open > max_pr_age?"}
+    E1 -->|Yes| E1a["Comment asking for review/merge"]
+    E --> E2{"CI failing?"}
+    E2 -->|fix-ci comment present| E2a["Skip (dedup)"]
+    E2 -->|fix-ci comment absent| E2b["Post /herd fix-ci comment"]
+
+    E --> F["Done — patrol complete"]
 ```
 
 ### Exponential Backoff
@@ -449,12 +398,12 @@ Milestones fit because batches have a clear end state: all issues closed.
 
 ### Lifecycle
 
-```
-Created ----> In Progress ----> Landed
-                |      ^
-                |      |
-                v      |
-             Stalled (Monitor detects)
+```mermaid
+graph LR
+    Created --> InProgress["In Progress"]
+    InProgress --> Landed
+    InProgress --> Stalled["Stalled<br>(Monitor detects)"]
+    Stalled --> InProgress
 ```
 
 - **Created**: Milestone exists, issues created, nothing dispatched
@@ -513,75 +462,43 @@ This prevents the system from marking issues as done when the agent didn't actua
 
 ### Worker Fails to Complete
 
-```
-Worker crashes or times out
-        |
-        v
-Action run shows as failed
-        |
-        v
-Worker triggers Monitor via workflow_dispatch (immediate response)
-        |
-        v
-Monitor re-dispatches (if auto_redispatch enabled, up to max_redispatch_attempts)
-   or
-Monitor labels issue herd/status:failed and @mentions notify_users
+```mermaid
+graph TD
+    A["Worker crashes or times out"] --> B["Action run shows as failed"]
+    B --> C["Worker triggers Monitor via<br>workflow_dispatch (immediate response)"]
+    C --> D["Monitor re-dispatches<br>(if auto_redispatch enabled,<br>up to max_redispatch_attempts)"]
+    C --> E["Monitor labels issue failed<br>and @mentions notify_users"]
 ```
 
 The batch branch is unaffected -- the failed worker's branch is never merged.
 
 ### Worker Produces Code That Doesn't Build
 
-```
-Worker pushes to worker branch
-        |
-        v
-Integrator consolidates into batch branch
-        |
-        v
-CI runs on the updated batch branch
-        |
-        v
-check_suite.completed event triggers the Integrator
-        |
-        +-- CI passed --> done, continue normally
-        |
-        +-- CI failed --> Re-run the failed checks (transient/flaky failure filter)
-        |
-        +-- Passes --> done, continue normally
-        |
-        +-- Fails again --> confirmed real failure
-                |
-                v
-        Agent analyzes failure logs, creates fix issues
-                |
-                v
-        Fix workers execute --> re-consolidate --> CI runs again
-                |
-                +-- Passes --> done
-                +-- Fails --> repeat up to ci_max_fix_cycles (default: 2)
-                        |
-                        v (at cap)
-                Integrator reverts the consolidation
-                Issue labeled herd/status:failed, comment with CI details
+```mermaid
+graph TD
+    A["Worker pushes to worker branch"] --> B["Integrator consolidates into batch branch"]
+    B --> C["CI runs on updated batch branch"]
+    C --> D["check_suite.completed triggers Integrator"]
+    D -->|CI passed| DONE["Done, continue normally"]
+    D -->|CI failed| E["Re-run failed checks<br>(transient/flaky filter)"]
+    E -->|Passes| DONE
+    E -->|Fails again| F["Confirmed real failure"]
+    F --> G["Agent analyzes failure logs,<br>creates fix issues"]
+    G --> H["Fix workers execute →<br>re-consolidate → CI runs again"]
+    H -->|Passes| DONE2["Done"]
+    H -->|Fails| I{"ci_max_fix_cycles<br>reached? (default: 2)"}
+    I -->|No| G
+    I -->|Yes| J["Integrator reverts consolidation<br>Issue labeled failed,<br>comment with CI details"]
 ```
 
 ### Merge Conflict Between Parallel Workers
 
-```
-Worker A and Worker B complete in the same tier
-        |
-        v
-Worker A merged into batch branch successfully
-        |
-        v
-Worker B conflicts with Worker A's changes
-        |
-        v
-Option A: Dispatch conflict-resolution worker
-          (on_conflict: dispatch-resolver, capped at max_conflict_resolution_attempts)
-Option B: Notify user
-          (on_conflict: notify, or after resolver cap reached)
+```mermaid
+graph TD
+    A["Worker A and Worker B<br>complete in the same tier"] --> B["Worker A merged into<br>batch branch successfully"]
+    B --> C["Worker B conflicts with<br>Worker A's changes"]
+    C --> D["Option A: Dispatch conflict-resolution worker<br>(on_conflict: dispatch-resolver,<br>capped at max_conflict_resolution_attempts)"]
+    C --> E["Option B: Notify user<br>(on_conflict: notify,<br>or after resolver cap reached)"]
 ```
 
 ### Recovering from a Stuck Tier
