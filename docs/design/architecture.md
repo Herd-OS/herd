@@ -7,7 +7,9 @@ HerdOS has two halves: a local CLI (the Planner) and GitHub infrastructure (ever
 ```mermaid
 graph TD
     subgraph Local["YOUR MACHINE"]
+        direction LR
         CLI["herd CLI (Planner)<br>Decomposes work<br>Creates issues<br>Dispatches workers<br>Monitors progress"]
+        Runner["Self-Hosted Runner<br>(optional, on same<br>or different host)"]
     end
 
     subgraph Cloud["GITHUB"]
