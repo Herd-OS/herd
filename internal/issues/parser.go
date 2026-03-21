@@ -31,6 +31,7 @@ func ParseBody(raw string) (*IssueBody, error) {
 	body.Task = sections["Task"]
 	body.Context = sections["Context"]
 	body.ImplementationDetails = sections["Implementation Details"]
+	body.ConversationHistory = sections["Conversation History"]
 
 	if conventions, ok := sections["Conventions"]; ok {
 		body.Conventions = parseBulletList(conventions)

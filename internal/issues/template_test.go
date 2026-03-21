@@ -66,6 +66,7 @@ func TestRenderBody_OmitsEmptyOptionalSections(t *testing.T) {
 	assert.NotContains(t, rendered, "## Acceptance Criteria")
 	assert.NotContains(t, rendered, "## Files to Modify")
 	assert.NotContains(t, rendered, "## Context")
+	assert.NotContains(t, rendered, "## Conversation History")
 }
 
 func TestParseBody_RoundTrip(t *testing.T) {
@@ -82,6 +83,7 @@ func TestParseBody_RoundTrip(t *testing.T) {
 		Conventions:           []string{"Use testify", "Table-driven tests"},
 		ContextFromDeps:       []string{"Auth package from task 0"},
 		Criteria:              []string{"Model exists", "Tests pass"},
+		ConversationHistory:   "User asked for bcrypt.\nAgent confirmed 12 rounds.",
 		FilesToModify:         []string{"model.go", "model_test.go"},
 	}
 
@@ -99,6 +101,7 @@ func TestParseBody_RoundTrip(t *testing.T) {
 	assert.Equal(t, original.Conventions, parsed.Conventions)
 	assert.Equal(t, original.ContextFromDeps, parsed.ContextFromDeps)
 	assert.Equal(t, original.Criteria, parsed.Criteria)
+	assert.Equal(t, original.ConversationHistory, parsed.ConversationHistory)
 	assert.Equal(t, original.FilesToModify, parsed.FilesToModify)
 }
 
@@ -117,6 +120,44 @@ func TestParseBody_NoNewFields(t *testing.T) {
 	assert.Equal(t, "", parsed.ImplementationDetails)
 	assert.Nil(t, parsed.Conventions)
 	assert.Nil(t, parsed.ContextFromDeps)
+}
+
+func TestRenderBody_WithConversationHistory(t *testing.T) {
+	tests := []struct {
+		name                string
+		conversationHistory string
+		wantSection         bool
+	}{
+		{
+			name:                "non-empty conversation history is rendered",
+			conversationHistory: "User asked about auth.\nAgent proposed bcrypt.",
+			wantSection:         true,
+		},
+		{
+			name:                "empty conversation history is omitted",
+			conversationHistory: "",
+			wantSection:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := IssueBody{
+				FrontMatter:         FrontMatter{Version: 1},
+				Task:                "Some task",
+				ConversationHistory: tt.conversationHistory,
+			}
+
+			rendered := RenderBody(body)
+
+			if tt.wantSection {
+				assert.Contains(t, rendered, "## Conversation History")
+				assert.Contains(t, rendered, tt.conversationHistory)
+			} else {
+				assert.NotContains(t, rendered, "## Conversation History")
+			}
+		})
+	}
 }
 
 func TestFormatIntSlice(t *testing.T) {
