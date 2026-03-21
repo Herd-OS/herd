@@ -5,7 +5,7 @@
 HerdOS has two halves: a local CLI (the Planner) and GitHub infrastructure (everything else). The CLI plans and dispatches. GitHub executes, tracks, and reports.
 
 ```mermaid
-graph TD
+graph LR
     subgraph Local["YOUR MACHINE"]
         CLI["herd CLI (Planner)<br>Decomposes work<br>Creates issues<br>Dispatches workers<br>Monitors progress"]
         Runner["Self-Hosted Runner<br>(optional, on same<br>or different host)"]
@@ -16,16 +16,19 @@ graph TD
         Issues["Issues<br>Work items with<br>labels & structure"]
         Actions["Actions<br>Workers (agent)"]
         BatchPR["Batch PR<br>Consolidated code<br>changes ready for review"]
-        Milestones["Milestones<br>Batch tracking"]
-        Monitor["Monitor<br>(cron + on-demand)<br>Health monitoring"]
         Integrator["Integrator<br>Consolidate<br>Review & merge"]
+        Monitor["Monitor<br>(cron + on-demand)<br>Health monitoring"]
+        Milestones["Milestones<br>Batch tracking"]
 
         Issues --> Actions
         Actions --> BatchPR
         BatchPR --> Integrator
+        Integrator ~~~ Monitor
+        Integrator ~~~ Milestones
     end
 
     CLI -->|GitHub API| Issues
+    Runner <--> Actions
 ```
 
 ## Data Flow
