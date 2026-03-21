@@ -10,10 +10,6 @@ graph TD
         CLI["herd CLI (Planner)<br>Decomposes work<br>Creates issues<br>Dispatches workers<br>Monitors progress"]
     end
 
-    subgraph RunnerEnv["YOUR MACHINE OR YOUR SERVER"]
-        Runner["Self-Hosted Runner<br>(optional)"]
-    end
-
     subgraph Cloud["GITHUB"]
         Issues["Issues<br>Work items with<br>labels & structure"]
         Actions["Actions<br>Workers (agent)"]
@@ -29,7 +25,12 @@ graph TD
         Integrator ~~~ Milestones
     end
 
+    subgraph RunnerEnv["YOUR MACHINE OR YOUR SERVER"]
+        Runner["Self-Hosted Runner<br>(optional)"]
+    end
+
     CLI -->|GitHub API| Issues
+    Cloud ~~~ RunnerEnv
 ```
 
 ## Data Flow
