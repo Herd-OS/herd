@@ -1,6 +1,7 @@
 package git
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -355,6 +356,200 @@ func TestIsMerging(t *testing.T) {
 	// Abort merge — no longer merging
 	require.NoError(t, g.AbortMerge())
 	assert.False(t, g.IsMerging())
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func TestIsDirty_CleanRepo(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	dirty, err := g.IsDirty()
+	require.NoError(t, err)
+	assert.False(t, dirty)
+}
+
+func TestIsDirty_UntrackedFile(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("hello"), 0644))
+
+	dirty, err := g.IsDirty()
+	require.NoError(t, err)
+	assert.True(t, dirty)
+}
+
+func TestIsDirty_StagedFile(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("hello"), 0644))
+	runGit(t, dir, "add", "staged.txt")
+
+	dirty, err := g.IsDirty()
+	require.NoError(t, err)
+	assert.True(t, dirty)
+}
+
+func TestIsDirty_ModifiedTrackedFile(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("modified"), 0644))
+
+	dirty, err := g.IsDirty()
+	require.NoError(t, err)
+	assert.True(t, dirty)
+}
+
+func TestBehindCount_UpToDate(t *testing.T) {
+	// Create a bare remote and clone it
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	cloneDir := t.TempDir()
+	cmd := exec.Command("git", "clone", bareDir, cloneDir)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// Configure identity and create initial commit in clone
+	runGit(t, cloneDir, "config", "user.email", "test@test.com")
+	runGit(t, cloneDir, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "file.txt"), []byte("init"), 0644))
+	runGit(t, cloneDir, "add", ".")
+	runGit(t, cloneDir, "commit", "-m", "init")
+	runGit(t, cloneDir, "push", "origin", "HEAD")
+
+	g := New(cloneDir)
+	runGit(t, cloneDir, "fetch", "origin")
+
+	branch, berr := g.CurrentBranch()
+	require.NoError(t, berr)
+
+	count, err := g.BehindCount("origin", branch)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
+func TestBehindCount_Behind(t *testing.T) {
+	// Create a bare remote and clone it twice
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	clone1 := t.TempDir()
+	cmd := exec.Command("git", "clone", bareDir, clone1)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	runGit(t, clone1, "config", "user.email", "test@test.com")
+	runGit(t, clone1, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(clone1, "file.txt"), []byte("init"), 0644))
+	runGit(t, clone1, "add", ".")
+	runGit(t, clone1, "commit", "-m", "init")
+	runGit(t, clone1, "push", "origin", "HEAD")
+
+	clone2 := t.TempDir()
+	cmd = exec.Command("git", "clone", bareDir, clone2)
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	runGit(t, clone2, "config", "user.email", "test@test.com")
+	runGit(t, clone2, "config", "user.name", "Test")
+
+	// Add 3 commits to clone1 and push
+	for i := 0; i < 3; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(clone1, "file.txt"), []byte(fmt.Sprintf("v%d", i)), 0644))
+		runGit(t, clone1, "add", ".")
+		runGit(t, clone1, "commit", "-m", fmt.Sprintf("commit %d", i))
+	}
+	runGit(t, clone1, "push", "origin", "HEAD")
+
+	// Fetch in clone2 and check behind count
+	g := New(clone2)
+	runGit(t, clone2, "fetch", "origin")
+
+	branch, berr := New(clone1).CurrentBranch()
+	require.NoError(t, berr)
+
+	count, err := g.BehindCount("origin", branch)
+	require.NoError(t, err)
+	assert.Equal(t, 3, count)
+}
+
+func TestDefaultBranch_WithOriginHEAD(t *testing.T) {
+	// Create a bare remote with a commit on main
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	// Create a temporary repo to push an initial commit
+	tmpDir := t.TempDir()
+	runGit(t, tmpDir, "init")
+	runGit(t, tmpDir, "checkout", "-b", "main")
+	runGit(t, tmpDir, "config", "user.email", "test@test.com")
+	runGit(t, tmpDir, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("init"), 0644))
+	runGit(t, tmpDir, "add", ".")
+	runGit(t, tmpDir, "commit", "-m", "init")
+	runGit(t, tmpDir, "remote", "add", "origin", bareDir)
+	runGit(t, tmpDir, "push", "-u", "origin", "main")
+
+	// Clone — git clone sets origin/HEAD automatically
+	cloneDir := t.TempDir()
+	cmd := exec.Command("git", "clone", bareDir, cloneDir)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	g := New(cloneDir)
+	branch, err := g.DefaultBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "main", branch)
+}
+
+func TestDefaultBranch_FallbackToMain(t *testing.T) {
+	// Create a bare remote with a commit on main
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare")
+
+	tmpDir := t.TempDir()
+	runGit(t, tmpDir, "init")
+	runGit(t, tmpDir, "checkout", "-b", "main")
+	runGit(t, tmpDir, "config", "user.email", "test@test.com")
+	runGit(t, tmpDir, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("init"), 0644))
+	runGit(t, tmpDir, "add", ".")
+	runGit(t, tmpDir, "commit", "-m", "init")
+	runGit(t, tmpDir, "remote", "add", "origin", bareDir)
+	runGit(t, tmpDir, "push", "-u", "origin", "main")
+
+	// Set up a local repo with origin but no origin/HEAD
+	localDir := t.TempDir()
+	runGit(t, localDir, "init")
+	runGit(t, localDir, "checkout", "-b", "main")
+	runGit(t, localDir, "config", "user.email", "test@test.com")
+	runGit(t, localDir, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("init"), 0644))
+	runGit(t, localDir, "add", ".")
+	runGit(t, localDir, "commit", "-m", "init")
+	runGit(t, localDir, "remote", "add", "origin", bareDir)
+	runGit(t, localDir, "fetch", "origin")
+
+	// Remove origin/HEAD if it exists
+	cmd := exec.Command("git", "remote", "set-head", "origin", "-d")
+	cmd.Dir = localDir
+	_ = cmd.Run() // ignore error if HEAD wasn't set
+
+	g := New(localDir)
+	branch, err := g.DefaultBranch()
+	require.NoError(t, err)
+	assert.Equal(t, "main", branch)
 }
 
 func TestAbortMerge_NoMergeInProgress(t *testing.T) {

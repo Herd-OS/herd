@@ -22,7 +22,7 @@ import (
 )
 
 func newPlanCmd() *cobra.Command {
-	var noDispatch, dryRun bool
+	var noDispatch, dryRun, skipPreflight bool
 	var batchName, fromFile string
 
 	cmd := &cobra.Command{
@@ -32,13 +32,13 @@ func newPlanCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if fromFile != "" {
-				return runPlanFromFile(cmd.Context(), fromFile, batchName, noDispatch, dryRun)
+				return runPlanFromFile(cmd.Context(), fromFile, batchName, noDispatch, dryRun, skipPreflight)
 			}
 			var initialPrompt string
 			if len(args) > 0 {
 				initialPrompt = args[0]
 			}
-			return runPlan(cmd.Context(), initialPrompt, batchName, noDispatch, dryRun)
+			return runPlan(cmd.Context(), initialPrompt, batchName, noDispatch, dryRun, skipPreflight)
 		},
 	}
 
@@ -46,14 +46,25 @@ func newPlanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be created without creating anything")
 	cmd.Flags().StringVar(&batchName, "batch", "", "Override batch name")
 	cmd.Flags().StringVar(&fromFile, "from-file", "", "Load plan from an existing JSON file (skip agent session)")
+	cmd.Flags().BoolVar(&skipPreflight, "skip-preflight", false, "Skip pre-flight git checks")
 
 	return cmd
 }
 
-func runPlanFromFile(ctx context.Context, filePath, batchNameOverride string, noDispatch, dryRun bool) error {
+func runPlanFromFile(ctx context.Context, filePath, batchNameOverride string, noDispatch, dryRun, skipPreflight bool) error {
 	cfg, err := loadConfigOrExit()
 	if err != nil {
 		return err
+	}
+
+	if !skipPreflight {
+		dir, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getting working directory: %w", err)
+		}
+		if err := runPreflight(dir); err != nil {
+			return err
+		}
 	}
 
 	// Read and parse the plan file
@@ -126,10 +137,21 @@ func runPlanFromFile(ctx context.Context, filePath, batchNameOverride string, no
 	return nil
 }
 
-func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDispatch, dryRun bool) error {
+func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDispatch, dryRun, skipPreflight bool) error {
 	cfg, err := loadConfigOrExit()
 	if err != nil {
 		return err
+	}
+
+	// Run pre-flight git checks
+	if !skipPreflight {
+		dir, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getting working directory: %w", err)
+		}
+		if err := runPreflight(dir); err != nil {
+			return err
+		}
 	}
 
 	// Fetch open milestones (best-effort: client creation or API failure is silently ignored)

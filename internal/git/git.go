@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -103,6 +104,52 @@ func (g *Git) IsMerging() bool {
 func (g *Git) HasConflicts() bool {
 	err := g.run("diff", "--check")
 	return err != nil
+}
+
+// IsDirty returns true if the working tree has uncommitted changes
+// (staged or unstaged, including untracked files).
+func (g *Git) IsDirty() (bool, error) {
+	out, err := g.output("status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	return out != "", nil
+}
+
+// BehindCount returns the number of commits HEAD is behind remote/branch.
+// Caller must fetch before calling this.
+func (g *Git) BehindCount(remote, branch string) (int, error) {
+	out, err := g.output("rev-list", "--count", "HEAD.."+remote+"/"+branch)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		return 0, fmt.Errorf("parsing behind count: %w", err)
+	}
+	return n, nil
+}
+
+// DefaultBranch returns the default branch name by inspecting origin/HEAD.
+// Falls back to "main" if origin/HEAD is not set.
+func (g *Git) DefaultBranch() (string, error) {
+	out, err := g.output("symbolic-ref", "refs/remotes/origin/HEAD")
+	if err != nil {
+		// Fallback: origin/HEAD not set, try common defaults
+		if _, checkErr := g.output("rev-parse", "--verify", "refs/remotes/origin/main"); checkErr == nil {
+			return "main", nil
+		}
+		if _, checkErr := g.output("rev-parse", "--verify", "refs/remotes/origin/master"); checkErr == nil {
+			return "master", nil
+		}
+		return "", fmt.Errorf("cannot determine default branch: %w", err)
+	}
+	// out is like "refs/remotes/origin/main"
+	parts := strings.SplitN(out, "refs/remotes/origin/", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("unexpected symbolic-ref output: %s", out)
+	}
+	return parts[1], nil
 }
 
 func (g *Git) run(args ...string) error {
