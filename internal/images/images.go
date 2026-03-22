@@ -72,7 +72,7 @@ func downloadImage(ctx context.Context, client *http.Client, url, destDir string
 	if err != nil {
 		return "", fmt.Errorf("downloading: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -87,10 +87,10 @@ func downloadImage(ctx context.Context, client *http.Client, url, destDir string
 	if err != nil {
 		return "", fmt.Errorf("creating file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := io.Copy(f, resp.Body); err != nil {
-		os.Remove(destPath)
+		_ = os.Remove(destPath)
 		return "", fmt.Errorf("writing file: %w", err)
 	}
 
