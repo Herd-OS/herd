@@ -21,7 +21,7 @@ graph TD
     S7 --> S8["8. PR<br>Single batch PR opened against main"]
     S8 --> S9["9. REVIEW<br>Agent reviews, dispatches fix workers if needed"]
     S9 --> S10["10. APPROVE<br>Human reviews (or auto-merge if enabled)"]
-    S10 --> S11["11. LAND<br>Batch PR merged, issues closed, user notified"]
+    S10 --> S11["11. LAND<br>Batch PR merged or closed, issues closed, cleanup"]
 ```
 
 The user runs `herd plan` and the system handles everything from there. The
@@ -220,8 +220,9 @@ Given a completed workflow run ID, the Integrator resolves the worker branch:
 **Worker branches** are deleted after successful consolidation. Failed worker
 branches are kept for debugging until re-dispatch or batch cancellation.
 
-**Batch branches** are deleted on cancel (`herd batch cancel`) or on merge
-(GitHub auto-delete or Integrator cleanup).
+**Batch branches** are deleted on cancel (`herd batch cancel`), on merge
+(GitHub auto-delete or Integrator cleanup), or when the batch PR is closed
+without merging (Integrator cleanup).
 
 ---
 
@@ -418,6 +419,7 @@ Milestones fit because batches have a clear end state: all issues closed.
 graph LR
     Created --> InProgress["In Progress"]
     InProgress --> Landed
+    InProgress --> Cancelled["Cancelled<br>(PR closed without merge)"]
     InProgress --> Stalled["Stalled<br>(Monitor detects)"]
     Stalled --> InProgress
 ```
@@ -427,10 +429,15 @@ graph LR
 - **Stalled**: Issues stuck (failed workers, unresolved conflicts); Monitor
   escalates
 - **Landed**: All issues done, batch PR merged, milestone closed
+- **Cancelled**: Batch PR closed without merging. Non-done issues are labelled
+  `herd/status:cancelled` and closed. Done issues are closed without relabelling.
+  Milestone is closed, branch is deleted.
 
 ### Cancellation
 
-`herd batch cancel <number>`:
+There are two ways a batch can be cancelled:
+
+**CLI cancellation** (`herd batch cancel <number>`):
 
 1. Cancels any active workflow runs for the batch's issues
 2. Labels remaining open issues as `herd/status:failed`
@@ -438,6 +445,17 @@ graph LR
 4. Deletes the batch branch
 
 Active workers may take a moment to stop -- Actions cancellation is asynchronous.
+
+**Closing the batch PR without merging:**
+
+1. Non-done issues are labelled `herd/status:cancelled` and closed. Issues
+   already `herd/status:done` are closed without relabelling.
+2. Milestone is closed
+3. Branch is deleted
+
+The key difference: `herd batch cancel` labels issues as `failed` (indicating
+work was attempted but did not succeed), while closing the PR labels non-done
+issues as `cancelled` (indicating the batch was abandoned).
 
 ---
 

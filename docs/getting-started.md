@@ -169,6 +169,10 @@ herd batch show 5
 
 # Cancel a batch (stops workers, labels issues as failed, closes milestone)
 herd batch cancel 5
+
+# Alternatively, close the batch PR on GitHub without merging.
+# This labels non-done issues as cancelled (not failed), closes the
+# milestone, and deletes the branch.
 ```
 
 ## What Happens After Dispatch
@@ -187,7 +191,7 @@ Once workers are dispatched, the system runs autonomously via GitHub Actions:
 
 6. **Monitor patrols** — A cron-triggered Action detects stale workers (in-progress with no active run), failed issues (auto-redispatches with exponential backoff), CI failures on batch PRs, and stuck PRs (open longer than `max_pr_age_hours`). It escalates to `notify_users` when retries are exhausted.
 
-7. **You review and merge** — The batch PR arrives with a summary table of all tasks and their tiers. If `pull_requests.auto_merge` is true and the agent review passed, it merges automatically.
+7. **You review and merge** — The batch PR arrives with a summary table of all tasks and their tiers. If `pull_requests.auto_merge` is true and the agent review passed, it merges automatically. If you close the PR without merging, cleanup still runs: non-done issues are labelled `herd/status:cancelled`, the milestone is closed, and the branch is deleted.
 
 ### Role Instruction Files
 

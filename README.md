@@ -52,6 +52,8 @@ graph TD
     E --> F[Batch PR opened]
     F --> G[Agent review]
     G --> H[You merge]
+    F --> I[You close without merging]
+    I --> J[Non-done issues cancelled, cleanup]
 ```
 
 Workers run your configured agent (Claude Code, Codex, Cursor) in
