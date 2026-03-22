@@ -230,6 +230,8 @@ When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the
 | `/herd review <focus area>` | Batch PR | Same as above, with extra review instructions |
 | `/herd fix <description>` | Batch PR | Creates a fix issue and dispatches a worker. The full PR comment thread is included in the fix issue so the worker has context of prior iterations. The reviewer automatically recognizes these fixes and will not flag them as acceptance criteria violations. |
 
+**Image support:** When you attach screenshots to `/herd fix` comments, workers automatically download GitHub-hosted attachment images and can view them directly. This is useful for UI bug fixes -- paste a screenshot of the problem or the desired result, and the worker will see it. Only GitHub attachment URLs are downloaded; external image URLs are left as-is for the agent to handle.
+
 ### Examples
 
 ```

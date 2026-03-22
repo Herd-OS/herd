@@ -1,3 +1,4 @@
 bin/
 .herd/state/
+.herd/tmp/
 .env

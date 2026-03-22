@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
+	"github.com/herd-os/herd/internal/images"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/planner"
 	"github.com/herd-os/herd/internal/platform"
@@ -22,6 +24,7 @@ import (
 type ExecParams struct {
 	IssueNumber int
 	RepoRoot    string
+	HTTPClient  *http.Client // nil means skip image downloading
 }
 
 // ExecResult holds the result of a worker execution.
@@ -118,8 +121,20 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		return nil, fmt.Errorf("creating worker branch: %w", err)
 	}
 
+	// Download GitHub attachment images so the agent can view them locally
+	issueBody := issue.Body
+	if params.HTTPClient != nil {
+		imgDir := filepath.Join(params.RepoRoot, ".herd", "tmp", "images")
+		processedBody, imgErr := images.DownloadAndReplace(ctx, params.HTTPClient, issue.Body, imgDir)
+		if imgErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: image download failed: %v\n", imgErr)
+		} else {
+			issueBody = processedBody
+		}
+	}
+
 	// Build system prompt
-	systemPrompt, err := renderWorkerPrompt(issue.Title, issue.Body, params.IssueNumber, params.RepoRoot, cfg)
+	systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, params.RepoRoot, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("rendering worker prompt: %w", err)
 	}
@@ -128,7 +143,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	taskSpec := agent.TaskSpec{
 		IssueNumber: params.IssueNumber,
 		Title:       issue.Title,
-		Body:        issue.Body,
+		Body:        issueBody,
 	}
 	execOpts := agent.ExecOptions{
 		RepoRoot:     params.RepoRoot,

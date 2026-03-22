@@ -492,6 +492,31 @@ func TestTruncateOutput(t *testing.T) {
 	assert.Contains(t, result, "... (truncated)")
 }
 
+func TestExec_HTTPClientNil_SkipsImageDownload(t *testing.T) {
+	// Verify that when HTTPClient is nil, the worker proceeds without
+	// attempting image downloads. This test ensures backward compatibility.
+	mock := &mockPlatform{
+		issues: &mockIssueService{
+			getResult: &platform.Issue{
+				Number: 42, Title: "Test",
+				Body:      "![screenshot](https://github.com/user-attachments/assets/abc-123)",
+				Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+			},
+		},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	_, err := Exec(context.Background(), mock, &mockAgent{}, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    t.TempDir(),
+		HTTPClient:  nil,
+	})
+	// Should fail at git fetch, not at image download
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "fetching")
+}
+
 func TestPromptTemplate_AllInstructions(t *testing.T) {
 	// Verify all 8 instruction bullets from the spec are present
 	cfg := &config.Config{}
