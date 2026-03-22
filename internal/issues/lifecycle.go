@@ -4,11 +4,12 @@ import "fmt"
 
 // validTransitions defines the allowed state transitions.
 var validTransitions = map[string][]string{
-	StatusBlocked:    {StatusReady, StatusFailed},
-	StatusReady:      {StatusInProgress, StatusFailed},
-	StatusInProgress: {StatusDone, StatusFailed},
-	StatusFailed:     {StatusReady},
+	StatusBlocked:    {StatusReady, StatusFailed, StatusCancelled},
+	StatusReady:      {StatusInProgress, StatusFailed, StatusCancelled},
+	StatusInProgress: {StatusDone, StatusFailed, StatusCancelled},
+	StatusFailed:     {StatusReady, StatusCancelled},
 	StatusDone:       {StatusFailed},
+	StatusCancelled:  {},
 }
 
 // ValidateTransition checks whether transitioning from one status to another is allowed.

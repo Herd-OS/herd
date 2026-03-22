@@ -42,6 +42,7 @@ All HerdOS labels use the `herd/` prefix to avoid collisions with existing repo 
 | `herd/status:done` | Work complete, worker branch ready for consolidation |
 | `herd/status:failed` | Worker failed, needs re-dispatch or manual intervention |
 | `herd/status:blocked` | Issue depends on another issue that hasn't completed |
+| `herd/status:cancelled` | Batch PR closed without merging — task was not completed |
 | `herd/type:feature` | New functionality |
 | `herd/type:bugfix` | Bug fix |
 | `herd/type:fix` | Integrator-generated fix (review or conflict resolution) |

@@ -19,6 +19,7 @@ All labels use the `herd/` prefix to avoid collisions. Created automatically by 
 | `herd/status:done` | Worker completed, branch ready for consolidation |
 | `herd/status:failed` | Worker failed -- needs re-dispatch or manual fix |
 | `herd/status:blocked` | Waiting for a dependency to complete |
+| `herd/status:cancelled` | Batch PR closed without merging — task was not completed |
 
 **Type labels:**
 
@@ -53,12 +54,17 @@ Workers parse the front matter for metadata and pass the human-readable sections
 +----------+   +----------+   +-----------------+   +--------+
 | blocked  |-->|  ready   |-->|  in-progress    |-->|  done  |
 +----------+   +----------+   +-----------------+   +--------+
-                    ^                |
-                    |                |
-                    |                v
-                    |          +----------+
-                    +----------| failed   |
-                   (re-dispatch)+----------+
+     |              ^                |
+     |              |                |
+     |              |                v
+     |              |          +----------+
+     |              +----------| failed   |
+     |             (re-dispatch)+----------+
+     |              |                |
+     |              v                v
+     |         +------------+
+     +-------->| cancelled  |  (terminal — batch PR closed without merge)
+               +------------+
 ```
 
 ### Transition Table
@@ -72,8 +78,9 @@ Workers parse the front matter for metadata and pass the human-readable sections
 | `in-progress` | `done` | Worker completes, pushes worker branch |
 | `in-progress` | `failed` | Worker fails, times out, or cannot complete |
 | `failed` | `ready` | Re-dispatched by Monitor or user |
-| `ready`/`blocked`/`in-progress`/`done` | `failed` | Batch cancelled |
-| `done` | (closed) | Batch PR merged |
+| `ready`/`blocked`/`in-progress`/`done` | `failed` | Batch cancelled via `herd batch cancel` |
+| `blocked`/`ready`/`in-progress`/`failed` | `cancelled` | Batch PR closed without merging (issues not already `done`) |
+| `done` | (closed) | Batch PR merged or closed (label unchanged) |
 
 ## 2. Actions Workflows
 
@@ -115,7 +122,10 @@ Agent review       -> (integrator logic)      -> Approve or fix cycle
                                                       |
 Human approves PR  -> pull_request_review     -> Integrator merges (if CI passes)
                                                       |
-Batch PR merged    -> pull_request.closed     -> Issues closed, cleanup
+Batch PR closed    -> pull_request.closed     -> Issues closed, cleanup
+                                                (merged: issues closed as-is)
+                                                (not merged: non-done issues
+                                                 labelled cancelled, then closed)
                                                       |
 Cron fires         -> schedule                -> Monitor patrols
 Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
@@ -129,7 +139,7 @@ Comment posted     -> issue_comment.created   -> handle-comment parses and execu
 - **check_suite** -- triggers the Integrator when CI completes on a batch branch. If CI failed, the Integrator re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`. Note: `check_suite` events may not fire for external CI providers (e.g., Cloudflare Pages). The Monitor patrol serves as a fallback, checking CI status on open batch PRs every 15 minutes. CI status detection checks both GitHub's commit status API and the check runs API to support external providers.
 - **issues** -- triggers the Integrator when an issue is closed. Used for manual task completion — the Integrator advances the tier and runs agent review if all tiers are done.
 - **pull_request_review** -- triggers the Integrator to merge batch PRs after human approval + CI pass.
-- **pull_request** -- triggers cleanup when a batch PR is merged (branch deletion, milestone closure).
+- **pull_request** -- triggers cleanup when a batch PR is closed (merged or not). On merge: issues are closed, milestone is closed, branch is deleted. On close without merge: non-done issues are labelled `herd/status:cancelled` before closing, milestone is closed, and branch is deleted. Issues already `herd/status:done` are closed without relabelling in both cases.
 - **schedule** -- triggers Monitor patrol. GitHub may delay or skip scheduled runs under load; the Monitor is stateless and catches up on the next patrol.
 - **issue_comment** -- triggers the Integrator's `handle-comment` job when a comment starting with `/herd ` is posted. The workflow validates the commenter's permissions, parses the command, and executes it. This is the entry point for both user-initiated commands and Monitor-posted commands (retry, fix-ci).
 
@@ -137,7 +147,7 @@ All workflows require the `HERD_ENABLED` repository variable to be set to `true`
 
 The checkout action in all workflows uses `HERD_GITHUB_TOKEN` (falling back to `GITHUB_TOKEN`) to configure git credentials for pushes. This is required for workers that create workflow files, which need the `workflows` permission.
 
-Issues auto-close via GitHub's native "Closes #N" references in the batch PR description. Dependency unblocking is handled by the Integrator's tier advancement logic, with the Monitor as a safety net.
+Issues auto-close via GitHub's native "Closes #N" references in the batch PR description when the PR is merged. When a batch PR is closed without merging, the Integrator explicitly closes milestone issues after labelling non-done issues as `cancelled`. Dependency unblocking is handled by the Integrator's tier advancement logic, with the Monitor as a safety net.
 
 ### Infinite Loop Prevention
 

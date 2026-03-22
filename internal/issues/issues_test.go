@@ -9,7 +9,7 @@ import (
 
 func TestAllLabels(t *testing.T) {
 	labels := AllLabels()
-	assert.Len(t, labels, 11)
+	assert.Len(t, labels, 12)
 }
 
 func TestIsStatusLabel(t *testing.T) {
@@ -261,11 +261,15 @@ func TestValidateTransition(t *testing.T) {
 	valid := []struct{ from, to string }{
 		{StatusBlocked, StatusReady},
 		{StatusBlocked, StatusFailed},
+		{StatusBlocked, StatusCancelled},
 		{StatusReady, StatusInProgress},
 		{StatusReady, StatusFailed},
+		{StatusReady, StatusCancelled},
 		{StatusInProgress, StatusDone},
 		{StatusInProgress, StatusFailed},
+		{StatusInProgress, StatusCancelled},
 		{StatusFailed, StatusReady},
+		{StatusFailed, StatusCancelled},
 		{StatusDone, StatusFailed},
 	}
 	for _, tt := range valid {
@@ -280,7 +284,9 @@ func TestValidateTransition(t *testing.T) {
 		{StatusInProgress, StatusReady},
 		{StatusDone, StatusReady},
 		{StatusDone, StatusInProgress},
+		{StatusDone, StatusCancelled},
 		{StatusFailed, StatusDone},
+		{StatusCancelled, StatusReady},
 	}
 	for _, tt := range invalid {
 		assert.Error(t, ValidateTransition(tt.from, tt.to), "%s → %s should be invalid", tt.from, tt.to)
