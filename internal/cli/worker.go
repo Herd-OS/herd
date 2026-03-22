@@ -57,6 +57,7 @@ func newWorkerExecCmd() *cobra.Command {
 			result, err := worker.Exec(cmd.Context(), client, ag, cfg, worker.ExecParams{
 				IssueNumber: issueNum,
 				RepoRoot:    cwd,
+				HTTPClient:  client.HTTPClient(),
 			})
 			if err != nil {
 				return err

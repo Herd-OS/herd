@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,9 +15,10 @@ import (
 
 // Client implements platform.Platform for GitHub.
 type Client struct {
-	gh    *gh.Client
-	owner string
-	repo  string
+	gh         *gh.Client
+	owner      string
+	repo       string
+	httpClient *http.Client
 }
 
 // Compile-time check that Client implements platform.Platform.
@@ -35,9 +37,10 @@ func New(owner, repo string) (*Client, error) {
 	client := gh.NewClient(httpClient)
 
 	return &Client{
-		gh:    client,
-		owner: owner,
-		repo:  repo,
+		gh:         client,
+		owner:      owner,
+		repo:       repo,
+		httpClient: httpClient,
 	}, nil
 }
 
@@ -68,6 +71,11 @@ func ghAuthToken() (string, error) {
 		return "", fmt.Errorf("gh auth token returned empty")
 	}
 	return token, nil
+}
+
+// HTTPClient returns the authenticated HTTP client used by this GitHub client.
+func (c *Client) HTTPClient() *http.Client {
+	return c.httpClient
 }
 
 func (c *Client) Issues() platform.IssueService           { return &issueService{c} }
