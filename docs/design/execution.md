@@ -98,6 +98,17 @@ Workers also post a report on the no-op path (when no changes are needed). The
 no-op report includes a "No changes were needed" message with the agent output
 in a collapsible details block.
 
+### Image Preprocessing
+
+Before invoking the agent, the worker scans the issue body for GitHub-hosted
+attachment images (URLs matching `github.com/user-attachments/assets/*`,
+`github.com/<owner>/<repo>/assets/*`, and
+`private-user-images.githubusercontent.com/*`). Matched images are downloaded to
+`.herd/tmp/images/` and the markdown URLs are replaced with local file paths so
+the agent can view them directly. External image URLs are left unchanged for the
+agent to handle. Downloading is best-effort -- if the HTTP client is unavailable
+or a download fails, the original URL is preserved.
+
 ### Concurrency
 
 Multiple workers run simultaneously on separate branches. Concurrency is bounded
