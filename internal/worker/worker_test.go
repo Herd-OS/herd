@@ -618,6 +618,83 @@ func TestExec_ResumesExistingBranch(t *testing.T) {
 	assert.Contains(t, err.Error(), "checking out existing worker branch")
 }
 
+func TestExec_ResumeMergesLatestBatchBranch(t *testing.T) {
+	// Verify that when resuming (GetBranchSHA succeeds), the worker
+	// merges the latest batch branch to avoid operating on a stale base.
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	// Find the resume path (GetBranchSHA succeeds → remoteBranchErr == nil)
+	resumeIdx := strings.Index(src, "checking out existing worker branch")
+	require.NotEqual(t, -1, resumeIdx, "resume path not found")
+
+	// After checkout, there should be a merge of the batch branch
+	resumeBlock := src[resumeIdx : resumeIdx+700]
+	assert.Contains(t, resumeBlock, `Merge("origin/" + batchBranch)`,
+		"resume path must merge latest batch branch to avoid stale base")
+	assert.Contains(t, resumeBlock, "merging latest batch branch",
+		"merge error should describe merging batch branch")
+}
+
+func TestExec_ResumeConfiguresIdentityBeforeMerge(t *testing.T) {
+	// The merge in the resume path creates a merge commit, which requires
+	// a git identity. Verify ConfigureIdentity is called before Merge.
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	resumeIdx := strings.Index(src, "checking out existing worker branch")
+	require.NotEqual(t, -1, resumeIdx)
+
+	resumeBlock := src[resumeIdx : resumeIdx+500]
+	identityIdx := strings.Index(resumeBlock, "ConfigureIdentity")
+	mergeIdx := strings.Index(resumeBlock, "Merge(")
+	require.NotEqual(t, -1, identityIdx, "ConfigureIdentity must be called in resume path")
+	require.NotEqual(t, -1, mergeIdx, "Merge must be called in resume path")
+	assert.Less(t, identityIdx, mergeIdx,
+		"ConfigureIdentity must be called before Merge in resume path")
+}
+
+func TestExec_ResumeMergeFailure(t *testing.T) {
+	// When the batch branch merge fails during resume, the error should
+	// be propagated (not silently ignored).
+	repoDir := initTestRepo(t)
+
+	// Create the batch branch locally so checkout succeeds, but there's
+	// nothing to merge from origin (the remote doesn't have it), causing
+	// the merge to fail.
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+	run(repoDir, "git", "checkout", "-b", "herd/worker/42-test")
+	run(repoDir, "git", "checkout", "-b", "herd/batch/1-batch")
+	run(repoDir, "git", "checkout", "herd/worker/42-test")
+
+	mock := &mockPlatform{
+		issues: &mockIssueService{
+			getResult: &platform.Issue{
+				Number: 42, Title: "Test",
+				Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+			},
+		},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: nil},
+	}
+
+	_, err := Exec(context.Background(), mock, &mockAgent{}, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	assert.Error(t, err)
+	// The error should mention merging (not just checkout)
+	assert.Contains(t, err.Error(), "merging latest batch branch")
+}
+
 func TestExec_FreshBranchWhenNoRemote(t *testing.T) {
 	// When GetBranchSHA fails (no remote branch), worker should create
 	// a fresh branch from the batch branch.

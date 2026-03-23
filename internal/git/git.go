@@ -105,6 +105,11 @@ func (g *Git) AmendNoEdit() error {
 	return g.run("commit", "--amend", "--no-edit")
 }
 
+// ResetHead resets the index to match HEAD, undoing any staged changes.
+func (g *Git) ResetHead() error {
+	return g.run("reset", "HEAD")
+}
+
 // IsMerging returns true if a merge is in progress (MERGE_HEAD exists).
 func (g *Git) IsMerging() bool {
 	_, err := os.Stat(filepath.Join(g.WorkDir, ".git", "MERGE_HEAD"))

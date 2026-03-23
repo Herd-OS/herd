@@ -612,6 +612,57 @@ func TestAbortRebase_DuringRebase(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "rebase-merge should not exist after abort")
 }
 
+func TestResetHead_UndoesStagedChanges(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	// Stage a new file
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("hello"), 0644))
+	runGit(t, dir, "add", "staged.txt")
+
+	dirty, err := g.IsDirty()
+	require.NoError(t, err)
+	assert.True(t, dirty, "should be dirty after staging")
+
+	// Reset HEAD to unstage
+	require.NoError(t, g.ResetHead())
+
+	// File should still exist but be untracked, not staged
+	// Check that there are no staged changes (only untracked)
+	out, err := g.output("diff", "--cached", "--name-only")
+	require.NoError(t, err)
+	assert.Empty(t, out, "no staged changes after ResetHead")
+}
+
+func TestResetHead_UndoesStagedRemoval(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	// Stage removal of README.md
+	require.NoError(t, g.Rm("README.md"))
+
+	// Verify it's staged
+	out, err := g.output("diff", "--cached", "--name-only")
+	require.NoError(t, err)
+	assert.Contains(t, out, "README.md")
+
+	// Reset HEAD to undo the staged removal
+	require.NoError(t, g.ResetHead())
+
+	// No staged changes
+	out, err = g.output("diff", "--cached", "--name-only")
+	require.NoError(t, err)
+	assert.Empty(t, out, "no staged changes after ResetHead")
+}
+
+func TestResetHead_CleanRepo(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	// ResetHead on a clean repo should succeed (no-op)
+	require.NoError(t, g.ResetHead())
+}
+
 func TestHasConflicts_WithConflict(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

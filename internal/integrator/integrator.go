@@ -164,7 +164,13 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	progressFile := filepath.Join(params.RepoRoot, "WORKER_PROGRESS.md")
 	if _, statErr := os.Stat(progressFile); statErr == nil {
 		if rmErr := g.Rm("WORKER_PROGRESS.md"); rmErr == nil {
-			_ = g.AmendNoEdit()
+			if amendErr := g.AmendNoEdit(); amendErr != nil {
+				fmt.Printf("Warning: failed to amend merge commit to remove WORKER_PROGRESS.md: %v\n", amendErr)
+				// Reset the staged removal to avoid pushing with dirty index
+				if resetErr := g.ResetHead(); resetErr != nil {
+					return nil, fmt.Errorf("failed to reset after amend failure: %w (amend error: %v)", resetErr, amendErr)
+				}
+			}
 		}
 	}
 

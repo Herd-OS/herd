@@ -135,6 +135,15 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		if err = g.Checkout(workerBranch); err != nil {
 			return nil, fmt.Errorf("checking out existing worker branch: %w", err)
 		}
+		// Merge latest batch branch to avoid operating on a stale base.
+		// If the batch branch has advanced (e.g., other workers consolidated),
+		// this brings in those changes and prevents avoidable merge conflicts.
+		if err = g.ConfigureIdentity("HerdOS Worker", "herd@herd-os.com"); err != nil {
+			return nil, fmt.Errorf("configuring git identity for merge: %w", err)
+		}
+		if mergeErr := g.Merge("origin/" + batchBranch); mergeErr != nil {
+			return nil, fmt.Errorf("merging latest batch branch into resumed worker branch: %w", mergeErr)
+		}
 	} else {
 		// Fresh start: checkout batch branch, create worker branch
 		if err = g.Checkout(batchBranch); err != nil {
