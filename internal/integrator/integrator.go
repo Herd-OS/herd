@@ -3,6 +3,8 @@ package integrator
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -158,6 +160,20 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 			ConflictDetected: true,
 		}, fmt.Errorf("merging worker branch %s into batch branch: %w", workerBranch, err)
 	}
+	// Clean up WORKER_PROGRESS.md if present (worker progress tracking artifact)
+	progressFile := filepath.Join(params.RepoRoot, "WORKER_PROGRESS.md")
+	if _, statErr := os.Stat(progressFile); statErr == nil {
+		if rmErr := g.Rm("WORKER_PROGRESS.md"); rmErr == nil {
+			if amendErr := g.AmendNoEdit(); amendErr != nil {
+				fmt.Printf("Warning: failed to amend merge commit to remove WORKER_PROGRESS.md: %v\n", amendErr)
+				// Reset the staged removal to avoid pushing with dirty index
+				if resetErr := g.ResetHead(); resetErr != nil {
+					return nil, fmt.Errorf("failed to reset after amend failure: %w (amend error: %v)", resetErr, amendErr)
+				}
+			}
+		}
+	}
+
 	if err := g.Push("origin", batchBranch); err != nil {
 		return nil, fmt.Errorf("pushing batch branch: %w", err)
 	}

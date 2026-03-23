@@ -95,6 +95,21 @@ func (g *Git) AbortRebase() error {
 	return g.run("rebase", "--abort")
 }
 
+// Rm removes a file from the git index and working tree.
+func (g *Git) Rm(path string) error {
+	return g.run("rm", path)
+}
+
+// AmendNoEdit amends the most recent commit without changing its message.
+func (g *Git) AmendNoEdit() error {
+	return g.run("commit", "--amend", "--no-edit")
+}
+
+// ResetHead resets the index to match HEAD, undoing any staged changes.
+func (g *Git) ResetHead() error {
+	return g.run("reset", "HEAD")
+}
+
 // IsMerging returns true if a merge is in progress (MERGE_HEAD exists).
 func (g *Git) IsMerging() bool {
 	_, err := os.Stat(filepath.Join(g.WorkDir, ".git", "MERGE_HEAD"))

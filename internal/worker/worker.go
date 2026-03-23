@@ -65,6 +65,18 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
   code that doesn't exist and can't be inferred).
 - If you cannot complete the task after exhausting alternatives,
   exit with a non-zero status and include the reason in your output.
+## Incremental Progress
+
+- Your branch is ` + "`{{.WorkerBranch}}`" + `. After completing work on each file or
+  logical unit, run ` + "`git push origin {{.WorkerBranch}}`" + ` to save your progress
+  remotely. Do not wait until all work is done to push.
+- Before your first push, create a file called WORKER_PROGRESS.md at the repo
+  root. Update it before each push with a checklist of what you have completed
+  and what remains. Format: completed items checked (` + "`- [x]`" + `), remaining items
+  unchecked (` + "`- [ ]`" + `).
+- If WORKER_PROGRESS.md already exists when you start (from a previous
+  timed-out attempt), read it to understand what was already done and continue
+  from where it left off. Do not redo completed work.
 {{if .CoAuthorTrailer}}- Add the following trailer to every commit message (on its own line after a blank line):
   {{.CoAuthorTrailer}}
 {{end}}{{if .RoleInstructions}}
@@ -76,6 +88,7 @@ type promptData struct {
 	Title            string
 	Body             string
 	IssueNumber      int
+	WorkerBranch     string
 	RoleInstructions string
 	CoAuthorTrailer  string
 }
@@ -109,16 +122,36 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
 	workerBranch := fmt.Sprintf("herd/worker/%d-%s", params.IssueNumber, planner.Slugify(issue.Title))
 
-	// Git setup: fetch, checkout batch branch, create worker branch
+	// Git setup: fetch, checkout batch branch, create or resume worker branch
 	g := git.New(params.RepoRoot)
 	if err = g.Fetch("origin"); err != nil {
 		return nil, fmt.Errorf("fetching: %w", err)
 	}
-	if err = g.Checkout(batchBranch); err != nil {
-		return nil, fmt.Errorf("checking out batch branch: %w", err)
-	}
-	if err = g.CreateBranch(workerBranch, batchBranch); err != nil {
-		return nil, fmt.Errorf("creating worker branch: %w", err)
+
+	// Check if worker branch already exists remotely (previous timed-out attempt)
+	_, remoteBranchErr := p.Repository().GetBranchSHA(ctx, workerBranch)
+	if remoteBranchErr == nil {
+		// Resume: checkout existing worker branch
+		if err = g.Checkout(workerBranch); err != nil {
+			return nil, fmt.Errorf("checking out existing worker branch: %w", err)
+		}
+		// Merge latest batch branch to avoid operating on a stale base.
+		// If the batch branch has advanced (e.g., other workers consolidated),
+		// this brings in those changes and prevents avoidable merge conflicts.
+		if err = g.ConfigureIdentity("HerdOS Worker", "herd@herd-os.com"); err != nil {
+			return nil, fmt.Errorf("configuring git identity for merge: %w", err)
+		}
+		if mergeErr := g.Merge("origin/" + batchBranch); mergeErr != nil {
+			return nil, fmt.Errorf("merging latest batch branch into resumed worker branch: %w", mergeErr)
+		}
+	} else {
+		// Fresh start: checkout batch branch, create worker branch
+		if err = g.Checkout(batchBranch); err != nil {
+			return nil, fmt.Errorf("checking out batch branch: %w", err)
+		}
+		if err = g.CreateBranch(workerBranch, batchBranch); err != nil {
+			return nil, fmt.Errorf("creating worker branch: %w", err)
+		}
 	}
 
 	// Download GitHub attachment images so the agent can view them locally
@@ -134,7 +167,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	}
 
 	// Build system prompt
-	systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, params.RepoRoot, cfg)
+	systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("rendering worker prompt: %w", err)
 	}
@@ -378,16 +411,17 @@ func truncateOutput(s string, max int) string {
 	return s
 }
 
-func renderWorkerPrompt(title, body string, issueNumber int, repoRoot string, cfg *config.Config) (string, error) {
+func renderWorkerPrompt(title, body string, issueNumber int, workerBranch string, repoRoot string, cfg *config.Config) (string, error) {
 	tmpl, err := template.New("worker").Parse(workerPromptTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parsing worker prompt template: %w", err)
 	}
 
 	data := promptData{
-		Title:       title,
-		Body:        body,
-		IssueNumber: issueNumber,
+		Title:        title,
+		Body:         body,
+		IssueNumber:  issueNumber,
+		WorkerBranch: workerBranch,
 	}
 
 	if cfg.PullRequests.CoAuthorEmail != "" {

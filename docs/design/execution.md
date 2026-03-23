@@ -48,7 +48,7 @@ sequenceDiagram
 
     CLI->>GitHub Actions: herd dispatch #42 (workflow_dispatch)
     GitHub Actions->>Runner: Action starts
-    Note over Runner: 1. Checkout batch branch<br>2. herd worker exec 42:<br>  a. Read issue #42 body<br>  b. Label in-progress<br>  c. Create worker branch<br>     herd/worker/42-slug<br>  d. Run agent headlessly<br>     (agent commits as it works)<br>  e. Push worker branch<br>  f. Label done (or failed)<br>3. Exit
+    Note over Runner: 1. Checkout batch branch<br>2. herd worker exec 42:<br>  a. Read issue #42 body<br>  b. Label in-progress<br>  c. Create or resume worker branch<br>     herd/worker/42-slug<br>  d. Run agent headlessly<br>     (agent commits and pushes incrementally)<br>  e. Final push of worker branch<br>  f. Label done (or failed)<br>3. Exit
     Note over GitHub Actions: Integrator consolidates<br>into batch branch
 ```
 
@@ -109,6 +109,39 @@ the agent can view them directly. External image URLs are left unchanged for the
 agent to handle. Downloading is best-effort -- if the HTTP client is unavailable
 or a download fails, the original URL is preserved.
 
+### Incremental Push and Progress Tracking
+
+Workers push incrementally during execution to preserve partial work. The
+agent's system prompt instructs it to run `git push` after completing each
+file or logical unit. This ensures that if the worker times out or crashes,
+the retry starts from where it left off rather than from scratch.
+
+To track progress, the agent creates a `WORKER_PROGRESS.md` file at the
+repository root before its first push. This file contains a checklist of
+completed and remaining items. On retry, the agent reads the existing file
+to understand what was already done.
+
+Example `WORKER_PROGRESS.md`:
+```
+- [x] Create auth model in internal/auth/model.go
+- [x] Add validation helpers
+- [ ] Write unit tests
+- [ ] Update API handler
+```
+
+The Integrator removes `WORKER_PROGRESS.md` during consolidation (after
+merging the worker branch into the batch branch) so it does not appear in
+the final batch PR.
+
+#### Retry Resume
+
+When a worker is re-dispatched for a previously timed-out task, it checks
+whether the worker branch already exists on the remote. If it does, the
+worker checks out the existing branch (which contains partial work from the
+previous attempt) instead of creating a fresh branch from the batch branch.
+The agent then reads `WORKER_PROGRESS.md` to continue where the previous
+attempt stopped.
+
 ### Concurrency
 
 Multiple workers run simultaneously on separate branches. Concurrency is bounded
@@ -119,7 +152,7 @@ GitHub Actions limits.
 
 | Failure | Response |
 |---------|----------|
-| Worker crashes mid-task | Action fails; worker triggers Monitor via workflow_dispatch for immediate response; Monitor re-dispatches or escalates |
+| Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and WORKER_PROGRESS.md |
 | Worker produces bad code | Integrator re-runs failed CI once (transient filter), then dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
 | Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |

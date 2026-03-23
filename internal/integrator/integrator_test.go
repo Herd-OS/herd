@@ -361,6 +361,93 @@ func TestConsolidate_SuccessfulMerge(t *testing.T) {
 	assert.NoError(t, statErr)
 }
 
+func TestConsolidate_RemovesWorkerProgressFile(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	// Create repo with batch and worker branches, worker branch has WORKER_PROGRESS.md
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create batch branch
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	// Create worker branch with WORKER_PROGRESS.md
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "WORKER_PROGRESS.md"), []byte("- [x] done"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change with progress file")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	g := git.New(dir)
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
+	require.NoError(t, err)
+	assert.True(t, result.Merged)
+
+	// WORKER_PROGRESS.md should not exist on disk after consolidation
+	_, statErr := os.Stat(filepath.Join(dir, "WORKER_PROGRESS.md"))
+	assert.True(t, os.IsNotExist(statErr), "WORKER_PROGRESS.md should be removed after consolidation")
+
+	// worker.txt should still exist
+	_, statErr = os.Stat(filepath.Join(dir, "worker.txt"))
+	assert.NoError(t, statErr, "worker.txt should still exist")
+
+	// Repo should be clean (no dirty index)
+	dirty, dirtyErr := g.IsDirty()
+	require.NoError(t, dirtyErr)
+	assert.False(t, dirty, "repo should be clean after consolidation")
+}
+
+func TestConsolidate_AmendNoEditFailure_LogsAndResets(t *testing.T) {
+	// Verify via source code that AmendNoEdit errors are handled, not silently ignored
+	source, err := os.ReadFile("integrator.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	// The AmendNoEdit error should be checked, not discarded with _ =
+	assert.NotContains(t, src, "_ = g.AmendNoEdit()",
+		"AmendNoEdit error must not be silently ignored")
+
+	// Should log the error
+	assert.Contains(t, src, "failed to amend merge commit",
+		"AmendNoEdit failure should be logged")
+
+	// Should attempt to reset the index
+	assert.Contains(t, src, "ResetHead()",
+		"should reset index if AmendNoEdit fails")
+}
+
 func TestConsolidate_ConfiguresGitIdentity(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
@@ -1550,6 +1637,18 @@ func (s *statefulMockPRService) GetDiff(ctx context.Context, n int) (string, err
 }
 func (s *statefulMockPRService) CreateReview(ctx context.Context, n int, body string, event platform.ReviewEvent) error {
 	return s.inner.CreateReview(ctx, n, body, event)
+}
+
+func TestConsolidate_CleansUpWorkerProgress(t *testing.T) {
+	source, err := os.ReadFile("integrator.go")
+	require.NoError(t, err)
+	src := string(source)
+	assert.Contains(t, src, "WORKER_PROGRESS.md",
+		"Consolidate must clean up WORKER_PROGRESS.md after merge")
+	assert.Contains(t, src, "g.Rm(",
+		"Should use g.Rm to remove the progress file")
+	assert.Contains(t, src, "g.AmendNoEdit()",
+		"Should amend the merge commit after removing progress file")
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
