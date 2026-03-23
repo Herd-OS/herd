@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/platform"
@@ -34,6 +35,7 @@ func New(owner, repo string) (*Client, error) {
 
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	httpClient := oauth2.NewClient(context.Background(), ts)
+	httpClient.Transport = newRetryTransport(httpClient.Transport, time.Second)
 	client := gh.NewClient(httpClient)
 
 	return &Client{

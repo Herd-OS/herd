@@ -266,6 +266,20 @@ For maximum isolation, run each runner in a container with ephemeral mode so it 
 
 Comment commands (`/herd`) are restricted to users with `OWNER`, `MEMBER`, or `COLLABORATOR` association on the repository, plus bot accounts. This is enforced by the CLI, not by GitHub's native permissions. The `author_association` field from the webhook payload is used for validation.
 
+### Automatic Retry on Transient Errors
+
+The GitHub API client automatically retries requests that receive transient server errors. This handles intermittent GitHub outages without requiring manual intervention or workflow re-runs.
+
+| Parameter | Value |
+|-----------|-------|
+| Retryable status codes | 500, 502, 503, 504 |
+| Max retries | 3 |
+| Backoff schedule | Exponential: 1s, 2s, 4s |
+
+Network errors and client errors (4xx) are **not** retried — these indicate a problem with the request itself, not a transient server issue. If the request's context is cancelled during a backoff wait, the retry loop exits immediately.
+
+The retry transport wraps the underlying `http.RoundTripper`, so it applies to all GitHub API calls made through the client.
+
 ### Rate Limits and Audit
 
 GitHub API limits (5,000 req/hour REST, 500 dispatches/10 min) are not a concern for typical usage (5-20 issues per session). All operations are traceable through GitHub's existing audit mechanisms: issue history, action logs, PR history, and workflow run logs. No additional audit infrastructure is needed.
