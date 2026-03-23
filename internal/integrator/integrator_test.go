@@ -1552,6 +1552,18 @@ func (s *statefulMockPRService) CreateReview(ctx context.Context, n int, body st
 	return s.inner.CreateReview(ctx, n, body, event)
 }
 
+func TestConsolidate_CleansUpWorkerProgress(t *testing.T) {
+	source, err := os.ReadFile("integrator.go")
+	require.NoError(t, err)
+	src := string(source)
+	assert.Contains(t, src, "WORKER_PROGRESS.md",
+		"Consolidate must clean up WORKER_PROGRESS.md after merge")
+	assert.Contains(t, src, "g.Rm(",
+		"Should use g.Rm to remove the progress file")
+	assert.Contains(t, src, "g.AmendNoEdit()",
+		"Should amend the merge commit after removing progress file")
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

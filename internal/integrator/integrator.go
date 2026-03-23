@@ -3,6 +3,8 @@ package integrator
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -158,6 +160,14 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 			ConflictDetected: true,
 		}, fmt.Errorf("merging worker branch %s into batch branch: %w", workerBranch, err)
 	}
+	// Clean up WORKER_PROGRESS.md if present (worker progress tracking artifact)
+	progressFile := filepath.Join(params.RepoRoot, "WORKER_PROGRESS.md")
+	if _, statErr := os.Stat(progressFile); statErr == nil {
+		if rmErr := g.Rm("WORKER_PROGRESS.md"); rmErr == nil {
+			_ = g.AmendNoEdit()
+		}
+	}
+
 	if err := g.Push("origin", batchBranch); err != nil {
 		return nil, fmt.Errorf("pushing batch branch: %w", err)
 	}
