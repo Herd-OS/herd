@@ -37,15 +37,46 @@ func (m *mockAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (
 
 // --- Mock Platform ---
 
+type mockPRService struct {
+	listResult []*platform.PullRequest
+	comments   []string
+}
+
+func (m *mockPRService) Create(_ context.Context, _, _, _, _ string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockPRService) Get(_ context.Context, _ int) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockPRService) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
+	return m.listResult, nil
+}
+func (m *mockPRService) Update(_ context.Context, _ int, _, _ *string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockPRService) Merge(_ context.Context, _ int, _ platform.MergeMethod) (*platform.MergeResult, error) {
+	return nil, nil
+}
+func (m *mockPRService) UpdateBranch(_ context.Context, _ int) error { return nil }
+func (m *mockPRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
+	return nil
+}
+func (m *mockPRService) AddComment(_ context.Context, _ int, body string) error {
+	m.comments = append(m.comments, body)
+	return nil
+}
+func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) { return "", nil }
+
 type mockPlatform struct {
 	issues     *mockIssueService
+	prs        *mockPRService
 	workflows  *mockWorkflowService
 	repo       *mockRepoService
 	milestones *mockMilestoneService
 }
 
 func (m *mockPlatform) Issues() platform.IssueService             { return m.issues }
-func (m *mockPlatform) PullRequests() platform.PullRequestService  { return nil }
+func (m *mockPlatform) PullRequests() platform.PullRequestService  { return m.prs }
 func (m *mockPlatform) Workflows() platform.WorkflowService        { return m.workflows }
 func (m *mockPlatform) Labels() platform.LabelService              { return nil }
 func (m *mockPlatform) Milestones() platform.MilestoneService      { return m.milestones }
@@ -176,6 +207,7 @@ func TestExec_NoMilestone(t *testing.T) {
 		issues: &mockIssueService{
 			getResult: &platform.Issue{Number: 42, Title: "Test", Milestone: nil},
 		},
+		prs:       &mockPRService{},
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main"},
 	}
@@ -200,6 +232,7 @@ func TestExec_AgentFailure(t *testing.T) {
 				Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 			},
 		},
+		prs:       &mockPRService{},
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main"},
 	}
@@ -255,6 +288,7 @@ func TestExec_PostsSummaryComment(t *testing.T) {
 	}
 	mock := &mockPlatform{
 		issues:    issueSvc,
+		prs:       &mockPRService{},
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main"},
 	}
@@ -300,6 +334,7 @@ func TestExec_EmptySummaryNoComment(t *testing.T) {
 	}
 	mock := &mockPlatform{
 		issues:    issueSvc,
+		prs:       &mockPRService{},
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main"},
 	}
@@ -512,6 +547,7 @@ func TestExec_HTTPClientNil_SkipsImageDownload(t *testing.T) {
 				Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 			},
 		},
+		prs:       &mockPRService{},
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main"},
 	}
@@ -606,6 +642,7 @@ func TestExec_ResumesExistingBranch(t *testing.T) {
 				Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 			},
 		},
+		prs:       &mockPRService{},
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: nil},
 	}
@@ -682,6 +719,7 @@ func TestExec_ResumeMergeFailure(t *testing.T) {
 				Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 			},
 		},
+		prs:       &mockPRService{},
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: nil},
 	}
@@ -708,6 +746,7 @@ func TestExec_FreshBranchWhenNoRemote(t *testing.T) {
 			},
 		},
 		workflows: &mockWorkflowService{},
+		prs:       &mockPRService{},
 		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
 	}
 
@@ -717,4 +756,67 @@ func TestExec_FreshBranchWhenNoRemote(t *testing.T) {
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "checking out batch branch")
+}
+
+func TestRenderWorkerPrompt_FixIssue(t *testing.T) {
+	body := "---\nherd:\n  version: 1\n  type: fix\n---\n\n## Task\nFix the bug"
+	cfg := &config.Config{}
+	prompt, err := renderWorkerPrompt("Fix bug", body, 10, "herd/worker/10-fix-bug", t.TempDir(), cfg)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "This is a fix issue created by the reviewer")
+	assert.Contains(t, prompt, "Do not dismiss")
+}
+
+func TestRenderWorkerPrompt_NonFixIssue(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"no frontmatter", "## Task\nBuild it"},
+		{"type not fix", "---\nherd:\n  version: 1\n  type: enhancement\n---\n\n## Task\nBuild it"},
+		{"empty type", "---\nherd:\n  version: 1\n---\n\n## Task\nBuild it"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			prompt, err := renderWorkerPrompt("Task", tt.body, 1, "herd/worker/1-task", t.TempDir(), cfg)
+			require.NoError(t, err)
+			assert.NotContains(t, prompt, "This is a fix issue")
+		})
+	}
+}
+
+func TestRenderWorkerPrompt_FixIssueWithMalformedFrontmatter(t *testing.T) {
+	body := "---\nherd:\n  version: [invalid yaml\n---\n\n## Task\nDo something"
+	cfg := &config.Config{}
+	prompt, err := renderWorkerPrompt("Task", body, 1, "herd/worker/1-task", t.TempDir(), cfg)
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, "This is a fix issue")
+}
+
+func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	// Find the no-op block
+	noOpIdx := strings.Index(src, `if diff == ""`)
+	require.NotEqual(t, -1, noOpIdx, "no-op check not found")
+
+	// Extract a generous block after the no-op check
+	end := noOpIdx + 1000
+	if end > len(src) {
+		end = len(src)
+	}
+	noOpBlock := src[noOpIdx:end]
+
+	assert.Contains(t, noOpBlock, "PullRequests().List",
+		"no-op path must list batch PRs")
+	assert.Contains(t, noOpBlock, "AddComment",
+		"no-op path must post a comment on the batch PR")
+	assert.Contains(t, noOpBlock, "Worker #",
+		"no-op PR comment must include Worker # prefix")
+	assert.Contains(t, noOpBlock, "(no-op)",
+		"no-op PR comment must include (no-op) marker")
 }
