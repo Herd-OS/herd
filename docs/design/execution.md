@@ -96,7 +96,10 @@ After completing a task, workers post a structured report on the issue:
 
 Workers also post a report on the no-op path (when no changes are needed). The
 no-op report includes a "No changes were needed" message with the agent output
-in a collapsible details block.
+in a collapsible details block. Additionally, the worker posts a summary comment
+on the batch PR so the reviewer can see why no changes were made. This prevents
+the reviewer from creating fix issues for work that was already determined to be
+unnecessary. Format: **Worker #N (no-op):** No changes needed. <explanation>
 
 ### Image Preprocessing
 
@@ -278,6 +281,13 @@ Review findings are classified by severity:
 | HIGH | Bugs, security vulnerabilities, race conditions, missing critical error handling | Creates fix issues, dispatches workers |
 | MEDIUM | Missing edge cases, suboptimal error handling | Creates fix issues, dispatches workers |
 | LOW | Style preferences, naming suggestions | Listed in PR comment, no fix workers |
+| CRITERIA | Acceptance criterion is wrong, incomplete, or contradictory | Listed in PR comment as requiring human review, no fix workers |
+
+The CRITERIA severity is distinct from code issues. When the reviewer identifies
+that an acceptance criterion itself is flawed (not the code), it flags it as
+CRITERIA. These findings appear in the PR comment under a separate
+"**CRITERIA** (requires human review)" section but never generate fix issues,
+because changing acceptance criteria requires human judgment.
 
 The `review_strictness` setting (standard/strict/lenient) controls which issues the agent flags. See [Configuration](../configuration.md#review-strictness) for details.
 
@@ -303,6 +313,14 @@ Fix issues are labeled `herd/type:fix`, have no dependencies (run in parallel),
 and track which review cycle spawned them via a `fix_cycle` field and a
 `batch_pr` reference back to the PR. Findings are deduplicated against open fix
 issues to avoid creating duplicate work.
+
+When a worker is dispatched for a fix issue, its system prompt includes an
+additional instruction prioritizing the reviewer's findings over original
+acceptance criteria. This prevents fix workers from checking the original
+criteria, finding them satisfied, and no-oping — ignoring the reviewer's
+concern entirely. If the fix worker genuinely believes the reviewer is wrong
+after careful analysis, it explains its reasoning in detail rather than
+silently doing nothing.
 
 When `/herd fix` creates a fix issue, all comments from the batch PR are
 included as a `## Conversation History` section in the issue body. Each comment
