@@ -35,7 +35,7 @@ func New(owner, repo string) (*Client, error) {
 
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	httpClient := oauth2.NewClient(context.Background(), ts)
-	httpClient.Transport = newRetryTransport(httpClient.Transport, 3, time.Second)
+	httpClient.Transport = newRetryTransport(httpClient.Transport, time.Second)
 	client := gh.NewClient(httpClient)
 
 	return &Client{

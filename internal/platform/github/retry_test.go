@@ -93,7 +93,7 @@ func TestRetryTransport(t *testing.T) {
 				responses: tt.responses,
 				errs:      tt.errs,
 			}
-			transport := newRetryTransport(mock, 3, 1*time.Millisecond)
+			transport := newRetryTransport(mock, 1*time.Millisecond)
 			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com", nil)
 			require.NoError(t, err)
 
@@ -120,7 +120,7 @@ func TestRetryTransport_RetryableStatusCodes(t *testing.T) {
 					newResponse(200),
 				},
 			}
-			transport := newRetryTransport(mock, 3, 1*time.Millisecond)
+			transport := newRetryTransport(mock, 1*time.Millisecond)
 			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com", nil)
 			require.NoError(t, err)
 
@@ -140,7 +140,7 @@ func TestRetryTransport_ContextCancellation(t *testing.T) {
 			newResponse(503),
 		},
 	}
-	transport := newRetryTransport(mock, 3, 100*time.Millisecond)
+	transport := newRetryTransport(mock, 100*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
@@ -160,7 +160,7 @@ func TestRetryTransport_ContextCancellation(t *testing.T) {
 }
 
 func TestNewRetryTransport_NilBase(t *testing.T) {
-	transport := newRetryTransport(nil, 3, time.Second)
+	transport := newRetryTransport(nil, time.Second)
 	assert.Equal(t, http.DefaultTransport, transport.base)
 }
 
@@ -187,7 +187,7 @@ func TestRetryTransport_RewindsRequestBody(t *testing.T) {
 			newResponse(200),
 		},
 	}
-	transport := newRetryTransport(bt, 3, 1*time.Millisecond)
+	transport := newRetryTransport(bt, 1*time.Millisecond)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://example.com", strings.NewReader("payload"))
 	require.NoError(t, err)
@@ -205,7 +205,7 @@ func TestRetryTransport_GetBodyError(t *testing.T) {
 	mock := &mockTransport{
 		responses: []*http.Response{newResponse(502), newResponse(200)},
 	}
-	transport := newRetryTransport(mock, 3, 1*time.Millisecond)
+	transport := newRetryTransport(mock, 1*time.Millisecond)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://example.com", strings.NewReader("data"))
 	require.NoError(t, err)
@@ -249,7 +249,7 @@ func TestRetryTransport_DrainsResponseBody(t *testing.T) {
 	mock := &mockTransport{
 		responses: []*http.Response{resp1, newResponse(200)},
 	}
-	transport := newRetryTransport(mock, 3, 1*time.Millisecond)
+	transport := newRetryTransport(mock, 1*time.Millisecond)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com", nil)
 	require.NoError(t, err)

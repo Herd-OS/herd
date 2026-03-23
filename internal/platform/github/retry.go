@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// defaultMaxRetries is the number of retry attempts for transient HTTP errors.
+const defaultMaxRetries = 3
+
 // retryableStatusCodes are the HTTP status codes that trigger a retry.
 var retryableStatusCodes = map[int]bool{
 	500: true,
@@ -24,14 +27,14 @@ type retryTransport struct {
 }
 
 // newRetryTransport creates a retryTransport wrapping the given base transport.
-// It retries up to maxRetries times with exponential backoff starting at baseDelay.
-func newRetryTransport(base http.RoundTripper, maxRetries int, baseDelay time.Duration) *retryTransport {
+// It retries up to defaultMaxRetries times with exponential backoff starting at baseDelay.
+func newRetryTransport(base http.RoundTripper, baseDelay time.Duration) *retryTransport {
 	if base == nil {
 		base = http.DefaultTransport
 	}
 	return &retryTransport{
 		base:       base,
-		maxRetries: maxRetries,
+		maxRetries: defaultMaxRetries,
 		baseDelay:  baseDelay,
 	}
 }
@@ -61,7 +64,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if attempt < t.maxRetries {
 			// Drain and close the body before retrying to allow connection reuse.
 			io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			delay := t.baseDelay * time.Duration(math.Pow(2, float64(attempt)))
 			select {
 			case <-req.Context().Done():
