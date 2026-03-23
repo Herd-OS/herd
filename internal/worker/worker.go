@@ -52,7 +52,14 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
 - Check if the acceptance criteria are already satisfied by existing
   code. If so, report that no changes are needed and exit successfully
   without making any commits.
-- Focus on files listed in the Scope or Files to Modify sections. You
+{{if .IsFixIssue}}- **This is a fix issue created by the reviewer.** Focus on the specific
+  problem described in the Task section. The reviewer found an issue that
+  may not be covered by the original acceptance criteria. Do not dismiss
+  the concern just because existing code passes the original criteria.
+  If after careful analysis you genuinely believe the reviewer is wrong,
+  explain your reasoning in detail in your output rather than silently
+  doing nothing.
+{{end}}- Focus on files listed in the Scope or Files to Modify sections. You
   may modify other files if necessary to satisfy acceptance criteria.
 - Commit your changes with clear messages referencing issue #{{.IssueNumber}}.
 - Do not add features, refactor code, or make improvements beyond
@@ -91,6 +98,7 @@ type promptData struct {
 	WorkerBranch     string
 	RoleInstructions string
 	CoAuthorTrailer  string
+	IsFixIssue       bool
 }
 
 // Exec runs the full worker lifecycle: reads the issue, creates a worker branch,
@@ -211,6 +219,17 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 			noOpReport += fmt.Sprintf("\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
 		}
 		_ = p.Issues().AddComment(ctx, params.IssueNumber, noOpReport)
+
+		// Best-effort: post a comment on the batch PR
+		prs, _ := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
+		if len(prs) > 0 {
+			prComment := fmt.Sprintf("**Worker #%d (no-op):** No changes needed.", params.IssueNumber)
+			if rawSummary != "" {
+				prComment = fmt.Sprintf("**Worker #%d (no-op):** No changes needed. %s", params.IssueNumber, truncateOutput(rawSummary, 2000))
+			}
+			_ = p.PullRequests().AddComment(ctx, prs[0].Number, prComment)
+		}
+
 		_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress, issues.StatusFailed})
 		_ = p.Issues().AddLabels(ctx, params.IssueNumber, []string{issues.StatusDone})
 		return &ExecResult{NoOp: true}, nil
@@ -417,11 +436,17 @@ func renderWorkerPrompt(title, body string, issueNumber int, workerBranch string
 		return "", fmt.Errorf("parsing worker prompt template: %w", err)
 	}
 
+	isFixIssue := false
+	if parsed, parseErr := issues.ParseBody(body); parseErr == nil {
+		isFixIssue = parsed.FrontMatter.Type == "fix"
+	}
+
 	data := promptData{
 		Title:        title,
 		Body:         body,
 		IssueNumber:  issueNumber,
 		WorkerBranch: workerBranch,
+		IsFixIssue:   isFixIssue,
 	}
 
 	if cfg.PullRequests.CoAuthorEmail != "" {

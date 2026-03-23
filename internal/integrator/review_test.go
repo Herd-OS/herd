@@ -1421,10 +1421,28 @@ func TestFilterFindingsBySeverity(t *testing.T) {
 		{Severity: "high", Description: "another bug"}, // case insensitive
 		{Severity: "", Description: "unknown defaults to low"},
 	}
-	high, medium, low := filterFindingsBySeverity(findings)
+	high, medium, low, criteria := filterFindingsBySeverity(findings)
 	assert.Len(t, high, 2)
 	assert.Len(t, medium, 1)
 	assert.Len(t, low, 2) // empty severity defaults to low
+	assert.Len(t, criteria, 0)
+}
+
+func TestFilterFindingsBySeverity_Criteria(t *testing.T) {
+	findings := []agent.ReviewFinding{
+		{Severity: "HIGH", Description: "bug"},
+		{Severity: "MEDIUM", Description: "edge case"},
+		{Severity: "LOW", Description: "style"},
+		{Severity: "CRITERIA", Description: "criterion is too vague"},
+		{Severity: "high", Description: "another bug"},
+		{Severity: "", Description: "unknown defaults to low"},
+	}
+	high, medium, low, criteria := filterFindingsBySeverity(findings)
+	assert.Len(t, high, 2)
+	assert.Len(t, medium, 1)
+	assert.Len(t, low, 2)
+	assert.Len(t, criteria, 1)
+	assert.Equal(t, "criterion is too vague", criteria[0].Description)
 }
 
 func TestDedupFindings(t *testing.T) {
@@ -1638,7 +1656,7 @@ func TestBuildReviewCycleComment(t *testing.T) {
 	medium := []agent.ReviewFinding{{Severity: "MEDIUM", Description: "edge case"}}
 	low := []agent.ReviewFinding{{Severity: "LOW", Description: "style"}}
 
-	comment := buildReviewCycleComment(2, 5, []int{100}, high, medium, low)
+	comment := buildReviewCycleComment(2, 5, []int{100}, high, medium, low, nil)
 	assert.Contains(t, comment, "cycle 2 of 5")
 	assert.Contains(t, comment, "Found 3 issues")
 	assert.Contains(t, comment, "**HIGH** (fix worker dispatched → #100)")
@@ -1648,7 +1666,7 @@ func TestBuildReviewCycleComment(t *testing.T) {
 
 func TestBuildReviewCycleComment_NoCycle(t *testing.T) {
 	medium := []agent.ReviewFinding{{Severity: "MEDIUM", Description: "edge case"}}
-	comment := buildReviewCycleComment(0, 3, nil, nil, medium, nil)
+	comment := buildReviewCycleComment(0, 3, nil, nil, medium, nil, nil)
 	assert.Contains(t, comment, "🔍 **HerdOS Agent Review**\n\n")
 	assert.NotContains(t, comment, "cycle")
 	assert.Contains(t, comment, "Found 1 issue:")
@@ -1691,10 +1709,28 @@ func TestBuildReviewCycleComment_SingularPlural(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			comment := buildReviewCycleComment(1, 3, nil, tt.high, tt.medium, tt.low)
+			comment := buildReviewCycleComment(1, 3, nil, tt.high, tt.medium, tt.low, nil)
 			assert.Contains(t, comment, tt.expected)
 		})
 	}
+}
+
+func TestBuildReviewCycleComment_WithCriteria(t *testing.T) {
+	criteria := []agent.ReviewFinding{
+		{Severity: "CRITERIA", Description: "Criterion 'tests pass' is too vague"},
+		{Severity: "CRITERIA", Description: "Criterion 'no regressions' is unmeasurable"},
+	}
+	comment := buildReviewCycleComment(1, 3, nil, nil, nil, nil, criteria)
+	assert.Contains(t, comment, "**CRITERIA** (requires human review):")
+	assert.Contains(t, comment, "- Criterion 'tests pass' is too vague")
+	assert.Contains(t, comment, "- Criterion 'no regressions' is unmeasurable")
+}
+
+func TestBuildReviewCycleComment_CriteriaInTotalCount(t *testing.T) {
+	high := []agent.ReviewFinding{{Severity: "HIGH", Description: "bug"}}
+	criteria := []agent.ReviewFinding{{Severity: "CRITERIA", Description: "vague criterion"}}
+	comment := buildReviewCycleComment(1, 3, nil, high, nil, nil, criteria)
+	assert.Contains(t, comment, "Found 2 issues:")
 }
 
 func TestCollectFixRequests(t *testing.T) {

@@ -43,11 +43,13 @@ Respond with ONLY a JSON object (no markdown fencing, no extra text):
 
 If you find issues, set approved to false and classify each finding as HIGH, MEDIUM, or LOW severity:
 {"approved": false, "findings": [{"severity": "HIGH", "description": "issue description"}, {"severity": "MEDIUM", "description": "minor issue"}], "summary": "brief summary of findings"}
+Use severity "CRITERIA" only when the acceptance criterion itself is flawed, not the code.
 
 Severity guide:
 - HIGH: Bugs, security vulnerabilities, data loss risks, race conditions, missing critical error handling
 - MEDIUM: Missing edge cases, suboptimal error handling, potential performance issues
 - LOW: Style preferences, naming suggestions, minor code quality improvements
+- CRITERIA: An acceptance criterion itself is wrong, incomplete, or contradictory. Flag what's wrong with the criterion and what it should say instead. Do NOT create fix issues for CRITERIA findings — they require human review.
 {{if .RoleInstructions}}
 ## Project-Specific Review Instructions
 {{.RoleInstructions}}
