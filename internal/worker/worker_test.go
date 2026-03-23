@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -110,6 +112,7 @@ func (m *mockWorkflowService) CancelRun(_ context.Context, _ int64) error { retu
 
 type mockRepoService struct {
 	defaultBranch string
+	branchSHAErr  error // if non-nil, GetBranchSHA returns this error
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
@@ -119,6 +122,9 @@ func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error   { return nil }
 func (m *mockRepoService) DeleteBranch(_ context.Context, _ string) error      { return nil }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
+	if m.branchSHAErr != nil {
+		return "", m.branchSHAErr
+	}
 	return "abc123", nil
 }
 
@@ -141,13 +147,16 @@ func (m *mockMilestoneService) Update(_ context.Context, _ int, _ platform.Miles
 
 func TestRenderWorkerPrompt(t *testing.T) {
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, "herd/worker/42-add-auth", t.TempDir(), cfg)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "Add auth")
 	assert.Contains(t, prompt, "## Task\nBuild it")
 	assert.Contains(t, prompt, "issue #42")
 	assert.Contains(t, prompt, "You are a HerdOS worker")
 	assert.NotContains(t, prompt, "Project-Specific Instructions")
+	assert.Contains(t, prompt, "herd/worker/42-add-auth")
+	assert.Contains(t, prompt, "WORKER_PROGRESS.md")
+	assert.Contains(t, prompt, "git push origin")
 }
 
 func TestRenderWorkerPromptWithRoleInstructions(t *testing.T) {
@@ -156,7 +165,7 @@ func TestRenderWorkerPromptWithRoleInstructions(t *testing.T) {
 	require.NoError(t, os.WriteFile(dir+"/.herd/worker.md", []byte("Use table-driven tests"), 0644))
 
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Task", "Body", 1, dir, cfg)
+	prompt, err := renderWorkerPrompt("Task", "Body", 1, "herd/worker/1-task", dir, cfg)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "Use table-driven tests")
 	assert.Contains(t, prompt, "Project-Specific Instructions")
@@ -224,7 +233,7 @@ func TestWorkerPrompt_CoAuthorTrailer(t *testing.T) {
 			cfg := &config.Config{
 				PullRequests: config.PullRequests{CoAuthorEmail: tt.coAuthorEmail},
 			}
-			prompt, err := renderWorkerPrompt("Task", "Body", 1, t.TempDir(), cfg)
+			prompt, err := renderWorkerPrompt("Task", "Body", 1, "herd/worker/1-task", t.TempDir(), cfg)
 			require.NoError(t, err)
 
 			if tt.expectTrailer {
@@ -520,7 +529,7 @@ func TestExec_HTTPClientNil_SkipsImageDownload(t *testing.T) {
 func TestPromptTemplate_AllInstructions(t *testing.T) {
 	// Verify all 8 instruction bullets from the spec are present
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Title", "Body", 1, t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Title", "Body", 1, "herd/worker/1-title", t.TempDir(), cfg)
 	require.NoError(t, err)
 
 	expectedPhrases := []string{
@@ -532,8 +541,103 @@ func TestPromptTemplate_AllInstructions(t *testing.T) {
 		"Commit your changes with clear messages",
 		"Do not add features, refactor code",
 		"exit with a non-zero status",
+		"WORKER_PROGRESS.md",
+		"git push origin",
+		"timed-out attempt",
 	}
 	for _, phrase := range expectedPhrases {
 		assert.Contains(t, prompt, phrase, "missing instruction: %s", phrase)
 	}
+}
+
+func TestExec_RetryBranchCheck(t *testing.T) {
+	// Verify that Exec checks for existing remote branch before creating
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+	assert.Contains(t, src, "GetBranchSHA(ctx, workerBranch)",
+		"Exec must check if worker branch exists remotely before creating")
+	// The existing-branch path should checkout, not create
+	assert.Contains(t, src, "checking out existing worker branch")
+}
+
+// initTestRepo creates a minimal git repo with a bare "origin" remote so that
+// git fetch origin succeeds. Returns the working repo path.
+func initTestRepo(t *testing.T) string {
+	t.Helper()
+
+	bare := t.TempDir()
+	work := t.TempDir()
+
+	// Create bare repo to act as origin
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+
+	run(bare, "git", "init", "--bare", bare)
+	run(work, "git", "init", work)
+	run(work, "git", "remote", "add", "origin", bare)
+
+	// Create an initial commit so refs exist
+	require.NoError(t, os.WriteFile(filepath.Join(work, "README"), []byte("init"), 0644))
+	run(work, "git", "add", "README")
+	run(work, "git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-m", "init")
+	run(work, "git", "push", "origin", "HEAD:refs/heads/main")
+
+	return work
+}
+
+func TestExec_ResumesExistingBranch(t *testing.T) {
+	// When GetBranchSHA succeeds (branch exists), worker should try to
+	// checkout the existing branch rather than creating a new one.
+	// After fetch succeeds, it takes the resume path (checkout workerBranch),
+	// which fails because the branch doesn't exist locally — but crucially
+	// NOT with "checking out batch branch" error.
+	repoDir := initTestRepo(t)
+
+	mock := &mockPlatform{
+		issues: &mockIssueService{
+			getResult: &platform.Issue{
+				Number: 42, Title: "Test",
+				Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+			},
+		},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: nil},
+	}
+
+	_, err := Exec(context.Background(), mock, &mockAgent{}, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "checking out existing worker branch")
+}
+
+func TestExec_FreshBranchWhenNoRemote(t *testing.T) {
+	// When GetBranchSHA fails (no remote branch), worker should create
+	// a fresh branch from the batch branch.
+	repoDir := initTestRepo(t)
+
+	mock := &mockPlatform{
+		issues: &mockIssueService{
+			getResult: &platform.Issue{
+				Number: 42, Title: "Test",
+				Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+			},
+		},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	_, err := Exec(context.Background(), mock, &mockAgent{}, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "checking out batch branch")
 }
