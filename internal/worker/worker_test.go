@@ -394,22 +394,45 @@ func TestReportPostedAfterPush(t *testing.T) {
 }
 
 func TestWorkerNoOpPath_PostsReport(t *testing.T) {
-	source, err := os.ReadFile("worker.go")
+	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	ag := &mockAgent{
+		execResult: &agent.ExecResult{Summary: "Everything looks good"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
 	require.NoError(t, err)
-	src := string(source)
+	require.NotNil(t, result)
+	assert.True(t, result.NoOp)
 
-	// The no-op path (diff == "") should post a comment
-	noOpIdx := strings.Index(src, `if diff == ""`)
-	require.NotEqual(t, -1, noOpIdx, "no-op check not found")
-
-	// Find the next return statement after the no-op check
-	noOpBlock := src[noOpIdx : noOpIdx+600]
-	assert.Contains(t, noOpBlock, "AddComment",
-		"no-op path must post a worker report comment")
-	assert.Contains(t, noOpBlock, "Worker Report",
-		"no-op comment should include Worker Report header")
-	assert.Contains(t, noOpBlock, "No changes were needed",
-		"no-op comment should explain that no changes were needed")
+	// Should have posted a worker report comment on the issue
+	require.NotEmpty(t, issueSvc.comments, "no-op path must post a worker report comment")
+	foundReport := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker Report") {
+			foundReport = true
+			assert.Contains(t, c, "No changes were needed",
+				"no-op comment should explain that no changes were needed")
+			break
+		}
+	}
+	assert.True(t, foundReport, "no-op path must post a Worker Report comment")
 }
 
 func TestRunValidation_NoGoMod(t *testing.T) {
@@ -627,6 +650,29 @@ func initTestRepo(t *testing.T) string {
 	return work
 }
 
+// initTestRepoWithBatchBranch creates a test repo (via initTestRepo) and
+// pushes a batch branch to origin so that Exec can check it out.
+func initTestRepoWithBatchBranch(t *testing.T, batchBranch string) string {
+	t.Helper()
+
+	work := initTestRepo(t)
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+
+	// Create and push the batch branch from main
+	run(work, "git", "checkout", "-b", batchBranch)
+	run(work, "git", "push", "origin", batchBranch)
+	run(work, "git", "checkout", "main")
+
+	return work
+}
+
 func TestExec_ResumesExistingBranch(t *testing.T) {
 	// When GetBranchSHA succeeds (branch exists), worker should try to
 	// checkout the existing branch rather than creating a new one.
@@ -796,27 +842,40 @@ func TestRenderWorkerPrompt_FixIssueWithMalformedFrontmatter(t *testing.T) {
 }
 
 func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
-	source, err := os.ReadFile("worker.go")
-	require.NoError(t, err)
-	src := string(source)
+	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
 
-	// Find the no-op block
-	noOpIdx := strings.Index(src, `if diff == ""`)
-	require.NotEqual(t, -1, noOpIdx, "no-op check not found")
-
-	// Extract a generous block after the no-op check
-	end := noOpIdx + 1000
-	if end > len(src) {
-		end = len(src)
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{{Number: 99}},
 	}
-	noOpBlock := src[noOpIdx:end]
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
 
-	assert.Contains(t, noOpBlock, "PullRequests().List",
-		"no-op path must list batch PRs")
-	assert.Contains(t, noOpBlock, "AddComment",
-		"no-op path must post a comment on the batch PR")
-	assert.Contains(t, noOpBlock, "Worker #",
+	ag := &mockAgent{
+		execResult: &agent.ExecResult{Summary: "No changes needed"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.NoOp, "result should be no-op")
+
+	// Should have posted a comment on the batch PR
+	require.NotEmpty(t, prSvc.comments, "no-op path must post a comment on the batch PR")
+	assert.Contains(t, prSvc.comments[0], "Worker #42",
 		"no-op PR comment must include Worker # prefix")
-	assert.Contains(t, noOpBlock, "(no-op)",
+	assert.Contains(t, prSvc.comments[0], "(no-op)",
 		"no-op PR comment must include (no-op) marker")
 }
