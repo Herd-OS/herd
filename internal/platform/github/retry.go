@@ -1,6 +1,8 @@
 package github
 
 import (
+	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"time"
@@ -40,6 +42,15 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var err error
 
 	for attempt := 0; attempt <= t.maxRetries; attempt++ {
+		// Re-wind request body for retries so non-GET requests send the full payload.
+		if attempt > 0 && req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return nil, fmt.Errorf("retry: failed to rewind request body: %w", err)
+			}
+			req.Body = body
+		}
+
 		resp, err = t.base.RoundTrip(req)
 		if err != nil {
 			return nil, err // network errors are not retried
@@ -48,7 +59,8 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return resp, nil
 		}
 		if attempt < t.maxRetries {
-			// Drain and close the body before retrying to reuse the connection.
+			// Drain and close the body before retrying to allow connection reuse.
+			io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain
 			resp.Body.Close()
 			delay := t.baseDelay * time.Duration(math.Pow(2, float64(attempt)))
 			select {

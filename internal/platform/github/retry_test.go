@@ -163,3 +163,101 @@ func TestNewRetryTransport_NilBase(t *testing.T) {
 	transport := newRetryTransport(nil, 3, time.Second)
 	assert.Equal(t, http.DefaultTransport, transport.base)
 }
+
+// bodyCapturingTransport records the request body bytes on each RoundTrip call.
+type bodyCapturingTransport struct {
+	bodies    []string
+	responses []*http.Response
+}
+
+func (b *bodyCapturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body string
+	if req.Body != nil {
+		data, _ := io.ReadAll(req.Body)
+		body = string(data)
+	}
+	b.bodies = append(b.bodies, body)
+	return b.responses[len(b.bodies)-1], nil
+}
+
+func TestRetryTransport_RewindsRequestBody(t *testing.T) {
+	bt := &bodyCapturingTransport{
+		responses: []*http.Response{
+			newResponse(502),
+			newResponse(200),
+		},
+	}
+	transport := newRetryTransport(bt, 3, 1*time.Millisecond)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://example.com", strings.NewReader("payload"))
+	require.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+
+	require.NoError(t, err)
+	assert.Equal(t, 200, resp.StatusCode)
+	require.Len(t, bt.bodies, 2)
+	assert.Equal(t, "payload", bt.bodies[0], "first attempt should send full body")
+	assert.Equal(t, "payload", bt.bodies[1], "retry should re-send full body")
+}
+
+func TestRetryTransport_GetBodyError(t *testing.T) {
+	mock := &mockTransport{
+		responses: []*http.Response{newResponse(502), newResponse(200)},
+	}
+	transport := newRetryTransport(mock, 3, 1*time.Millisecond)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://example.com", strings.NewReader("data"))
+	require.NoError(t, err)
+	// Override GetBody to return an error.
+	req.GetBody = func() (io.ReadCloser, error) {
+		return nil, errors.New("rewind failed")
+	}
+
+	_, err = transport.RoundTrip(req)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rewind failed")
+}
+
+// drainingBody tracks whether the body was fully read before being closed.
+type drainingBody struct {
+	io.Reader
+	drained bool
+	closed  bool
+}
+
+func (d *drainingBody) Read(p []byte) (int, error) {
+	n, err := d.Reader.Read(p)
+	if err == io.EOF {
+		d.drained = true
+	}
+	return n, err
+}
+
+func (d *drainingBody) Close() error {
+	d.closed = true
+	return nil
+}
+
+func TestRetryTransport_DrainsResponseBody(t *testing.T) {
+	body := &drainingBody{Reader: strings.NewReader("response data")}
+	resp1 := &http.Response{
+		StatusCode: 502,
+		Body:       body,
+	}
+	mock := &mockTransport{
+		responses: []*http.Response{resp1, newResponse(200)},
+	}
+	transport := newRetryTransport(mock, 3, 1*time.Millisecond)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com", nil)
+	require.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+
+	require.NoError(t, err)
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.True(t, body.drained, "response body should be drained before close")
+	assert.True(t, body.closed, "response body should be closed")
+}
