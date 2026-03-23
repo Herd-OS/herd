@@ -208,7 +208,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 
 	// Partition findings by severity
-	highFindings, mediumFindings, lowFindings := filterFindingsBySeverity(reviewResult.Findings)
+	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
 
 	// Handle approved
 	if reviewResult.Approved {
@@ -255,7 +255,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// No actionable findings — approve with informational comment and batch summary
 	if len(actionableFindings) == 0 {
-		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings)
+		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
 		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
 		_ = p.PullRequests().AddComment(ctx, pr.Number, summaryComment)
@@ -332,7 +332,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	fixIssueNums := []int{fixIssue.Number}
 
 	// Post structured findings comment
-	findingsComment := buildReviewCycleComment(nextCycle, cfg.Integrator.ReviewMaxFixCycles, fixIssueNums, highFindings, mediumFindings, lowFindings)
+	findingsComment := buildReviewCycleComment(nextCycle, cfg.Integrator.ReviewMaxFixCycles, fixIssueNums, highFindings, mediumFindings, lowFindings, criteriaFindings)
 	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsComment)
 
 	// Block merge with Request Changes review
@@ -492,14 +492,16 @@ func truncate(s string, max int) string {
 	return s
 }
 
-// filterFindingsBySeverity partitions findings into high, medium, and low.
-func filterFindingsBySeverity(findings []agent.ReviewFinding) (high, medium, low []agent.ReviewFinding) {
+// filterFindingsBySeverity partitions findings into high, medium, low, and criteria.
+func filterFindingsBySeverity(findings []agent.ReviewFinding) (high, medium, low, criteria []agent.ReviewFinding) {
 	for _, f := range findings {
 		switch strings.ToUpper(f.Severity) {
 		case "HIGH":
 			high = append(high, f)
 		case "MEDIUM":
 			medium = append(medium, f)
+		case "CRITERIA":
+			criteria = append(criteria, f)
 		default:
 			low = append(low, f)
 		}
@@ -551,10 +553,10 @@ func buildBatchSummaryComment(allIssues []*platform.Issue, reviewSummary string)
 }
 
 // buildReviewCycleComment creates a structured PR comment for a review cycle.
-func buildReviewCycleComment(cycle, maxCycles int, fixIssueNums []int, high, medium, low []agent.ReviewFinding) string {
+func buildReviewCycleComment(cycle, maxCycles int, fixIssueNums []int, high, medium, low, criteria []agent.ReviewFinding) string {
 	var b strings.Builder
 
-	totalFindings := len(high) + len(medium) + len(low)
+	totalFindings := len(high) + len(medium) + len(low) + len(criteria)
 
 	if cycle > 0 {
 		b.WriteString(fmt.Sprintf("🔍 **HerdOS Agent Review** (cycle %d of %d)\n\n", cycle, maxCycles))
@@ -607,6 +609,15 @@ func buildReviewCycleComment(cycle, maxCycles int, fixIssueNums []int, high, med
 		for _, f := range low {
 			b.WriteString(fmt.Sprintf("- %s\n", f.Description))
 		}
+		b.WriteString("\n")
+	}
+
+	if len(criteria) > 0 {
+		b.WriteString("**CRITERIA** (requires human review):\n")
+		for _, f := range criteria {
+			b.WriteString(fmt.Sprintf("- %s\n", f.Description))
+		}
+		b.WriteString("\n")
 	}
 
 	return b.String()

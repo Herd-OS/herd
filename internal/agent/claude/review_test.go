@@ -217,6 +217,26 @@ func TestRenderReviewPrompt_SeverityGuide(t *testing.T) {
 	assert.Contains(t, prompt, "HIGH: Bugs, security vulnerabilities")
 	assert.Contains(t, prompt, "MEDIUM: Missing edge cases")
 	assert.Contains(t, prompt, "LOW: Style preferences")
+	assert.Contains(t, prompt, "CRITERIA: An acceptance criterion itself is wrong")
+}
+
+func TestRenderReviewPrompt_CriteriaSeverityGuide(t *testing.T) {
+	opts := agent.ReviewOptions{AcceptanceCriteria: []string{"works"}}
+	prompt, err := renderReviewPrompt("diff", opts)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "acceptance criterion itself is wrong")
+	assert.Contains(t, prompt, `Use severity "CRITERIA" only when the acceptance criterion itself is flawed`)
+}
+
+func TestParseReviewOutput_CriteriaSeverity(t *testing.T) {
+	output := `{"approved": false, "findings": [{"severity": "CRITERIA", "description": "Criterion 'tests pass' is too vague"}], "summary": "criteria issue"}`
+	result, err := parseReviewOutput(output)
+	require.NoError(t, err)
+	assert.False(t, result.Approved)
+	assert.Len(t, result.Findings, 1)
+	assert.Equal(t, "CRITERIA", result.Findings[0].Severity)
+	assert.Equal(t, "Criterion 'tests pass' is too vague", result.Findings[0].Description)
+	assert.Equal(t, "criteria issue", result.Summary)
 }
 
 func TestRenderReviewPrompt_FixRequestsInCriteria(t *testing.T) {
