@@ -76,6 +76,9 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	if err := ensureGitignore(dir, ".herd/state/"); err != nil {
 		return fmt.Errorf("updating .gitignore: %w", err)
 	}
+	if err := ensureGitignore(dir, ".herd/progress/"); err != nil {
+		return fmt.Errorf("updating .gitignore: %w", err)
+	}
 	if err := ensureGitignore(dir, ".env"); err != nil {
 		return fmt.Errorf("updating .gitignore: %w", err)
 	}

@@ -100,6 +100,12 @@ func (g *Git) Rm(path string) error {
 	return g.run("rm", path)
 }
 
+// RmDir removes a directory recursively from the git index and working tree.
+// Returns nil if the path does not exist in the index.
+func (g *Git) RmDir(path string) error {
+	return g.run("rm", "-r", "--ignore-unmatch", path)
+}
+
 // AmendNoEdit amends the most recent commit without changing its message.
 func (g *Git) AmendNoEdit() error {
 	return g.run("commit", "--amend", "--no-edit")

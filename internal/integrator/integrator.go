@@ -160,16 +160,26 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 			ConflictDetected: true,
 		}, fmt.Errorf("merging worker branch %s into batch branch: %w", workerBranch, err)
 	}
-	// Clean up WORKER_PROGRESS.md if present (worker progress tracking artifact)
-	progressFile := filepath.Join(params.RepoRoot, "WORKER_PROGRESS.md")
-	if _, statErr := os.Stat(progressFile); statErr == nil {
+	// Clean up progress tracking artifacts (both new per-issue and legacy formats)
+	needsAmend := false
+	progressDir := filepath.Join(params.RepoRoot, ".herd", "progress")
+	if _, statErr := os.Stat(progressDir); statErr == nil {
+		if rmErr := g.RmDir(".herd/progress/"); rmErr == nil {
+			needsAmend = true
+		}
+	}
+	// Backward compat: remove legacy WORKER_PROGRESS.md at repo root
+	legacyFile := filepath.Join(params.RepoRoot, "WORKER_PROGRESS.md")
+	if _, statErr := os.Stat(legacyFile); statErr == nil {
 		if rmErr := g.Rm("WORKER_PROGRESS.md"); rmErr == nil {
-			if amendErr := g.AmendNoEdit(); amendErr != nil {
-				fmt.Printf("Warning: failed to amend merge commit to remove WORKER_PROGRESS.md: %v\n", amendErr)
-				// Reset the staged removal to avoid pushing with dirty index
-				if resetErr := g.ResetHead(); resetErr != nil {
-					return nil, fmt.Errorf("failed to reset after amend failure: %w (amend error: %v)", resetErr, amendErr)
-				}
+			needsAmend = true
+		}
+	}
+	if needsAmend {
+		if amendErr := g.AmendNoEdit(); amendErr != nil {
+			fmt.Printf("Warning: failed to amend merge commit to remove progress files: %v\n", amendErr)
+			if resetErr := g.ResetHead(); resetErr != nil {
+				return nil, fmt.Errorf("failed to reset after amend failure: %w (amend error: %v)", resetErr, amendErr)
 			}
 		}
 	}

@@ -392,6 +392,8 @@ func TestConsolidate_RemovesWorkerProgressFile(t *testing.T) {
 	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "WORKER_PROGRESS.md"), []byte("- [x] done"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd", "progress"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "progress", "42.md"), []byte("- [x] done"), 0644))
 	runGit(t, dir, "add", ".")
 	runGit(t, dir, "commit", "-m", "worker change with progress file")
 	runGit(t, dir, "push", "origin", "herd/worker/42-test")
@@ -418,6 +420,10 @@ func TestConsolidate_RemovesWorkerProgressFile(t *testing.T) {
 	// WORKER_PROGRESS.md should not exist on disk after consolidation
 	_, statErr := os.Stat(filepath.Join(dir, "WORKER_PROGRESS.md"))
 	assert.True(t, os.IsNotExist(statErr), "WORKER_PROGRESS.md should be removed after consolidation")
+
+	// .herd/progress/42.md should not exist on disk after consolidation
+	_, statErr = os.Stat(filepath.Join(dir, ".herd", "progress", "42.md"))
+	assert.True(t, os.IsNotExist(statErr), ".herd/progress/42.md should be removed after consolidation")
 
 	// worker.txt should still exist
 	_, statErr = os.Stat(filepath.Join(dir, "worker.txt"))
@@ -1643,8 +1649,10 @@ func TestConsolidate_CleansUpWorkerProgress(t *testing.T) {
 	source, err := os.ReadFile("integrator.go")
 	require.NoError(t, err)
 	src := string(source)
+	assert.Contains(t, src, ".herd/progress/",
+		"Consolidate must clean up .herd/progress/ directory after merge")
 	assert.Contains(t, src, "WORKER_PROGRESS.md",
-		"Consolidate must clean up WORKER_PROGRESS.md after merge")
+		"Consolidate must clean up legacy WORKER_PROGRESS.md for backward compat")
 	assert.Contains(t, src, "g.Rm(",
 		"Should use g.Rm to remove the progress file")
 	assert.Contains(t, src, "g.AmendNoEdit()",
