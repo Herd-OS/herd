@@ -1,0 +1,7 @@
+- [x] Create internal/commands/integrate.go with handleIntegrate function
+- [x] Register 'integrate' command in DefaultRegistry() in register.go
+- [x] Create internal/commands/integrate_test.go with comprehensive tests
+- [x] go build ./... passes
+- [x] go test ./... passes
+- [x] go vet ./... passes
+- [x] golangci-lint: not available for Go 1.26 (version incompatibility)
