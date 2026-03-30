@@ -35,6 +35,7 @@ You need a Personal Access Token (PAT) for runner registration and API operation
    - **Contents**: Read and write
    - **Issues**: Read and write
    - **Pull requests**: Read and write
+   - **Statuses**: Read (commit status API — not needed if `require_ci: false` in `.herdos.yml`)
    - **Workflows**: Read and write (required if workers create workflow files)
    - **Metadata**: Read (auto-selected)
 5. Generate and copy the token
@@ -199,4 +200,5 @@ See [GitHub's self-hosted runner docs](https://docs.github.com/en/actions/hostin
 | 403 on listing PRs | Missing permission | Ensure `pull-requests: write` is in workflow permissions |
 | Dispatch succeeds but no run appears | Missing secret | Add `HERD_GITHUB_TOKEN` as org/repo secret (see section 1) |
 | Token permission errors | Insufficient scope | Fine-grained: needs Administration read/write. Classic: needs `repo` scope |
+| Integrator crashes checking CI | Missing Statuses permission | Add **Statuses: Read** to fine-grained PAT, or set `require_ci: false` in `.herdos.yml` |
 | Auth errors in worker | Missing credentials | Verify `.env` has `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` |
