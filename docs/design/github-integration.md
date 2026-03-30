@@ -90,7 +90,7 @@ HerdOS ships three workflow files, installed by `herd init` into `.github/workfl
 |----------|---------|---------|
 | `herd-worker.yml` | `workflow_dispatch` | Executes a task from an issue. Receives issue number, batch branch, timeout, and runner label as inputs. Checks out the batch branch (or main), runs `herd worker exec`, which handles reading the issue, labeling, branching, invoking the agent, pushing, and updating status. |
 | `herd-monitor.yml` | `schedule` (cron, every 15 min) + `workflow_dispatch` | Health patrol. Runs `herd monitor patrol` to detect stuck/failed work, re-dispatch if configured, comment on issues, and unblock stragglers. Does not need an agent -- only makes API calls. |
-| `herd-integrator.yml` | `workflow_run` (worker completed) + `check_suite` (CI completed) + `issues` (closed) + `pull_request_review` (submitted) + `pull_request` (closed) | Consolidates worker branches into the batch branch, checks tier completion, dispatches next tier, opens the batch PR when all tiers are done, detects CI failures and dispatches fix workers, runs agent review, and merges after human approval. |
+| `herd-integrator.yml` | `workflow_run` (worker completed) + `check_run` (CI check completed) + `issues` (closed) + `pull_request_review` (submitted) + `pull_request` (closed) | Consolidates worker branches into the batch branch, checks tier completion, dispatches next tier, opens the batch PR when all tiers are done, detects CI failures and dispatches fix workers, runs agent review, and merges after human approval. |
 
 ### Secrets Management
 
@@ -116,7 +116,7 @@ Manual task closed -> issues.closed           -> Integrator advances + reviews
                                                       |
 All tiers done     -> (integrator logic)      -> Batch PR opened
                                                       |
-CI fails on batch  -> check_suite.completed   -> Integrator dispatches fix worker
+CI check completes -> check_run.completed     -> Integrator checks CI status, dispatches fix worker if needed
                                                       |
 Agent review       -> (integrator logic)      -> Approve or fix cycle
                                                       |
@@ -136,7 +136,7 @@ Comment posted     -> issue_comment.created   -> handle-comment parses and execu
 
 - **workflow_dispatch** -- primary dispatch mechanism. Only users with write access can trigger it (enforced by GitHub). The `ref` parameter points to the branch containing the workflow YAML, not the branch the worker checks out.
 - **workflow_run** -- triggers the Integrator when a worker completes (success or failure).
-- **check_suite** -- triggers the Integrator when CI completes on a batch branch. If CI failed, the Integrator re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`. Note: `check_suite` events may not fire for external CI providers (e.g., Cloudflare Pages). The Monitor patrol serves as a fallback, checking CI status on open batch PRs every 15 minutes. CI status detection checks both GitHub's commit status API and the check runs API to support external providers.
+- **check_run** -- triggers the Integrator when an individual CI check completes on a batch branch. Unlike `check_suite`, `check_run` fires per individual check completion and is more reliable across external CI providers. The job fires multiple times (once per check_run completion) but is idempotent: it calls `GetCombinedStatus` which returns "pending" if other checks are still running (no-op), "success" if all passed (no-op), or "failure" if all done with failures (dispatches fix workers up to `ci_max_fix_cycles`). The integrate job no longer runs `check-ci` inline, as it executed immediately after consolidation when CI hadn't started yet and always saw "pending". The Monitor patrol remains as a fallback, checking CI status on open batch PRs every 15 minutes.
 - **issues** -- triggers the Integrator when an issue is closed. Used for manual task completion — the Integrator advances the tier and runs agent review if all tiers are done.
 - **pull_request_review** -- triggers the Integrator to merge batch PRs after human approval + CI pass.
 - **pull_request** -- triggers cleanup when a batch PR is closed (merged or not). On merge: issues are closed, milestone is closed, branch is deleted. On close without merge: non-done issues are labelled `herd/status:cancelled` before closing, milestone is closed, and branch is deleted. Issues already `herd/status:done` are closed without relabelling in both cases.
