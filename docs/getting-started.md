@@ -233,6 +233,7 @@ When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the
 | `/herd review` | Batch PR | Triggers agent review of the batch PR |
 | `/herd review <focus area>` | Batch PR | Same as above, with extra review instructions |
 | `/herd fix <description>` | Batch PR | Creates a fix issue and dispatches a worker. The full PR comment thread is included in the fix issue so the worker has context of prior iterations. The reviewer automatically recognizes these fixes and will not flag them as acceptance criteria violations. |
+| `/herd integrate` | Any batch issue or PR | Manually triggers the integrator cycle (consolidate → check-ci → advance → review) for the batch. Useful for retrying after integrator failures. |
 
 **Image support:** When you attach screenshots to `/herd fix` comments, workers automatically download GitHub-hosted attachment images and can view them directly. This is useful for UI bug fixes -- paste a screenshot of the problem or the desired result, and the worker will see it. Only GitHub attachment URLs are downloaded; external image URLs are left as-is for the agent to handle.
 
@@ -243,7 +244,10 @@ When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the
 /herd retry 42
 /herd review focus on error handling in the auth module
 /herd fix add missing error check in auth.go line 42
+/herd integrate
 ```
+
+When the integrator fails during any step (consolidation, CI check, advancement, or review), it posts a comment on the relevant issue or batch PR with the error details and a reminder to retry with `/herd integrate`.
 
 Quotes around the prompt text are optional. You can paste error logs, JSON snippets, or any text directly after the command — everything after the command name (including subsequent lines) is treated as the prompt. The quoted format (`/herd fix "description"`) is also still supported.
 
