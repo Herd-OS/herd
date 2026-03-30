@@ -164,14 +164,18 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	needsAmend := false
 	progressDir := filepath.Join(params.RepoRoot, ".herd", "progress")
 	if _, statErr := os.Stat(progressDir); statErr == nil {
-		if rmErr := g.RmDir(".herd/progress/"); rmErr == nil {
+		if rmErr := g.RmDir(".herd/progress/"); rmErr != nil {
+			fmt.Printf("Warning: failed to git rm .herd/progress/: %v\n", rmErr)
+		} else {
 			needsAmend = true
 		}
 	}
 	// Backward compat: remove legacy WORKER_PROGRESS.md at repo root
 	legacyFile := filepath.Join(params.RepoRoot, "WORKER_PROGRESS.md")
 	if _, statErr := os.Stat(legacyFile); statErr == nil {
-		if rmErr := g.Rm("WORKER_PROGRESS.md"); rmErr == nil {
+		if rmErr := g.Rm("WORKER_PROGRESS.md"); rmErr != nil {
+			fmt.Printf("Warning: failed to git rm WORKER_PROGRESS.md: %v\n", rmErr)
+		} else {
 			needsAmend = true
 		}
 	}

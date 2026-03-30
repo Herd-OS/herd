@@ -1659,6 +1659,18 @@ func TestConsolidate_CleansUpWorkerProgress(t *testing.T) {
 		"Should amend the merge commit after removing progress file")
 }
 
+func TestConsolidate_RmErrorsAreLogged(t *testing.T) {
+	// Verify that RmDir and Rm errors are logged as warnings, not silently swallowed
+	source, err := os.ReadFile("integrator.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	assert.Contains(t, src, `Warning: failed to git rm .herd/progress/`,
+		"RmDir errors should be logged as warnings")
+	assert.Contains(t, src, `Warning: failed to git rm WORKER_PROGRESS.md`,
+		"Rm errors for legacy file should be logged as warnings")
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

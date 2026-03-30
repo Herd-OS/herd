@@ -314,6 +314,20 @@ func TestCreateRunnerFiles_OwnerRepoSubstitution(t *testing.T) {
 	}
 }
 
+func TestProgressDirNotGitignored(t *testing.T) {
+	// .herd/progress/ must NOT be gitignored — workers commit and push these files
+	// so retried workers and the integrator can access them via git.
+	source, err := os.ReadFile("init.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	assert.NotContains(t, src, `ensureGitignore(dir, ".herd/progress/")`,
+		".herd/progress/ must not be added to .gitignore — progress files are shared via git")
+	// .herd/state/ should still be gitignored (local-only state)
+	assert.Contains(t, src, `ensureGitignore(dir, ".herd/state/")`,
+		".herd/state/ should remain gitignored")
+}
+
 func TestEnvFileGitignored(t *testing.T) {
 	dir := t.TempDir()
 

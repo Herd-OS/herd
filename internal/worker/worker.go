@@ -77,7 +77,7 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
 - Your branch is ` + "`{{.WorkerBranch}}`" + `. After completing work on each file or
   logical unit, run ` + "`git push origin {{.WorkerBranch}}`" + ` to save your progress
   remotely. Do not wait until all work is done to push.
-- Before your first push, create a file called .herd/progress/{{.IssueNumber}}.md.
+- Before your first push, ensure the directory exists (` + "`mkdir -p .herd/progress`" + `) then create a file called .herd/progress/{{.IssueNumber}}.md.
   Update it before each push with a checklist of what you have completed
   and what remains. Format: completed items checked (` + "`- [x]`" + `), remaining items
   unchecked (` + "`- [ ]`" + `).

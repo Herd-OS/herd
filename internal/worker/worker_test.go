@@ -601,6 +601,7 @@ func TestPromptTemplate_AllInstructions(t *testing.T) {
 		"Do not add features, refactor code",
 		"exit with a non-zero status",
 		".herd/progress/",
+		"mkdir -p .herd/progress",
 		"git push origin",
 		"timed-out attempt",
 	}
