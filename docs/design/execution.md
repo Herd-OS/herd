@@ -119,12 +119,13 @@ agent's system prompt instructs it to run `git push` after completing each
 file or logical unit. This ensures that if the worker times out or crashes,
 the retry starts from where it left off rather than from scratch.
 
-To track progress, the agent creates a `WORKER_PROGRESS.md` file at the
-repository root before its first push. This file contains a checklist of
-completed and remaining items. On retry, the agent reads the existing file
-to understand what was already done.
+To track progress, the agent creates a `.herd/progress/<issue-number>.md` file
+before its first push. Each worker writes to a unique file (e.g., issue #17
+writes to `.herd/progress/17.md`), preventing merge conflicts between parallel
+workers. This file contains a checklist of completed and remaining items. On
+retry, the agent reads the existing file to understand what was already done.
 
-Example `WORKER_PROGRESS.md`:
+Example `.herd/progress/17.md`:
 ```
 - [x] Create auth model in internal/auth/model.go
 - [x] Add validation helpers
@@ -132,9 +133,10 @@ Example `WORKER_PROGRESS.md`:
 - [ ] Update API handler
 ```
 
-The Integrator removes `WORKER_PROGRESS.md` during consolidation (after
-merging the worker branch into the batch branch) so it does not appear in
-the final batch PR.
+The Integrator removes the `.herd/progress/` directory during consolidation
+(after merging the worker branch into the batch branch) so progress files
+do not appear in the final batch PR. For backward compatibility, legacy
+`WORKER_PROGRESS.md` files at the repo root are also removed.
 
 #### Retry Resume
 
@@ -142,8 +144,8 @@ When a worker is re-dispatched for a previously timed-out task, it checks
 whether the worker branch already exists on the remote. If it does, the
 worker checks out the existing branch (which contains partial work from the
 previous attempt) instead of creating a fresh branch from the batch branch.
-The agent then reads `WORKER_PROGRESS.md` to continue where the previous
-attempt stopped.
+The agent then reads `.herd/progress/<issue-number>.md` to continue where
+the previous attempt stopped.
 
 ### Concurrency
 
@@ -155,7 +157,7 @@ GitHub Actions limits.
 
 | Failure | Response |
 |---------|----------|
-| Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and WORKER_PROGRESS.md |
+| Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md` |
 | Worker produces bad code | Integrator re-runs failed CI once (transient filter), then dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
 | Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |

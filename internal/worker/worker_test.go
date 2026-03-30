@@ -186,7 +186,7 @@ func TestRenderWorkerPrompt(t *testing.T) {
 	assert.Contains(t, prompt, "You are a HerdOS worker")
 	assert.NotContains(t, prompt, "Project-Specific Instructions")
 	assert.Contains(t, prompt, "herd/worker/42-add-auth")
-	assert.Contains(t, prompt, "WORKER_PROGRESS.md")
+	assert.Contains(t, prompt, ".herd/progress/")
 	assert.Contains(t, prompt, "git push origin")
 }
 
@@ -600,7 +600,8 @@ func TestPromptTemplate_AllInstructions(t *testing.T) {
 		"Commit your changes with clear messages",
 		"Do not add features, refactor code",
 		"exit with a non-zero status",
-		"WORKER_PROGRESS.md",
+		".herd/progress/",
+		"mkdir -p .herd/progress",
 		"git push origin",
 		"timed-out attempt",
 	}
