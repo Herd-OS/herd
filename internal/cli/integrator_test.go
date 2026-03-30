@@ -449,7 +449,7 @@ func TestBatchPRNumber(t *testing.T) {
 			name:      "returns error when PR list fails",
 			milestone: &platform.Milestone{Number: 5, Title: "My Batch"},
 			prErr:     fmt.Errorf("API error"),
-			wantErr:   "no open batch PR found",
+			wantErr:   "no open batch PR found: API error",
 		},
 		{
 			name:      "returns first PR when multiple found",

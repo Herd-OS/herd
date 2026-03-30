@@ -569,7 +569,10 @@ func batchPRNumber(ctx context.Context, client platform.Platform, batchNum int) 
 	}
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
 	prs, err := client.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
-	if err != nil || len(prs) == 0 {
+	if err != nil {
+		return 0, fmt.Errorf("no open batch PR found: %w", err)
+	}
+	if len(prs) == 0 {
 		return 0, fmt.Errorf("no open batch PR found")
 	}
 	return prs[0].Number, nil
