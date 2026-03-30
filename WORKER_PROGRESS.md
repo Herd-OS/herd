@@ -1,7 +1,0 @@
-- [x] Update `internal/platform/github/checks.go` to handle 403/404 gracefully
-- [x] Add tests for 403, 404, and mixed scenarios in `checks_test.go`
-- [x] Verify `go build ./...` passes
-- [x] Verify `go test ./...` passes
-- [x] Verify `go vet ./...` passes
-- [ ] golangci-lint: skipped (no compatible version for Go 1.26.1)
-- [x] Commit and push changes

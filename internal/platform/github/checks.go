@@ -20,12 +20,14 @@ func (s *checkService) GetCombinedStatus(ctx context.Context, ref string) (strin
 	// external apps like Cloudflare). The combined result is the worst of the two.
 
 	// 1. Commit statuses
+	var permissionDenied bool
 	commitStatus, _, err := s.c.gh.Repositories.GetCombinedStatus(ctx, s.c.owner, s.c.repo, ref, nil)
 	var statusState string
 	if err != nil {
 		var errResp *gh.ErrorResponse
 		if errors.As(err, &errResp) && (errResp.Response.StatusCode == 403 || errResp.Response.StatusCode == 404) {
 			statusState = ""
+			permissionDenied = true
 		} else {
 			return "", fmt.Errorf("getting combined status for %s: %w", ref, err)
 		}
@@ -40,6 +42,7 @@ func (s *checkService) GetCombinedStatus(ctx context.Context, ref string) (strin
 		var errResp *gh.ErrorResponse
 		if errors.As(err, &errResp) && (errResp.Response.StatusCode == 403 || errResp.Response.StatusCode == 404) {
 			checksState = ""
+			permissionDenied = true
 		} else {
 			return "", fmt.Errorf("listing check runs for %s: %w", ref, err)
 		}
@@ -60,9 +63,11 @@ func (s *checkService) GetCombinedStatus(ctx context.Context, ref string) (strin
 		}
 	}
 
-	// If both endpoints failed or returned nothing, treat as no CI available.
+	// If both endpoints returned nothing, treat as no CI available.
 	if statusState == "" && checksState == "" {
-		fmt.Fprintf(os.Stderr, "warning: CI status unavailable for %s (no CI configured or insufficient permissions), treating as success\n", ref)
+		if permissionDenied {
+			fmt.Fprintf(os.Stderr, "warning: CI status unavailable for %s (insufficient permissions), treating as success\n", ref)
+		}
 		return "success", nil
 	}
 
