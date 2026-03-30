@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/herd-os/herd/internal/agent/claude"
@@ -11,6 +12,7 @@ import (
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/integrator"
+	"github.com/herd-os/herd/internal/planner"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
@@ -63,6 +65,9 @@ func newConsolidateCmd() *cobra.Command {
 				RepoRoot: cwd,
 			})
 			if err != nil {
+				if issNum, lookupErr := issueNumberFromRun(cmd.Context(), client, runID); lookupErr == nil {
+					postIntegratorFailure(cmd.Context(), client.Issues(), issNum, "consolidation", err)
+				}
 				return err
 			}
 
@@ -133,6 +138,15 @@ func newAdvanceCmd() *cobra.Command {
 				})
 			}
 			if err != nil {
+				if runID != 0 {
+					if issNum, lookupErr := issueNumberFromRun(cmd.Context(), client, runID); lookupErr == nil {
+						postIntegratorFailure(cmd.Context(), client.Issues(), issNum, "tier advancement", err)
+					}
+				} else if batchNum > 0 {
+					if prNum, lookupErr := batchPRNumber(cmd.Context(), client, batchNum); lookupErr == nil {
+						postIntegratorFailure(cmd.Context(), client.Issues(), prNum, "tier advancement", err)
+					}
+				}
 				return err
 			}
 
@@ -209,6 +223,17 @@ func newIntegratorReviewCmd() *cobra.Command {
 				RepoRoot:    cwd,
 			})
 			if err != nil {
+				if prNumber != 0 {
+					postIntegratorFailure(cmd.Context(), client.Issues(), prNumber, "review", err)
+				} else if runID != 0 {
+					if issNum, lookupErr := issueNumberFromRun(cmd.Context(), client, runID); lookupErr == nil {
+						postIntegratorFailure(cmd.Context(), client.Issues(), issNum, "review", err)
+					}
+				} else if batchNum != 0 {
+					if prNum, lookupErr := batchPRNumber(cmd.Context(), client, batchNum); lookupErr == nil {
+						postIntegratorFailure(cmd.Context(), client.Issues(), prNum, "review", err)
+					}
+				}
 				return err
 			}
 
@@ -478,6 +503,15 @@ func newIntegratorCheckCICmd() *cobra.Command {
 				RepoRoot:    cwd,
 			})
 			if err != nil {
+				if runID != 0 {
+					if issNum, lookupErr := issueNumberFromRun(cmd.Context(), client, runID); lookupErr == nil {
+						postIntegratorFailure(cmd.Context(), client.Issues(), issNum, "CI check", err)
+					}
+				} else if batchNum > 0 {
+					if prNum, lookupErr := batchPRNumber(cmd.Context(), client, batchNum); lookupErr == nil {
+						postIntegratorFailure(cmd.Context(), client.Issues(), prNum, "CI check", err)
+					}
+				}
 				return err
 			}
 
@@ -506,4 +540,37 @@ func postCommentWithLog(ctx context.Context, issues platform.IssueService, issue
 	if err := issues.AddComment(ctx, issueNumber, body); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to post comment on issue #%d: %v\n", issueNumber, err)
 	}
+}
+
+func postIntegratorFailure(ctx context.Context, issueSvc platform.IssueService, number int, step string, err error) {
+	body := fmt.Sprintf(
+		"⚠️ **Integrator failed** during %s: %s\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
+		step, err,
+	)
+	postCommentWithLog(ctx, issueSvc, number, body)
+}
+
+func issueNumberFromRun(ctx context.Context, client platform.Platform, runID int64) (int, error) {
+	run, err := client.Workflows().GetRun(ctx, runID)
+	if err != nil {
+		return 0, err
+	}
+	numStr, ok := run.Inputs["issue_number"]
+	if !ok {
+		return 0, fmt.Errorf("run %d has no issue_number input", runID)
+	}
+	return strconv.Atoi(numStr)
+}
+
+func batchPRNumber(ctx context.Context, client platform.Platform, batchNum int) (int, error) {
+	ms, err := client.Milestones().Get(ctx, batchNum)
+	if err != nil {
+		return 0, err
+	}
+	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	prs, err := client.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
+	if err != nil || len(prs) == 0 {
+		return 0, fmt.Errorf("no open batch PR found")
+	}
+	return prs[0].Number, nil
 }
