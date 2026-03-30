@@ -647,6 +647,24 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 
 The Monitor posts `/herd retry <N>` and `/herd fix-ci` comments instead of dispatching workflows directly. This ensures all command execution flows through the same handler, maintaining single responsibility.
 
+### Failure Recovery
+
+When integrator steps fail, the CLI posts a comment on the relevant issue or batch PR:
+
+```
+⚠️ **Integrator failed** during <step>: <error>
+
+You can retry with `/herd integrate` on this issue or the batch PR.
+```
+
+The `/herd integrate` command manually triggers the full integrator cycle for a batch. It can be posted on:
+- **Any issue belonging to a batch** — extracts the batch number from the issue's YAML frontmatter
+- **A batch PR** — extracts the batch number from the `herd/batch/<N>-<slug>` branch name
+
+The cycle runs: consolidate any remaining worker branches → check CI → advance tiers → review. This replaces the previous workaround of relabeling a done issue as failed to re-trigger the integrator.
+
+Comments are posted to the issue being processed (for run-based triggers) or the batch PR (for batch-based triggers).
+
 ---
 
 ## Runaway Loop Protection

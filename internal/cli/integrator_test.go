@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -266,6 +267,289 @@ func (m *mockCommentIssueService) AddComment(_ context.Context, number int, body
 	m.addedNumber = number
 	m.addedBody = body
 	return m.addCommentErr
+}
+
+// mockFailurePlatform implements platform.Platform for testing failure comment helpers.
+type mockFailurePlatform struct {
+	wf         *mockIntegratorWorkflowService
+	issues     *mockCommentIssueService
+	milestones *mockFailureMilestoneService
+	prs        *mockFailurePRService
+}
+
+func (m *mockFailurePlatform) Issues() platform.IssueService             { return m.issues }
+func (m *mockFailurePlatform) PullRequests() platform.PullRequestService { return m.prs }
+func (m *mockFailurePlatform) Workflows() platform.WorkflowService       { return m.wf }
+func (m *mockFailurePlatform) Labels() platform.LabelService             { return nil }
+func (m *mockFailurePlatform) Milestones() platform.MilestoneService     { return m.milestones }
+func (m *mockFailurePlatform) Runners() platform.RunnerService           { return nil }
+func (m *mockFailurePlatform) Repository() platform.RepositoryService    { return nil }
+func (m *mockFailurePlatform) Checks() platform.CheckService            { return nil }
+
+type mockFailureMilestoneService struct {
+	getResult *platform.Milestone
+	getErr    error
+}
+
+func (m *mockFailureMilestoneService) Create(_ context.Context, _, _ string, _ *time.Time) (*platform.Milestone, error) {
+	return nil, nil
+}
+func (m *mockFailureMilestoneService) Get(_ context.Context, _ int) (*platform.Milestone, error) {
+	return m.getResult, m.getErr
+}
+func (m *mockFailureMilestoneService) List(_ context.Context) ([]*platform.Milestone, error) {
+	return nil, nil
+}
+func (m *mockFailureMilestoneService) Update(_ context.Context, _ int, _ platform.MilestoneUpdate) (*platform.Milestone, error) {
+	return nil, nil
+}
+
+type mockFailurePRService struct {
+	listResult []*platform.PullRequest
+	listErr    error
+}
+
+func (m *mockFailurePRService) Create(_ context.Context, _, _, _, _ string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockFailurePRService) Get(_ context.Context, _ int) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockFailurePRService) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
+	return m.listResult, m.listErr
+}
+func (m *mockFailurePRService) Update(_ context.Context, _ int, _, _ *string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockFailurePRService) Merge(_ context.Context, _ int, _ platform.MergeMethod) (*platform.MergeResult, error) {
+	return nil, nil
+}
+func (m *mockFailurePRService) UpdateBranch(_ context.Context, _ int) error { return nil }
+func (m *mockFailurePRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
+	return nil
+}
+func (m *mockFailurePRService) AddComment(_ context.Context, _ int, _ string) error { return nil }
+func (m *mockFailurePRService) GetDiff(_ context.Context, _ int) (string, error)    { return "", nil }
+
+func TestIssueNumberFromRun(t *testing.T) {
+	tests := []struct {
+		name    string
+		run     *platform.Run
+		runErr  error
+		wantNum int
+		wantErr string
+	}{
+		{
+			name:    "extracts issue number from run inputs",
+			run:     &platform.Run{ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+			wantNum: 42,
+		},
+		{
+			name:    "returns error when GetRun fails",
+			runErr:  fmt.Errorf("API error"),
+			wantErr: "API error",
+		},
+		{
+			name:    "returns error when no issue_number input",
+			run:     &platform.Run{ID: 100, Inputs: map[string]string{}},
+			wantErr: "run 100 has no issue_number input",
+		},
+		{
+			name:    "returns error when issue_number is not a number",
+			run:     &platform.Run{ID: 100, Inputs: map[string]string{"issue_number": "abc"}},
+			wantErr: "strconv.Atoi",
+		},
+		{
+			name:    "returns error when inputs map is nil",
+			run:     &platform.Run{ID: 100, Inputs: nil},
+			wantErr: "run 100 has no issue_number input",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wf := &mockIntegratorWorkflowService{}
+			if tt.runErr != nil {
+				wf.run = nil
+			} else {
+				wf.run = tt.run
+			}
+			// Override GetRun to return error if needed
+			mock := &mockFailurePlatform{
+				wf: &mockIntegratorWorkflowService{run: tt.run},
+			}
+			if tt.runErr != nil {
+				mock.wf = &mockIntegratorWorkflowService{run: nil}
+			}
+
+			var p platform.Platform = mock
+			if tt.runErr != nil {
+				p = &errWorkflowPlatform{mockFailurePlatform: mock, getRunErr: tt.runErr}
+			}
+
+			got, err := issueNumberFromRun(context.Background(), p, 100)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantNum, got)
+			}
+		})
+	}
+}
+
+// errWorkflowPlatform wraps mockFailurePlatform to return errors from GetRun.
+type errWorkflowPlatform struct {
+	*mockFailurePlatform
+	getRunErr error
+}
+
+func (m *errWorkflowPlatform) Workflows() platform.WorkflowService {
+	return &errWorkflowService{getRunErr: m.getRunErr}
+}
+
+type errWorkflowService struct {
+	mockIntegratorWorkflowService
+	getRunErr error
+}
+
+func (m *errWorkflowService) GetRun(_ context.Context, _ int64) (*platform.Run, error) {
+	return nil, m.getRunErr
+}
+
+func TestBatchPRNumber(t *testing.T) {
+	tests := []struct {
+		name      string
+		milestone *platform.Milestone
+		msErr     error
+		prs       []*platform.PullRequest
+		prErr     error
+		wantNum   int
+		wantErr   string
+	}{
+		{
+			name:      "finds batch PR number",
+			milestone: &platform.Milestone{Number: 5, Title: "My Batch"},
+			prs:       []*platform.PullRequest{{Number: 99}},
+			wantNum:   99,
+		},
+		{
+			name:    "returns error when milestone lookup fails",
+			msErr:   fmt.Errorf("milestone not found"),
+			wantErr: "milestone not found",
+		},
+		{
+			name:      "returns error when no open PRs found",
+			milestone: &platform.Milestone{Number: 5, Title: "My Batch"},
+			prs:       []*platform.PullRequest{},
+			wantErr:   "no open batch PR found",
+		},
+		{
+			name:      "returns error when PR list fails",
+			milestone: &platform.Milestone{Number: 5, Title: "My Batch"},
+			prErr:     fmt.Errorf("API error"),
+			wantErr:   "no open batch PR found: API error",
+		},
+		{
+			name:      "returns first PR when multiple found",
+			milestone: &platform.Milestone{Number: 3, Title: "Test"},
+			prs:       []*platform.PullRequest{{Number: 10}, {Number: 20}},
+			wantNum:   10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockFailurePlatform{
+				milestones: &mockFailureMilestoneService{getResult: tt.milestone, getErr: tt.msErr},
+				prs:        &mockFailurePRService{listResult: tt.prs, listErr: tt.prErr},
+			}
+
+			got, err := batchPRNumber(context.Background(), mock, 5)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantNum, got)
+			}
+		})
+	}
+}
+
+func TestPostIntegratorFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		number    int
+		step      string
+		err       error
+		wantBody  string
+		wantNum   int
+	}{
+		{
+			name:   "consolidation failure",
+			number: 42,
+			step:   "consolidation",
+			err:    fmt.Errorf("merge conflict"),
+			wantBody: "⚠️ **Integrator failed** during consolidation: merge conflict\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
+			wantNum: 42,
+		},
+		{
+			name:   "CI check failure",
+			number: 10,
+			step:   "CI check",
+			err:    fmt.Errorf("timeout"),
+			wantBody: "⚠️ **Integrator failed** during CI check: timeout\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
+			wantNum: 10,
+		},
+		{
+			name:   "tier advancement failure",
+			number: 7,
+			step:   "tier advancement",
+			err:    fmt.Errorf("branch not found"),
+			wantBody: "⚠️ **Integrator failed** during tier advancement: branch not found\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
+			wantNum: 7,
+		},
+		{
+			name:   "review failure",
+			number: 55,
+			step:   "review",
+			err:    fmt.Errorf("agent error"),
+			wantBody: "⚠️ **Integrator failed** during review: agent error\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
+			wantNum: 55,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockCommentIssueService{}
+			postIntegratorFailure(context.Background(), mock, tt.number, tt.step, tt.err)
+			assert.Equal(t, tt.wantNum, mock.addedNumber)
+			assert.Equal(t, tt.wantBody, mock.addedBody)
+		})
+	}
+}
+
+func TestPostIntegratorFailure_CommentErrorDoesNotPanic(t *testing.T) {
+	mock := &mockCommentIssueService{addCommentErr: fmt.Errorf("API down")}
+
+	// Capture stderr to avoid noise
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+
+	// Should not panic even when AddComment fails
+	postIntegratorFailure(context.Background(), mock, 1, "consolidation", fmt.Errorf("some error"))
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	_, err = buf.ReadFrom(r)
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "Warning: failed to post comment")
 }
 
 func TestPostCommentWithLog(t *testing.T) {
