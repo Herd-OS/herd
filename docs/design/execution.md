@@ -253,6 +253,15 @@ Given a completed workflow run ID, the Integrator resolves the worker branch:
    (no-op worker), skip merge. Either way, the issue counts toward tier
    completion.
 
+### Post-Merge Failure Handling
+
+If the merge succeeds but a downstream step fails (e.g., push rejected due to
+non-fast-forward), the Integrator relabels the issue from `herd/status:done` to
+`herd/status:failed` and posts a diagnostic comment. This ensures the issue is
+retried automatically rather than being treated as complete. The Integrator also
+resets the local batch branch to match the remote tracking branch before each
+checkout, preventing stale-branch issues.
+
 ### Branch Cleanup
 
 **Worker branches** are deleted after successful consolidation. Failed worker

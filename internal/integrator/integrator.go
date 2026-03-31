@@ -128,7 +128,7 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	if err := g.Fetch("origin"); err != nil {
 		return nil, fmt.Errorf("fetching: %w", err)
 	}
-	if err := g.Checkout(batchBranch); err != nil {
+	if err := g.CheckoutReset(batchBranch); err != nil {
 		return nil, fmt.Errorf("checking out batch branch: %w", err)
 	}
 	if err := g.Merge("origin/" + workerBranch); err != nil {
@@ -189,6 +189,12 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	}
 
 	if err := g.Push("origin", batchBranch); err != nil {
+		// Merge succeeded but push failed — relabel so the issue gets retried
+		_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusDone})
+		_ = p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+		_ = p.Issues().AddComment(ctx, issueNumber, fmt.Sprintf(
+			"⚠️ **HerdOS Integrator**\n\nCould not push consolidated batch branch `%s` (non-fast-forward). This issue will be retried.\n\nYou can also retry with `/herd integrate` on this issue.",
+			batchBranch))
 		return nil, fmt.Errorf("pushing batch branch: %w", err)
 	}
 
