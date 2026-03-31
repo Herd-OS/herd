@@ -150,7 +150,29 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 			return nil, fmt.Errorf("configuring git identity for merge: %w", err)
 		}
 		if mergeErr := g.Merge("origin/" + batchBranch); mergeErr != nil {
-			return nil, fmt.Errorf("merging latest batch branch into resumed worker branch: %w", mergeErr)
+			// Merge conflict — abort and fall back to a fresh branch
+			fmt.Fprintf(os.Stderr, "warning: Merge conflict when updating resumed worker branch, starting fresh from batch branch.\n")
+			_ = g.AbortMerge()
+
+			// Checkout batch branch so we can delete the worker branch
+			if err = g.Checkout(batchBranch); err != nil {
+				return nil, fmt.Errorf("checking out batch branch after merge conflict: %w", err)
+			}
+
+			// Delete old worker branch locally and remotely
+			if err = g.DeleteLocalBranch(workerBranch); err != nil {
+				return nil, fmt.Errorf("deleting local worker branch after merge conflict: %w", err)
+			}
+			_ = p.Repository().DeleteBranch(ctx, workerBranch) // best-effort remote delete
+
+			// Remove stale progress file from previous attempt
+			progressFile := filepath.Join(params.RepoRoot, ".herd", "progress", fmt.Sprintf("%d.md", params.IssueNumber))
+			_ = os.Remove(progressFile)
+
+			// Create fresh worker branch from batch branch
+			if err = g.CreateBranch(workerBranch, batchBranch); err != nil {
+				return nil, fmt.Errorf("creating fresh worker branch after merge conflict: %w", err)
+			}
 		}
 	} else {
 		// Fresh start: checkout batch branch, create worker branch
