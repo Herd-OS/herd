@@ -78,7 +78,7 @@ Workers parse the front matter for metadata and pass the human-readable sections
 | `in-progress` | `done` | Worker completes, pushes worker branch |
 | `in-progress` | `failed` | Worker fails, times out, or cannot complete |
 | `failed` | `ready` | Re-dispatched by Monitor or user |
-| `ready`/`blocked`/`in-progress`/`done` | `failed` | Batch cancelled via `herd batch cancel` |
+| `ready`/`blocked`/`in-progress`/`failed` | `cancelled` | Batch cancelled via `herd batch cancel` |
 | `blocked`/`ready`/`in-progress`/`failed` | `cancelled` | Batch PR closed without merging (issues not already `done`) |
 | `done` | (closed) | Batch PR merged or closed (label unchanged) |
 
