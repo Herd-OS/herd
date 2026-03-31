@@ -1671,6 +1671,160 @@ func TestConsolidate_RmErrorsAreLogged(t *testing.T) {
 		"Rm errors for legacy file should be logged as warnings")
 }
 
+func initPushFailRepo(t *testing.T) (string, *git.Git) {
+	t.Helper()
+
+	// Create bare repo as "origin"
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	// Clone to working dir
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	// Initial commit
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create batch branch and push
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	// Create worker branch with non-conflicting change and push
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	// Install a pre-receive hook on the bare repo that rejects pushes to the batch branch.
+	// This simulates a non-fast-forward rejection after the merge succeeds locally.
+	hookDir := filepath.Join(bareDir, "hooks")
+	hookPath := filepath.Join(hookDir, "pre-receive")
+	hookScript := "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/heads/herd/batch/*) exit 1;;\n  esac\ndone\n"
+	require.NoError(t, os.WriteFile(hookPath, []byte(hookScript), 0755))
+
+	// Back in first clone, checkout batch branch
+	runGit(t, dir, "checkout", "herd/batch/1-batch")
+
+	return dir, git.New(dir)
+}
+
+func initStaleCheckoutRepo(t *testing.T) (string, *git.Git) {
+	t.Helper()
+
+	// Create bare repo as "origin"
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	// Clone to working dir
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	// Initial commit
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create batch branch and push
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	// Create worker branch with non-conflicting change and push
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker content"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	// Advance remote batch branch from a second clone
+	dir2 := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir2)
+	runGit(t, dir2, "config", "user.email", "test@test.com")
+	runGit(t, dir2, "config", "user.name", "Test")
+	runGit(t, dir2, "checkout", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "other.txt"), []byte("other content"), 0644))
+	runGit(t, dir2, "add", ".")
+	runGit(t, dir2, "commit", "-m", "advance remote batch")
+	runGit(t, dir2, "push", "origin", "herd/batch/1-batch")
+
+	// Back in first clone, checkout batch branch (now stale/behind remote)
+	runGit(t, dir, "checkout", "herd/batch/1-batch")
+
+	return dir, git.New(dir)
+}
+
+func TestConsolidate_PushFailure_LabelsIssueFailed(t *testing.T) {
+	dir, g := initPushFailRepo(t)
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	_, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pushing batch branch")
+
+	// Verify relabeling
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+
+	// Verify comment
+	require.Len(t, issueSvc.comments[42], 1)
+	assert.Contains(t, issueSvc.comments[42][0], "Could not push consolidated batch branch")
+}
+
+func TestConsolidate_CheckoutTracksRemote(t *testing.T) {
+	dir, g := initStaleCheckoutRepo(t)
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
+	require.NoError(t, err)
+	assert.True(t, result.Merged)
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

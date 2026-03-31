@@ -39,6 +39,12 @@ func (g *Git) Checkout(branch string) error {
 	return g.run("checkout", branch)
 }
 
+// CheckoutReset checks out a branch, resetting it to match the remote tracking branch.
+// This ensures the local branch is up-to-date even if the remote has advanced.
+func (g *Git) CheckoutReset(branch string) error {
+	return g.run("checkout", "-B", branch, "origin/"+branch)
+}
+
 func (g *Git) CreateBranch(name, from string) error {
 	return g.run("checkout", "-b", name, from)
 }
