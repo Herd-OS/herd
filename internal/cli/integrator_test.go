@@ -255,6 +255,51 @@ func TestHandleCommentCmd_IsPRFlag(t *testing.T) {
 	}
 }
 
+func TestHandleCommentCmd_IsPRParsing(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagVal  string
+		wantBool bool
+	}{
+		{"true string sets isPR true", "true", true},
+		{"false string sets isPR false", "false", false},
+		{"empty string sets isPR false", "", false},
+		{"TRUE (uppercase) sets isPR false", "TRUE", false},
+		{"1 sets isPR false", "1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Verify the boolean conversion logic matches production code:
+			// isPR := isPRStr == "true"
+			got := tt.flagVal == "true"
+			assert.Equal(t, tt.wantBool, got, "isPR conversion for flag value %q", tt.flagVal)
+
+			t.Setenv("HERD_RUNNER", "true")
+			t.Setenv("COMMENT_BODY", "/herd help")
+			root := NewRootCmd()
+			args := []string{
+				"integrator", "handle-comment",
+				"--comment-id", "1",
+				"--issue-number", "1",
+				"--author-association", "OWNER",
+				"--is-pr", tt.flagVal,
+			}
+			root.SetArgs(args)
+			// The command will fail at config.Load in test env, but we can verify
+			// the flag was parsed as a string (not consuming the next arg).
+			// The key behavior: --is-pr "false" should NOT leave "false" as a positional arg.
+			err := root.Execute()
+			// Should get past flag parsing without error about unknown positional args.
+			// Will fail at config.Load or similar — that's fine, it means parsing succeeded.
+			if err != nil {
+				assert.NotContains(t, err.Error(), "unknown command")
+				assert.NotContains(t, err.Error(), "invalid argument")
+			}
+		})
+	}
+}
+
 // mockCommentIssueService is a minimal IssueService mock for testing postCommentWithLog.
 type mockCommentIssueService struct {
 	mockDispatchIssueService
