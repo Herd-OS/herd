@@ -342,7 +342,7 @@ func newHandleCommentCmd() *cobra.Command {
 		issueNumber       int
 		authorLogin       string
 		authorAssociation string
-		isPR              bool
+		isPRStr           string
 	)
 
 	cmd := &cobra.Command{
@@ -366,6 +366,8 @@ func newHandleCommentCmd() *cobra.Command {
 			if commentBody == "" {
 				return fmt.Errorf("COMMENT_BODY env var is required")
 			}
+
+			isPR := isPRStr == "true"
 
 			parsed := commands.Parse(commentBody)
 			if parsed == nil {
@@ -438,7 +440,7 @@ func newHandleCommentCmd() *cobra.Command {
 	cmd.Flags().IntVar(&issueNumber, "issue-number", 0, "Issue/PR number (required)")
 	cmd.Flags().StringVar(&authorLogin, "author-login", "", "Comment author login")
 	cmd.Flags().StringVar(&authorAssociation, "author-association", "", "Comment author association")
-	cmd.Flags().BoolVar(&isPR, "is-pr", false, "Whether the comment was posted on a pull request")
+	cmd.Flags().StringVar(&isPRStr, "is-pr", "false", "Whether the comment was posted on a pull request")
 	cmd.MarkFlagRequired("comment-id")
 	cmd.MarkFlagRequired("issue-number")
 	return cmd
