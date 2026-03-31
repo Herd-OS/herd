@@ -168,7 +168,7 @@ GitHub Actions limits.
 | Failure | Response |
 |---------|----------|
 | Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md`; if the batch branch has diverged and merge conflicts, the worker falls back to a fresh branch (partial work is lost) |
-| Worker produces bad code | Integrator re-runs failed CI once (transient filter), then dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
+| Worker produces bad code | Integrator dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
 | Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |
 | Runner offline | Action queues until a runner is available; no special handling |
@@ -586,10 +586,7 @@ graph TD
     B --> C["CI runs on updated batch branch"]
     C --> D["check_suite.completed triggers Integrator"]
     D -->|CI passed| DONE["Done, continue normally"]
-    D -->|CI failed| E["Re-run failed checks<br>(transient/flaky filter)"]
-    E -->|Passes| DONE
-    E -->|Fails again| F["Confirmed real failure"]
-    F --> G["Agent analyzes failure logs,<br>creates fix issues"]
+    D -->|CI failed| G["Agent analyzes failure logs,<br>creates fix issues"]
     G --> H["Fix workers execute →<br>re-consolidate → CI runs again"]
     H -->|Passes| DONE2["Done"]
     H -->|Fails| I{"ci_max_fix_cycles<br>reached? (default: 2)"}
