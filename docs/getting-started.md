@@ -167,7 +167,7 @@ herd batch list
 # Show detailed issue status for a batch
 herd batch show 5
 
-# Cancel a batch (stops workers, labels issues as failed, closes milestone)
+# Cancel a batch (stops workers, labels issues as cancelled, closes issues and PR, closes milestone)
 herd batch cancel 5
 
 # Alternatively, close the batch PR on GitHub without merging.

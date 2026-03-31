@@ -263,6 +263,27 @@ func TestPullRequestGetDiff(t *testing.T) {
 	assert.Contains(t, diff, "+added line")
 }
 
+func TestPullRequestService_Close(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test-org/test-repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPatch, r.Method)
+		var req gh.PullRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "closed", req.GetState())
+
+		json.NewEncoder(w).Encode(gh.PullRequest{
+			Number: gh.Ptr(42),
+			State:  gh.Ptr("closed"),
+			Head:   &gh.PullRequestBranch{Ref: gh.Ptr("feature")},
+			Base:   &gh.PullRequestBranch{Ref: gh.Ptr("main")},
+		})
+	})
+
+	client, _ := newTestClient(t, mux)
+	err := client.PullRequests().Close(context.Background(), 42)
+	require.NoError(t, err)
+}
+
 func TestMapPullRequest(t *testing.T) {
 	ts := gh.Timestamp{Time: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)}
 	pr := mapPullRequest(&gh.PullRequest{

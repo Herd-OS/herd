@@ -40,6 +40,7 @@ type PullRequestService interface {
 	CreateReview(ctx context.Context, number int, body string, event ReviewEvent) error
 	AddComment(ctx context.Context, number int, body string) error
 	GetDiff(ctx context.Context, number int) (string, error)
+	Close(ctx context.Context, number int) error
 }
 
 type WorkflowService interface {

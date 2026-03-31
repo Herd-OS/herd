@@ -139,7 +139,7 @@ func newBatchCancelCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cancel <number>",
 		Short: "Cancel a batch",
-		Long:  "Cancel all active workers, label remaining issues as failed, close the milestone, and delete the batch branch.",
+		Long:  "Cancel all active workers, label remaining issues as cancelled, close issues and batch PR, close the milestone, and delete the batch branch.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			batchNum, err := strconv.Atoi(args[0])
@@ -185,10 +185,19 @@ func runBatchCancel(ctx context.Context, client platform.Platform, batchNum int,
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
 
+	// Count non-done issues (only these get the cancelled label)
+	var nonDoneCount int
+	for _, issue := range allIssues {
+		if issues.StatusLabel(issue.Labels) != issues.StatusDone {
+			nonDoneCount++
+		}
+	}
+
 	if !force {
 		fmt.Printf("WARNING: This will:\n")
 		fmt.Printf("  - Cancel %d active workflow runs\n", len(runs))
-		fmt.Printf("  - Label %d remaining issues as %s\n", len(allIssues), issues.StatusFailed)
+		fmt.Printf("  - Label %d issues as cancelled and close %d issues\n", nonDoneCount, len(allIssues))
+		fmt.Printf("  - Close any open batch PR\n")
 		fmt.Printf("  - Close milestone #%d\n", ms.Number)
 		fmt.Printf("  - Delete branch %s\n", batchBranch)
 		fmt.Print("Continue? [type \"yes\" to confirm] ")
@@ -209,20 +218,41 @@ func runBatchCancel(ctx context.Context, client platform.Platform, batchNum int,
 		}
 	}
 
-	// Label open issues as failed
+	// Label non-done issues as cancelled and close all issues
+	closed := "closed"
 	for _, issue := range allIssues {
 		status := issues.StatusLabel(issue.Labels)
-		if status != "" && status != issues.StatusFailed {
-			_ = client.Issues().RemoveLabels(ctx, issue.Number, []string{status})
+		if status != issues.StatusDone {
+			if status != "" {
+				if err := client.Issues().RemoveLabels(ctx, issue.Number, []string{status}); err != nil {
+					fmt.Printf("  %s\n", display.Error(fmt.Sprintf("failed to remove label from issue #%d: %v", issue.Number, err)))
+				}
+			}
+			if err := client.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusCancelled}); err != nil {
+				fmt.Printf("  %s\n", display.Error(fmt.Sprintf("failed to label issue #%d as cancelled: %v", issue.Number, err)))
+			}
 		}
-		if status != issues.StatusFailed {
-			_ = client.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
+		if _, err := client.Issues().Update(ctx, issue.Number, platform.IssueUpdate{State: &closed}); err != nil {
+			fmt.Printf("  %s\n", display.Error(fmt.Sprintf("failed to close issue #%d: %v", issue.Number, err)))
 		}
 	}
-	fmt.Println(display.Success(fmt.Sprintf("Labeled %d issues as failed", len(allIssues))))
+	fmt.Println(display.Success(fmt.Sprintf("Labelled %d issues as cancelled and closed %d issues", nonDoneCount, len(allIssues))))
+
+	// Close batch PR if one exists
+	batchPRs, err := client.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
+	if err != nil {
+		fmt.Printf("  %s\n", display.Error(fmt.Sprintf("failed to list batch PRs: %v", err)))
+	} else {
+		for _, pr := range batchPRs {
+			if err := client.PullRequests().Close(ctx, pr.Number); err != nil {
+				fmt.Printf("  %s\n", display.Error(fmt.Sprintf("failed to close PR #%d: %v", pr.Number, err)))
+			} else {
+				fmt.Println(display.Success(fmt.Sprintf("Closed PR #%d", pr.Number)))
+			}
+		}
+	}
 
 	// Close milestone
-	closed := "closed"
 	if _, err := client.Milestones().Update(ctx, ms.Number, platform.MilestoneUpdate{State: &closed}); err != nil {
 		fmt.Printf("  %s\n", display.Error(fmt.Sprintf("failed to close milestone: %v", err)))
 	} else {

@@ -512,9 +512,12 @@ There are two ways a batch can be cancelled:
 **CLI cancellation** (`herd batch cancel <number>`):
 
 1. Cancels any active workflow runs for the batch's issues
-2. Labels remaining open issues as `herd/status:failed`
-3. Closes the milestone
-4. Deletes the batch branch
+2. Labels non-done open issues as `herd/status:cancelled` and closes all
+   milestone issues. Issues already `herd/status:done` are closed without
+   relabelling.
+3. Closes the batch PR if one exists
+4. Closes the milestone
+5. Deletes the batch branch
 
 Active workers may take a moment to stop -- Actions cancellation is asynchronous.
 
@@ -525,9 +528,8 @@ Active workers may take a moment to stop -- Actions cancellation is asynchronous
 2. Milestone is closed
 3. Branch is deleted
 
-The key difference: `herd batch cancel` labels issues as `failed` (indicating
-work was attempted but did not succeed), while closing the PR labels non-done
-issues as `cancelled` (indicating the batch was abandoned).
+Both paths now use `herd/status:cancelled` for non-done issues, ensuring the
+monitor does not redispatch them. The cancelled status is terminal.
 
 ---
 

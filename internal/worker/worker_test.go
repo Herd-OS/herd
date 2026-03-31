@@ -66,6 +66,7 @@ func (m *mockPRService) AddComment(_ context.Context, _ int, body string) error 
 	return nil
 }
 func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) { return "", nil }
+func (m *mockPRService) Close(_ context.Context, _ int) error              { return nil }
 
 type mockPlatform struct {
 	issues     *mockIssueService
