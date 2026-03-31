@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -91,6 +92,63 @@ func TestBatchCancel_ClosesBatchPR(t *testing.T) {
 	assert.Equal(t, []int{10}, mock.prs.closedPRs)
 }
 
+func TestBatchCancel_IssueCloseError(t *testing.T) {
+	mock := newMockPlatformForBatchCancel()
+	mock.issues.listResult = []*platform.Issue{
+		{Number: 1, Labels: []string{issues.StatusInProgress}},
+	}
+	mock.issues.updateErr = fmt.Errorf("API error")
+	mock.prs.listResult = []*platform.PullRequest{}
+
+	// Should not return error (errors are printed, not returned)
+	err := runBatchCancel(context.Background(), mock, 1, true)
+	require.NoError(t, err)
+
+	// Issue should not be in updatedIssues since the mock returns error
+	assert.Empty(t, mock.issues.updatedIssues)
+}
+
+func TestBatchCancel_AddLabelError(t *testing.T) {
+	mock := newMockPlatformForBatchCancel()
+	mock.issues.listResult = []*platform.Issue{
+		{Number: 1, Labels: []string{issues.StatusInProgress}},
+	}
+	mock.issues.addLabelsErr = fmt.Errorf("label error")
+	mock.prs.listResult = []*platform.PullRequest{}
+
+	err := runBatchCancel(context.Background(), mock, 1, true)
+	require.NoError(t, err)
+
+	// Label was not added due to error
+	assert.Empty(t, mock.issues.addedLabels)
+
+	// Issue should still be closed
+	require.Contains(t, mock.issues.updatedIssues, 1)
+	assert.Equal(t, "closed", *mock.issues.updatedIssues[1].State)
+}
+
+func TestBatchCancel_RemoveLabelError(t *testing.T) {
+	mock := newMockPlatformForBatchCancel()
+	mock.issues.listResult = []*platform.Issue{
+		{Number: 1, Labels: []string{issues.StatusInProgress}},
+	}
+	mock.issues.removeLabelsErr = fmt.Errorf("remove error")
+	mock.prs.listResult = []*platform.PullRequest{}
+
+	err := runBatchCancel(context.Background(), mock, 1, true)
+	require.NoError(t, err)
+
+	// Label was not removed due to error
+	assert.Empty(t, mock.issues.removedLabels)
+
+	// Cancelled label should still be added
+	assert.Contains(t, mock.issues.addedLabels[1], issues.StatusCancelled)
+
+	// Issue should still be closed
+	require.Contains(t, mock.issues.updatedIssues, 1)
+	assert.Equal(t, "closed", *mock.issues.updatedIssues[1].State)
+}
+
 // --- Mock Platform for batch cancel tests ---
 
 type mockBatchCancelPlatform struct {
@@ -158,6 +216,9 @@ type mockBatchCancelIssueService struct {
 	addedLabels   map[int][]string
 	removedLabels map[int][]string
 	updatedIssues map[int]platform.IssueUpdate
+	updateErr     error
+	addLabelsErr  error
+	removeLabelsErr error
 }
 
 func (m *mockBatchCancelIssueService) Create(_ context.Context, _, _ string, _ []string, _ *int) (*platform.Issue, error) {
@@ -170,14 +231,23 @@ func (m *mockBatchCancelIssueService) List(_ context.Context, _ platform.IssueFi
 	return m.listResult, nil
 }
 func (m *mockBatchCancelIssueService) Update(_ context.Context, number int, changes platform.IssueUpdate) (*platform.Issue, error) {
+	if m.updateErr != nil {
+		return nil, m.updateErr
+	}
 	m.updatedIssues[number] = changes
 	return nil, nil
 }
 func (m *mockBatchCancelIssueService) AddLabels(_ context.Context, number int, labels []string) error {
+	if m.addLabelsErr != nil {
+		return m.addLabelsErr
+	}
 	m.addedLabels[number] = labels
 	return nil
 }
 func (m *mockBatchCancelIssueService) RemoveLabels(_ context.Context, number int, labels []string) error {
+	if m.removeLabelsErr != nil {
+		return m.removeLabelsErr
+	}
 	m.removedLabels[number] = labels
 	return nil
 }

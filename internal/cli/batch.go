@@ -185,10 +185,18 @@ func runBatchCancel(ctx context.Context, client platform.Platform, batchNum int,
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
 
+	// Count non-done issues (only these get the cancelled label)
+	var nonDoneCount int
+	for _, issue := range allIssues {
+		if issues.StatusLabel(issue.Labels) != issues.StatusDone {
+			nonDoneCount++
+		}
+	}
+
 	if !force {
 		fmt.Printf("WARNING: This will:\n")
 		fmt.Printf("  - Cancel %d active workflow runs\n", len(runs))
-		fmt.Printf("  - Label %d remaining issues as cancelled and close them\n", len(allIssues))
+		fmt.Printf("  - Label %d issues as cancelled and close %d issues\n", nonDoneCount, len(allIssues))
 		fmt.Printf("  - Close any open batch PR\n")
 		fmt.Printf("  - Close milestone #%d\n", ms.Number)
 		fmt.Printf("  - Delete branch %s\n", batchBranch)
@@ -216,13 +224,19 @@ func runBatchCancel(ctx context.Context, client platform.Platform, batchNum int,
 		status := issues.StatusLabel(issue.Labels)
 		if status != issues.StatusDone {
 			if status != "" {
-				_ = client.Issues().RemoveLabels(ctx, issue.Number, []string{status})
+				if err := client.Issues().RemoveLabels(ctx, issue.Number, []string{status}); err != nil {
+					fmt.Printf("  %s\n", display.Error(fmt.Sprintf("failed to remove label from issue #%d: %v", issue.Number, err)))
+				}
 			}
-			_ = client.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusCancelled})
+			if err := client.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusCancelled}); err != nil {
+				fmt.Printf("  %s\n", display.Error(fmt.Sprintf("failed to label issue #%d as cancelled: %v", issue.Number, err)))
+			}
 		}
-		_, _ = client.Issues().Update(ctx, issue.Number, platform.IssueUpdate{State: &closed})
+		if _, err := client.Issues().Update(ctx, issue.Number, platform.IssueUpdate{State: &closed}); err != nil {
+			fmt.Printf("  %s\n", display.Error(fmt.Sprintf("failed to close issue #%d: %v", issue.Number, err)))
+		}
 	}
-	fmt.Println(display.Success(fmt.Sprintf("Labelled %d issues as cancelled and closed them", len(allIssues))))
+	fmt.Println(display.Success(fmt.Sprintf("Labelled %d issues as cancelled and closed %d issues", nonDoneCount, len(allIssues))))
 
 	// Close batch PR if one exists
 	batchPRs, err := client.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
