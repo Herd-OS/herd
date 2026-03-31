@@ -144,6 +144,9 @@ func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) {
 func (m *mockPRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
 	return nil
 }
+func (m *mockPRService) Close(_ context.Context, _ int) error {
+	return nil
+}
 
 type mockWorkflowService struct {
 	runs         map[int64]*platform.Run
@@ -1643,6 +1646,9 @@ func (s *statefulMockPRService) GetDiff(ctx context.Context, n int) (string, err
 }
 func (s *statefulMockPRService) CreateReview(ctx context.Context, n int, body string, event platform.ReviewEvent) error {
 	return s.inner.CreateReview(ctx, n, body, event)
+}
+func (s *statefulMockPRService) Close(ctx context.Context, number int) error {
+	return s.inner.Close(ctx, number)
 }
 
 func TestConsolidate_CleansUpWorkerProgress(t *testing.T) {

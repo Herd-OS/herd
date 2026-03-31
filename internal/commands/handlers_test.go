@@ -141,6 +141,9 @@ func (m *testPRService) CreateReview(_ context.Context, _ int, _ string, _ platf
 func (m *testPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "", nil
 }
+func (m *testPRService) Close(_ context.Context, _ int) error {
+	return nil
+}
 
 // --- Mock WorkflowService ---
 

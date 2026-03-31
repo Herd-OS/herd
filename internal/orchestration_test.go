@@ -240,6 +240,9 @@ func (s *statefulPRService) CreateReview(_ context.Context, _ int, _ string, _ p
 func (s *statefulPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "diff --git a/file.go b/file.go\n", nil
 }
+func (s *statefulPRService) Close(_ context.Context, _ int) error {
+	return nil
+}
 
 // --- Stateful Workflow Service ---
 

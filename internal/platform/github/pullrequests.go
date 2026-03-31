@@ -140,6 +140,16 @@ func (s *pullRequestService) GetDiff(ctx context.Context, number int) (string, e
 	return diff, nil
 }
 
+func (s *pullRequestService) Close(ctx context.Context, number int) error {
+	_, _, err := s.c.gh.PullRequests.Edit(ctx, s.c.owner, s.c.repo, number, &gh.PullRequest{
+		State: gh.Ptr("closed"),
+	})
+	if err != nil {
+		return fmt.Errorf("closing pull request #%d: %w", number, err)
+	}
+	return nil
+}
+
 func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 	return &platform.PullRequest{
 		Number:    pr.GetNumber(),
