@@ -30,8 +30,8 @@ type CheckCIResult struct {
 }
 
 // CheckCI checks CI status on the batch branch after consolidation.
-// If CI fails, it re-runs once (transient failure filter), then dispatches
-// fix workers up to ci_max_fix_cycles. If ci_max_fix_cycles is 0, it only notifies.
+// If CI fails, it dispatches fix workers up to ci_max_fix_cycles.
+// If ci_max_fix_cycles is 0, it only notifies.
 func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, params CheckCIParams) (*CheckCIResult, error) {
 	if !cfg.Integrator.RequireCI {
 		return &CheckCIResult{Skipped: true}, nil
@@ -86,15 +86,6 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 
 	if status == "success" || status == "pending" {
 		return &CheckCIResult{Status: status}, nil
-	}
-
-	// CI failed — re-run failed checks once
-	if err := p.Checks().RerunFailedChecks(ctx, batchBranch); err != nil {
-		// Re-run failed, proceed to fix cycle
-		fmt.Printf("Warning: failed to re-run checks: %v\n", err)
-	} else {
-		// Re-run triggered — return pending, let the next integrator run handle it
-		return &CheckCIResult{Status: "pending"}, nil
 	}
 
 	// Count existing CI fix cycles in the milestone

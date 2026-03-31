@@ -64,7 +64,6 @@ func TestCheckCI(t *testing.T) {
 	tests := []struct {
 		name           string
 		ciStatus       string
-		rerunErr       error
 		ciMaxCycles    int
 		existingCycles int
 		requireCI      bool
@@ -94,35 +93,33 @@ func TestCheckCI(t *testing.T) {
 			expectSkipped: true,
 		},
 		{
-			name:         "failure — re-run succeeds, returns pending",
-			ciStatus:     "failure",
-			requireCI:    true,
-			ciMaxCycles:  2,
-			expectStatus: "pending",
-		},
-		{
-			name:           "failure — re-run fails, dispatches fix worker",
+			name:           "failure — creates fix issue on first call",
 			ciStatus:       "failure",
-			rerunErr:       fmt.Errorf("re-run failed"),
 			requireCI:      true,
 			ciMaxCycles:    2,
 			expectStatus:   "failure",
 			expectFixCount: 1,
 		},
 		{
-			name:         "failure — re-run fails, max cycles reached",
-			ciStatus:     "failure",
-			rerunErr:     fmt.Errorf("re-run failed"),
-			requireCI:    true,
-			ciMaxCycles:  1,
-			existingCycles: 1,
-			expectStatus: "failure",
-			expectMaxHit: true,
+			name:           "failure — dispatches fix worker",
+			ciStatus:       "failure",
+			requireCI:      true,
+			ciMaxCycles:    2,
+			expectStatus:   "failure",
+			expectFixCount: 1,
 		},
 		{
-			name:           "failure — re-run fails, zero cycles (unlimited)",
+			name:           "failure — max cycles reached",
 			ciStatus:       "failure",
-			rerunErr:       fmt.Errorf("re-run failed"),
+			requireCI:      true,
+			ciMaxCycles:    1,
+			existingCycles: 1,
+			expectStatus:   "failure",
+			expectMaxHit:   true,
+		},
+		{
+			name:           "failure — zero cycles (unlimited)",
+			ciStatus:       "failure",
 			requireCI:      true,
 			ciMaxCycles:    0,
 			expectStatus:   "failure",
@@ -154,7 +151,7 @@ func TestCheckCI(t *testing.T) {
 				},
 			}
 
-			checkSvc := &mockCheckService{status: tt.ciStatus, rerunErr: tt.rerunErr}
+			checkSvc := &mockCheckService{status: tt.ciStatus}
 
 			mock := &mockPlatformWithChecks{
 				mockPlatform: &mockPlatform{
@@ -209,7 +206,7 @@ func TestCheckCI_BeforeDispatch(t *testing.T) {
 		},
 	}
 
-	checkSvc := &mockCheckService{status: "failure", rerunErr: fmt.Errorf("re-run failed")}
+	checkSvc := &mockCheckService{status: "failure"}
 
 	var callOrder []string
 	mock := &mockPlatformWithChecks{
@@ -302,7 +299,7 @@ func TestCheckCI_BatchLookup_Failure(t *testing.T) {
 	}
 
 	wf := &mockWorkflowService{}
-	checkSvc := &mockCheckService{status: "failure", rerunErr: fmt.Errorf("re-run failed")}
+	checkSvc := &mockCheckService{status: "failure"}
 
 	mock := &mockPlatformWithChecks{
 		mockPlatform: &mockPlatform{
@@ -328,4 +325,46 @@ func TestCheckCI_BatchLookup_Failure(t *testing.T) {
 	assert.Equal(t, "failure", result.Status)
 	assert.Len(t, createdIssues, 1)
 	assert.Len(t, result.FixIssues, 1)
+}
+
+func TestCheckCI_FixIssueOnFirstFailure(t *testing.T) {
+	issueSvc, wf, prSvc := baseCIMocks()
+	issueSvc.listResult = []*platform.Issue{}
+
+	createdIssues := []*platform.Issue{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			iss := &platform.Issue{Number: 99, Title: title}
+			createdIssues = append(createdIssues, iss)
+			return iss, nil
+		},
+	}
+
+	checkSvc := &mockCheckService{status: "failure"}
+
+	mock := &mockPlatformWithChecks{
+		mockPlatform: &mockPlatform{
+			issues:     mockCreate,
+			prs:        prSvc,
+			workflows:  wf,
+			repo:       &mockRepoService{defaultBranch: "main"},
+			milestones: &mockMilestoneService{},
+		},
+		checks: checkSvc,
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true, CIMaxFixCycles: 2},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := CheckCI(context.Background(), mock, cfg, CheckCIParams{RunID: 100})
+	require.NoError(t, err)
+
+	assert.Equal(t, "failure", result.Status)
+	assert.Len(t, createdIssues, 1, "fix issue must be created on first call")
+	assert.Len(t, result.FixIssues, 1)
+	assert.Equal(t, 1, result.FixCycle)
+	assert.False(t, checkSvc.rerunCalled, "RerunFailedChecks must not be called")
 }
