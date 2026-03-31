@@ -142,8 +142,9 @@ func (m *mockWorkflowService) ListRuns(_ context.Context, _ platform.RunFilters)
 func (m *mockWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
 
 type mockRepoService struct {
-	defaultBranch string
-	branchSHAErr  error // if non-nil, GetBranchSHA returns this error
+	defaultBranch   string
+	branchSHAErr    error // if non-nil, GetBranchSHA returns this error
+	deletedBranches []string
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
@@ -151,7 +152,10 @@ func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, nil
 }
 func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error   { return nil }
-func (m *mockRepoService) DeleteBranch(_ context.Context, _ string) error      { return nil }
+func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
+	m.deletedBranches = append(m.deletedBranches, name)
+	return nil
+}
 func (m *mockRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
 	if m.branchSHAErr != nil {
 		return "", m.branchSHAErr
@@ -717,8 +721,8 @@ func TestExec_ResumeMergesLatestBatchBranch(t *testing.T) {
 	resumeBlock := src[resumeIdx : resumeIdx+700]
 	assert.Contains(t, resumeBlock, `Merge("origin/" + batchBranch)`,
 		"resume path must merge latest batch branch to avoid stale base")
-	assert.Contains(t, resumeBlock, "merging latest batch branch",
-		"merge error should describe merging batch branch")
+	assert.Contains(t, resumeBlock, "Merge conflict",
+		"merge failure should trigger fallback with conflict handling")
 }
 
 func TestExec_ResumeConfiguresIdentityBeforeMerge(t *testing.T) {
@@ -741,13 +745,11 @@ func TestExec_ResumeConfiguresIdentityBeforeMerge(t *testing.T) {
 }
 
 func TestExec_ResumeMergeFailure(t *testing.T) {
-	// When the batch branch merge fails during resume, the error should
-	// be propagated (not silently ignored).
+	// When the batch branch merge fails during resume, the fallback
+	// path is triggered. If the batch branch doesn't exist locally
+	// or on origin, the fallback's checkout also fails.
 	repoDir := initTestRepo(t)
 
-	// Create the batch branch locally so checkout succeeds, but there's
-	// nothing to merge from origin (the remote doesn't have it), causing
-	// the merge to fail.
 	run := func(dir string, args ...string) {
 		t.Helper()
 		cmd := exec.Command(args[0], args[1:]...)
@@ -755,9 +757,8 @@ func TestExec_ResumeMergeFailure(t *testing.T) {
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "command %v failed: %s", args, string(out))
 	}
+	// Create worker branch (but no batch branch on origin)
 	run(repoDir, "git", "checkout", "-b", "herd/worker/42-test")
-	run(repoDir, "git", "checkout", "-b", "herd/batch/1-batch")
-	run(repoDir, "git", "checkout", "herd/worker/42-test")
 
 	mock := &mockPlatform{
 		issues: &mockIssueService{
@@ -776,8 +777,10 @@ func TestExec_ResumeMergeFailure(t *testing.T) {
 		RepoRoot:    repoDir,
 	})
 	assert.Error(t, err)
-	// The error should mention merging (not just checkout)
-	assert.Contains(t, err.Error(), "merging latest batch branch")
+	// The merge fails (origin/batch branch doesn't exist), triggering the
+	// fallback path. The fallback tries to checkout the batch branch, which
+	// also fails because it doesn't exist on origin.
+	assert.Contains(t, err.Error(), "checking out batch branch after merge conflict")
 }
 
 func TestExec_FreshBranchWhenNoRemote(t *testing.T) {
@@ -879,4 +882,80 @@ func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
 		"no-op PR comment must include Worker # prefix")
 	assert.Contains(t, prSvc.comments[0], "(no-op)",
 		"no-op PR comment must include (no-op) marker")
+}
+
+func TestExec_ResumeMergeConflict_FallsBackToFreshBranch(t *testing.T) {
+	// Set up a repo where the worker branch and batch branch have conflicting changes
+	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+
+	// Create worker branch from batch branch with a conflicting file
+	run(repoDir, "git", "checkout", "herd/batch/1-batch")
+	run(repoDir, "git", "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "conflict.txt"), []byte("worker version"), 0644))
+	run(repoDir, "git", "add", "conflict.txt")
+	run(repoDir, "git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-m", "worker change")
+	run(repoDir, "git", "push", "origin", "herd/worker/42-test")
+
+	// Add a conflicting change on the batch branch and push
+	run(repoDir, "git", "checkout", "herd/batch/1-batch")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "conflict.txt"), []byte("batch version"), 0644))
+	run(repoDir, "git", "add", "conflict.txt")
+	run(repoDir, "git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-m", "batch change")
+	run(repoDir, "git", "push", "origin", "herd/batch/1-batch")
+
+	// Also create a progress file to verify it gets cleaned up
+	progressDir := filepath.Join(repoDir, ".herd", "progress")
+	require.NoError(t, os.MkdirAll(progressDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(progressDir, "42.md"), []byte("- [x] Step 1\n- [ ] Step 2"), 0644))
+
+	// Go back to worker branch so checkout in Exec works
+	run(repoDir, "git", "checkout", "herd/worker/42-test")
+	run(repoDir, "git", "fetch", "origin")
+
+	// Mock: GetBranchSHA succeeds (branch exists remotely)
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchSHAErr:  nil,
+	}
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      repoSvc,
+	}
+
+	ag := &mockAgent{
+		execResult: &agent.ExecResult{Summary: "Done"},
+	}
+
+	// Exec should NOT fail with merge conflict — it should fall back to fresh branch
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+
+	// The agent will run and produce no diff (no-op), so we expect success
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// Verify the remote worker branch was deleted
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-test")
+
+	// Verify progress file was removed
+	_, statErr := os.Stat(filepath.Join(progressDir, "42.md"))
+	assert.True(t, os.IsNotExist(statErr), "progress file should be deleted on fallback")
 }

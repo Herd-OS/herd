@@ -101,6 +101,11 @@ func (g *Git) AbortRebase() error {
 	return g.run("rebase", "--abort")
 }
 
+// DeleteLocalBranch force-deletes a local branch.
+func (g *Git) DeleteLocalBranch(name string) error {
+	return g.run("branch", "-D", name)
+}
+
 // Rm removes a file from the git index and working tree.
 func (g *Git) Rm(path string) error {
 	return g.run("rm", path)

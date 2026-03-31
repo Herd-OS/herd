@@ -552,6 +552,32 @@ func TestDefaultBranch_FallbackToMain(t *testing.T) {
 	assert.Equal(t, "main", branch)
 }
 
+func TestDeleteLocalBranch(t *testing.T) {
+	work := initTestRepo(t)
+	g := New(work)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	// Create a branch to delete
+	require.NoError(t, g.CreateBranch("to-delete", defaultBranch))
+	require.NoError(t, g.Checkout(defaultBranch))
+
+	// Delete it
+	require.NoError(t, g.DeleteLocalBranch("to-delete"))
+
+	// Verify it's gone — checkout should fail
+	err = g.Checkout("to-delete")
+	assert.Error(t, err)
+}
+
+func TestDeleteLocalBranch_NonExistent(t *testing.T) {
+	work := initTestRepo(t)
+	g := New(work)
+	err := g.DeleteLocalBranch("nonexistent")
+	assert.Error(t, err)
+}
+
 func TestAbortMerge_NoMergeInProgress(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)
