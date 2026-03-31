@@ -147,6 +147,16 @@ previous attempt) instead of creating a fresh branch from the batch branch.
 The agent then reads `.herd/progress/<issue-number>.md` to continue where
 the previous attempt stopped.
 
+If the merge of the batch branch into the resumed worker branch fails (e.g.,
+because the batch branch has diverged with conflicting changes from other
+workers' consolidation), the worker aborts the merge, deletes the stale worker
+branch (both locally and on the remote), removes the
+`.herd/progress/<issue-number>.md` file, and creates a fresh worker branch from
+the current batch branch. A warning is logged:
+"Merge conflict when updating resumed worker branch, starting fresh from batch
+branch." The previous partial work is lost, but this is preferable to crashing
+and leaving the issue stuck as failed.
+
 ### Concurrency
 
 Multiple workers run simultaneously on separate branches. Concurrency is bounded
@@ -157,7 +167,7 @@ GitHub Actions limits.
 
 | Failure | Response |
 |---------|----------|
-| Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md` |
+| Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md`; if the batch branch has diverged and merge conflicts, the worker falls back to a fresh branch (partial work is lost) |
 | Worker produces bad code | Integrator re-runs failed CI once (transient filter), then dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
 | Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |
