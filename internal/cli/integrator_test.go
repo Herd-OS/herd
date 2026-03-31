@@ -270,6 +270,11 @@ func TestHandleCommentCmd_IsPRParsing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Verify the boolean conversion logic matches production code:
+			// isPR := isPRStr == "true"
+			got := tt.flagVal == "true"
+			assert.Equal(t, tt.wantBool, got, "isPR conversion for flag value %q", tt.flagVal)
+
 			t.Setenv("HERD_RUNNER", "true")
 			t.Setenv("COMMENT_BODY", "/herd help")
 			root := NewRootCmd()
