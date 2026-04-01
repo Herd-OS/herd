@@ -184,6 +184,16 @@ func (g *Git) DefaultBranch() (string, error) {
 	return parts[1], nil
 }
 
+// MergeBase returns the merge base commit SHA between two refs.
+func (g *Git) MergeBase(a, b string) (string, error) {
+	return g.output("merge-base", a, b)
+}
+
+// RevParse returns the SHA for a ref.
+func (g *Git) RevParse(ref string) (string, error) {
+	return g.output("rev-parse", ref)
+}
+
 func (g *Git) run(args ...string) error {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = g.WorkDir

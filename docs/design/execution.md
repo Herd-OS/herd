@@ -171,6 +171,7 @@ GitHub Actions limits.
 | Worker produces bad code | Integrator dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
 | Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |
+| Stale conflict resolution issue | Automatically closed after successful consolidation; worker closes no-op conflict issues directly; non-fast-forward errors on stale branches don't block advance/review |
 | Runner offline | Action queues until a runner is available; no special handling |
 
 ---
@@ -265,12 +266,40 @@ Given a completed workflow run ID, the Integrator resolves the worker branch:
 
 ### Post-Merge Failure Handling
 
-If the merge succeeds but a downstream step fails (e.g., push rejected due to
-non-fast-forward), the Integrator relabels the issue from `herd/status:done` to
-`herd/status:failed` and posts a diagnostic comment. This ensures the issue is
-retried automatically rather than being treated as complete. The Integrator also
-resets the local batch branch to match the remote tracking branch before each
+If the merge succeeds but the push is rejected (e.g., non-fast-forward), the
+Integrator relabels the issue from `herd/status:done` to `herd/status:failed`
+and posts a diagnostic comment. This ensures the issue is retried automatically.
+The Integrator resets the local batch branch to match the remote before each
 checkout, preventing stale-branch issues.
+
+**Non-fatal consolidation failures do not block advance and review.** Push
+failures on stale branches and merge conflicts in notify mode are treated as
+warnings — the issue is relabeled as failed (for the Monitor to handle), but the
+consolidate command returns success so the workflow continues to run advance and
+review. Only truly fatal failures (git unavailable, authentication errors,
+corrupted state) cause the pipeline to stop.
+
+### Stale Conflict Issue Cleanup
+
+After a successful consolidation push, the Integrator scans for open conflict
+resolution issues in the same milestone whose worker branches no longer exist
+(already consolidated or deleted). These stale issues are automatically closed
+with the comment: "Automatically closed — batch branch is already up to date."
+
+This prevents the Monitor from retrying stale conflict resolution issues that
+would fail with non-fast-forward errors and block the integrator pipeline.
+
+Additionally, if a conflict resolution worker completes with no changes (the
+batch branch is already up to date), the worker closes the issue directly
+instead of marking it as done.
+
+### Already-Merged Branch Detection
+
+Before attempting a merge, the Integrator checks if the worker branch's changes
+are already in the batch branch (the merge base equals the worker branch tip).
+If so, the merge is skipped, the worker branch is deleted, and the result is
+treated as a no-op. This handles cases where a previous integrator run already
+merged the branch but the issue was re-triggered.
 
 ### Branch Cleanup
 

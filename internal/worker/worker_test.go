@@ -91,6 +91,7 @@ type mockIssueService struct {
 	addedLabels    []string
 	removedLabels  []string
 	comments       []string
+	updatedIssues  map[int]platform.IssueUpdate
 }
 
 func (m *mockIssueService) Create(_ context.Context, _, _ string, _ []string, _ *int) (*platform.Issue, error) {
@@ -102,7 +103,10 @@ func (m *mockIssueService) Get(_ context.Context, _ int) (*platform.Issue, error
 func (m *mockIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*platform.Issue, error) {
 	return nil, nil
 }
-func (m *mockIssueService) Update(_ context.Context, _ int, _ platform.IssueUpdate) (*platform.Issue, error) {
+func (m *mockIssueService) Update(_ context.Context, number int, update platform.IssueUpdate) (*platform.Issue, error) {
+	if m.updatedIssues != nil {
+		m.updatedIssues[number] = update
+	}
 	return nil, nil
 }
 func (m *mockIssueService) AddLabels(_ context.Context, _ int, labels []string) error {
@@ -399,7 +403,7 @@ func TestReportPostedAfterPush(t *testing.T) {
 }
 
 func TestWorkerNoOpPath_PostsReport(t *testing.T) {
-	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+	repoDir := initTestRepoWithBatchBranch(t)
 
 	issueSvc := &mockIssueService{
 		getResult: &platform.Issue{
@@ -658,7 +662,8 @@ func initTestRepo(t *testing.T) string {
 
 // initTestRepoWithBatchBranch creates a test repo (via initTestRepo) and
 // pushes a batch branch to origin so that Exec can check it out.
-func initTestRepoWithBatchBranch(t *testing.T, batchBranch string) string {
+func initTestRepoWithBatchBranch(t *testing.T) string {
+	batchBranch := "herd/batch/1-batch"
 	t.Helper()
 
 	work := initTestRepo(t)
@@ -847,7 +852,7 @@ func TestRenderWorkerPrompt_FixIssueWithMalformedFrontmatter(t *testing.T) {
 }
 
 func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
-	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+	repoDir := initTestRepoWithBatchBranch(t)
 
 	prSvc := &mockPRService{
 		listResult: []*platform.PullRequest{{Number: 99}},
@@ -887,7 +892,7 @@ func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
 
 func TestExec_ResumeMergeConflict_FallsBackToFreshBranch(t *testing.T) {
 	// Set up a repo where the worker branch and batch branch have conflicting changes
-	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+	repoDir := initTestRepoWithBatchBranch(t)
 
 	run := func(dir string, args ...string) {
 		t.Helper()
@@ -959,4 +964,118 @@ func TestExec_ResumeMergeConflict_FallsBackToFreshBranch(t *testing.T) {
 	// Verify progress file was removed
 	_, statErr := os.Stat(filepath.Join(progressDir, "42.md"))
 	assert.True(t, os.IsNotExist(statErr), "progress file should be deleted on fallback")
+}
+
+func TestExec_StaleConflictIssue_ClosesAsNoOp(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	// Create an issue body with ConflictResolution: true
+	conflictBody := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:            1,
+			Batch:              1,
+			ConflictResolution: true,
+		},
+		Task: "Resolve merge conflict.",
+	})
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Resolve conflict",
+			Body:      conflictBody,
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	ag := &mockAgent{
+		execResult: &agent.ExecResult{Summary: "No changes needed"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.NoOp, "result should be no-op")
+
+	// Issue should have the closing comment
+	require.NotEmpty(t, issueSvc.comments)
+	assert.Contains(t, issueSvc.comments[0], "Automatically closed — conflict resolution is no longer needed.")
+
+	// Issue should be updated with state "closed"
+	update, ok := issueSvc.updatedIssues[42]
+	require.True(t, ok, "issue should have been updated")
+	require.NotNil(t, update.State)
+	assert.Equal(t, "closed", *update.State)
+
+	// Issue should be labeled done
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
+
+	// In-progress label should be removed
+	assert.Contains(t, issueSvc.removedLabels, issues.StatusInProgress)
+}
+
+func TestExec_NonConflictNoOp_NotClosed(t *testing.T) {
+	// Verify that non-conflict-resolution no-op issues follow the normal path
+	// (labeled done, NOT closed)
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	// Regular issue body (no ConflictResolution flag)
+	regularBody := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version: 1,
+			Batch:   1,
+		},
+		Task: "Do something.",
+	})
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Regular task",
+			Body:      regularBody,
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	ag := &mockAgent{
+		execResult: &agent.ExecResult{Summary: "Already done"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.NoOp)
+
+	// Should NOT be closed (no Update call with state "closed")
+	_, wasClosed := issueSvc.updatedIssues[42]
+	assert.False(t, wasClosed, "non-conflict no-op issue should not be closed")
+
+	// Should have the standard "Worker Report" comment, not the conflict closing comment
+	foundReport := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker Report") {
+			foundReport = true
+		}
+		assert.NotContains(t, c, "conflict resolution is no longer needed",
+			"non-conflict issue should not get conflict resolution comment")
+	}
+	assert.True(t, foundReport, "non-conflict no-op should get standard Worker Report")
 }

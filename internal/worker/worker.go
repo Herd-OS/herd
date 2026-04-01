@@ -235,6 +235,21 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	}
 
 	if diff == "" {
+		// Check if this is a stale conflict resolution issue
+		parsed, parseErr := issues.ParseBody(issue.Body)
+		if parseErr == nil && parsed.FrontMatter.ConflictResolution {
+			// This conflict resolution task produced no changes — the batch branch
+			// is already up to date. Close the issue instead of marking done,
+			// so the integrator doesn't try to consolidate a no-op worker branch.
+			fmt.Printf("Conflict resolution issue #%d is no longer needed — closing.\n", params.IssueNumber)
+			_ = p.Issues().AddComment(ctx, params.IssueNumber, "Automatically closed — conflict resolution is no longer needed. The batch branch is already up to date.")
+			_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress})
+			_ = p.Issues().AddLabels(ctx, params.IssueNumber, []string{issues.StatusDone})
+			state := "closed"
+			_, _ = p.Issues().Update(ctx, params.IssueNumber, platform.IssueUpdate{State: &state})
+			return &ExecResult{NoOp: true}, nil
+		}
+
 		// No changes — post report and label done without pushing
 		noOpReport := "**Worker Report**\n\nNo changes were needed — acceptance criteria already satisfied.\n"
 		if rawSummary != "" {

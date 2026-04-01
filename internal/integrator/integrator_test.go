@@ -175,9 +175,10 @@ func (m *mockWorkflowService) ListRuns(_ context.Context, _ platform.RunFilters)
 func (m *mockWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
 
 type mockRepoService struct {
-	defaultBranch string
-	branchExists  map[string]bool
-	deletedBranch string
+	defaultBranch  string
+	branchExists   map[string]bool
+	deletedBranch  string
+	deletedBranches []string
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
@@ -187,6 +188,7 @@ func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
 func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 	m.deletedBranch = name
+	m.deletedBranches = append(m.deletedBranches, name)
 	return nil
 }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
@@ -751,7 +753,7 @@ func TestConsolidate_ConflictNotify(t *testing.T) {
 	}
 
 	result, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
-	assert.Error(t, err)
+	assert.NoError(t, err)
 	assert.True(t, result.ConflictDetected)
 	assert.Contains(t, issueSvc.comments[42][0], "Merge conflict detected")
 	// Should relabel from done → failed to block tier advancement
@@ -788,7 +790,7 @@ func TestConsolidate_ConflictNotify_MentionsUsers(t *testing.T) {
 	}
 
 	_, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
-	assert.Error(t, err)
+	assert.NoError(t, err)
 	assert.Contains(t, issueSvc.comments[42][0], "@alice")
 	assert.Contains(t, issueSvc.comments[42][0], "@bob")
 }
@@ -1790,9 +1792,9 @@ func TestConsolidate_PushFailure_LabelsIssueFailed(t *testing.T) {
 		},
 	}
 
-	_, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pushing batch branch")
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
+	require.NoError(t, err)
+	assert.False(t, result.Merged)
 
 	// Verify relabeling
 	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
@@ -1829,6 +1831,213 @@ func TestConsolidate_CheckoutTracksRemote(t *testing.T) {
 	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
 	require.NoError(t, err)
 	assert.True(t, result.Merged)
+}
+
+func TestConsolidate_SkipsAlreadyMergedWorkerBranch(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	// Create repo where worker branch is an ancestor of batch branch
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create worker branch with a commit
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "worker change")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	// Create batch branch that already contains the worker branch
+	// (merge worker into batch so worker is an ancestor)
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "merge", "herd/worker/42-test")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	g := git.New(dir)
+
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/worker/42-test": true},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: repoSvc,
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100})
+	require.NoError(t, err)
+	assert.True(t, result.NoOp, "should be NoOp when worker is already merged")
+	assert.False(t, result.Merged, "should not report as merged")
+	assert.Equal(t, "herd/worker/42-test", result.WorkerBranch)
+	// DeleteBranch should have been called for the worker branch
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-test")
+}
+
+func TestCloseStaleConflictIssues(t *testing.T) {
+	issueSvc := newMockIssueService()
+	// Conflict issue whose worker branch is gone
+	issueSvc.listResult = []*platform.Issue{
+		{
+			Number: 99, Title: "Resolve conflict: #42",
+			State:  "open",
+			Labels: []string{issues.TypeFix},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/42-test\n    - herd/batch/1-batch\n---\n\n## Task\nResolve conflict\n",
+		},
+	}
+
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{}, // worker branch is gone
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		repo:   repoSvc,
+	}
+
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	closeStaleConflictIssues(context.Background(), mock, ms)
+
+	// Issue should be closed
+	update, ok := issueSvc.updatedIssues[99]
+	require.True(t, ok, "issue #99 should have been updated")
+	require.NotNil(t, update.State)
+	assert.Equal(t, "closed", *update.State)
+
+	// Should have comment
+	assert.Len(t, issueSvc.comments[99], 1)
+	assert.Equal(t, "Automatically closed — batch branch is already up to date.", issueSvc.comments[99][0])
+}
+
+func TestCloseStaleConflictIssues_BranchStillExists(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{
+			Number: 99, Title: "Resolve conflict: #42",
+			State:  "open",
+			Labels: []string{issues.TypeFix},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/42-test\n    - herd/batch/1-batch\n---\n\n## Task\nResolve conflict\n",
+		},
+	}
+
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/worker/42-test": true}, // branch still exists
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		repo:   repoSvc,
+	}
+
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	closeStaleConflictIssues(context.Background(), mock, ms)
+
+	// Issue should NOT be closed
+	_, ok := issueSvc.updatedIssues[99]
+	assert.False(t, ok, "issue #99 should not have been updated")
+	assert.Empty(t, issueSvc.comments[99], "no comment should be added")
+}
+
+func TestConsolidate_PushFailure_ReturnsSuccessWithWarning(t *testing.T) {
+	dir, g := initPushFailRepo(t)
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
+	require.NoError(t, err, "push failure should not return an error")
+	assert.False(t, result.Merged, "Merged should be false on push failure")
+	assert.Equal(t, 42, result.IssueNumber)
+	assert.Equal(t, "herd/worker/42-test", result.WorkerBranch)
+
+	// Issue should be relabeled as failed
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+
+	// Comment should be posted about push failure
+	require.Len(t, issueSvc.comments[42], 1)
+	assert.Contains(t, issueSvc.comments[42][0], "Could not push consolidated batch branch")
+}
+
+func TestConsolidate_MergeConflict_NotifyMode_ReturnsSuccessWithWarning(t *testing.T) {
+	_, g := initConflictRepo(t)
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{OnConflict: "notify"},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
+	require.NoError(t, err, "merge conflict in notify mode should not return an error")
+	assert.True(t, result.ConflictDetected, "ConflictDetected should be true")
+	assert.Equal(t, 42, result.IssueNumber)
+
+	// Issue should be relabeled from done → failed
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+
+	// Comment should be posted about the conflict
+	require.Len(t, issueSvc.comments[42], 1)
+	assert.Contains(t, issueSvc.comments[42][0], "Merge conflict detected")
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
