@@ -25,6 +25,9 @@ permissions:
 jobs:
   integrate:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped'
+    concurrency:
+      group: herd-integrate-${{ github.event.workflow_run.head_branch || github.ref }}
+      cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
@@ -52,6 +55,9 @@ jobs:
       vars.HERD_ENABLED == 'true'
       && github.event_name == 'check_run'
       && startsWith(github.event.check_run.check_suite.head_branch, 'herd/batch/')
+    concurrency:
+      group: herd-check-ci-${{ github.event.check_run.check_suite.head_branch || github.ref }}
+      cancel-in-progress: true
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
@@ -78,6 +84,9 @@ jobs:
 
   advance-on-close:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'issues'
+    concurrency:
+      group: herd-advance-${{ github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number }}
+      cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
@@ -109,6 +118,9 @@ jobs:
       vars.HERD_ENABLED == 'true'
       && github.event_name == 'pull_request_review'
       && startsWith(github.event.pull_request.title, '[herd]')
+    concurrency:
+      group: herd-re-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
@@ -142,6 +154,9 @@ jobs:
       && github.event.action == 'closed'
       && github.event.pull_request.merged == true
       && startsWith(github.event.pull_request.title, '[herd]')
+    concurrency:
+      group: herd-cleanup-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
       - name: Checkout
@@ -164,7 +179,7 @@ jobs:
       && github.event.action == 'created'
       && startsWith(github.event.comment.body, '/herd ')
     concurrency:
-      group: herd-comment-${{ github.event.issue.number }}
+      group: herd-comment-${{ github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number }}
       cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
