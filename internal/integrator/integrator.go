@@ -131,6 +131,28 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	if err := g.CheckoutReset(batchBranch); err != nil {
 		return nil, fmt.Errorf("checking out batch branch: %w", err)
 	}
+
+	// Check if worker branch is already contained in batch branch
+	// (merge base equals worker branch tip → already merged)
+	workerSHA, shaErr := g.RevParse("origin/" + workerBranch)
+	batchSHA, batchShaErr := g.RevParse(batchBranch)
+	if shaErr == nil && batchShaErr == nil {
+		mergeBase, mbErr := g.MergeBase("origin/"+workerBranch, batchBranch)
+		if mbErr == nil && mergeBase == workerSHA {
+			fmt.Printf("Worker branch %s is already contained in batch branch, skipping merge.\n", workerBranch)
+			if err := p.Repository().DeleteBranch(ctx, workerBranch); err != nil {
+				fmt.Printf("Warning: failed to delete already-merged worker branch %s: %v\n", workerBranch, err)
+			}
+			return &ConsolidateResult{
+				IssueNumber:  issueNumber,
+				WorkerBranch: workerBranch,
+				Merged:       false,
+				NoOp:         true,
+			}, nil
+		}
+	}
+	_ = batchSHA // used only for error check above
+
 	if err := g.Merge("origin/" + workerBranch); err != nil {
 		// Abort the failed merge to restore clean state
 		_ = g.AbortMerge()
@@ -197,6 +219,9 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 			batchBranch))
 		return nil, fmt.Errorf("pushing batch branch: %w", err)
 	}
+
+	// Close stale conflict/rebase issues whose worker branches no longer exist
+	closeStaleConflictIssues(ctx, p, issue.Milestone)
 
 	// Delete worker branch
 	if err := p.Repository().DeleteBranch(ctx, workerBranch); err != nil {
@@ -543,6 +568,50 @@ func findIssue(allIssues []*platform.Issue, number int) *platform.Issue {
 		}
 	}
 	return nil
+}
+
+// closeStaleConflictIssues closes open conflict/rebase resolution issues in the
+// milestone whose worker branches have already been consolidated or deleted.
+// This prevents the monitor from retrying stale issues that would fail with
+// non-fast-forward errors.
+func closeStaleConflictIssues(ctx context.Context, p platform.Platform, ms *platform.Milestone) {
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+		State:     "open",
+		Milestone: &ms.Number,
+	})
+	if err != nil {
+		fmt.Printf("Warning: failed to list issues for stale conflict cleanup: %v\n", err)
+		return
+	}
+
+	for _, iss := range allIssues {
+		parsed, parseErr := issues.ParseBody(iss.Body)
+		if parseErr != nil {
+			continue
+		}
+		if !parsed.FrontMatter.ConflictResolution {
+			continue
+		}
+		// Check if any conflicting worker branch is gone
+		branchGone := false
+		for _, branch := range parsed.FrontMatter.ConflictingBranches {
+			if strings.HasPrefix(branch, "herd/worker/") {
+				if _, err := p.Repository().GetBranchSHA(ctx, branch); err != nil {
+					branchGone = true
+					break
+				}
+			}
+		}
+		if !branchGone {
+			continue
+		}
+
+		// Close the stale issue
+		fmt.Printf("Closing stale conflict issue #%d — worker branch already consolidated.\n", iss.Number)
+		_ = p.Issues().AddComment(ctx, iss.Number, "Automatically closed — batch branch is already up to date.")
+		state := "closed"
+		_, _ = p.Issues().Update(ctx, iss.Number, platform.IssueUpdate{State: &state})
+	}
 }
 
 func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, issue *platform.Issue, ms *platform.Milestone, workerBranch, batchBranch string) (*ConsolidateResult, error) {

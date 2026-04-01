@@ -689,6 +689,75 @@ func TestResetHead_CleanRepo(t *testing.T) {
 	require.NoError(t, g.ResetHead())
 }
 
+func TestRevParse(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	sha, err := g.RevParse("HEAD")
+	require.NoError(t, err)
+	assert.Len(t, sha, 40)
+
+	// Non-existent ref should error
+	_, err = g.RevParse("refs/heads/nonexistent")
+	assert.Error(t, err)
+}
+
+func TestMergeBase(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	// Record the initial commit SHA (will be the merge base)
+	baseSHA, err := g.RevParse("HEAD")
+	require.NoError(t, err)
+
+	// Create feature branch with a commit
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0644))
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "add feature")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Add a commit on default branch
+	require.NoError(t, g.Checkout(defaultBranch))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.txt"), []byte("main"), 0644))
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "add main")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// Merge base should be the initial commit
+	mb, err := g.MergeBase(defaultBranch, "feature")
+	require.NoError(t, err)
+	assert.Equal(t, baseSHA, mb)
+}
+
+func TestMergeBase_AncestorBranch(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	// Create feature branch (no extra commits — same as default)
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+
+	featureSHA, err := g.RevParse("feature")
+	require.NoError(t, err)
+
+	// When feature is ancestor of default (or same), merge-base == feature tip
+	mb, err := g.MergeBase(defaultBranch, "feature")
+	require.NoError(t, err)
+	assert.Equal(t, featureSHA, mb)
+}
+
 func TestHasConflicts_WithConflict(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)
