@@ -176,11 +176,12 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		// Relabel from done → failed to block tier advancement
 		_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusDone})
 		_ = p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+		fmt.Printf("Warning: merge conflict for %s into %s (issue #%d relabeled as failed)\n", workerBranch, batchBranch, issueNumber)
 		return &ConsolidateResult{
 			IssueNumber:      issueNumber,
 			WorkerBranch:     workerBranch,
 			ConflictDetected: true,
-		}, fmt.Errorf("merging worker branch %s into batch branch: %w", workerBranch, err)
+		}, nil
 	}
 	// Clean up progress tracking artifacts (both new per-issue and legacy formats)
 	needsAmend := false
@@ -217,7 +218,12 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		_ = p.Issues().AddComment(ctx, issueNumber, fmt.Sprintf(
 			"⚠️ **HerdOS Integrator**\n\nCould not push consolidated batch branch `%s` (non-fast-forward). This issue will be retried.\n\nYou can also retry with `/herd integrate` on this issue.",
 			batchBranch))
-		return nil, fmt.Errorf("pushing batch branch: %w", err)
+		fmt.Printf("Warning: push failed for batch branch %s: %v (issue #%d relabeled as failed)\n", batchBranch, err, issueNumber)
+		return &ConsolidateResult{
+			IssueNumber:  issueNumber,
+			WorkerBranch: workerBranch,
+			Merged:       false,
+		}, nil
 	}
 
 	// Close stale conflict/rebase issues whose worker branches no longer exist

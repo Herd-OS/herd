@@ -753,7 +753,7 @@ func TestConsolidate_ConflictNotify(t *testing.T) {
 	}
 
 	result, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
-	assert.Error(t, err)
+	assert.NoError(t, err)
 	assert.True(t, result.ConflictDetected)
 	assert.Contains(t, issueSvc.comments[42][0], "Merge conflict detected")
 	// Should relabel from done → failed to block tier advancement
@@ -790,7 +790,7 @@ func TestConsolidate_ConflictNotify_MentionsUsers(t *testing.T) {
 	}
 
 	_, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
-	assert.Error(t, err)
+	assert.NoError(t, err)
 	assert.Contains(t, issueSvc.comments[42][0], "@alice")
 	assert.Contains(t, issueSvc.comments[42][0], "@bob")
 }
@@ -1792,9 +1792,9 @@ func TestConsolidate_PushFailure_LabelsIssueFailed(t *testing.T) {
 		},
 	}
 
-	_, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pushing batch branch")
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
+	require.NoError(t, err)
+	assert.False(t, result.Merged)
 
 	// Verify relabeling
 	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
@@ -1959,6 +1959,85 @@ func TestCloseStaleConflictIssues_BranchStillExists(t *testing.T) {
 	_, ok := issueSvc.updatedIssues[99]
 	assert.False(t, ok, "issue #99 should not have been updated")
 	assert.Empty(t, issueSvc.comments[99], "no comment should be added")
+}
+
+func TestConsolidate_PushFailure_ReturnsSuccessWithWarning(t *testing.T) {
+	dir, g := initPushFailRepo(t)
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 100, RepoRoot: dir})
+	require.NoError(t, err, "push failure should not return an error")
+	assert.False(t, result.Merged, "Merged should be false on push failure")
+	assert.Equal(t, 42, result.IssueNumber)
+	assert.Equal(t, "herd/worker/42-test", result.WorkerBranch)
+
+	// Issue should be relabeled as failed
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+
+	// Comment should be posted about push failure
+	require.Len(t, issueSvc.comments[42], 1)
+	assert.Contains(t, issueSvc.comments[42][0], "Could not push consolidated batch branch")
+}
+
+func TestConsolidate_MergeConflict_NotifyMode_ReturnsSuccessWithWarning(t *testing.T) {
+	_, g := initConflictRepo(t)
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{OnConflict: "notify"},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
+	require.NoError(t, err, "merge conflict in notify mode should not return an error")
+	assert.True(t, result.ConflictDetected, "ConflictDetected should be true")
+	assert.Equal(t, 42, result.IssueNumber)
+
+	// Issue should be relabeled from done → failed
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+
+	// Comment should be posted about the conflict
+	require.Len(t, issueSvc.comments[42], 1)
+	assert.Contains(t, issueSvc.comments[42][0], "Merge conflict detected")
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

@@ -73,6 +73,8 @@ func newConsolidateCmd() *cobra.Command {
 
 			if result.NoOp {
 				fmt.Printf("No-op: issue #%d had no worker branch (already done)\n", result.IssueNumber)
+			} else if result.ConflictDetected {
+				fmt.Printf("Warning: conflict detected for issue #%d, relabeled as failed\n", result.IssueNumber)
 			} else if result.Merged {
 				fmt.Printf("Consolidated %s into batch branch\n", result.WorkerBranch)
 			} else {
