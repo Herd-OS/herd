@@ -440,23 +440,15 @@ func TestConsolidate_RemovesWorkerProgressFile(t *testing.T) {
 	assert.False(t, dirty, "repo should be clean after consolidation")
 }
 
-func TestConsolidate_AmendNoEditFailure_LogsAndResets(t *testing.T) {
-	// Verify via source code that AmendNoEdit errors are handled, not silently ignored
+func TestConsolidate_ProgressCleanupUseSeparateCommit(t *testing.T) {
 	source, err := os.ReadFile("integrator.go")
 	require.NoError(t, err)
 	src := string(source)
 
-	// The AmendNoEdit error should be checked, not discarded with _ =
-	assert.NotContains(t, src, "_ = g.AmendNoEdit()",
-		"AmendNoEdit error must not be silently ignored")
-
-	// Should log the error
-	assert.Contains(t, src, "failed to amend merge commit",
-		"AmendNoEdit failure should be logged")
-
-	// Should attempt to reset the index
-	assert.Contains(t, src, "ResetHead()",
-		"should reset index if AmendNoEdit fails")
+	assert.Contains(t, src, `g.Commit("Remove worker progress tracking files")`,
+		"Progress cleanup should use a separate commit, not amend")
+	assert.NotContains(t, src, "AmendNoEdit",
+		"Progress cleanup should not use AmendNoEdit")
 }
 
 func TestConsolidate_ConfiguresGitIdentity(t *testing.T) {
@@ -1663,8 +1655,8 @@ func TestConsolidate_CleansUpWorkerProgress(t *testing.T) {
 		"Consolidate must clean up legacy WORKER_PROGRESS.md for backward compat")
 	assert.Contains(t, src, "g.Rm(",
 		"Should use g.Rm to remove the progress file")
-	assert.Contains(t, src, "g.AmendNoEdit()",
-		"Should amend the merge commit after removing progress file")
+	assert.Contains(t, src, `g.Commit(`,
+		"Should use a separate commit to remove progress files")
 }
 
 func TestConsolidate_RmErrorsAreLogged(t *testing.T) {
@@ -1677,6 +1669,18 @@ func TestConsolidate_RmErrorsAreLogged(t *testing.T) {
 		"RmDir errors should be logged as warnings")
 	assert.Contains(t, src, `Warning: failed to git rm WORKER_PROGRESS.md`,
 		"Rm errors for legacy file should be logged as warnings")
+}
+
+func TestConsolidate_CommitFailureResetsIndex(t *testing.T) {
+	// Verify that when Commit fails, ResetHead is called to clean up staged removals
+	source, err := os.ReadFile("integrator.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	assert.Contains(t, src, `Warning: failed to commit progress file removal`,
+		"Commit errors should be logged as warnings")
+	assert.Contains(t, src, `ResetHead()`,
+		"Index should be reset on commit failure to avoid dirty state affecting subsequent push")
 }
 
 func initPushFailRepo(t *testing.T) (string, *git.Git) {
@@ -2038,6 +2042,75 @@ func TestConsolidate_MergeConflict_NotifyMode_ReturnsSuccessWithWarning(t *testi
 	// Comment should be posted about the conflict
 	require.Len(t, issueSvc.comments[42], 1)
 	assert.Contains(t, issueSvc.comments[42][0], "Merge conflict detected")
+}
+
+func TestConsolidate_ProgressOnlyWorkerBranch(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	// Create repo with batch and worker branches
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "init.txt"), []byte("init"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "initial")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create batch branch
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	// Create worker branch with ONLY progress files
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/42-test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "WORKER_PROGRESS.md"), []byte("- [x] done"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd", "progress"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "progress", "42.md"), []byte("progress"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "progress files only")
+	runGit(t, dir, "push", "origin", "herd/worker/42-test")
+
+	g := git.New(dir)
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{"herd/worker/42-test": true},
+		},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{
+		RunID:    100,
+		RepoRoot: dir,
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Merged)
+
+	// Progress files should be removed
+	_, statErr := os.Stat(filepath.Join(dir, "WORKER_PROGRESS.md"))
+	assert.True(t, os.IsNotExist(statErr), "WORKER_PROGRESS.md should be removed")
+	_, statErr = os.Stat(filepath.Join(dir, ".herd", "progress", "42.md"))
+	assert.True(t, os.IsNotExist(statErr), ".herd/progress/42.md should be removed")
+
+	// Repo should be clean
+	dirty, err := g.IsDirty()
+	require.NoError(t, err)
+	assert.False(t, dirty, "repo should be clean after consolidation")
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

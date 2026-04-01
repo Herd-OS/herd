@@ -184,13 +184,13 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		}, nil
 	}
 	// Clean up progress tracking artifacts (both new per-issue and legacy formats)
-	needsAmend := false
+	needsCommit := false
 	progressDir := filepath.Join(params.RepoRoot, ".herd", "progress")
 	if _, statErr := os.Stat(progressDir); statErr == nil {
 		if rmErr := g.RmDir(".herd/progress/"); rmErr != nil {
 			fmt.Printf("Warning: failed to git rm .herd/progress/: %v\n", rmErr)
 		} else {
-			needsAmend = true
+			needsCommit = true
 		}
 	}
 	// Backward compat: remove legacy WORKER_PROGRESS.md at repo root
@@ -199,15 +199,13 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		if rmErr := g.Rm("WORKER_PROGRESS.md"); rmErr != nil {
 			fmt.Printf("Warning: failed to git rm WORKER_PROGRESS.md: %v\n", rmErr)
 		} else {
-			needsAmend = true
+			needsCommit = true
 		}
 	}
-	if needsAmend {
-		if amendErr := g.AmendNoEdit(); amendErr != nil {
-			fmt.Printf("Warning: failed to amend merge commit to remove progress files: %v\n", amendErr)
-			if resetErr := g.ResetHead(); resetErr != nil {
-				return nil, fmt.Errorf("failed to reset after amend failure: %w (amend error: %v)", resetErr, amendErr)
-			}
+	if needsCommit {
+		if commitErr := g.Commit("Remove worker progress tracking files"); commitErr != nil {
+			fmt.Printf("Warning: failed to commit progress file removal: %v\n", commitErr)
+			_ = g.ResetHead()
 		}
 	}
 

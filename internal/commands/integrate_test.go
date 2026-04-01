@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -298,6 +299,30 @@ func TestHandleIntegrate_ReviewRunsWithExistingPR(t *testing.T) {
 	require.NoError(t, result.Error)
 	assert.Contains(t, result.Message, "Integrator cycle for batch #1")
 	// Review should be attempted because there's an existing batch PR.
+}
+
+func TestHandleIntegrate_ProgressCleanupLogsWarnings(t *testing.T) {
+	// Verify that RmDir and Rm errors are logged as warnings, not silently swallowed
+	source, err := os.ReadFile("integrate.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	assert.Contains(t, src, `Warning: failed to git rm .herd/progress/`,
+		"RmDir errors should be logged as warnings")
+	assert.Contains(t, src, `Warning: failed to git rm WORKER_PROGRESS.md`,
+		"Rm errors for legacy file should be logged as warnings")
+}
+
+func TestHandleIntegrate_CommitFailureLogsAndResetsIndex(t *testing.T) {
+	// Verify that Commit errors are logged and index is reset
+	source, err := os.ReadFile("integrate.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	assert.Contains(t, src, `Warning: failed to commit progress file removal`,
+		"Commit errors should be logged as warnings")
+	assert.Contains(t, src, `ResetHead()`,
+		"Index should be reset on commit failure to avoid dirty state")
 }
 
 func TestHandleIntegrate_Registered(t *testing.T) {

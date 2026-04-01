@@ -117,6 +117,11 @@ func (g *Git) RmDir(path string) error {
 	return g.run("rm", "-r", "--ignore-unmatch", path)
 }
 
+// Commit creates a new commit with the given message.
+func (g *Git) Commit(message string) error {
+	return g.run("commit", "-m", message)
+}
+
 // AmendNoEdit amends the most recent commit without changing its message.
 func (g *Git) AmendNoEdit() error {
 	return g.run("commit", "--amend", "--no-edit")
