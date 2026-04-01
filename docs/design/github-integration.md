@@ -173,6 +173,23 @@ Multiple workers can complete near-simultaneously, triggering concurrent Integra
 
 **General rule:** All operations are idempotent. Labeling an already-labeled issue, dispatching an already-in-progress issue, and merging an already-merged branch are all detected and skipped.
 
+#### Workflow Concurrency Groups
+
+All integrator workflow jobs use GitHub Actions [concurrency groups](https://docs.github.com/en/actions/using-jobs/using-concurrency) to prevent parallel runs from racing. Without these, two workers completing close together (or a `/herd integrate` comment firing at the same time as a `workflow_run` trigger) can cause duplicate fix issues, duplicate worker dispatches, and duplicate review comments.
+
+| Job | Group Key | cancel-in-progress | Rationale |
+|-----|-----------|-------------------|----------|
+| `integrate` | `herd-integrate-{head_branch}` | false | Serializes all integrator runs. Workers are dispatched with `ref: defaultBranch`, so `head_branch` is typically `main` — this serializes across batches, which is acceptable since integrator runs are quick and touch shared state. |
+| `check-ci-on-completion` | `herd-check-ci-{head_branch}` | true | Fires once per `check_run` completion on a batch branch. Idempotent — only the last run matters, so earlier runs are cancelled to save runner time. |
+| `advance-on-close` | `herd-advance-{milestone \|\| issue_number}` | false | Uses milestone number (= batch number) to serialize per-batch. Falls back to issue number for non-herd issues. |
+| `re-review` | `herd-re-review-{pr_number}` | false | Prevents concurrent reviews on the same PR. |
+| `cleanup` | `herd-cleanup-{pr_number}` | false | Prevents concurrent cleanup on the same PR. |
+| `handle-comment` | `herd-comment-{milestone \|\| issue_number}` | false | Uses milestone number to serialize all `/herd` commands for the same batch. Falls back to issue number if no milestone. |
+
+All groups use `cancel-in-progress: false` (except `check-ci-on-completion`) so that queued runs wait rather than being cancelled. Every integrator run should complete — we want serialization, not cancellation.
+
+**Cross-job limitation:** The `integrate` and `handle-comment` jobs cannot share a concurrency group because they use different event payloads (`workflow_run` vs `issue_comment`) with no common batch identifier extractable at the expression level. Both jobs are idempotent, so concurrent execution produces duplicate work at worst, not data corruption.
+
 ## 4. Runners
 
 Workers execute on GitHub Actions self-hosted runners. HerdOS provides a Docker image as the primary deployment method.
