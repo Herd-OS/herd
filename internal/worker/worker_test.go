@@ -403,7 +403,7 @@ func TestReportPostedAfterPush(t *testing.T) {
 }
 
 func TestWorkerNoOpPath_PostsReport(t *testing.T) {
-	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+	repoDir := initTestRepoWithBatchBranch(t)
 
 	issueSvc := &mockIssueService{
 		getResult: &platform.Issue{
@@ -662,7 +662,8 @@ func initTestRepo(t *testing.T) string {
 
 // initTestRepoWithBatchBranch creates a test repo (via initTestRepo) and
 // pushes a batch branch to origin so that Exec can check it out.
-func initTestRepoWithBatchBranch(t *testing.T, batchBranch string) string {
+func initTestRepoWithBatchBranch(t *testing.T) string {
+	batchBranch := "herd/batch/1-batch"
 	t.Helper()
 
 	work := initTestRepo(t)
@@ -851,7 +852,7 @@ func TestRenderWorkerPrompt_FixIssueWithMalformedFrontmatter(t *testing.T) {
 }
 
 func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
-	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+	repoDir := initTestRepoWithBatchBranch(t)
 
 	prSvc := &mockPRService{
 		listResult: []*platform.PullRequest{{Number: 99}},
@@ -891,7 +892,7 @@ func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
 
 func TestExec_ResumeMergeConflict_FallsBackToFreshBranch(t *testing.T) {
 	// Set up a repo where the worker branch and batch branch have conflicting changes
-	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+	repoDir := initTestRepoWithBatchBranch(t)
 
 	run := func(dir string, args ...string) {
 		t.Helper()
@@ -966,7 +967,7 @@ func TestExec_ResumeMergeConflict_FallsBackToFreshBranch(t *testing.T) {
 }
 
 func TestExec_StaleConflictIssue_ClosesAsNoOp(t *testing.T) {
-	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+	repoDir := initTestRepoWithBatchBranch(t)
 
 	// Create an issue body with ConflictResolution: true
 	conflictBody := issues.RenderBody(issues.IssueBody{
@@ -1025,7 +1026,7 @@ func TestExec_StaleConflictIssue_ClosesAsNoOp(t *testing.T) {
 func TestExec_NonConflictNoOp_NotClosed(t *testing.T) {
 	// Verify that non-conflict-resolution no-op issues follow the normal path
 	// (labeled done, NOT closed)
-	repoDir := initTestRepoWithBatchBranch(t, "herd/batch/1-batch")
+	repoDir := initTestRepoWithBatchBranch(t)
 
 	// Regular issue body (no ConflictResolution flag)
 	regularBody := issues.RenderBody(issues.IssueBody{
