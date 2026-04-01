@@ -205,6 +205,7 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	if needsCommit {
 		if commitErr := g.Commit("Remove worker progress tracking files"); commitErr != nil {
 			fmt.Printf("Warning: failed to commit progress file removal: %v\n", commitErr)
+			_ = g.ResetHead()
 		}
 	}
 

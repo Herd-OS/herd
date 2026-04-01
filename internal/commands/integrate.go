@@ -108,18 +108,25 @@ func handleIntegrate(hctx *HandlerContext, cmd Command) Result {
 			needsCommit := false
 			progressDir := filepath.Join(hctx.RepoRoot, ".herd", "progress")
 			if _, statErr := os.Stat(progressDir); statErr == nil {
-				if rmErr := hctx.Git.RmDir(".herd/progress/"); rmErr == nil {
+				if rmErr := hctx.Git.RmDir(".herd/progress/"); rmErr != nil {
+					fmt.Printf("Warning: failed to git rm .herd/progress/: %v\n", rmErr)
+				} else {
 					needsCommit = true
 				}
 			}
 			progressFile := filepath.Join(hctx.RepoRoot, "WORKER_PROGRESS.md")
 			if _, statErr := os.Stat(progressFile); statErr == nil {
-				if rmErr := hctx.Git.Rm("WORKER_PROGRESS.md"); rmErr == nil {
+				if rmErr := hctx.Git.Rm("WORKER_PROGRESS.md"); rmErr != nil {
+					fmt.Printf("Warning: failed to git rm WORKER_PROGRESS.md: %v\n", rmErr)
+				} else {
 					needsCommit = true
 				}
 			}
 			if needsCommit {
-				_ = hctx.Git.Commit("Remove worker progress tracking files")
+				if commitErr := hctx.Git.Commit("Remove worker progress tracking files"); commitErr != nil {
+					fmt.Printf("Warning: failed to commit progress file removal: %v\n", commitErr)
+					_ = hctx.Git.ResetHead()
+				}
 			}
 
 			if err := hctx.Git.Push("origin", batchBranch); err != nil {

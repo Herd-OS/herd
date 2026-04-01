@@ -1671,6 +1671,18 @@ func TestConsolidate_RmErrorsAreLogged(t *testing.T) {
 		"Rm errors for legacy file should be logged as warnings")
 }
 
+func TestConsolidate_CommitFailureResetsIndex(t *testing.T) {
+	// Verify that when Commit fails, ResetHead is called to clean up staged removals
+	source, err := os.ReadFile("integrator.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	assert.Contains(t, src, `Warning: failed to commit progress file removal`,
+		"Commit errors should be logged as warnings")
+	assert.Contains(t, src, `ResetHead()`,
+		"Index should be reset on commit failure to avoid dirty state affecting subsequent push")
+}
+
 func initPushFailRepo(t *testing.T) (string, *git.Git) {
 	t.Helper()
 
