@@ -20,6 +20,12 @@ const (
 	// It is removed by the retry handler, preventing duplicate retry comments
 	// when two patrol runs execute before the first retry is processed.
 	RetryPending = "herd/retry-pending"
+
+	// RebasePending is added to a batch PR when the monitor detects a merge
+	// conflict with the base branch and dispatches a rebase conflict resolution
+	// worker. It is removed once the conflict is resolved (PR becomes mergeable
+	// again), preventing duplicate dispatches from concurrent patrol runs.
+	RebasePending = "herd/rebase-pending"
 )
 
 // Type labels
@@ -55,6 +61,7 @@ func AllLabels() []LabelDef {
 		{TypeManual, "BFD4F2", "Requires human action — not dispatched to workers"},
 		{CIFixPending, "E4E669", "CI fix cycle in progress for this batch PR"},
 		{RetryPending, "D4C5F9", "Monitor-posted retry pending processing"},
+		{RebasePending, "FBCA04", "Rebase conflict resolution in progress for this batch PR"},
 	}
 }
 

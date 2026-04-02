@@ -671,8 +671,15 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 			ConflictingBranches: []string{workerBranch, batchBranch},
 		},
 		Task: fmt.Sprintf("Resolve merge conflict between `%s` and `%s`.\n\n"+
-			"Checkout the batch branch (`%s`), merge the worker branch (`%s`), "+
-			"resolve all conflicts, and commit the result.", workerBranch, batchBranch, batchBranch, workerBranch),
+			"Follow these steps exactly:\n"+
+			"1. `git fetch origin`\n"+
+			"2. `git checkout %s`\n"+
+			"3. `git merge origin/%s`\n"+
+			"4. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch — only fix the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) produced by git.\n"+
+			"5. `git add <resolved files>`\n"+
+			"6. `git commit` (accept the default merge commit message)\n"+
+			"7. `git push origin %s`",
+			workerBranch, batchBranch, batchBranch, workerBranch, batchBranch),
 		Context: fmt.Sprintf("Worker branch `%s` (from issue #%d) conflicts with the batch branch `%s`.", workerBranch, issue.Number, batchBranch),
 	})
 
@@ -801,14 +808,18 @@ func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers
 	return b.String()
 }
 
-func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) error {
+// DispatchRebaseConflictWorker creates a conflict-resolution issue and dispatches
+// a worker to rebase the batch branch onto the default branch. It respects the
+// max conflict resolution attempts cap. Returns the created issue number, or 0
+// if the cap was reached.
+func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) (int, error) {
 	// Count existing conflict-resolution issues in this milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
 		State:     "all",
 		Milestone: &ms.Number,
 	})
 	if err != nil {
-		return fmt.Errorf("listing milestone issues: %w", err)
+		return 0, fmt.Errorf("listing milestone issues: %w", err)
 	}
 
 	conflictCount := 0
@@ -823,7 +834,7 @@ func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cf
 	}
 
 	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
-		return nil // At cap, fall through to open PR un-rebased
+		return 0, nil // At cap
 	}
 
 	// Create conflict-resolution issue
@@ -836,8 +847,16 @@ func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cf
 			ConflictingBranches: []string{batchBranch, defaultBranch},
 		},
 		Task: fmt.Sprintf("Rebase the batch branch `%s` onto the latest `%s`.\n\n"+
-			"Checkout `%s`, read the batch branch diff, produce a clean rebase, "+
-			"and force-push the result to `%s`.", batchBranch, defaultBranch, defaultBranch, batchBranch),
+			"Follow these steps exactly:\n"+
+			"1. `git fetch origin`\n"+
+			"2. `git checkout %s`\n"+
+			"3. `git rebase origin/%s`\n"+
+			"4. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch — only fix the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) produced by git.\n"+
+			"5. `git add <resolved files>`\n"+
+			"6. `git rebase --continue`\n"+
+			"7. Repeat steps 4-6 for each conflicting commit.\n"+
+			"8. `git push --force origin %s`",
+			batchBranch, defaultBranch, batchBranch, defaultBranch, batchBranch),
 		Context: fmt.Sprintf("Automatic rebase of batch branch `%s` onto `%s` failed due to conflicts.", batchBranch, defaultBranch),
 	})
 
@@ -848,7 +867,7 @@ func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cf
 		&ms.Number,
 	)
 	if err != nil {
-		return fmt.Errorf("creating rebase conflict-resolution issue: %w", err)
+		return 0, fmt.Errorf("creating rebase conflict-resolution issue: %w", err)
 	}
 
 	// Dispatch resolver worker
@@ -860,7 +879,12 @@ func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cf
 		"runner_label":    cfg.Workers.RunnerLabel,
 	})
 
-	return nil
+	return fixIssue.Number, nil
+}
+
+func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) error {
+	_, err := DispatchRebaseConflictWorker(ctx, p, cfg, ms, batchBranch, defaultBranch)
+	return err
 }
 
 func tierForIssue(number int, tiers [][]int) int {

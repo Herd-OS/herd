@@ -16,18 +16,24 @@ import (
 // --- Mock Platform ---
 
 type mockPlatform struct {
-	issues    *mockIssueService
-	prs       *mockPRService
-	workflows *mockWorkflowService
-	repo      *mockRepoService
-	checks    *mockCheckService
+	issues     *mockIssueService
+	prs        *mockPRService
+	workflows  *mockWorkflowService
+	repo       *mockRepoService
+	checks     *mockCheckService
+	milestones *mockMilestoneService
 }
 
 func (m *mockPlatform) Issues() platform.IssueService             { return m.issues }
 func (m *mockPlatform) PullRequests() platform.PullRequestService  { return m.prs }
 func (m *mockPlatform) Workflows() platform.WorkflowService        { return m.workflows }
 func (m *mockPlatform) Labels() platform.LabelService              { return nil }
-func (m *mockPlatform) Milestones() platform.MilestoneService      { return nil }
+func (m *mockPlatform) Milestones() platform.MilestoneService {
+	if m.milestones != nil {
+		return m.milestones
+	}
+	return &mockMilestoneService{}
+}
 func (m *mockPlatform) Runners() platform.RunnerService            { return nil }
 func (m *mockPlatform) Repository() platform.RepositoryService     { return m.repo }
 func (m *mockPlatform) Checks() platform.CheckService {
@@ -50,6 +56,7 @@ func (m *mockCheckService) RerunFailedChecks(_ context.Context, _ string) error 
 
 type mockIssueService struct {
 	listResults      map[string][]*platform.Issue // keyed by label
+	listByMilestone  map[int][]*platform.Issue    // keyed by milestone number
 	getResults       map[int]*platform.Issue      // for Get by number
 	getErr           error
 	addedLabels      map[int][]string
@@ -60,6 +67,8 @@ type mockIssueService struct {
 	listCommentsErr  error
 	deletedComments  []int64
 	callLog          *[]string // if non-nil, records "issue:AddLabels" etc. for ordering assertions
+	createResult     *platform.Issue
+	createErr        error
 }
 
 func newMockIssueService() *mockIssueService {
@@ -73,7 +82,13 @@ func newMockIssueService() *mockIssueService {
 }
 
 func (m *mockIssueService) Create(_ context.Context, _, _ string, _ []string, _ *int) (*platform.Issue, error) {
-	return nil, nil
+	if m.createErr != nil {
+		return nil, m.createErr
+	}
+	if m.createResult != nil {
+		return m.createResult, nil
+	}
+	return &platform.Issue{Number: 999}, nil
 }
 func (m *mockIssueService) Get(_ context.Context, number int) (*platform.Issue, error) {
 	if m.getErr != nil {
@@ -85,6 +100,9 @@ func (m *mockIssueService) Get(_ context.Context, number int) (*platform.Issue, 
 	return &platform.Issue{Number: number}, nil
 }
 func (m *mockIssueService) List(_ context.Context, f platform.IssueFilters) ([]*platform.Issue, error) {
+	if f.Milestone != nil && m.listByMilestone != nil {
+		return m.listByMilestone[*f.Milestone], nil
+	}
 	if len(f.Labels) > 0 {
 		return m.listResults[f.Labels[0]], nil
 	}
@@ -130,19 +148,27 @@ func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ s
 
 type mockPRService struct {
 	listResult []*platform.PullRequest
+	getResults map[int]*platform.PullRequest
+	getErr     error
 	comments   map[int][]string
 	callLog    *[]string // if non-nil, records "pr:AddComment" etc. for ordering assertions
 }
 
 func newMockPRService() *mockPRService {
-	return &mockPRService{comments: make(map[int][]string)}
+	return &mockPRService{comments: make(map[int][]string), getResults: make(map[int]*platform.PullRequest)}
 }
 
 func (m *mockPRService) Create(_ context.Context, _, _, _, _ string) (*platform.PullRequest, error) {
 	return nil, nil
 }
-func (m *mockPRService) Get(_ context.Context, _ int) (*platform.PullRequest, error) {
-	return nil, nil
+func (m *mockPRService) Get(_ context.Context, number int) (*platform.PullRequest, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	if pr, ok := m.getResults[number]; ok {
+		return pr, nil
+	}
+	return &platform.PullRequest{Number: number, Mergeable: true}, nil
 }
 func (m *mockPRService) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
 	return m.listResult, nil
@@ -216,6 +242,32 @@ func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error   {
 func (m *mockRepoService) DeleteBranch(_ context.Context, _ string) error      { return nil }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
 	return "abc123", nil
+}
+
+type mockMilestoneService struct {
+	getResult map[int]*platform.Milestone
+	getErr    error
+}
+
+func (m *mockMilestoneService) Create(_ context.Context, _, _ string, _ *time.Time) (*platform.Milestone, error) {
+	return nil, nil
+}
+func (m *mockMilestoneService) Get(_ context.Context, number int) (*platform.Milestone, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	if m.getResult != nil {
+		if ms, ok := m.getResult[number]; ok {
+			return ms, nil
+		}
+	}
+	return &platform.Milestone{Number: number, Title: fmt.Sprintf("Batch %d", number)}, nil
+}
+func (m *mockMilestoneService) List(_ context.Context) ([]*platform.Milestone, error) {
+	return nil, nil
+}
+func (m *mockMilestoneService) Update(_ context.Context, _ int, _ platform.MilestoneUpdate) (*platform.Milestone, error) {
+	return nil, nil
 }
 
 // --- Tests ---
@@ -1460,4 +1512,272 @@ func TestPatrol_TimeoutAndStale_BothRelabel(t *testing.T) {
 			assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
 		})
 	}
+}
+
+func TestHasRebasePendingLabel(t *testing.T) {
+	tests := []struct {
+		name     string
+		labels   []string
+		expected bool
+	}{
+		{
+			name:     "no labels",
+			labels:   nil,
+			expected: false,
+		},
+		{
+			name:     "unrelated label only",
+			labels:   []string{issues.StatusFailed},
+			expected: false,
+		},
+		{
+			name:     "rebase-pending label present",
+			labels:   []string{issues.RebasePending},
+			expected: true,
+		},
+		{
+			name:     "rebase-pending label among others",
+			labels:   []string{issues.StatusFailed, issues.RebasePending, "other"},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.getResults[42] = &platform.Issue{Number: 42, Labels: tt.labels}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       newMockPRService(),
+				workflows: &mockWorkflowService{},
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+			assert.Equal(t, tt.expected, hasRebasePendingLabel(context.Background(), mock, 42))
+		})
+	}
+}
+
+func TestHasRebasePendingLabel_ErrorFallback(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getErr = fmt.Errorf("API error")
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	// Should return false (fail open) when Issues().Get() errors.
+	assert.False(t, hasRebasePendingLabel(context.Background(), mock, 42))
+}
+
+func TestPatrol_ConflictDetectedOnBatchPR(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	// Get returns non-mergeable PR
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+
+	issueSvc := newMockIssueService()
+	issueSvc.createResult = &platform.Issue{Number: 999}
+
+	wf := &mockWorkflowService{}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.ConflictDetected)
+	// RebasePending label should be added
+	assert.Contains(t, issueSvc.addedLabels[10], issues.RebasePending)
+	// A comment should be posted about the conflict
+	require.Len(t, issueSvc.comments[10], 1)
+	assert.Contains(t, issueSvc.comments[10][0], "merge conflicts")
+	assert.Contains(t, issueSvc.comments[10][0], "HerdOS Monitor Alert")
+	// A conflict resolution issue should be created and worker dispatched
+	assert.Len(t, wf.dispatched, 1)
+}
+
+func TestPatrol_ConflictResolved_LabelRemoved(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	// Get returns mergeable PR
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: true}
+
+	issueSvc := newMockIssueService()
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.ConflictDetected)
+	// RebasePending label should be removed (cleanup)
+	assert.Contains(t, issueSvc.removedLabels[10], issues.RebasePending)
+}
+
+func TestPatrol_ConflictWithRebasePendingLabel_NoDuplicate(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+
+	issueSvc := newMockIssueService()
+	// Simulate herd/rebase-pending label already present
+	issueSvc.getResults[10] = &platform.Issue{Number: 10, Labels: []string{issues.RebasePending}}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  &mockWorkflowService{},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.ConflictDetected)
+	// No new label additions, no comments
+	assert.Empty(t, issueSvc.addedLabels[10])
+	assert.Empty(t, issueSvc.comments[10])
+}
+
+func TestPatrol_ConflictDispatchFailure_LabelRemoved(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+
+	issueSvc := newMockIssueService()
+	// Make issue creation fail, which will cause the dispatch to fail
+	issueSvc.createErr = fmt.Errorf("create failed")
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  &mockWorkflowService{},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.ConflictDetected)
+	// Label was added then removed on failure
+	assert.Contains(t, issueSvc.addedLabels[10], issues.RebasePending)
+	assert.Contains(t, issueSvc.removedLabels[10], issues.RebasePending)
+}
+
+func TestPatrol_ConflictDetection_NonBatchPR_Skipped(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Manual PR", Head: "feature/manual", CreatedAt: time.Now()},
+	}
+
+	issueSvc := newMockIssueService()
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.ConflictDetected)
+}
+
+func TestPatrol_ConflictDetection_PRGetError_Continues(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	prSvc.getErr = fmt.Errorf("API error")
+
+	issueSvc := newMockIssueService()
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.ConflictDetected)
+}
+
+func TestPatrol_ConflictDetection_LabelAddedBeforeDispatch(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+
+	issueSvc := newMockIssueService()
+	issueSvc.createResult = &platform.Issue{Number: 999}
+
+	var opLog []string
+	issueSvc.callLog = &opLog
+
+	wf := &mockWorkflowService{}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}
+
+	_, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	// The label add must appear before the comment
+	require.True(t, len(opLog) >= 2, "expected at least AddLabels then AddComment")
+	assert.Equal(t, "issue:AddLabels", opLog[0], "label must be added first")
+	// The comment should come after the label
+	lastIdx := len(opLog) - 1
+	assert.Equal(t, "issue:AddComment", opLog[lastIdx], "comment must be posted last")
 }
