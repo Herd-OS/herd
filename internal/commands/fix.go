@@ -81,7 +81,7 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 
 	// Detect conflict-related keywords and append explicit git instructions
 	if looksLikeConflict(cmd.Prompt) {
-		body = appendConflictInstructions(body, pr.Head, pr.Base)
+		body = appendConflictInstructions(body, pr.Base)
 	}
 
 	truncated := truncateRunes(cmd.Prompt, 60)
@@ -137,7 +137,7 @@ func looksLikeConflict(description string) bool {
 }
 
 // appendConflictInstructions appends explicit git instructions to a fix issue body.
-func appendConflictInstructions(body, batchBranch, baseBranch string) string {
+func appendConflictInstructions(body, baseBranch string) string {
 	instructions := fmt.Sprintf("\n\n## Git Instructions\n\n"+
 		"This task involves a merge or rebase conflict. Follow these steps:\n\n"+
 		"**For merge conflicts:**\n"+
