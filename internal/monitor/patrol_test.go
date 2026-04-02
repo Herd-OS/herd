@@ -1781,3 +1781,70 @@ func TestPatrol_ConflictDetection_LabelAddedBeforeDispatch(t *testing.T) {
 	lastIdx := len(opLog) - 1
 	assert.Equal(t, "issue:AddComment", opLog[lastIdx], "comment must be posted last")
 }
+
+func TestPatrol_ConflictDetection_NonHerdPR_Ignored(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "Normal PR", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	// If Get were called, it would return non-mergeable — but it should never be called
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+
+	issueSvc := newMockIssueService()
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.ConflictDetected)
+	// No labels or comments should be added — the PR was skipped entirely
+	assert.Empty(t, issueSvc.addedLabels[10])
+	assert.Empty(t, issueSvc.comments[10])
+}
+
+func TestPatrol_ConflictDetection_MaxAttemptsReached(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+
+	issueSvc := newMockIssueService()
+	issueSvc.createResult = &platform.Issue{Number: 999}
+	// Simulate existing conflict-resolution issue at the cap
+	issueSvc.listByMilestone = map[int][]*platform.Issue{
+		1: {
+			{Number: 100, Body: "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  conflict_resolution: true\n---\n\n## Task\nResolve"},
+		},
+	}
+
+	wf := &mockWorkflowService{}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 1},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	// Dispatch returns 0 (cap reached) but no error, so patrol still counts it
+	assert.Equal(t, 1, result.ConflictDetected)
+	assert.Contains(t, issueSvc.addedLabels[10], issues.RebasePending)
+	// No new workflow dispatch since cap was reached
+	assert.Len(t, wf.dispatched, 0)
+}
