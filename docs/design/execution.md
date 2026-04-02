@@ -377,6 +377,12 @@ included as a `## Conversation History` section in the issue body. Each comment
 is formatted as `**@author:**` followed by the comment body, separated by `---`.
 This gives the fix worker full context of prior fix requests and review feedback.
 
+`/herd fix` also detects conflict-related keywords in the description (e.g.,
+"merge conflict", "rebase conflict", "conflict with main"). When detected, the
+handler automatically appends explicit git merge/rebase instructions to the fix
+issue body so the dispatched worker knows to follow the step-by-step conflict
+resolution procedure rather than attempting ad-hoc fixes.
+
 On each re-review, the reviewer receives its prior review comments as context to
 maintain consistency and avoid contradicting previous decisions. This cycle
 repeats until the agent approves or `review_max_fix_cycles` (default 3) is
@@ -430,6 +436,48 @@ The configured strategy (`on_conflict: notify | dispatch-resolver`) controls
 which path is taken. The resolver is capped at `max_conflict_resolution_attempts`
 (default 2); after that, it falls back to notify regardless of config.
 
+### Monitor-Detected Batch-vs-Main Conflicts
+
+Previously, batch branch conflicts with main were only detected at PR creation
+time (during the final rebase). The Monitor now detects these proactively during
+patrol:
+
+1. For each open batch PR with a `herd/batch/` head branch, the Monitor calls
+   the single-PR `PullRequests().Get()` endpoint (the List endpoint does not
+   populate the `Mergeable` field)
+2. If `Mergeable == false`, the batch PR has conflicts with its base branch
+3. The Monitor checks for the `herd/rebase-pending` label to prevent duplicate
+   dispatches (same dedup pattern as `herd/ci-fix-pending` for CI fixes)
+4. If no `herd/rebase-pending` label is present, the Monitor dispatches a rebase
+   conflict resolution worker via `DispatchRebaseConflictWorker` and applies the
+   label
+5. When the PR becomes mergeable again, the `herd/rebase-pending` label is
+   removed automatically
+6. Dispatch respects the `max_conflict_resolution_attempts` cap
+
+```mermaid
+graph TD
+    A["Batch A merges to main"] --> B["Batch B PR has conflicts"]
+    B --> C["Monitor patrol detects Mergeable == false"]
+    C --> D["Dispatch rebase conflict resolution worker"]
+    D --> E["Worker rebases batch branch onto main"]
+    E --> F["PR is mergeable again"]
+```
+
+### Improved Conflict Resolution Instructions
+
+Conflict resolution issues (both worker-vs-worker and batch-vs-main) include
+explicit step-by-step git instructions to guide the resolver worker:
+
+- **For merge conflicts:** `git fetch origin`, `git merge origin/main`, resolve
+  conflict markers, `git add`, `git commit`
+- **For rebase conflicts:** `git fetch origin`, `git rebase origin/main`, resolve
+  conflict markers, `git add`, `git rebase --continue`
+
+Workers are instructed to resolve actual conflict markers in-place rather than
+rewriting files from scratch, which preserves intentional changes from both
+sides.
+
 ---
 
 ## 7. Monitor
@@ -471,6 +519,10 @@ graph TD
     E --> E2{"CI failing?"}
     E2 -->|fix-ci comment present| E2a["Skip (dedup)"]
     E2 -->|fix-ci comment absent| E2b["Post /herd fix-ci comment"]
+
+    E --> E3{"Mergeable == false?"}
+    E3 -->|rebase-pending label present| E3a["Skip (dedup)"]
+    E3 -->|rebase-pending label absent| E3b["Dispatch rebase conflict<br>resolution worker"]
 
     E --> F["Done — patrol complete"]
 ```
@@ -751,12 +803,12 @@ Comments are posted to the issue being processed (for run-based triggers) or the
 
 Every automated feedback loop has a hard cap:
 
-| Loop | Config Key | Default | At Limit |
-|------|-----------|---------|----------|
-| Agent review / fix / re-review | review_max_fix_cycles | 3 | Comments on PR, waits for human |
-| Monitor re-dispatch | max_redispatch_attempts | 3 | Labels issue failed, stops |
-| Conflict resolution | max_conflict_resolution_attempts | 2 | Falls back to notify |
-| CI failure fix cycles | ci_max_fix_cycles | 2 | Reverts consolidation, notifies user (0 = notify-only) |
+| Loop | Config Key | Default | At Limit | Dedup Label |
+|------|-----------|---------|----------|-------------|
+| Agent review / fix / re-review | review_max_fix_cycles | 3 | Comments on PR, waits for human | — |
+| Monitor re-dispatch | max_redispatch_attempts | 3 | Labels issue failed, stops | — |
+| Conflict resolution | max_conflict_resolution_attempts | 2 | Falls back to notify | `herd/rebase-pending` |
+| CI failure fix cycles | ci_max_fix_cycles | 2 | Reverts consolidation, notifies user (0 = notify-only) | `herd/ci-fix-pending` |
 
 ### Merge Strategy
 

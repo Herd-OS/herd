@@ -79,6 +79,11 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 		ConversationHistory: history,
 	})
 
+	// Detect conflict-related keywords and append explicit git instructions
+	if looksLikeConflict(cmd.Prompt) {
+		body = appendConflictInstructions(body, pr.Base)
+	}
+
 	truncated := truncateRunes(cmd.Prompt, 60)
 	fixIssue, err := hctx.Platform.Issues().Create(hctx.Ctx,
 		"Fix: "+truncated,
@@ -117,6 +122,39 @@ func formatCommentHistory(comments []*platform.Comment) string {
 		b.WriteString(fmt.Sprintf("**@%s:**\n\n%s\n", c.AuthorLogin, c.Body))
 	}
 	return b.String()
+}
+
+// looksLikeConflict returns true if the description contains conflict-related keywords.
+func looksLikeConflict(description string) bool {
+	lower := strings.ToLower(description)
+	keywords := []string{"merge conflict", "rebase conflict", "conflict with main", "conflict with master", "conflicts with main", "conflicts with master"}
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// appendConflictInstructions appends explicit git instructions to a fix issue body.
+func appendConflictInstructions(body, baseBranch string) string {
+	instructions := fmt.Sprintf("\n\n## Git Instructions\n\n"+
+		"This task involves a merge or rebase conflict. Follow these steps:\n\n"+
+		"**For merge conflicts:**\n"+
+		"1. `git fetch origin`\n"+
+		"2. `git merge origin/%s`\n"+
+		"3. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch.\n"+
+		"4. `git add <resolved files>`\n"+
+		"5. `git commit`\n\n"+
+		"**For rebase conflicts:**\n"+
+		"1. `git fetch origin`\n"+
+		"2. `git rebase origin/%s`\n"+
+		"3. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch.\n"+
+		"4. `git add <resolved files>`\n"+
+		"5. `git rebase --continue`\n"+
+		"6. Repeat steps 3-5 for each conflicting commit.\n",
+		baseBranch, baseBranch)
+	return body + instructions
 }
 
 // truncateRunes truncates s to at most n runes, appending "..." if truncated.

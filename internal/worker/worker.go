@@ -59,7 +59,11 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
   If after careful analysis you genuinely believe the reviewer is wrong,
   explain your reasoning in detail in your output rather than silently
   doing nothing.
-{{end}}- Focus on files listed in the Scope or Files to Modify sections. You
+{{end}}- If the task describes a merge or rebase conflict, follow the explicit
+  git commands in the task. Do not skip the git merge or rebase step and
+  try to manually rewrite files. You must resolve the actual conflict
+  markers produced by git.
+- Focus on files listed in the Scope or Files to Modify sections. You
   may modify other files if necessary to satisfy acceptance criteria.
 - Commit your changes with clear messages referencing issue #{{.IssueNumber}}.
 - Do not add features, refactor code, or make improvements beyond

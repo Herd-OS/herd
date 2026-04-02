@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 )
@@ -20,6 +21,7 @@ type PatrolResult struct {
 	StuckPRs              int
 	CIFailures            int
 	StaleReadyDispatched  int
+	ConflictDetected      int
 }
 
 const monitorCommentSignature = "**HerdOS Monitor Alert**"
@@ -184,6 +186,62 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 				case "success":
 					deleteCIFixComments(ctx, p, pr.Number)
 				}
+			}
+		}
+
+		// Merge conflict detection on batch PRs
+		if strings.HasPrefix(pr.Head, "herd/batch/") {
+			// List endpoint doesn't populate Mergeable — call Get
+			fullPR, getErr := p.PullRequests().Get(ctx, pr.Number)
+			if getErr != nil {
+				continue
+			}
+			if fullPR.Mergeable {
+				// Conflict resolved — clean up label
+				_ = p.Issues().RemoveLabels(ctx, pr.Number, []string{issues.RebasePending})
+			} else {
+				if hasRebasePendingLabel(ctx, p, pr.Number) {
+					continue
+				}
+
+				// Parse milestone from batch branch name
+				batchNum, parseErr := integrator.ParseBatchBranchMilestone(pr.Head)
+				if parseErr != nil {
+					continue
+				}
+				ms, msErr := p.Milestones().Get(ctx, batchNum)
+				if msErr != nil {
+					continue
+				}
+
+				defaultBranch, dbErr := p.Repository().GetDefaultBranch(ctx)
+				if dbErr != nil {
+					continue
+				}
+
+				// Add label BEFORE dispatching to prevent duplicate dispatches
+				_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.RebasePending})
+
+				// Dispatch rebase conflict resolution worker
+				issueNum, resolveErr := dispatchRebaseConflictWorker(ctx, p, cfg, ms, pr.Head, defaultBranch)
+				if resolveErr != nil {
+					// Remove label if dispatch failed so next patrol retries
+					_ = p.Issues().RemoveLabels(ctx, pr.Number, []string{issues.RebasePending})
+					continue
+				}
+
+				if issueNum == 0 {
+					// Cap reached — no worker was dispatched, remove label so next patrol retries after cap clears
+					_ = p.Issues().RemoveLabels(ctx, pr.Number, []string{issues.RebasePending})
+					continue
+				}
+
+				// Comment on the PR explaining what happened
+				_ = p.Issues().AddComment(ctx, pr.Number, fmt.Sprintf(
+					"⚠️ **HerdOS Monitor Alert**\n\nThis batch PR has merge conflicts with `%s`. A conflict resolution worker has been dispatched to rebase the branch.\n\n%s",
+					defaultBranch, buildMentions(cfg.Monitor.NotifyUsers)))
+
+				result.ConflictDetected++
 			}
 		}
 	}
@@ -364,6 +422,25 @@ func buildMentions(users []string) string {
 		mentions[i] = "@" + u
 	}
 	return "/cc " + strings.Join(mentions, " ")
+}
+
+// hasRebasePendingLabel returns true if the herd/rebase-pending label is present on the PR.
+// Fails open (returns false on error) so a broken labels API doesn't silence future rebase triggers.
+func hasRebasePendingLabel(ctx context.Context, p platform.Platform, prNumber int) bool {
+	issue, err := p.Issues().Get(ctx, prNumber)
+	if err != nil {
+		return false
+	}
+	for _, label := range issue.Labels {
+		if label == issues.RebasePending {
+			return true
+		}
+	}
+	return false
+}
+
+func dispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) (int, error) {
+	return integrator.DispatchRebaseConflictWorker(ctx, p, cfg, ms, batchBranch, defaultBranch)
 }
 
 func isDepComplete(issue *platform.Issue) bool {

@@ -9,7 +9,7 @@ import (
 
 func TestAllLabels(t *testing.T) {
 	labels := AllLabels()
-	assert.Len(t, labels, 12)
+	assert.Len(t, labels, 13)
 }
 
 func TestIsStatusLabel(t *testing.T) {

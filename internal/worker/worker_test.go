@@ -1079,3 +1079,12 @@ func TestExec_NonConflictNoOp_NotClosed(t *testing.T) {
 	}
 	assert.True(t, foundReport, "non-conflict no-op should get standard Worker Report")
 }
+
+func TestRenderWorkerPrompt_ContainsConflictInstruction(t *testing.T) {
+	cfg := &config.Config{}
+	prompt, err := renderWorkerPrompt("Resolve conflict", "## Task\nFix it", 42, "herd/worker/42-resolve", t.TempDir(), cfg)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "merge or rebase conflict")
+	assert.Contains(t, prompt, "resolve the actual conflict")
+	assert.Contains(t, prompt, "Do not skip the git merge or rebase step")
+}

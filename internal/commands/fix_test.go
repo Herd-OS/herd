@@ -70,3 +70,52 @@ func TestTruncateRunes(t *testing.T) {
 		})
 	}
 }
+
+func TestLooksLikeConflict(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"merge conflict lowercase", "there is a merge conflict", true},
+		{"merge conflict mixed case", "Merge Conflict detected", true},
+		{"rebase conflict", "Rebase conflict on main", true},
+		{"conflict with main", "PR has conflict with main", true},
+		{"conflict with master", "conflict with master branch", true},
+		{"conflicts with main", "this conflicts with main", true},
+		{"conflicts with master", "this conflicts with master", true},
+		{"no conflict keywords", "fix the broken test", false},
+		{"empty string", "", false},
+		{"partial match - conflict alone", "there is a conflict", false},
+		{"partial match - merge alone", "merge the branches", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, looksLikeConflict(tc.input))
+		})
+	}
+}
+
+func TestAppendConflictInstructions(t *testing.T) {
+	body := "original body"
+	result := appendConflictInstructions(body, "main")
+
+	assert.Contains(t, result, "original body")
+	assert.Contains(t, result, "## Git Instructions")
+	assert.Contains(t, result, "merge conflict")
+	assert.Contains(t, result, "rebase conflict")
+	assert.Contains(t, result, "git merge origin/main")
+	assert.Contains(t, result, "git rebase origin/main")
+	assert.Contains(t, result, "Do NOT rewrite files from scratch")
+	assert.Contains(t, result, "git rebase --continue")
+}
+
+func TestAppendConflictInstructions_CustomBaseBranch(t *testing.T) {
+	body := "body"
+	result := appendConflictInstructions(body, "develop")
+
+	assert.Contains(t, result, "git merge origin/develop")
+	assert.Contains(t, result, "git rebase origin/develop")
+	assert.NotContains(t, result, "origin/main")
+}
