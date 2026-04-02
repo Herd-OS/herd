@@ -11,6 +11,7 @@ type Issue struct {
 	Milestone *Milestone
 	Assignees []string
 	URL       string
+	UpdatedAt time.Time
 }
 
 type PullRequest struct {

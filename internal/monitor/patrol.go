@@ -17,8 +17,9 @@ type PatrolResult struct {
 	FailedIssues      int
 	RedispatchedCount int
 	EscalatedCount    int
-	StuckPRs          int
-	CIFailures        int
+	StuckPRs              int
+	CIFailures            int
+	StaleReadyDispatched  int
 }
 
 const monitorCommentSignature = "**HerdOS Monitor Alert**"
@@ -187,6 +188,94 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		}
 	}
 
+	// Dispatch stale ready issues
+	if cfg.Monitor.AutoRedispatch {
+		readyIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+			State:  "open",
+			Labels: []string{issues.StatusReady},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing ready issues: %w", err)
+		}
+
+		// Re-fetch active runs for accurate concurrency count
+		// (stale detection above may have cancelled some)
+		currentActiveRuns, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "in_progress"})
+		if err != nil {
+			return nil, fmt.Errorf("listing active runs for ready dispatch: %w", err)
+		}
+		remaining := cfg.Workers.MaxConcurrent - len(currentActiveRuns)
+
+		for _, issue := range readyIssues {
+			if remaining <= 0 {
+				break
+			}
+			if issue.Milestone == nil {
+				continue
+			}
+			// Skip manual tasks
+			if issues.HasLabel(issue.Labels, issues.TypeManual) {
+				continue
+			}
+			// Skip if there is already an active run for this issue
+			hasActiveRun := false
+			for _, run := range currentActiveRuns {
+				if run.Inputs["issue_number"] == fmt.Sprintf("%d", issue.Number) {
+					hasActiveRun = true
+					break
+				}
+			}
+			if hasActiveRun {
+				continue
+			}
+			// Check stale threshold: skip if updated recently
+			if cfg.Monitor.StaleThresholdMinutes > 0 && time.Since(issue.UpdatedAt) < time.Duration(cfg.Monitor.StaleThresholdMinutes)*time.Minute {
+				continue
+			}
+			// Check dependencies are all done
+			parsed, err := issues.ParseBody(issue.Body)
+			if err != nil {
+				continue
+			}
+			depsComplete := true
+			for _, dep := range parsed.FrontMatter.DependsOn {
+				depIssue, err := p.Issues().Get(ctx, dep)
+				if err != nil {
+					depsComplete = false
+					break
+				}
+				if !isDepComplete(depIssue) {
+					depsComplete = false
+					break
+				}
+			}
+			if !depsComplete {
+				continue
+			}
+			// Dispatch
+			batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, slugify(issue.Milestone.Title))
+			defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
+			if err != nil {
+				continue
+			}
+			_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusReady})
+			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusInProgress})
+			_, err = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
+				"issue_number":    fmt.Sprintf("%d", issue.Number),
+				"batch_branch":    batchBranch,
+				"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+				"runner_label":    cfg.Workers.RunnerLabel,
+			})
+			if err != nil {
+				_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusInProgress})
+				_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
+				continue
+			}
+			remaining--
+			result.StaleReadyDispatched++
+		}
+	}
+
 	return result, nil
 }
 
@@ -275,4 +364,36 @@ func buildMentions(users []string) string {
 		mentions[i] = "@" + u
 	}
 	return "/cc " + strings.Join(mentions, " ")
+}
+
+func isDepComplete(issue *platform.Issue) bool {
+	return issue.State == "closed" || issues.HasLabel(issue.Labels, issues.StatusDone)
+}
+
+// slugify converts a string to a URL-friendly slug.
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	var result []rune
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			result = append(result, r)
+		} else if r == ' ' || r == '_' || r == '-' {
+			result = append(result, '-')
+		}
+	}
+	// Collapse multiple dashes
+	parts := strings.Split(string(result), "-")
+	var filtered []string
+	for _, p := range parts {
+		if p != "" {
+			filtered = append(filtered, p)
+		}
+	}
+	slug := strings.Join(filtered, "-")
+	// Truncate to reasonable length
+	if len(slug) > 50 {
+		slug = slug[:50]
+		slug = strings.TrimRight(slug, "-")
+	}
+	return slug
 }

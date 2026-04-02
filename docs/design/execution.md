@@ -456,6 +456,15 @@ graph TD
     D2 -->|Failure| D2b["Re-dispatch or escalate"]
     D1 -->|Running too long| D3["Cancel and re-dispatch"]
 
+    D --> D4["For each ready issue (stale)"]
+    D4 --> D4a{"Ready > stale_threshold?"}
+    D4a -->|No| D4b["Skip (may be freshly unblocked)"]
+    D4a -->|Yes| D4c{"Dependencies complete?"}
+    D4c -->|No| D4d["Skip"]
+    D4c -->|Yes| D4e{"Below max_concurrent?"}
+    D4e -->|No| D4f["Skip (at capacity)"]
+    D4e -->|Yes| D4g["Dispatch worker"]
+
     D --> E["For each open batch PR"]
     E --> E1{"Open > max_pr_age?"}
     E1 -->|Yes| E1a["Comment asking for review/merge"]
@@ -486,6 +495,23 @@ worker workflow runs filtered by issue number and counting those with
 `conclusion: "failure"`. Backoff delays are enforced by timestamp comparison.
 This means the Monitor can be restarted, re-deployed, or run on different
 runners without losing track of anything.
+
+### Stale Ready Issue Dispatch
+
+When `max_concurrent` prevents the Integrator from dispatching all issues during
+tier advancement, some issues are marked `herd/status:ready` but never dispatched.
+On subsequent Integrator runs, the advance logic may skip these because the tier
+is already considered complete.
+
+The Monitor catches this: each patrol cycle lists all open `herd/status:ready`
+issues. For each one that has been ready longer than `stale_threshold_minutes`,
+the Monitor verifies that all `depends_on` dependencies are done or closed. If
+so, it dispatches the issue (same as the Integrator would: label `in-progress`,
+trigger `herd-worker.yml`). The `stale_threshold_minutes` delay prevents the
+Monitor from racing with the Integrator's normal advance logic.
+
+This dispatch respects `max_concurrent` globally — the Monitor only dispatches
+up to the remaining capacity.
 
 ### Escalation
 
@@ -650,7 +676,7 @@ it blocks everything and can't be fixed, cancel and re-plan.
 
 ## 11. Dispatch Model
 
-Three actors dispatch work:
+Four actors dispatch work:
 
 1. **`herd plan` dispatches Tier 0** automatically after the user approves the
    plan. The batch branch is created and Tier 0 workers are triggered. No
@@ -664,6 +690,11 @@ Three actors dispatch work:
 
 3. **The Monitor re-dispatches failed work** if `auto_redispatch` is enabled,
    with exponential backoff.
+
+4. **The Monitor dispatches stale ready issues** that were left behind when
+   `max_concurrent` prevented dispatch during tier advancement. After
+   `stale_threshold_minutes`, the Monitor picks them up and dispatches them
+   (respecting concurrency limits).
 
 For manual control, `herd plan --no-dispatch` creates issues without dispatching.
 The user can then dispatch with `herd dispatch --batch <N>`.

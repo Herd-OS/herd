@@ -176,10 +176,14 @@ type mockWorkflowService struct {
 	completedRuns []*platform.Run
 	dispatched    []map[string]string
 	cancelled     []int64
+	dispatchErr   error
 }
 
 func (m *mockWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) { return 0, nil }
 func (m *mockWorkflowService) Dispatch(_ context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
+	if m.dispatchErr != nil {
+		return nil, m.dispatchErr
+	}
 	m.dispatched = append(m.dispatched, inputs)
 	return nil, nil
 }
@@ -1228,6 +1232,186 @@ func TestPatrol_StaleIssueRedispatchedNextCycle(t *testing.T) {
 	assert.Len(t, wf2.dispatched, 0) // monitor no longer dispatches directly
 	assert.Len(t, issueSvc2.comments[42], 1)
 	assert.Contains(t, issueSvc2.comments[42][0], "/herd retry 42")
+}
+
+func TestPatrol_StaleReadyIssue_Dispatched(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusReady] = []*platform.Issue{
+		{
+			Number:    50,
+			Title:     "Ready task",
+			Labels:    []string{issues.StatusReady},
+			Milestone: &platform.Milestone{Number: 5, Title: "Sprint Alpha"},
+			Body: "---\nherd:\n  version: 1\n---\n## Task\nSome task",
+			UpdatedAt: time.Now().Add(-1 * time.Hour),
+		},
+	}
+
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{
+		Monitor: config.Monitor{AutoRedispatch: true, StaleThresholdMinutes: 10},
+		Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.StaleReadyDispatched)
+	assert.Contains(t, issueSvc.removedLabels[50], issues.StatusReady)
+	assert.Contains(t, issueSvc.addedLabels[50], issues.StatusInProgress)
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "50", wf.dispatched[0]["issue_number"])
+	assert.Equal(t, "herd/batch/5-sprint-alpha", wf.dispatched[0]["batch_branch"])
+	assert.Equal(t, "30", wf.dispatched[0]["timeout_minutes"])
+	assert.Equal(t, "herd-worker", wf.dispatched[0]["runner_label"])
+}
+
+func TestPatrol_StaleReadyIssue_SkipConditions(t *testing.T) {
+	tests := []struct {
+		name      string
+		issue     *platform.Issue
+		depIssue  *platform.Issue // if non-nil, added to getResults
+		maxConc   int
+		runs      []*platform.Run
+		threshold int
+	}{
+		{
+			name: "deps not complete",
+			issue: &platform.Issue{
+				Number:    50,
+				Title:     "Ready task",
+				Labels:    []string{issues.StatusReady},
+				Milestone: &platform.Milestone{Number: 5, Title: "Sprint"},
+				Body:      "---\nherd:\n  version: 1\n  depends_on: [10]\n---\n## Task\nSome task",
+				UpdatedAt: time.Now().Add(-1 * time.Hour),
+			},
+			depIssue:  &platform.Issue{Number: 10, State: "open", Labels: []string{issues.StatusInProgress}},
+			maxConc:   3,
+			threshold: 10,
+		},
+		{
+			name: "max concurrent reached",
+			issue: &platform.Issue{
+				Number:    50,
+				Title:     "Ready task",
+				Labels:    []string{issues.StatusReady},
+				Milestone: &platform.Milestone{Number: 5, Title: "Sprint"},
+				Body:      "---\nherd:\n  version: 1\n---\n## Task\nSome task",
+				UpdatedAt: time.Now().Add(-1 * time.Hour),
+			},
+			maxConc: 1,
+			runs: []*platform.Run{
+				{ID: 300, Inputs: map[string]string{"issue_number": "99"}, CreatedAt: time.Now()},
+			},
+			threshold: 10,
+		},
+		{
+			name: "below stale threshold",
+			issue: &platform.Issue{
+				Number:    50,
+				Title:     "Ready task",
+				Labels:    []string{issues.StatusReady},
+				Milestone: &platform.Milestone{Number: 5, Title: "Sprint"},
+				Body:      "---\nherd:\n  version: 1\n---\n## Task\nSome task",
+				UpdatedAt: time.Now(), // just updated
+			},
+			maxConc:   3,
+			threshold: 10,
+		},
+		{
+			name: "manual task skipped",
+			issue: &platform.Issue{
+				Number:    50,
+				Title:     "Manual task",
+				Labels:    []string{issues.StatusReady, issues.TypeManual},
+				Milestone: &platform.Milestone{Number: 5, Title: "Sprint"},
+				Body:      "---\nherd:\n  version: 1\n---\n## Task\nSome task",
+				UpdatedAt: time.Now().Add(-1 * time.Hour),
+			},
+			maxConc:   3,
+			threshold: 10,
+		},
+		{
+			name: "no milestone",
+			issue: &platform.Issue{
+				Number:    50,
+				Title:     "No milestone task",
+				Labels:    []string{issues.StatusReady},
+				Body:      "---\nherd:\n  version: 1\n---\n## Task\nSome task",
+				UpdatedAt: time.Now().Add(-1 * time.Hour),
+			},
+			maxConc:   3,
+			threshold: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.listResults[issues.StatusReady] = []*platform.Issue{tt.issue}
+			if tt.depIssue != nil {
+				issueSvc.getResults[tt.depIssue.Number] = tt.depIssue
+			}
+
+			wf := &mockWorkflowService{activeRuns: tt.runs}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       newMockPRService(),
+				workflows: wf,
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+
+			cfg := &config.Config{
+				Monitor: config.Monitor{AutoRedispatch: true, StaleThresholdMinutes: tt.threshold},
+				Workers: config.Workers{MaxConcurrent: tt.maxConc, TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+			}
+
+			result, err := Patrol(context.Background(), mock, cfg)
+			require.NoError(t, err)
+			assert.Equal(t, 0, result.StaleReadyDispatched)
+			assert.Len(t, wf.dispatched, 0)
+		})
+	}
+}
+
+func TestPatrol_StaleReadyIssue_DispatchFailure(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResults[issues.StatusReady] = []*platform.Issue{
+		{
+			Number:    50,
+			Title:     "Ready task",
+			Labels:    []string{issues.StatusReady},
+			Milestone: &platform.Milestone{Number: 5, Title: "Sprint"},
+			Body:      "---\nherd:\n  version: 1\n---\n## Task\nSome task",
+			UpdatedAt: time.Now().Add(-1 * time.Hour),
+		},
+	}
+
+	wf := &mockWorkflowService{dispatchErr: fmt.Errorf("dispatch failed")}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       newMockPRService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{
+		Monitor: config.Monitor{AutoRedispatch: true, StaleThresholdMinutes: 10},
+		Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.StaleReadyDispatched)
+	// Should relabel to failed on dispatch error
+	assert.Contains(t, issueSvc.removedLabels[50], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.addedLabels[50], issues.StatusFailed)
 }
 
 func TestPatrol_TimeoutAndStale_BothRelabel(t *testing.T) {

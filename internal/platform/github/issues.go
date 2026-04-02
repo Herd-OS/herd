@@ -185,6 +185,7 @@ func mapIssue(i *gh.Issue) *platform.Issue {
 		Labels:    labels,
 		Assignees: assignees,
 		URL:       i.GetHTMLURL(),
+		UpdatedAt: i.GetUpdatedAt().Time,
 	}
 	if i.Milestone != nil {
 		result.Milestone = mapMilestone(i.Milestone)
