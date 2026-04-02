@@ -1842,9 +1842,10 @@ func TestPatrol_ConflictDetection_MaxAttemptsReached(t *testing.T) {
 
 	result, err := Patrol(context.Background(), mock, cfg)
 	require.NoError(t, err)
-	// Dispatch returns 0 (cap reached) but no error, so patrol still counts it
-	assert.Equal(t, 1, result.ConflictDetected)
-	assert.Contains(t, issueSvc.addedLabels[10], issues.RebasePending)
+	// Dispatch returns 0 (cap reached), so patrol should NOT count it as detected
+	assert.Equal(t, 0, result.ConflictDetected)
+	// Label was added then removed when cap was reached
+	assert.Contains(t, issueSvc.removedLabels[10], issues.RebasePending)
 	// No new workflow dispatch since cap was reached
 	assert.Len(t, wf.dispatched, 0)
 }

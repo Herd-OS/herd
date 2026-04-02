@@ -99,14 +99,25 @@ func TestLooksLikeConflict(t *testing.T) {
 
 func TestAppendConflictInstructions(t *testing.T) {
 	body := "original body"
-	result := appendConflictInstructions(body, "herd/batch/1-test")
+	result := appendConflictInstructions(body, "herd/batch/1-test", "main")
 
 	assert.Contains(t, result, "original body")
 	assert.Contains(t, result, "## Git Instructions")
 	assert.Contains(t, result, "merge conflict")
 	assert.Contains(t, result, "rebase conflict")
-	assert.Contains(t, result, "git merge origin/herd/batch/1-test")
+	assert.Contains(t, result, "git merge origin/main")
 	assert.Contains(t, result, "git rebase origin/main")
 	assert.Contains(t, result, "Do NOT rewrite files from scratch")
 	assert.Contains(t, result, "git rebase --continue")
+	// Ensure batch branch is NOT used in merge/rebase commands
+	assert.NotContains(t, result, "git merge origin/herd/batch/1-test")
+}
+
+func TestAppendConflictInstructions_CustomBaseBranch(t *testing.T) {
+	body := "body"
+	result := appendConflictInstructions(body, "herd/batch/1-test", "develop")
+
+	assert.Contains(t, result, "git merge origin/develop")
+	assert.Contains(t, result, "git rebase origin/develop")
+	assert.NotContains(t, result, "origin/main")
 }

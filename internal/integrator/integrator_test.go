@@ -46,6 +46,8 @@ type mockIssueService struct {
 	listCommentsResult []*platform.Comment
 	createResult       *platform.Issue
 	createErr          error
+	createdTitle       string
+	createdBody        string
 }
 
 func newMockIssueService() *mockIssueService {
@@ -58,7 +60,9 @@ func newMockIssueService() *mockIssueService {
 	}
 }
 
-func (m *mockIssueService) Create(_ context.Context, _, _ string, _ []string, _ *int) (*platform.Issue, error) {
+func (m *mockIssueService) Create(_ context.Context, title, body string, _ []string, _ *int) (*platform.Issue, error) {
+	m.createdTitle = title
+	m.createdBody = body
 	if m.createErr != nil {
 		return nil, m.createErr
 	}
@@ -2204,7 +2208,14 @@ func TestDispatchRebaseConflictWorker_TaskDescriptionContainsGitInstructions(t *
 	_, err := DispatchRebaseConflictWorker(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
 	require.NoError(t, err)
 
-	// The issue create is called via the mock — we can't directly inspect the body
-	// but we verify the function succeeds and creates an issue with a dispatch.
 	assert.Len(t, wf.dispatched, 1)
+
+	// Verify the created issue body contains git rebase instructions
+	body := issueSvc.createdBody
+	assert.Contains(t, body, "git fetch origin")
+	assert.Contains(t, body, "git checkout herd/batch/1-batch")
+	assert.Contains(t, body, "git rebase origin/main")
+	assert.Contains(t, body, "git push --force origin herd/batch/1-batch")
+	assert.Contains(t, body, "conflict markers")
+	assert.Contains(t, body, "git rebase --continue")
 }

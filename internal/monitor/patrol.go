@@ -223,9 +223,15 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 				_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.RebasePending})
 
 				// Dispatch rebase conflict resolution worker
-				resolveErr := dispatchRebaseConflictWorker(ctx, p, cfg, ms, pr.Head, defaultBranch)
+				issueNum, resolveErr := dispatchRebaseConflictWorker(ctx, p, cfg, ms, pr.Head, defaultBranch)
 				if resolveErr != nil {
 					// Remove label if dispatch failed so next patrol retries
+					_ = p.Issues().RemoveLabels(ctx, pr.Number, []string{issues.RebasePending})
+					continue
+				}
+
+				if issueNum == 0 {
+					// Cap reached — no worker was dispatched, remove label so next patrol retries after cap clears
 					_ = p.Issues().RemoveLabels(ctx, pr.Number, []string{issues.RebasePending})
 					continue
 				}
@@ -433,9 +439,8 @@ func hasRebasePendingLabel(ctx context.Context, p platform.Platform, prNumber in
 	return false
 }
 
-func dispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) error {
-	_, err := integrator.DispatchRebaseConflictWorker(ctx, p, cfg, ms, batchBranch, defaultBranch)
-	return err
+func dispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) (int, error) {
+	return integrator.DispatchRebaseConflictWorker(ctx, p, cfg, ms, batchBranch, defaultBranch)
 }
 
 func isDepComplete(issue *platform.Issue) bool {
