@@ -327,6 +327,29 @@ fi
 	assert.True(t, result.Approved)
 }
 
+func TestRenderReviewPrompt_SupportingChangesInstruction(t *testing.T) {
+	tests := []struct {
+		name       string
+		strictness string
+	}{
+		{"standard", "standard"},
+		{"strict", "strict"},
+		{"lenient", "lenient"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := agent.ReviewOptions{
+				AcceptanceCriteria: []string{"no other files modified"},
+				Strictness:         tt.strictness,
+			}
+			prompt, err := renderReviewPrompt("diff", opts)
+			require.NoError(t, err)
+			assert.Contains(t, prompt, "allow supporting changes to configuration files, test helpers, test fixtures, and infrastructure files")
+			assert.Contains(t, prompt, "if removing the extra change would break the primary task, it is a necessary supporting change, not a violation")
+		})
+	}
+}
+
 func TestRenderReviewPrompt_PriorReviewComments(t *testing.T) {
 	tests := []struct {
 		name                string

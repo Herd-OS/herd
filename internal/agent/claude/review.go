@@ -23,6 +23,8 @@ const reviewPromptTemplate = `Review the following code changes. Check each acce
 ## Acceptance Criteria
 {{range .AcceptanceCriteria}}- {{.}}
 {{end}}
+When an acceptance criterion says no other files are modified or lists specific files in scope, allow supporting changes to configuration files, test helpers, test fixtures, and infrastructure files if they are clearly required for the primary task to work. For example, adding a test host to a config file so that new request specs can run, or updating a test helper to support new test patterns. Only flag changes to files that are truly unrelated to the task. Use your judgment — if removing the extra change would break the primary task, it is a necessary supporting change, not a violation.
+
 {{if .PriorReviewComments}}
 ## Prior Review History
 The following review comments were posted in previous cycles on this PR. Do NOT contradict prior review decisions. If a previous cycle requested a change and a worker implemented it, do not flag that change as an issue. Only flag genuinely new issues not covered by prior reviews:
