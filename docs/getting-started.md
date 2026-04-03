@@ -101,7 +101,7 @@ To bypass all pre-flight checks:
 herd plan --skip-preflight "Add user authentication"
 ```
 
-The planner automatically reads the repository structure, README, tech stack manifest, recent git history, and active batches to give the agent context about your project. The agent asks clarifying questions, then produces a decomposition with tasks, dependencies, and tier assignments. You can confirm, reject, or edit the plan in `$EDITOR`. When you exit the session, herd automatically creates issues and dispatches Tier 0 workers — no extra commands needed.
+The planner automatically reads the repository structure, README, tech stack manifest, recent git history, and active batches to give the agent context about your project. The agent asks clarifying questions, then produces a decomposition with tasks, dependencies, and tier assignments. Before writing the plan file, the agent presents the full plan in readable markdown in the conversation for you to review. You can approve, request revisions, or reject — the agent only writes the plan file after explicit approval. Once approved and written, herd automatically creates issues and dispatches Tier 0 workers — no extra commands needed.
 
 To plan without auto-dispatching Tier 0:
 
