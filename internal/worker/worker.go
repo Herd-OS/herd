@@ -188,9 +188,16 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 	}
 
+	// Check if previous attempt already completed all work
+	skipAgent := false
+	if remoteBranchErr == nil && checkProgressComplete(params.RepoRoot, params.IssueNumber) {
+		fmt.Printf("Progress file shows all work complete for issue #%d — skipping agent execution.\n", params.IssueNumber)
+		skipAgent = true
+	}
+
 	// Download GitHub attachment images so the agent can view them locally
 	issueBody := issue.Body
-	if params.HTTPClient != nil {
+	if !skipAgent && params.HTTPClient != nil {
 		imgDir := filepath.Join(params.RepoRoot, ".herd", "tmp", "images")
 		processedBody, imgErr := images.DownloadAndReplace(ctx, params.HTTPClient, issue.Body, imgDir)
 		if imgErr != nil {
@@ -200,36 +207,40 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 	}
 
-	// Build system prompt
+	// Build system prompt (needed for both initial execution and retry)
 	systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("rendering worker prompt: %w", err)
 	}
 
-	// Execute task
-	taskSpec := agent.TaskSpec{
-		IssueNumber: params.IssueNumber,
-		Title:       issue.Title,
-		Body:        issueBody,
-	}
 	execOpts := agent.ExecOptions{
 		RepoRoot:     params.RepoRoot,
 		SystemPrompt: systemPrompt,
 		MaxTurns:     cfg.Agent.MaxTurns,
 	}
 
-	agentResult, err := ag.Execute(ctx, taskSpec, execOpts)
-	if err != nil {
-		_ = p.Issues().AddComment(ctx, params.IssueNumber,
-			fmt.Sprintf("**Worker failed:** agent returned an error.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
-				truncateOutput(err.Error(), 2000)))
-		return nil, fmt.Errorf("agent execution failed: %w", err)
-	}
-
-	// Capture raw agent summary for report
 	rawSummary := ""
-	if agentResult != nil && agentResult.Summary != "" {
-		rawSummary = agentResult.Summary
+	if skipAgent {
+		rawSummary = "Skipped — previous attempt completed all work (detected via progress file)."
+	} else {
+		// Execute task
+		taskSpec := agent.TaskSpec{
+			IssueNumber: params.IssueNumber,
+			Title:       issue.Title,
+			Body:        issueBody,
+		}
+
+		agentResult, err := ag.Execute(ctx, taskSpec, execOpts)
+		if err != nil {
+			_ = p.Issues().AddComment(ctx, params.IssueNumber,
+				fmt.Sprintf("**Worker failed:** agent returned an error.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
+					truncateOutput(err.Error(), 2000)))
+			return nil, fmt.Errorf("agent execution failed: %w", err)
+		}
+
+		if agentResult != nil && agentResult.Summary != "" {
+			rawSummary = agentResult.Summary
+		}
 	}
 
 	// Check for no-op (no commits made)
@@ -469,6 +480,40 @@ func truncateOutput(s string, max int) string {
 		return s[:max] + "\n\n... (truncated)"
 	}
 	return s
+}
+
+// checkProgressComplete checks if the worker's progress file indicates all work
+// is done. It looks for .herd/progress/<issueNumber>.md first, then falls back
+// to WORKER_PROGRESS.md. Returns true if a progress file exists, has at least
+// one checkbox, and all checkboxes are checked.
+func checkProgressComplete(repoRoot string, issueNumber int) bool {
+	paths := []string{
+		filepath.Join(repoRoot, ".herd", "progress", fmt.Sprintf("%d.md", issueNumber)),
+		filepath.Join(repoRoot, "WORKER_PROGRESS.md"),
+	}
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		return isAllChecked(string(data))
+	}
+	return false
+}
+
+// isAllChecked returns true if the content has at least one checkbox and all
+// checkboxes are checked (no unchecked "- [ ]" lines).
+func isAllChecked(content string) bool {
+	checked := 0
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- [x]") || strings.HasPrefix(trimmed, "- [X]") {
+			checked++
+		} else if strings.HasPrefix(trimmed, "- [ ]") {
+			return false
+		}
+	}
+	return checked > 0
 }
 
 func renderWorkerPrompt(title, body string, issueNumber int, workerBranch string, repoRoot string, cfg *config.Config) (string, error) {

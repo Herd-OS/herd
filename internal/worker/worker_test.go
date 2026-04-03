@@ -1088,3 +1088,146 @@ func TestRenderWorkerPrompt_ContainsConflictInstruction(t *testing.T) {
 	assert.Contains(t, prompt, "resolve the actual conflict")
 	assert.Contains(t, prompt, "Do not skip the git merge or rebase step")
 }
+
+func TestIsAllChecked(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"all checked", "- [x] task 1\n- [x] task 2", true},
+		{"some unchecked", "- [x] task 1\n- [ ] task 2", false},
+		{"no checkboxes", "just some text", false},
+		{"empty", "", false},
+		{"uppercase X", "- [X] task 1\n- [x] task 2", true},
+		{"all unchecked", "- [ ] task 1\n- [ ] task 2", false},
+		{"with extra text", "# Progress\n\n- [x] done thing\n- [x] another done\n", true},
+		{"unchecked after checked", "- [x] done\n- [ ] not done\n- [x] also done", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isAllChecked(tt.content))
+		})
+	}
+}
+
+func TestCheckProgressComplete(t *testing.T) {
+	t.Run("primary path", func(t *testing.T) {
+		dir := t.TempDir()
+		progDir := filepath.Join(dir, ".herd", "progress")
+		require.NoError(t, os.MkdirAll(progDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(progDir, "42.md"), []byte("- [x] done\n"), 0o644))
+		assert.True(t, checkProgressComplete(dir, 42))
+	})
+	t.Run("fallback to WORKER_PROGRESS.md", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "WORKER_PROGRESS.md"), []byte("- [x] done\n"), 0o644))
+		assert.True(t, checkProgressComplete(dir, 42))
+	})
+	t.Run("no file", func(t *testing.T) {
+		dir := t.TempDir()
+		assert.False(t, checkProgressComplete(dir, 42))
+	})
+	t.Run("incomplete", func(t *testing.T) {
+		dir := t.TempDir()
+		progDir := filepath.Join(dir, ".herd", "progress")
+		require.NoError(t, os.MkdirAll(progDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(progDir, "42.md"), []byte("- [x] done\n- [ ] not done\n"), 0o644))
+		assert.False(t, checkProgressComplete(dir, 42))
+	})
+	t.Run("primary preferred over fallback", func(t *testing.T) {
+		dir := t.TempDir()
+		progDir := filepath.Join(dir, ".herd", "progress")
+		require.NoError(t, os.MkdirAll(progDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(progDir, "42.md"), []byte("- [ ] not done\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "WORKER_PROGRESS.md"), []byte("- [x] done\n"), 0o644))
+		assert.False(t, checkProgressComplete(dir, 42), "should use primary path, not fallback")
+	})
+}
+
+func TestExec_SkipsAgentWhenProgressComplete(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+
+	// Create worker branch from batch branch to simulate resume
+	run(repoDir, "git", "checkout", "herd/batch/1-batch")
+	run(repoDir, "git", "checkout", "-b", "herd/worker/42-test")
+
+	// Create complete progress file
+	progDir := filepath.Join(repoDir, ".herd", "progress")
+	require.NoError(t, os.MkdirAll(progDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(progDir, "42.md"),
+		[]byte("- [x] Create auth model\n- [x] Add validation\n- [x] Write tests\n"),
+		0o644,
+	))
+	// Commit the progress file so the branch has changes
+	run(repoDir, "git", "add", ".")
+	run(repoDir, "git", "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-m", "progress")
+	run(repoDir, "git", "push", "origin", "herd/worker/42-test")
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: nil},
+	}
+
+	ag := &mockAgent{
+		execResult: &agent.ExecResult{Summary: "done"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// The worker should have skipped the agent and gone straight to validation/push.
+	// Verify the report was posted with the skip message.
+	foundSkipReport := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker Report") {
+			foundSkipReport = true
+			assert.Contains(t, c, "Skipped",
+				"report should mention skipping when progress is complete")
+		}
+	}
+	assert.True(t, foundSkipReport, "worker should post a report even when agent is skipped")
+}
+
+func TestExec_SkipAgent_SourceVerification(t *testing.T) {
+	// Verify that the resume path checks progress before invoking the agent.
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+
+	// Find the resume path
+	resumeIdx := strings.Index(src, "checkProgressComplete")
+	require.NotEqual(t, -1, resumeIdx, "checkProgressComplete must be called in Exec")
+
+	// The check must happen after the git setup (resume branch checkout)
+	// and before ag.Execute
+	executeIdx := strings.Index(src, "ag.Execute(")
+	require.NotEqual(t, -1, executeIdx)
+	assert.Less(t, resumeIdx, executeIdx,
+		"checkProgressComplete must be called before ag.Execute")
+
+	// skipAgent must gate the Execute call
+	assert.Contains(t, src, "if skipAgent",
+		"skipAgent flag must control whether agent is invoked")
+}
