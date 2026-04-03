@@ -108,7 +108,7 @@ The agent produces a structured plan containing:
   - **Description** -- what to build (the "what").
   - **Implementation details** -- how to build it (the "how"): exact file paths, function signatures, algorithms, data formats. This is the core of making issues self-contained.
   - **Acceptance criteria** -- concrete, verifiable checks (the "done").
-  - **Scope** -- the set of files this task will create or modify.
+  - **Scope** -- the set of files this task will create or modify. During review, supporting changes to configuration files, test helpers, test fixtures, and infrastructure files are allowed when clearly required by the primary task.
   - **Conventions** -- project-specific patterns the worker must follow.
   - **Context from dependencies** -- information from upstream tasks that this task needs, inlined so the worker never has to cross-reference other issues. The Planner already knows what each task produces and should tell downstream tasks explicitly.
   - **Complexity** -- low, medium, or high, used for estimation and worker resource allocation.
