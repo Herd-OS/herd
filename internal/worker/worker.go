@@ -207,22 +207,22 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 	}
 
-	// Build system prompt (needed for both initial execution and retry)
-	systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("rendering worker prompt: %w", err)
-	}
-
-	execOpts := agent.ExecOptions{
-		RepoRoot:     params.RepoRoot,
-		SystemPrompt: systemPrompt,
-		MaxTurns:     cfg.Agent.MaxTurns,
-	}
-
 	rawSummary := ""
 	if skipAgent {
 		rawSummary = "Skipped — previous attempt completed all work (detected via progress file)."
 	} else {
+		// Build system prompt only when agent will actually run
+		systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("rendering worker prompt: %w", err)
+		}
+
+		execOpts := agent.ExecOptions{
+			RepoRoot:     params.RepoRoot,
+			SystemPrompt: systemPrompt,
+			MaxTurns:     cfg.Agent.MaxTurns,
+		}
+
 		// Execute task
 		taskSpec := agent.TaskSpec{
 			IssueNumber: params.IssueNumber,
@@ -293,13 +293,24 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	if !validation.allPassed() {
 		fmt.Printf("Validation failed, re-invoking agent to fix:\n%s\n", validation.Errors)
 
+		// Build system prompt for the retry agent invocation
+		retryPrompt, rpErr := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg)
+		if rpErr != nil {
+			return nil, fmt.Errorf("rendering worker prompt for retry: %w", rpErr)
+		}
+		retryExecOpts := agent.ExecOptions{
+			RepoRoot:     params.RepoRoot,
+			SystemPrompt: retryPrompt,
+			MaxTurns:     cfg.Agent.MaxTurns,
+		}
+
 		// Re-invoke agent with validation errors
 		retrySpec := agent.TaskSpec{
 			IssueNumber: params.IssueNumber,
 			Title:       "Fix validation failures",
 			Body:        fmt.Sprintf("The following validation commands failed after your changes. Please fix all errors:\n\n```\n%s\n```\n\nDo not add new features — only fix the validation errors.", validation.Errors),
 		}
-		retryResult, retryErr := ag.Execute(ctx, retrySpec, execOpts)
+		retryResult, retryErr := ag.Execute(ctx, retrySpec, retryExecOpts)
 		if retryErr != nil {
 			_ = p.Issues().AddComment(ctx, params.IssueNumber,
 				fmt.Sprintf("**Worker failed:** agent returned an error during validation retry.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
