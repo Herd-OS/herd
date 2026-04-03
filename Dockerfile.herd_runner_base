@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-ARG RUNNER_VERSION=2.332.0
+ARG RUNNER_VERSION=2.333.1
 ARG TARGETARCH
 
 # Dependencies (Node 22 LTS required by Claude Code, libicu for GitHub Actions runner)
