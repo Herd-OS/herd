@@ -157,6 +157,16 @@ the current batch branch. A warning is logged:
 branch." The previous partial work is lost, but this is preferable to crashing
 and leaving the issue stuck as failed.
 
+If the resumed worker branch's progress file (`.herd/progress/<issue-number>.md`
+or legacy `WORKER_PROGRESS.md`) shows all items checked off — every checkbox is
+`- [x]` and none are `- [ ]` — the worker skips agent invocation entirely. This
+handles the case where a previous attempt completed all work and pushed it, but
+timed out before finishing validation or posting the worker report. The worker
+still runs pre-push validation (build, test, vet, lint), posts the worker report,
+pushes the branch, and labels the issue as done. If the progress file shows
+incomplete work, the normal retry flow continues (the agent is launched with the
+progress file as context to continue where the previous attempt stopped).
+
 ### Concurrency
 
 Multiple workers run simultaneously on separate branches. Concurrency is bounded
@@ -167,7 +177,7 @@ GitHub Actions limits.
 
 | Failure | Response |
 |---------|----------|
-| Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md`; if the batch branch has diverged and merge conflicts, the worker falls back to a fresh branch (partial work is lost) |
+| Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md`; if the batch branch has diverged and merge conflicts, the worker falls back to a fresh branch (partial work is lost); if the progress file shows all work complete, the retry skips agent invocation and proceeds directly to validation and reporting |
 | Worker produces bad code | Integrator dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
 | Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |
