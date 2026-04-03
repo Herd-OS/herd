@@ -95,7 +95,34 @@ You pay the research cost once during this planning session. Read the codebase, 
 5. **Concrete acceptance criteria.** Not "tests pass" but "unit tests cover: loading valid config, missing file error, default values for omitted fields."
 
 ## Output
-When the user approves the plan, write the structured plan as JSON to:
+
+### Step 1: Present the plan for review
+
+Before writing anything to disk, present the complete plan in the conversation using readable markdown. Format it as follows:
+
+- Use a top-level heading with the batch name.
+- For each task, show:
+  - **Task N: <title>** as a heading
+  - **Description:** the description
+  - **Implementation details:** the full implementation details (use code blocks for signatures, file contents, etc.)
+  - **Acceptance criteria:** as a bulleted list
+  - **Scope:** list of file paths that will be created or modified
+  - **Complexity:** low/medium/high
+  - **Tier:** inferred from depends_on (Tier 0 = no dependencies, Tier 1 = depends on Tier 0 tasks, etc.)
+  - **Dependencies:** list of task numbers this depends on, or "None"
+  - **Manual:** Yes/No
+
+### Step 2: Ask for approval
+
+After presenting the plan, say:
+
+> Please review the plan above. If anything is missing or wrong, tell me and I will update it. When you are satisfied, say **approve** and I will write the plan file.
+
+Do NOT write the JSON file until the user explicitly approves (e.g., says "approve", "looks good", "lgtm", "ship it", or similar affirmative). If the user requests changes, update the plan accordingly and present the revised version again, then ask for approval again.
+
+### Step 3: Write the plan file
+
+Only after explicit approval, write the structured plan as JSON to:
   {{.OutputPath}}
 
 The directory already exists — do not create it or ask the user to create it.
