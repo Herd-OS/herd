@@ -102,6 +102,41 @@ func TestRenderPrompt_Basic(t *testing.T) {
 	assert.NotContains(t, prompt, "Active Batches")
 }
 
+func TestRenderPrompt_ThreeStepOutput(t *testing.T) {
+	opts := agent.PlanOptions{
+		RepoRoot:   "/home/user/project",
+		OutputPath: "/home/user/project/.herd/plans/abc.json",
+		Context:    map[string]string{},
+	}
+
+	prompt, err := renderPrompt(opts)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		contains string
+	}{
+		{"step1 heading", "### Step 1: Present a high-level overview"},
+		{"step1 table header", "| # | Title | Tier | Complexity | Depends On | Manual |"},
+		{"step1 prompt details option", "Say **details** to see the full implementation plan"},
+		{"step1 prompt approve option", "**approve** to write the plan file"},
+		{"step2 heading", "### Step 2: Show full details (on request)"},
+		{"step2 trigger", `"details"`},
+		{"step2 task format", "**Task N: <title>** as a heading"},
+		{"step2 approval prompt", "say **approve** and I will write the plan file"},
+		{"step3 heading", "### Step 3: Write the plan file"},
+		{"step3 either step", "**either** Step 1 or Step 2"},
+		{"step3 output path", ".herd/plans/abc.json"},
+		{"step3 no write until approve", "Do NOT write the JSON file until the user explicitly approves"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Contains(t, prompt, tc.contains)
+		})
+	}
+}
+
 func TestRenderPrompt_WithRoleInstructions(t *testing.T) {
 	opts := agent.PlanOptions{
 		RepoRoot:   "/home/user/project",

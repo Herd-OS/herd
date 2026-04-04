@@ -96,34 +96,50 @@ You pay the research cost once during this planning session. Read the codebase, 
 
 ## Output
 
-### Step 1: Present the plan for review
+### Step 1: Present a high-level overview
 
-Before writing anything to disk, present the complete plan in the conversation using readable markdown. Format it as follows:
+Before showing any implementation details, present a concise overview of the plan. Format it as a markdown table:
 
-- Use a top-level heading with the batch name.
-- For each task, show:
-  - **Task N: <title>** as a heading
-  - **Description:** the description
-  - **Implementation details:** the full implementation details (use code blocks for signatures, file contents, etc.)
-  - **Acceptance criteria:** as a bulleted list
-  - **Scope:** list of file paths that will be created or modified
-  - **Complexity:** low/medium/high
-  - **Tier:** inferred from depends_on (Tier 0 = no dependencies, Tier 1 = depends on Tier 0 tasks, etc.)
-  - **Dependencies:** list of task numbers this depends on, or "None"
-  - **Manual:** Yes/No
+| # | Title | Tier | Complexity | Depends On | Manual |
+|---|-------|------|------------|------------|--------|
+| 0 | Auth model | 0 | medium | — | No |
+| 1 | Login route | 0 | medium | — | No |
+| 2 | Auth middleware | 1 | low | 0, 1 | No |
 
-### Step 2: Ask for approval
+Use a top-level heading with the batch name above the table.
 
-After presenting the plan, say:
+After the table, say:
+
+> Does this decomposition look complete? If anything is missing or the tiers are wrong, tell me now. Say **details** to see the full implementation plan, or **approve** to write the plan file.
+
+If the user requests changes at this stage, update the overview and present it again.
+
+### Step 2: Show full details (on request)
+
+If the user says "details" (or similar: "show details", "expand", "full plan"), present the complete plan in readable markdown. For each task, show:
+
+- **Task N: <title>** as a heading
+- **Description:** the description
+- **Implementation details:** the full implementation details (use code blocks for signatures, file contents, etc.)
+- **Acceptance criteria:** as a bulleted list
+- **Scope:** list of file paths that will be created or modified
+- **Complexity:** low/medium/high
+- **Tier:** inferred from depends_on (Tier 0 = no dependencies, Tier 1 = depends on Tier 0 tasks, etc.)
+- **Dependencies:** list of task numbers this depends on, or "None"
+- **Manual:** Yes/No
+
+After presenting, say:
 
 > Please review the plan above. If anything is missing or wrong, tell me and I will update it. When you are satisfied, say **approve** and I will write the plan file.
 
-Do NOT write the JSON file until the user explicitly approves (e.g., says "approve", "looks good", "lgtm", "ship it", or similar affirmative). If the user requests changes, update the plan accordingly and present the revised version again, then ask for approval again.
+If the user requests changes, update the plan and present the revised version again.
 
 ### Step 3: Write the plan file
 
-Only after explicit approval, write the structured plan as JSON to:
+If the user says "approve" (or similar affirmative: "looks good", "lgtm", "ship it") at **either** Step 1 or Step 2, write the structured plan as JSON to:
   {{.OutputPath}}
+
+Do NOT write the JSON file until the user explicitly approves. If the user requests changes, update the plan accordingly, present the revised version, and ask for approval again.
 
 The directory already exists — do not create it or ask the user to create it.
 
