@@ -30,13 +30,18 @@ Use `--skip-preflight` to bypass all checks (e.g., when intentionally planning f
 
 **Description mode** (`herd plan "description"`): The description is sent as the agent's first message, so it starts working immediately -- but the session remains interactive. If the description is clear, the agent produces a plan right away. If it is vague, the agent asks clarifying questions. The user can always follow up, refine, or redirect.
 
-In both modes, the conversation continues until the user and agent agree on scope and decomposition. When the agent has a complete plan, it presents it in readable markdown in the conversation for the user to review. The user can approve, request revisions, or reject. The agent only writes the plan file after explicit approval. Once written, `herd` reads the plan, creates GitHub Issues, and dispatches Tier 0 workers (all tasks with no dependencies). Use `--no-dispatch` to create issues without dispatching.
+In both modes, the conversation continues until the user and agent agree on scope and decomposition. When the agent has a complete plan, it presents it in two steps:
+
+1. **Overview table** — the agent shows a high-level markdown table with task number, title, tier, complexity, dependencies, and whether the task is manual. The user can say **"details"** to see the full implementation plan, or **"approve"** to proceed immediately.
+2. **Full plan** (on "details") — the agent presents the complete plan in readable markdown with implementation details, acceptance criteria, and conventions for each task. The user can then approve or request revisions.
+
+The user can approve at either step. Only after explicit approval does the agent write the plan file. Once written, `herd` reads the plan, creates GitHub Issues, and dispatches Tier 0 workers (all tasks with no dependencies). Use `--no-dispatch` to create issues without dispatching.
 
 ### How the Agent Session Works
 
 The `herd plan` command gathers repository context, generates a unique plan ID, and launches the configured agent as a subprocess with a planning system prompt. HerdOS does not implement its own chat loop -- it delegates to whatever agent is configured, preserving the agent's native interactive experience.
 
-When the plan is ready, the agent presents the full plan in readable markdown directly in the conversation. The user reviews it and can request changes — the agent incorporates feedback and re-presents until the user approves. Only after explicit approval does the agent write the structured plan to `.herd/plans/<plan-id>.json`. After the agent process exits, `herd` reads and parses the plan file, then creates issues and dispatches.
+When the plan is ready, the agent first presents a high-level overview table (task number, title, tier, complexity, dependencies, manual flag). The user can say "details" to see the full implementation plan, or "approve" to proceed. If the user asks for details, the agent presents the complete plan in readable markdown. The user can request changes at either step — the agent incorporates feedback and re-presents until the user approves. Only after explicit approval does the agent write the structured plan to `.herd/plans/<plan-id>.json`. After the agent process exits, `herd` reads and parses the plan file, then creates issues and dispatches.
 
 The agent writes to a file rather than stdout because agent stdout is mixed with conversation output, formatting, and UI elements. Parsing structured data from that stream would be fragile. A known file path is reliable and works identically across all agents.
 
