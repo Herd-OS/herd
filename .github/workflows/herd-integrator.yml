@@ -140,7 +140,6 @@ jobs:
       vars.HERD_ENABLED == 'true'
       && github.event_name == 'pull_request'
       && github.event.action == 'closed'
-      && github.event.pull_request.merged == true
       && startsWith(github.event.pull_request.title, '[herd]')
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
@@ -149,13 +148,18 @@ jobs:
         with:
           token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Post-merge cleanup
+      - name: Post-close cleanup
         env:
           HERD_RUNNER: "true"
           GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
         run: |
-          herd integrator cleanup --pr "$PR_NUMBER"
+          MERGED_FLAG=""
+          if [ "$PR_MERGED" = "true" ]; then
+            MERGED_FLAG="--merged"
+          fi
+          herd integrator cleanup --pr "$PR_NUMBER" $MERGED_FLAG
 
   handle-comment:
     if: >
