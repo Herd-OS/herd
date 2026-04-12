@@ -322,8 +322,23 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		}
 	}
 
-	if tierStuck || !tierComplete {
+	if tierStuck {
 		return &AdvanceResult{TierComplete: false}, nil
+	}
+
+	if !tierComplete {
+		// Tier not done yet — but there may be ready issues that weren't dispatched
+		// due to concurrency limits on the previous advance. Try to dispatch them now.
+		dispatched, err := dispatchReadyIssues(ctx, p, cfg, tiers[triggerTier], allIssues, batchBranch)
+		if err != nil {
+			return nil, fmt.Errorf("dispatching remaining tier issues: %w", err)
+		}
+		if dispatched > 0 {
+			fmt.Printf("Tier %d not yet complete. Dispatched %d remaining issues.\n", triggerTier, dispatched)
+		} else {
+			fmt.Printf("Tier %d not yet complete.\n", triggerTier)
+		}
+		return &AdvanceResult{TierComplete: false, DispatchedCount: dispatched}, nil
 	}
 
 	// Tier is complete — check if this was the last tier
@@ -337,22 +352,33 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 	}
 
 	// Dispatch next tier
-	nextTier := tiers[triggerTier+1]
-	dispatched := 0
+	dispatched, err := dispatchReadyIssues(ctx, p, cfg, tiers[triggerTier+1], allIssues, batchBranch)
+	if err != nil {
+		return nil, fmt.Errorf("dispatching next tier: %w", err)
+	}
 
-	// Count active workers for concurrency limit
+	return &AdvanceResult{
+		TierComplete:    true,
+		DispatchedCount: dispatched,
+	}, nil
+}
+
+// dispatchReadyIssues dispatches ready/blocked issues from a tier, respecting
+// concurrency limits. Returns the number of issues dispatched.
+func dispatchReadyIssues(ctx context.Context, p platform.Platform, cfg *config.Config, tierIssues []int, allIssues []*platform.Issue, batchBranch string) (int, error) {
 	activeRuns, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "in_progress"})
 	if err != nil {
-		return nil, fmt.Errorf("counting active workers: %w", err)
+		return 0, fmt.Errorf("counting active workers: %w", err)
 	}
 	remaining := cfg.Workers.MaxConcurrent - len(activeRuns)
 
 	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("getting default branch: %w", err)
+		return 0, fmt.Errorf("getting default branch: %w", err)
 	}
 
-	for _, num := range nextTier {
+	dispatched := 0
+	for _, num := range tierIssues {
 		issue := findIssue(allIssues, num)
 		if issue == nil {
 			continue
@@ -404,11 +430,7 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		}
 		dispatched++
 	}
-
-	return &AdvanceResult{
-		TierComplete:    true,
-		DispatchedCount: dispatched,
-	}, nil
+	return dispatched, nil
 }
 
 // buildTiersFromIssues parses issue front matter to build a DAG and compute tiers.
@@ -505,53 +527,10 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 		return &AdvanceResult{AllComplete: true, TierComplete: true, BatchPRNumber: prNum}, nil
 	}
 
-	// Dispatch next tier's blocked issues
-	dispatched := 0
-	activeRuns, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "in_progress"})
+	// Dispatch incomplete tier's blocked/ready issues
+	dispatched, err := dispatchReadyIssues(ctx, p, cfg, tiers[incompleteTier], allIssues, batchBranch)
 	if err != nil {
-		return nil, fmt.Errorf("counting active workers: %w", err)
-	}
-	remaining := cfg.Workers.MaxConcurrent - len(activeRuns)
-
-	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getting default branch: %w", err)
-	}
-
-	for _, num := range tiers[incompleteTier] {
-		issue := findIssue(allIssues, num)
-		if issue == nil {
-			continue
-		}
-		if issues.HasLabel(issue.Labels, issues.TypeManual) {
-			continue
-		}
-
-		status := issues.StatusLabel(issue.Labels)
-		if status != issues.StatusBlocked {
-			continue
-		}
-
-		_ = p.Issues().RemoveLabels(ctx, num, []string{issues.StatusBlocked})
-
-		if dispatched >= remaining {
-			_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusReady})
-			continue
-		}
-
-		_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusInProgress})
-		_, err := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
-			"issue_number":    fmt.Sprintf("%d", num),
-			"batch_branch":    batchBranch,
-			"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
-			"runner_label":    cfg.Workers.RunnerLabel,
-		})
-		if err != nil {
-			_ = p.Issues().RemoveLabels(ctx, num, []string{issues.StatusInProgress})
-			_ = p.Issues().AddLabels(ctx, num, []string{issues.StatusFailed})
-			continue
-		}
-		dispatched++
+		return nil, fmt.Errorf("dispatching tier issues: %w", err)
 	}
 
 	return &AdvanceResult{
