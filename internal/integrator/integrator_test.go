@@ -618,6 +618,58 @@ func TestAdvance_DispatchesReadyIssues(t *testing.T) {
 	assert.Contains(t, issueSvc.addedLabels[13], issues.StatusInProgress)
 }
 
+func TestAdvance_DispatchesRemainingInSameTier(t *testing.T) {
+	// When a worker completes but other issues in the same tier are still ready
+	// (because concurrency limits prevented dispatching them earlier), advance
+	// should dispatch the remaining ready issues.
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[11] = &platform.Issue{
+		Number: 11, Title: "Task B",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		// Tier 0: done
+		{Number: 10, Title: "Task A", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+		// Tier 1: triggering issue is done, but two others still ready
+		{Number: 11, Title: "Task B", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo B\n"},
+		{Number: 12, Title: "Task C", Labels: []string{issues.StatusReady},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo C\n"},
+		{Number: 13, Title: "Task D", Labels: []string{issues.StatusReady},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n  depends_on: [10]\n---\n\n## Task\nDo D\n"},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			200: {ID: 200, Conclusion: "success", Inputs: map[string]string{"issue_number": "11"}},
+		},
+		listResult: []*platform.Run{}, // no active workers
+	}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        &mockPRService{},
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 5, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, nil, cfg, AdvanceParams{RunID: 200})
+	require.NoError(t, err)
+	assert.False(t, result.TierComplete)
+	assert.Equal(t, 2, result.DispatchedCount)
+	// Both ready issues should be dispatched
+	assert.Contains(t, issueSvc.removedLabels[12], issues.StatusReady)
+	assert.Contains(t, issueSvc.addedLabels[12], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.removedLabels[13], issues.StatusReady)
+	assert.Contains(t, issueSvc.addedLabels[13], issues.StatusInProgress)
+	assert.Len(t, wf.dispatched, 2)
+}
+
 func TestAdvance_TierStuck(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[10] = &platform.Issue{
