@@ -193,6 +193,76 @@ func TestReview_ChangesRequested_CreatesFixes(t *testing.T) {
 	assert.Equal(t, "Review fixes (cycle 1)", createdIssues[0].Title)
 }
 
+func TestReview_LowSeverityIncludedWhenConfigured(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	createdIssues := []*platform.Issue{}
+	nextNum := 100
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+		},
+	}
+
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			iss := &platform.Issue{Number: nextNum, Title: title, Body: body}
+			nextNum++
+			createdIssues = append(createdIssues, iss)
+			return iss, nil
+		},
+	}
+
+	mock := &mockPlatform{
+		issues: mockCreate,
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "LOW", Description: "Minor style issue in utils.go"},
+			},
+			Comments: []string{"Minor style issue"},
+		},
+	}
+
+	dir, g := initTestRepo(t)
+
+	// With default config (medium), LOW findings should NOT create fix issues
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3, ReviewFixSeverity: "medium"},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Len(t, createdIssues, 0)
+
+	// With review_fix_severity: low, LOW findings SHOULD create fix issues
+	createdIssues = nil
+	result, err = Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3, ReviewFixSeverity: "low"},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+	require.NoError(t, err)
+	assert.False(t, result.Approved)
+	assert.Len(t, createdIssues, 1)
+	assert.Len(t, wf.dispatched, 1)
+}
+
 func TestReview_SkipsWhenFixWorkersInProgress(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
