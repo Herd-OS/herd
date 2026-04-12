@@ -46,7 +46,8 @@ type Integrator struct {
 	RequireCI                      bool   `yaml:"require_ci"`
 	Review                         bool   `yaml:"review"`
 	ReviewMaxFixCycles             int    `yaml:"review_max_fix_cycles"`
-	ReviewStrictness               string `yaml:"review_strictness"` // "standard", "strict", "lenient"
+	ReviewStrictness               string `yaml:"review_strictness"`    // "standard", "strict", "lenient"
+	ReviewFixSeverity              string `yaml:"review_fix_severity"`  // minimum severity to fix: "high", "medium", "low" (default: "medium")
 	CIMaxFixCycles                 int    `yaml:"ci_max_fix_cycles"`
 }
 

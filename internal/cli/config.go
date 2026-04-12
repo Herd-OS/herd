@@ -159,6 +159,8 @@ func flattenConfig(cfg *config.Config) []keyValue {
 	kvs = append(kvs, keyValue{"integrator.require_ci", btoa(cfg.Integrator.RequireCI)})
 	kvs = append(kvs, keyValue{"integrator.review", btoa(cfg.Integrator.Review)})
 	kvs = append(kvs, keyValue{"integrator.review_max_fix_cycles", itoa(cfg.Integrator.ReviewMaxFixCycles)})
+	kvs = append(kvs, keyValue{"integrator.review_strictness", displayValue(cfg.Integrator.ReviewStrictness)})
+	kvs = append(kvs, keyValue{"integrator.review_fix_severity", displayValue(cfg.Integrator.ReviewFixSeverity)})
 	kvs = append(kvs, keyValue{"integrator.ci_max_fix_cycles", itoa(cfg.Integrator.CIMaxFixCycles)})
 	kvs = append(kvs, keyValue{"monitor.patrol_interval_minutes", itoa(cfg.Monitor.PatrolIntervalMinutes)})
 	kvs = append(kvs, keyValue{"monitor.stale_threshold_minutes", itoa(cfg.Monitor.StaleThresholdMinutes)})

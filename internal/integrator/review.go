@@ -248,10 +248,19 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Combine HIGH and MEDIUM findings for fix dispatch — only LOW is informational
-	actionableFindings := make([]agent.ReviewFinding, 0, len(highFindings)+len(mediumFindings))
+	// Combine findings for fix dispatch based on configured minimum severity
+	actionableFindings := make([]agent.ReviewFinding, 0, len(highFindings)+len(mediumFindings)+len(lowFindings))
 	actionableFindings = append(actionableFindings, highFindings...)
-	actionableFindings = append(actionableFindings, mediumFindings...)
+	minSeverity := strings.ToLower(cfg.Integrator.ReviewFixSeverity)
+	if minSeverity == "" {
+		minSeverity = "medium"
+	}
+	if minSeverity == "medium" || minSeverity == "low" {
+		actionableFindings = append(actionableFindings, mediumFindings...)
+	}
+	if minSeverity == "low" {
+		actionableFindings = append(actionableFindings, lowFindings...)
+	}
 
 	// No actionable findings — approve with informational comment and batch summary
 	if len(actionableFindings) == 0 {
@@ -289,7 +298,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Create single batched fix issue with all actionable findings (HIGH + MEDIUM)
+	// Create single batched fix issue with all actionable findings
 	nextCycle := currentCycle + 1
 
 	var fixTaskBuilder strings.Builder
@@ -336,7 +345,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsComment)
 
 	// Block merge with Request Changes review
-	reviewBody := fmt.Sprintf("Found %d actionable issues (HIGH+MEDIUM). Fix worker dispatched → #%d.", len(actionableFindings), fixIssue.Number)
+	reviewBody := fmt.Sprintf("Found %d actionable issues. Fix worker dispatched → #%d.", len(actionableFindings), fixIssue.Number)
 	_ = p.PullRequests().CreateReview(ctx, pr.Number, reviewBody, platform.ReviewRequestChanges)
 
 	return &ReviewResult{
