@@ -224,6 +224,9 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		}, nil
 	}
 
+	// Remove rebase-pending label from batch PR if present
+	removeBatchPRRebasePending(ctx, p, batchBranch)
+
 	// Close stale conflict/rebase issues whose worker branches no longer exist
 	closeStaleConflictIssues(ctx, p, issue.Milestone)
 
@@ -557,6 +560,20 @@ func findIssue(allIssues []*platform.Issue, number int) *platform.Issue {
 // milestone whose worker branches have already been consolidated or deleted.
 // This prevents the monitor from retrying stale issues that would fail with
 // non-fast-forward errors.
+// removeBatchPRRebasePending removes the rebase-pending label from the batch PR
+// after a successful consolidation push.
+func removeBatchPRRebasePending(ctx context.Context, p platform.Platform, batchBranch string) {
+	prSvc := p.PullRequests()
+	if prSvc == nil {
+		return
+	}
+	prs, err := prSvc.List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
+	if err != nil || len(prs) == 0 {
+		return
+	}
+	_ = p.Issues().RemoveLabels(ctx, prs[0].Number, []string{issues.RebasePending})
+}
+
 func closeStaleConflictIssues(ctx context.Context, p platform.Platform, ms *platform.Milestone) {
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
 		State:     "open",

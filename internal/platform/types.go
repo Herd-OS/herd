@@ -21,7 +21,8 @@ type PullRequest struct {
 	State     string // "open", "closed", "merged"
 	Head      string // branch name
 	Base      string // target branch
-	Mergeable bool
+	Mergeable        bool
+	MergeableKnown   bool // false when GitHub is still computing mergeability
 	URL       string
 	CreatedAt time.Time
 }
