@@ -18,6 +18,7 @@ integrator:
     require_ci: true
     review: true
     review_max_fix_cycles: 0
+    review_fix_severity: low
     ci_max_fix_cycles: 0
 monitor:
     patrol_interval_minutes: 15
