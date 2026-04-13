@@ -168,7 +168,7 @@ func (m *mockPRService) Get(_ context.Context, number int) (*platform.PullReques
 	if pr, ok := m.getResults[number]; ok {
 		return pr, nil
 	}
-	return &platform.PullRequest{Number: number, Mergeable: true}, nil
+	return &platform.PullRequest{Number: number, Mergeable: true, MergeableKnown: true}, nil
 }
 func (m *mockPRService) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
 	return m.listResult, nil
@@ -1576,7 +1576,7 @@ func TestPatrol_ConflictDetectedOnBatchPR(t *testing.T) {
 		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
 	}
 	// Get returns non-mergeable PR
-	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false, MergeableKnown: true}
 
 	issueSvc := newMockIssueService()
 	issueSvc.createResult = &platform.Issue{Number: 999}
@@ -1609,13 +1609,45 @@ func TestPatrol_ConflictDetectedOnBatchPR(t *testing.T) {
 	assert.Len(t, wf.dispatched, 1)
 }
 
+func TestPatrol_MergeableUnknown_SkipsConflictCheck(t *testing.T) {
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
+	}
+	// GitHub hasn't computed mergeability yet (e.g., right after a force push)
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false, MergeableKnown: false}
+
+	issueSvc := newMockIssueService()
+	wf := &mockWorkflowService{}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := Patrol(context.Background(), mock, cfg)
+	require.NoError(t, err)
+	// Should NOT detect a conflict when mergeability is unknown
+	assert.Equal(t, 0, result.ConflictDetected)
+	assert.Empty(t, issueSvc.addedLabels[10])
+	assert.Empty(t, wf.dispatched)
+}
+
 func TestPatrol_ConflictResolved_LabelRemoved(t *testing.T) {
 	prSvc := newMockPRService()
 	prSvc.listResult = []*platform.PullRequest{
 		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
 	}
 	// Get returns mergeable PR
-	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: true}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: true, MergeableKnown: true}
 
 	issueSvc := newMockIssueService()
 
@@ -1640,7 +1672,7 @@ func TestPatrol_ConflictWithRebasePendingLabel_NoDuplicate(t *testing.T) {
 	prSvc.listResult = []*platform.PullRequest{
 		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
 	}
-	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false, MergeableKnown: true}
 
 	issueSvc := newMockIssueService()
 	// Simulate herd/rebase-pending label already present
@@ -1672,7 +1704,7 @@ func TestPatrol_ConflictDispatchFailure_LabelRemoved(t *testing.T) {
 	prSvc.listResult = []*platform.PullRequest{
 		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
 	}
-	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false, MergeableKnown: true}
 
 	issueSvc := newMockIssueService()
 	// Make issue creation fail, which will cause the dispatch to fail
@@ -1749,7 +1781,7 @@ func TestPatrol_ConflictDetection_LabelAddedBeforeDispatch(t *testing.T) {
 	prSvc.listResult = []*platform.PullRequest{
 		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
 	}
-	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false, MergeableKnown: true}
 
 	issueSvc := newMockIssueService()
 	issueSvc.createResult = &platform.Issue{Number: 999}
@@ -1788,7 +1820,7 @@ func TestPatrol_ConflictDetection_NonHerdPR_Ignored(t *testing.T) {
 		{Number: 10, Title: "Normal PR", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
 	}
 	// If Get were called, it would return non-mergeable — but it should never be called
-	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false, MergeableKnown: true}
 
 	issueSvc := newMockIssueService()
 
@@ -1814,7 +1846,7 @@ func TestPatrol_ConflictDetection_MaxAttemptsReached(t *testing.T) {
 	prSvc.listResult = []*platform.PullRequest{
 		{Number: 10, Title: "[herd] Batch 1", Head: "herd/batch/1-batch", CreatedAt: time.Now()},
 	}
-	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false}
+	prSvc.getResults[10] = &platform.PullRequest{Number: 10, Head: "herd/batch/1-batch", Mergeable: false, MergeableKnown: true}
 
 	issueSvc := newMockIssueService()
 	issueSvc.createResult = &platform.Issue{Number: 999}

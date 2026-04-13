@@ -158,7 +158,8 @@ func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 		State:     pr.GetState(),
 		Head:      pr.GetHead().GetRef(),
 		Base:      pr.GetBase().GetRef(),
-		Mergeable: pr.GetMergeable(),
+		Mergeable:      pr.GetMergeable(),
+		MergeableKnown: pr.Mergeable != nil,
 		URL:       pr.GetHTMLURL(),
 		CreatedAt: pr.GetCreatedAt().Time,
 	}

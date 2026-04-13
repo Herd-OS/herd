@@ -196,6 +196,11 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 			if getErr != nil {
 				continue
 			}
+			if !fullPR.MergeableKnown {
+				// GitHub is still computing mergeability (e.g., right after a force push).
+				// Skip — we'll check again on the next patrol.
+				continue
+			}
 			if fullPR.Mergeable {
 				// Conflict resolved — clean up label
 				_ = p.Issues().RemoveLabels(ctx, pr.Number, []string{issues.RebasePending})
