@@ -49,6 +49,7 @@ jobs:
           herd integrator consolidate --run-id "$RUN_ID"
           herd integrator advance --run-id "$RUN_ID"
           herd integrator review --run-id "$RUN_ID"
+          herd integrator check-ci --run-id "$RUN_ID"
 
   check-ci-on-completion:
     if: >
@@ -109,6 +110,7 @@ jobs:
           if [ -n "$BATCH" ]; then
             herd integrator advance --batch "$BATCH"
             herd integrator review --batch "$BATCH"
+            herd integrator check-ci --batch "$BATCH"
           else
             echo "Not a herd issue — skipping."
           fi
