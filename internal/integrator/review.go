@@ -175,6 +175,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		AcceptanceCriteria:  allCriteria,
 		RepoRoot:            params.RepoRoot,
 		Strictness:          cfg.Integrator.ReviewStrictness,
+		MinFixSeverity:      cfg.Integrator.ReviewFixSeverity,
 		PriorReviewComments: priorReviewComments,
 	}
 

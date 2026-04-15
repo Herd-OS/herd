@@ -220,6 +220,26 @@ func TestRenderReviewPrompt_SeverityGuide(t *testing.T) {
 	assert.Contains(t, prompt, "CRITERIA: An acceptance criterion itself is wrong")
 }
 
+func TestRenderReviewPrompt_MinFixSeverity(t *testing.T) {
+	// Default (medium) — no special instruction, uses fallback
+	opts := agent.ReviewOptions{AcceptanceCriteria: []string{"works"}}
+	prompt, err := renderReviewPrompt("diff", opts)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "MEDIUM or HIGH severity")
+
+	// Low — tells agent to reject on LOW or higher
+	opts.MinFixSeverity = "low"
+	prompt, err = renderReviewPrompt("diff", opts)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "LOW severity or higher")
+
+	// High — tells agent to reject only on HIGH
+	opts.MinFixSeverity = "high"
+	prompt, err = renderReviewPrompt("diff", opts)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "HIGH severity or higher")
+}
+
 func TestRenderReviewPrompt_CriteriaSeverityGuide(t *testing.T) {
 	opts := agent.ReviewOptions{AcceptanceCriteria: []string{"works"}}
 	prompt, err := renderReviewPrompt("diff", opts)
