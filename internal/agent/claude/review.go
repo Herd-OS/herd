@@ -43,7 +43,8 @@ The following review comments were posted in previous cycles on this PR. Do NOT 
 Respond with ONLY a JSON object (no markdown fencing, no extra text):
 {"approved": true, "findings": [], "summary": "brief summary"}
 
-If you find issues, set approved to false and classify each finding as HIGH, MEDIUM, or LOW severity:
+If you find issues, classify each finding as HIGH, MEDIUM, or LOW severity.
+{{if .MinFixSeverity}}Set approved to false if ANY finding is {{.MinFixSeverityDesc}} severity or higher. Only set approved to true if all findings are below {{.MinFixSeverityDesc}} severity.{{else}}Set approved to false if any finding is MEDIUM or HIGH severity.{{end}}
 {"approved": false, "findings": [{"severity": "HIGH", "description": "issue description"}, {"severity": "MEDIUM", "description": "minor issue"}], "summary": "brief summary of findings"}
 Use severity "CRITERIA" only when the acceptance criterion itself is flawed, not the code.
 
@@ -65,6 +66,8 @@ type reviewPromptData struct {
 	RoleInstructions    string
 	Strictness          string
 	StrictnessUpper     string
+	MinFixSeverity      string
+	MinFixSeverityDesc  string
 	PriorReviewComments []string
 }
 
@@ -142,11 +145,25 @@ func renderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 		strictness = "standard"
 	}
 
+	minSev := strings.ToUpper(opts.MinFixSeverity)
+	sevDesc := ""
+	switch minSev {
+	case "LOW":
+		sevDesc = "LOW"
+	case "HIGH":
+		sevDesc = "HIGH"
+	default:
+		minSev = ""
+		sevDesc = ""
+	}
+
 	data := reviewPromptData{
 		AcceptanceCriteria:  opts.AcceptanceCriteria,
 		Diff:                diff,
 		Strictness:          strictness,
 		StrictnessUpper:     strings.ToUpper(strictness),
+		MinFixSeverity:      minSev,
+		MinFixSeverityDesc:  sevDesc,
 		PriorReviewComments: opts.PriorReviewComments,
 	}
 
