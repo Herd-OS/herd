@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
@@ -230,8 +231,27 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 			Body:        issueBody,
 		}
 
-		agentResult, err := ag.Execute(ctx, taskSpec, execOpts)
+		// Use a timeout for agent execution so the worker has time to push
+		// whatever work was done if the agent hangs after completing its task.
+		agentTimeout := time.Duration(cfg.Workers.TimeoutMinutes)*time.Minute - 5*time.Minute
+		if agentTimeout < 5*time.Minute {
+			agentTimeout = 5 * time.Minute
+		}
+		agentCtx, agentCancel := context.WithTimeout(ctx, agentTimeout)
+		agentResult, err := ag.Execute(agentCtx, taskSpec, execOpts)
+		agentCancel()
+
 		if err != nil {
+			// If the agent timed out, check if work was done — if so, continue to push
+			if agentCtx.Err() == context.DeadlineExceeded {
+				fmt.Printf("Agent execution timed out after %s, checking for completed work...\n", agentTimeout)
+				diff, diffErr := g.Diff(batchBranch, "HEAD")
+				if diffErr == nil && diff != "" {
+					fmt.Println("Work detected despite timeout — proceeding to push.")
+					rawSummary = "Agent timed out but work was completed."
+					goto pushWork
+				}
+			}
 			_ = p.Issues().AddComment(ctx, params.IssueNumber,
 				fmt.Sprintf("**Worker failed:** agent returned an error.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
 					truncateOutput(err.Error(), 2000)))
@@ -243,6 +263,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 	}
 
+pushWork:
 	// Check for no-op (no commits made)
 	diff, diffErr := g.Diff(batchBranch, "HEAD")
 	if diffErr != nil {

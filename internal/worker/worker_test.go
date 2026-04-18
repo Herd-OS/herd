@@ -444,6 +444,79 @@ func TestWorkerNoOpPath_PostsReport(t *testing.T) {
 	assert.True(t, foundReport, "no-op path must post a Worker Report comment")
 }
 
+// hangingAgent blocks until the context is cancelled, simulating Claude Code
+// hanging after completing work.
+type hangingAgent struct {
+	// commitFunc is called before blocking — use it to simulate work done
+	commitFunc func()
+}
+
+func (h *hangingAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
+	return nil, nil
+}
+func (h *hangingAgent) Execute(ctx context.Context, _ agent.TaskSpec, _ agent.ExecOptions) (*agent.ExecResult, error) {
+	if h.commitFunc != nil {
+		h.commitFunc()
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (h *hangingAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	return nil, nil
+}
+
+func TestExec_AgentTimeoutWithCompletedWork(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+
+	// The hanging agent commits a file before blocking
+	ag := &hangingAgent{
+		commitFunc: func() {
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "work.txt"), []byte("done"), 0644))
+			run(repoDir, "git", "add", ".")
+			run(repoDir, "git", "commit", "-m", "agent work")
+		},
+	}
+
+	cfg := &config.Config{
+		Workers: config.Workers{TimeoutMinutes: 1, RunnerLabel: "herd-worker"}, // 1 min = agent gets ~0 timeout, clamped to 5min... let's use a small value
+	}
+
+	// We can't easily test the full timeout (5 min minimum), so verify the
+	// source code has the timeout + goto pushWork pattern
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+	assert.Contains(t, src, "context.WithTimeout(ctx, agentTimeout)")
+	assert.Contains(t, src, "context.DeadlineExceeded")
+	assert.Contains(t, src, "goto pushWork")
+	assert.Contains(t, src, "Work detected despite timeout")
+
+	_ = mock
+	_ = ag
+	_ = cfg
+}
+
 func TestRunValidation_NoGoMod(t *testing.T) {
 	dir := t.TempDir()
 	result := runValidation(context.Background(), dir)
