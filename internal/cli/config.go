@@ -153,6 +153,7 @@ func flattenConfig(cfg *config.Config) []keyValue {
 	kvs = append(kvs, keyValue{"workers.max_concurrent", itoa(cfg.Workers.MaxConcurrent)})
 	kvs = append(kvs, keyValue{"workers.runner_label", cfg.Workers.RunnerLabel})
 	kvs = append(kvs, keyValue{"workers.timeout_minutes", itoa(cfg.Workers.TimeoutMinutes)})
+	kvs = append(kvs, keyValue{"workers.progress_interval_seconds", itoa(cfg.Workers.ProgressIntervalSeconds)})
 	kvs = append(kvs, keyValue{"integrator.strategy", cfg.Integrator.Strategy})
 	kvs = append(kvs, keyValue{"integrator.on_conflict", cfg.Integrator.OnConflict})
 	kvs = append(kvs, keyValue{"integrator.max_conflict_resolution_attempts", itoa(cfg.Integrator.MaxConflictResolutionAttempts)})

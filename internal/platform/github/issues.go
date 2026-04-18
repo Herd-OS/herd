@@ -118,10 +118,24 @@ func (s *issueService) RemoveLabels(ctx context.Context, number int, labels []st
 }
 
 func (s *issueService) AddComment(ctx context.Context, number int, body string) error {
+	_, err := s.AddCommentReturningID(ctx, number, body)
+	return err
+}
+
+func (s *issueService) AddCommentReturningID(ctx context.Context, number int, body string) (int64, error) {
 	comment := &gh.IssueComment{Body: gh.Ptr(body)}
-	_, _, err := s.c.gh.Issues.CreateComment(ctx, s.c.owner, s.c.repo, number, comment)
+	created, _, err := s.c.gh.Issues.CreateComment(ctx, s.c.owner, s.c.repo, number, comment)
 	if err != nil {
-		return fmt.Errorf("adding comment to issue #%d: %w", number, err)
+		return 0, fmt.Errorf("adding comment to issue #%d: %w", number, err)
+	}
+	return created.GetID(), nil
+}
+
+func (s *issueService) UpdateComment(ctx context.Context, commentID int64, body string) error {
+	comment := &gh.IssueComment{Body: gh.Ptr(body)}
+	_, _, err := s.c.gh.Issues.EditComment(ctx, s.c.owner, s.c.repo, commentID, comment)
+	if err != nil {
+		return fmt.Errorf("updating comment %d: %w", commentID, err)
 	}
 	return nil
 }

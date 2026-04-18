@@ -313,6 +313,12 @@ func (m *mockCommentIssueService) AddComment(_ context.Context, number int, body
 	m.addedBody = body
 	return m.addCommentErr
 }
+func (m *mockCommentIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
+	return 0, nil
+}
+func (m *mockCommentIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
+	return nil
+}
 
 // mockFailurePlatform implements platform.Platform for testing failure comment helpers.
 type mockFailurePlatform struct {

@@ -132,6 +132,12 @@ func (m *mockIssueService) AddComment(_ context.Context, number int, body string
 	}
 	return nil
 }
+func (m *mockIssueService) AddCommentReturningID(_ context.Context, _ int, body string) (int64, error) {
+	return 0, nil
+}
+func (m *mockIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
+	return nil
+}
 func (m *mockIssueService) DeleteComment(_ context.Context, commentID int64) error {
 	m.deletedComments = append(m.deletedComments, commentID)
 	return nil

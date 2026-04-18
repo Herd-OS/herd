@@ -94,6 +94,12 @@ func (m *testIssueService) RemoveLabels(_ context.Context, number int, labels []
 	return nil
 }
 func (m *testIssueService) AddComment(_ context.Context, _ int, _ string) error  { return nil }
+func (m *testIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
+	return 0, nil
+}
+func (m *testIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
+	return nil
+}
 func (m *testIssueService) DeleteComment(_ context.Context, _ int64) error       { return nil }
 func (m *testIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return m.listCommentsResult, nil

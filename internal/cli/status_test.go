@@ -134,8 +134,12 @@ func (m *mockStatusIssueService) Update(_ context.Context, _ int, _ platform.Iss
 }
 func (m *mockStatusIssueService) AddLabels(_ context.Context, _ int, _ []string) error    { return nil }
 func (m *mockStatusIssueService) RemoveLabels(_ context.Context, _ int, _ []string) error { return nil }
-func (m *mockStatusIssueService) AddComment(_ context.Context, _ int, _ string) error     { return nil }
-func (m *mockStatusIssueService) DeleteComment(_ context.Context, _ int64) error          { return nil }
+func (m *mockStatusIssueService) AddComment(_ context.Context, _ int, _ string) error { return nil }
+func (m *mockStatusIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
+	return 0, nil
+}
+func (m *mockStatusIssueService) UpdateComment(_ context.Context, _ int64, _ string) error { return nil }
+func (m *mockStatusIssueService) DeleteComment(_ context.Context, _ int64) error           { return nil }
 func (m *mockStatusIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }

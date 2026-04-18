@@ -231,6 +231,11 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 			Body:        issueBody,
 		}
 
+		// Start progress poster — updates a comment on the issue periodically
+		// with the contents of the progress file.
+		progressDone := make(chan struct{})
+		go postProgressUpdates(ctx, p, params.IssueNumber, params.RepoRoot, cfg.Workers.ProgressIntervalSeconds, progressDone)
+
 		// Use a timeout for agent execution so the worker has time to push
 		// whatever work was done if the agent hangs after completing its task.
 		agentTimeout := time.Duration(cfg.Workers.TimeoutMinutes)*time.Minute - 5*time.Minute
@@ -240,6 +245,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		agentCtx, agentCancel := context.WithTimeout(ctx, agentTimeout)
 		agentResult, err := ag.Execute(agentCtx, taskSpec, execOpts)
 		agentCancel()
+		close(progressDone)
 
 		if err != nil {
 			// If the agent timed out, check if work was done — if so, continue to push
@@ -518,6 +524,56 @@ func truncateOutput(s string, max int) string {
 // is done. It looks for .herd/progress/<issueNumber>.md first, then falls back
 // to WORKER_PROGRESS.md. Returns true if a progress file exists, has at least
 // one checkbox, and all checkboxes are checked.
+// postProgressUpdates polls the progress file and posts/updates a comment on
+// the issue with the current contents. Stops when done is closed.
+func postProgressUpdates(ctx context.Context, p platform.Platform, issueNumber int, repoRoot string, intervalSeconds int, done <-chan struct{}) {
+	if intervalSeconds <= 0 {
+		<-done
+		return
+	}
+
+	progressFile := filepath.Join(repoRoot, ".herd", "progress", fmt.Sprintf("%d.md", issueNumber))
+	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
+	defer ticker.Stop()
+
+	var commentID int64
+	var lastContent string
+
+	for {
+		select {
+		case <-done:
+			// Post final update with completed state
+			if content, err := os.ReadFile(progressFile); err == nil && string(content) != lastContent {
+				body := "📋 **Worker Progress** _(final)_\n\n" + string(content)
+				if commentID != 0 {
+					_ = p.Issues().UpdateComment(ctx, commentID, body)
+				}
+			} else if commentID != 0 && lastContent != "" {
+				body := "📋 **Worker Progress** _(final)_\n\n" + lastContent
+				_ = p.Issues().UpdateComment(ctx, commentID, body)
+			}
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			content, err := os.ReadFile(progressFile)
+			if err != nil || string(content) == lastContent {
+				continue
+			}
+			lastContent = string(content)
+			body := fmt.Sprintf("📋 **Worker Progress** _(updating every %ds)_\n\n%s", intervalSeconds, lastContent)
+			if commentID == 0 {
+				id, createErr := p.Issues().AddCommentReturningID(ctx, issueNumber, body)
+				if createErr == nil {
+					commentID = id
+				}
+			} else {
+				_ = p.Issues().UpdateComment(ctx, commentID, body)
+			}
+		}
+	}
+}
+
 func checkProgressComplete(repoRoot string, issueNumber int) bool {
 	paths := []string{
 		filepath.Join(repoRoot, ".herd", "progress", fmt.Sprintf("%d.md", issueNumber)),

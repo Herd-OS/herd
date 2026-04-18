@@ -138,6 +138,10 @@ The Integrator removes the `.herd/progress/` directory during consolidation
 do not appear in the final batch PR. For backward compatibility, legacy
 `WORKER_PROGRESS.md` files at the repo root are also removed.
 
+#### Live Progress Updates
+
+While the agent is working, the worker posts a progress comment on the issue and updates it periodically with the contents of the `.herd/progress/<issue-number>.md` file. This provides live visibility into what the agent has completed and what remains. The update interval is configurable via `workers.progress_interval_seconds` (default: 30 seconds, set to 0 to disable). When the worker finishes, the progress comment is updated one final time and kept on the issue for history.
+
 #### Retry Resume
 
 When a worker is re-dispatched for a previously timed-out task, it checks
