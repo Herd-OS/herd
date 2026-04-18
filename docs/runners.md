@@ -32,12 +32,12 @@ You need a Personal Access Token (PAT) for runner registration and API operation
 4. Under **Permissions**, enable:
    - **Actions**: Read and write
    - **Administration**: Read and write (runner self-registration)
+   - **Commit statuses**: Read and write
    - **Contents**: Read and write
    - **Issues**: Read and write
    - **Pull requests**: Read and write
-   - **Statuses**: Read (commit status API — not needed if `require_ci: false` in `.herdos.yml`)
-   - **Workflows**: Read and write (required if workers create workflow files)
-   - **Metadata**: Read (auto-selected)
+   - **Workflows**: Read and write
+   - **Metadata**: Read-only (auto-selected)
 5. Generate and copy the token
 
 ### Classic token (simpler)

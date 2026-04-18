@@ -22,5 +22,6 @@ jobs:
         env:
           HERD_RUNNER: "true"
           GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          HERD_ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           herd monitor patrol
