@@ -218,7 +218,11 @@ func (m *mockDispatchIssueService) RemoveLabels(_ context.Context, number int, l
 	return nil
 }
 func (m *mockDispatchIssueService) AddComment(_ context.Context, _ int, _ string) error { return nil }
-func (m *mockDispatchIssueService) DeleteComment(_ context.Context, _ int64) error       { return nil }
+func (m *mockDispatchIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
+	return 0, nil
+}
+func (m *mockDispatchIssueService) UpdateComment(_ context.Context, _ int64, _ string) error { return nil }
+func (m *mockDispatchIssueService) DeleteComment(_ context.Context, _ int64) error           { return nil }
 func (m *mockDispatchIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }

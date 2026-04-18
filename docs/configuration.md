@@ -23,6 +23,7 @@ workers:
   max_concurrent: 3              # max simultaneous worker Actions
   runner_label: "herd-worker"    # GitHub runner label for worker jobs
   timeout_minutes: 30            # max time per worker run
+  progress_interval_seconds: 30  # post progress updates to issue (0 = disabled)
 
 integrator:
   strategy: "squash"             # squash | rebase | merge

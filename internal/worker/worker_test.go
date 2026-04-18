@@ -86,12 +86,15 @@ func (m *mockPlatform) Repository() platform.RepositoryService     { return m.re
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 type mockIssueService struct {
-	getResult      *platform.Issue
-	getErr         error
-	addedLabels    []string
-	removedLabels  []string
-	comments       []string
-	updatedIssues  map[int]platform.IssueUpdate
+	getResult         *platform.Issue
+	getErr            error
+	addedLabels       []string
+	removedLabels     []string
+	comments          []string
+	updatedIssues     map[int]platform.IssueUpdate
+	nextCommentID     int64
+	updatedComments   map[int64]string
+	deletedComments   []int64
 }
 
 func (m *mockIssueService) Create(_ context.Context, _, _ string, _ []string, _ *int) (*platform.Issue, error) {
@@ -121,7 +124,22 @@ func (m *mockIssueService) AddComment(_ context.Context, _ int, body string) err
 	m.comments = append(m.comments, body)
 	return nil
 }
-func (m *mockIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
+func (m *mockIssueService) AddCommentReturningID(_ context.Context, _ int, body string) (int64, error) {
+	m.comments = append(m.comments, body)
+	m.nextCommentID++
+	return m.nextCommentID, nil
+}
+func (m *mockIssueService) UpdateComment(_ context.Context, commentID int64, body string) error {
+	if m.updatedComments == nil {
+		m.updatedComments = make(map[int64]string)
+	}
+	m.updatedComments[commentID] = body
+	return nil
+}
+func (m *mockIssueService) DeleteComment(_ context.Context, commentID int64) error {
+	m.deletedComments = append(m.deletedComments, commentID)
+	return nil
+}
 func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }
@@ -463,6 +481,89 @@ func (h *hangingAgent) Execute(ctx context.Context, _ agent.TaskSpec, _ agent.Ex
 }
 func (h *hangingAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return nil, nil
+}
+
+func TestPostProgressUpdates_PostsAndUpdates(t *testing.T) {
+	dir := t.TempDir()
+	progressDir := filepath.Join(dir, ".herd", "progress")
+	require.NoError(t, os.MkdirAll(progressDir, 0755))
+	progressFile := filepath.Join(progressDir, "42.md")
+
+	issueSvc := &mockIssueService{}
+	mock := &mockPlatform{issues: issueSvc}
+
+	done := make(chan struct{})
+	go postProgressUpdates(context.Background(), mock, 42, dir, 1, done)
+
+	// Write initial progress
+	require.NoError(t, os.WriteFile(progressFile, []byte("- [x] Step 1\n- [ ] Step 2\n"), 0644))
+	time.Sleep(1500 * time.Millisecond)
+
+	// Should have created a comment
+	require.NotEmpty(t, issueSvc.comments, "should have posted progress comment")
+	assert.Contains(t, issueSvc.comments[0], "Step 1")
+
+	// Update progress
+	require.NoError(t, os.WriteFile(progressFile, []byte("- [x] Step 1\n- [x] Step 2\n"), 0644))
+	time.Sleep(1500 * time.Millisecond)
+
+	// Should have updated the comment
+	require.NotEmpty(t, issueSvc.updatedComments, "should have updated progress comment")
+	var lastUpdate string
+	for _, body := range issueSvc.updatedComments {
+		lastUpdate = body
+	}
+	assert.Contains(t, lastUpdate, "Step 2")
+
+	close(done)
+	time.Sleep(100 * time.Millisecond)
+
+	// Should NOT have deleted the comment (kept for history)
+	assert.Empty(t, issueSvc.deletedComments, "progress comment should be kept for history")
+}
+
+func TestPostProgressUpdates_DisabledWhenZero(t *testing.T) {
+	issueSvc := &mockIssueService{}
+	mock := &mockPlatform{issues: issueSvc}
+
+	done := make(chan struct{})
+	go postProgressUpdates(context.Background(), mock, 42, t.TempDir(), 0, done)
+
+	time.Sleep(100 * time.Millisecond)
+	close(done)
+	time.Sleep(100 * time.Millisecond)
+
+	assert.Empty(t, issueSvc.comments, "should not post when interval is 0")
+}
+
+func TestPostProgressUpdates_FinalUpdateOnDone(t *testing.T) {
+	dir := t.TempDir()
+	progressDir := filepath.Join(dir, ".herd", "progress")
+	require.NoError(t, os.MkdirAll(progressDir, 0755))
+	progressFile := filepath.Join(progressDir, "42.md")
+
+	issueSvc := &mockIssueService{}
+	mock := &mockPlatform{issues: issueSvc}
+
+	done := make(chan struct{})
+	go postProgressUpdates(context.Background(), mock, 42, dir, 1, done)
+
+	// Write progress and wait for first post
+	require.NoError(t, os.WriteFile(progressFile, []byte("- [x] Step 1\n"), 0644))
+	time.Sleep(1500 * time.Millisecond)
+
+	// Update progress file and immediately close — should get final update
+	require.NoError(t, os.WriteFile(progressFile, []byte("- [x] Step 1\n- [x] Step 2\n"), 0644))
+	close(done)
+	time.Sleep(100 * time.Millisecond)
+
+	// Final update should contain "(final)" marker
+	var finalBody string
+	for _, body := range issueSvc.updatedComments {
+		finalBody = body
+	}
+	assert.Contains(t, finalBody, "final")
+	assert.Contains(t, finalBody, "Step 2")
 }
 
 func TestExec_AgentTimeoutWithCompletedWork(t *testing.T) {

@@ -25,6 +25,8 @@ type IssueService interface {
 	AddLabels(ctx context.Context, number int, labels []string) error
 	RemoveLabels(ctx context.Context, number int, labels []string) error
 	AddComment(ctx context.Context, number int, body string) error
+	AddCommentReturningID(ctx context.Context, number int, body string) (int64, error)
+	UpdateComment(ctx context.Context, commentID int64, body string) error
 	DeleteComment(ctx context.Context, commentID int64) error
 	ListComments(ctx context.Context, number int) ([]*Comment, error)
 	CreateCommentReaction(ctx context.Context, commentID int64, reaction string) error
