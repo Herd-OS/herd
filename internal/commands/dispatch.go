@@ -8,11 +8,8 @@ import (
 	"github.com/herd-os/herd/internal/planner"
 )
 
-func handleRetry(hctx *HandlerContext, cmd Command) Result {
-	if cmd.ParseErr != nil {
-		return Result{Message: "⚠️ Could not parse command: " + cmd.ParseErr.Error()}
-	}
-
+func handleDispatch(hctx *HandlerContext, cmd Command) Result {
+	// Determine which issue to dispatch — either from args or the current issue
 	var issueNum int
 	if len(cmd.Args) > 0 {
 		n, err := strconv.Atoi(cmd.Args[0])
@@ -22,7 +19,7 @@ func handleRetry(hctx *HandlerContext, cmd Command) Result {
 		issueNum = n
 	} else {
 		if hctx.IsPR {
-			return Result{Message: "⚠️ `/herd retry` on a PR requires an issue number: `/herd retry <issue-number>`"}
+			return Result{Message: "⚠️ `/herd dispatch` on a PR requires an issue number: `/herd dispatch <issue-number>`"}
 		}
 		issueNum = hctx.IssueNumber
 	}
@@ -32,13 +29,9 @@ func handleRetry(hctx *HandlerContext, cmd Command) Result {
 		return Result{Error: fmt.Errorf("getting issue #%d: %w", issueNum, err)}
 	}
 
-	// Always remove the retry-pending label so the monitor can post a new
-	// retry comment if this attempt fails and the issue returns to failed.
-	_ = hctx.Platform.Issues().RemoveLabels(hctx.Ctx, issueNum, []string{issues.RetryPending})
-
 	status := issues.StatusLabel(issue.Labels)
-	if status != issues.StatusFailed {
-		return Result{Message: fmt.Sprintf("⚠️ Issue #%d is not failed (status: %s).", issueNum, status)}
+	if status != issues.StatusReady && status != issues.StatusBlocked {
+		return Result{Message: fmt.Sprintf("⚠️ Issue #%d is not ready or blocked (status: %s).", issueNum, status)}
 	}
 	if issue.Milestone == nil {
 		return Result{Message: fmt.Sprintf("⚠️ Issue #%d has no milestone.", issueNum)}
@@ -51,7 +44,10 @@ func handleRetry(hctx *HandlerContext, cmd Command) Result {
 		return Result{Error: fmt.Errorf("getting default branch: %w", err)}
 	}
 
-	_ = hctx.Platform.Issues().RemoveLabels(hctx.Ctx, issueNum, []string{issues.StatusFailed})
+	// Remove current status and set in-progress
+	if status != "" {
+		_ = hctx.Platform.Issues().RemoveLabels(hctx.Ctx, issueNum, []string{status})
+	}
 	_ = hctx.Platform.Issues().AddLabels(hctx.Ctx, issueNum, []string{issues.StatusInProgress})
 
 	_, err = hctx.Platform.Workflows().Dispatch(hctx.Ctx, "herd-worker.yml", defaultBranch, map[string]string{
@@ -62,9 +58,9 @@ func handleRetry(hctx *HandlerContext, cmd Command) Result {
 	})
 	if err != nil {
 		_ = hctx.Platform.Issues().RemoveLabels(hctx.Ctx, issueNum, []string{issues.StatusInProgress})
-		_ = hctx.Platform.Issues().AddLabels(hctx.Ctx, issueNum, []string{issues.StatusFailed})
+		_ = hctx.Platform.Issues().AddLabels(hctx.Ctx, issueNum, []string{status})
 		return Result{Error: fmt.Errorf("dispatching worker for #%d: %w", issueNum, err)}
 	}
 
-	return Result{Message: fmt.Sprintf("🔄 Re-dispatched worker for issue #%d.", issueNum)}
+	return Result{Message: fmt.Sprintf("🚀 Dispatched worker for issue #%d.", issueNum)}
 }
