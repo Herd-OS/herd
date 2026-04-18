@@ -31,12 +31,10 @@ func (s *checkService) GetCombinedStatus(ctx context.Context, ref string) (strin
 		} else {
 			return "", fmt.Errorf("getting combined status for %s: %w", ref, err)
 		}
-	} else {
+	} else if commitStatus.GetTotalCount() > 0 {
 		// GitHub returns "pending" when there are zero commit statuses.
-		// Treat that as empty so it doesn't override check run results.
-		if commitStatus.GetTotalCount() > 0 {
-			statusState = commitStatus.GetState() // "success", "pending", "failure"
-		}
+		// Only use the state when actual statuses exist.
+		statusState = commitStatus.GetState() // "success", "pending", "failure"
 	}
 
 	// 2. Check runs
