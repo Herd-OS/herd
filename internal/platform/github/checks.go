@@ -8,12 +8,15 @@ import (
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/platform"
+	"golang.org/x/oauth2"
 )
 
 // Compile-time check.
 var _ platform.CheckService = (*checkService)(nil)
 
-type checkService struct{ c *Client }
+type checkService struct {
+	c *Client
+}
 
 func (s *checkService) GetCombinedStatus(ctx context.Context, ref string) (string, error) {
 	// Check both commit statuses (older API) and check runs (newer API, used by
@@ -38,7 +41,18 @@ func (s *checkService) GetCombinedStatus(ctx context.Context, ref string) (strin
 	}
 
 	// 2. Check runs
-	checkRuns, _, err := s.c.gh.Checks.ListCheckRunsForRef(ctx, s.c.owner, s.c.repo, ref, nil)
+	// Fine-grained PATs cannot access the Checks API (GitHub limitation).
+	// Fall back to the Actions-provided GITHUB_TOKEN via HERD_ACTIONS_TOKEN.
+	checksClient := s.c.gh
+	checkRuns, _, err := checksClient.Checks.ListCheckRunsForRef(ctx, s.c.owner, s.c.repo, ref, nil)
+	if err != nil {
+		var errResp *gh.ErrorResponse
+		if errors.As(err, &errResp) && errResp.Response.StatusCode == 403 {
+			if fallback := newActionsTokenClient(); fallback != nil {
+				checkRuns, _, err = fallback.Checks.ListCheckRunsForRef(ctx, s.c.owner, s.c.repo, ref, nil)
+			}
+		}
+	}
 	var checksState string
 	if err != nil {
 		var errResp *gh.ErrorResponse
@@ -102,4 +116,18 @@ func (s *checkService) RerunFailedChecks(ctx context.Context, ref string) error 
 		}
 	}
 	return nil
+}
+
+// newActionsTokenClient creates a GitHub client using the Actions-provided token.
+// Fine-grained PATs cannot access the Checks API, but the workflow's GITHUB_TOKEN can.
+// The workflow passes the Actions token as HERD_ACTIONS_TOKEN to avoid conflict with
+// the GITHUB_TOKEN env var which is set to HERD_GITHUB_TOKEN.
+func newActionsTokenClient() *gh.Client {
+	token := os.Getenv("HERD_ACTIONS_TOKEN")
+	if token == "" {
+		return nil
+	}
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	tc := oauth2.NewClient(context.Background(), ts)
+	return gh.NewClient(tc)
 }

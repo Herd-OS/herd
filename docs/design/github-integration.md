@@ -145,7 +145,19 @@ Comment posted     -> issue_comment.created   -> handle-comment parses and execu
 
 All workflows require the `HERD_ENABLED` repository variable to be set to `true`. This prevents workflow storms when `herd init` pushes workflow files before runners are configured. All `${{ }}` expressions in `run:` blocks are passed through environment variables to prevent shell injection.
 
-The checkout action in all workflows uses `HERD_GITHUB_TOKEN` (falling back to `GITHUB_TOKEN`) to configure git credentials for pushes. This is required for workers that create workflow files, which need the `workflows` permission.
+The checkout action in all workflows uses `HERD_GITHUB_TOKEN` (falling back to `GITHUB_TOKEN`) to configure git credentials for pushes. `HERD_GITHUB_TOKEN` is a fine-grained PAT with the following permissions:
+
+| Permission | Access | Why |
+|---|---|---|
+| Actions | Read and write | Dispatch worker workflows, list runs |
+| Administration | Read and write | Register self-hosted runners |
+| Checks | _(via Actions token)_ | CI check run results — fine-grained PATs cannot access this; workflows use the Actions-provided `GITHUB_TOKEN` as fallback |
+| Commit statuses | Read and write | Read/write commit statuses |
+| Contents | Read and write | Push branches, read repo contents |
+| Issues | Read and write | Create/update/label issues and milestones |
+| Metadata | Read-only | Required by GitHub (automatic) |
+| Pull requests | Read and write | Create/update/comment on PRs |
+| Workflows | Read and write | Push workflow files, required for worker commits that modify `.github/workflows/` |
 
 Issues auto-close via GitHub's native "Closes #N" references in the batch PR description when the PR is merged. When a batch PR is closed without merging, the Integrator explicitly closes milestone issues after labelling non-done issues as `cancelled`. Dependency unblocking is handled by the Integrator's tier advancement logic, with the Monitor as a safety net.
 
