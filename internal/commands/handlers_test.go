@@ -512,6 +512,7 @@ func TestHandleRetry(t *testing.T) {
 	tests := []struct {
 		name        string
 		args        []string
+		isPR        bool
 		parseErr    error
 		setupIssue  *platform.Issue
 		dispatchErr error
@@ -524,9 +525,10 @@ func TestHandleRetry(t *testing.T) {
 			wantMsg:  "Could not parse command",
 		},
 		{
-			name:    "missing arg",
+			name:    "missing arg on PR",
 			args:    []string{},
-			wantMsg: "Usage: `/herd retry",
+			isPR:    true,
+			wantMsg: "requires an issue number",
 		},
 		{
 			name:    "invalid issue number",
@@ -549,6 +551,15 @@ func TestHandleRetry(t *testing.T) {
 				Number: 42, Labels: []string{issues.StatusFailed},
 			},
 			wantMsg: "no milestone",
+		},
+		{
+			name: "no arg on issue — uses current issue",
+			args: []string{},
+			setupIssue: &platform.Issue{
+				Number: 42, Labels: []string{issues.StatusFailed},
+				Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+			},
+			wantMsg: "Re-dispatched worker for issue #42",
 		},
 		{
 			name: "successful redispatch",
@@ -574,10 +585,16 @@ func TestHandleRetry(t *testing.T) {
 				repo:      &testRepoService{defaultBranch: "main"},
 			}
 
+			issueNum := 42
+			if tt.isPR {
+				issueNum = 0
+			}
 			hctx := &HandlerContext{
-				Ctx:      context.Background(),
-				Platform: p,
-				Config:   baseConfig(),
+				Ctx:         context.Background(),
+				Platform:    p,
+				Config:      baseConfig(),
+				IsPR:        tt.isPR,
+				IssueNumber: issueNum,
 			}
 			result := handleRetry(hctx, Command{Name: "retry", Args: tt.args, ParseErr: tt.parseErr})
 

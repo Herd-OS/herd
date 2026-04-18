@@ -795,7 +795,8 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 | Command | Context | Description |
 |---------|---------|-------------|
 | `/herd fix-ci` | Issue or PR | Check CI status and dispatch a fix worker if CI failed |
-| `/herd retry <N>` | Issue or PR | Re-dispatch a failed issue's worker |
+| `/herd retry` | Issue | Re-dispatch the current failed issue's worker |
+| `/herd retry <N>` | Issue or PR | Re-dispatch failed issue #N's worker |
 | `/herd review` | PR | Trigger an agent review of the batch PR |
 | `/herd fix <description>` | PR | Create a fix issue from the description and dispatch a worker |
 | `/herd integrate` | Issue or PR | Run the full integrator cycle: consolidate → check CI → advance → review |

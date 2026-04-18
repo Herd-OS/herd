@@ -12,12 +12,19 @@ func handleRetry(hctx *HandlerContext, cmd Command) Result {
 	if cmd.ParseErr != nil {
 		return Result{Message: "⚠️ Could not parse command: " + cmd.ParseErr.Error()}
 	}
-	if len(cmd.Args) < 1 {
-		return Result{Message: "⚠️ Usage: `/herd retry <issue-number>`"}
-	}
-	issueNum, err := strconv.Atoi(cmd.Args[0])
-	if err != nil {
-		return Result{Message: fmt.Sprintf("⚠️ Invalid issue number: %s", cmd.Args[0])}
+
+	var issueNum int
+	if len(cmd.Args) > 0 {
+		n, err := strconv.Atoi(cmd.Args[0])
+		if err != nil {
+			return Result{Message: fmt.Sprintf("⚠️ Invalid issue number: %s", cmd.Args[0])}
+		}
+		issueNum = n
+	} else {
+		if hctx.IsPR {
+			return Result{Message: "⚠️ `/herd retry` on a PR requires an issue number: `/herd retry <issue-number>`"}
+		}
+		issueNum = hctx.IssueNumber
 	}
 
 	issue, err := hctx.Platform.Issues().Get(hctx.Ctx, issueNum)
