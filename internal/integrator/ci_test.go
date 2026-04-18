@@ -67,6 +67,7 @@ func TestCheckCI(t *testing.T) {
 		ciMaxCycles    int
 		existingCycles int
 		requireCI      bool
+		force          bool
 		expectStatus   string
 		expectSkipped  bool
 		expectMaxHit   bool
@@ -85,6 +86,15 @@ func TestCheckCI(t *testing.T) {
 			requireCI:    true,
 			ciMaxCycles:  2,
 			expectStatus: "pending",
+		},
+		{
+			name:           "pending with force — treats as failure",
+			ciStatus:       "pending",
+			requireCI:      true,
+			ciMaxCycles:    2,
+			force:          true,
+			expectStatus:   "failure",
+			expectFixCount: 1,
 		},
 		{
 			name:          "skipped — require_ci false",
@@ -172,7 +182,7 @@ func TestCheckCI(t *testing.T) {
 				Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
 			}
 
-			result, err := CheckCI(context.Background(), mock, cfg, CheckCIParams{RunID: 100})
+			result, err := CheckCI(context.Background(), mock, cfg, CheckCIParams{RunID: 100, Force: tt.force})
 			require.NoError(t, err)
 
 			if tt.expectSkipped {

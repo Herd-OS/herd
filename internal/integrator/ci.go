@@ -18,6 +18,7 @@ type CheckCIParams struct {
 	RepoRoot       string
 	UserContext    string // Optional hint from the user, prepended to fix issue body
 	BeforeDispatch func() // optional; called once, right before worker dispatch
+	Force          bool   // skip pending/success early return — treat any non-success as failure
 }
 
 // CheckCIResult holds the result of CI checking.
@@ -84,7 +85,10 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		return nil, fmt.Errorf("getting CI status: %w", err)
 	}
 
-	if status == "success" || status == "pending" {
+	if status == "success" {
+		return &CheckCIResult{Status: status}, nil
+	}
+	if status == "pending" && !params.Force {
 		return &CheckCIResult{Status: status}, nil
 	}
 

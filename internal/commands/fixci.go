@@ -41,6 +41,7 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 		RepoRoot:       hctx.RepoRoot,
 		UserContext:    cmd.Prompt,
 		BeforeDispatch: beforeDispatch,
+		Force:          true,
 	})
 	if err != nil {
 		return Result{Error: err}
@@ -52,8 +53,8 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 		msg = "CI checking is disabled (`require_ci: false`)."
 	case result.Status == "success":
 		msg = "✅ CI is passing."
-	case result.Status == "pending":
-		msg = "⏳ CI is pending — re-ran failed checks."
+	case result.Status == "pending" && len(result.FixIssues) == 0:
+		msg = "⏳ CI is pending — no failures detected yet."
 	case result.MaxCyclesHit:
 		msg = "⚠️ CI failed — max fix cycles reached. Manual intervention needed."
 	case len(result.FixIssues) > 0:

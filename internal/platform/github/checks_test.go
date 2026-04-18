@@ -77,7 +77,7 @@ func TestGetCombinedStatus_CheckRunPending(t *testing.T) {
 func TestGetCombinedStatus_BothSucceed(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/test-org/test-repo/commits/main/status", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(gh.CombinedStatus{State: gh.Ptr("success")})
+		json.NewEncoder(w).Encode(gh.CombinedStatus{State: gh.Ptr("success"), TotalCount: gh.Ptr(1)})
 	})
 	mux.HandleFunc("GET /repos/test-org/test-repo/commits/main/check-runs", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(gh.ListCheckRunsResults{
@@ -101,7 +101,7 @@ func TestGetCombinedStatus_BothSucceed(t *testing.T) {
 func TestGetCombinedStatus_CommitStatusFailureOverridesCheckRunSuccess(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/test-org/test-repo/commits/main/status", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(gh.CombinedStatus{State: gh.Ptr("failure")})
+		json.NewEncoder(w).Encode(gh.CombinedStatus{State: gh.Ptr("failure"), TotalCount: gh.Ptr(1)})
 	})
 	mux.HandleFunc("GET /repos/test-org/test-repo/commits/main/check-runs", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(gh.ListCheckRunsResults{
@@ -135,6 +135,29 @@ func TestGetCombinedStatus_NoStatusesOrChecks(t *testing.T) {
 	status, err := client.Checks().GetCombinedStatus(context.Background(), "main")
 	require.NoError(t, err)
 	assert.Equal(t, "success", status)
+}
+
+func TestGetCombinedStatus_ZeroStatusesWithFailedCheckRuns(t *testing.T) {
+	// Repos using only GitHub Actions CI have zero commit statuses (returns
+	// "pending" from the status API). Failed check runs should still be detected.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/test-org/test-repo/commits/main/status", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(gh.CombinedStatus{State: gh.Ptr("pending"), TotalCount: gh.Ptr(0)})
+	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/commits/main/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(gh.ListCheckRunsResults{
+			Total: gh.Ptr(2),
+			CheckRuns: []*gh.CheckRun{
+				{Name: gh.Ptr("Lint"), Status: gh.Ptr("completed"), Conclusion: gh.Ptr("success")},
+				{Name: gh.Ptr("Tests"), Status: gh.Ptr("completed"), Conclusion: gh.Ptr("failure")},
+			},
+		})
+	})
+
+	client, _ := newTestClient(t, mux)
+	status, err := client.Checks().GetCombinedStatus(context.Background(), "main")
+	require.NoError(t, err)
+	assert.Equal(t, "failure", status)
 }
 
 func TestGetCombinedStatus_CheckRunCancelled(t *testing.T) {
