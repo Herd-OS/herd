@@ -8,5 +8,6 @@ func DefaultRegistry() *Registry {
 	r.Register("review", handleReview)
 	r.Register("fix", handleFix)
 	r.Register("integrate", handleIntegrate)
+	r.Register("dispatch", handleDispatch)
 	return r
 }

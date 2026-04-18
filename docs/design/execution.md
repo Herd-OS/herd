@@ -790,6 +790,20 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 
 ### Monitor Integration
 
+### Available Commands
+
+| Command | Context | Description |
+|---------|---------|-------------|
+| `/herd fix-ci` | Issue or PR | Check CI status and dispatch a fix worker if CI failed |
+| `/herd retry <N>` | Issue or PR | Re-dispatch a failed issue's worker |
+| `/herd review` | PR | Trigger an agent review of the batch PR |
+| `/herd fix <description>` | PR | Create a fix issue from the description and dispatch a worker |
+| `/herd integrate` | Issue or PR | Run the full integrator cycle: consolidate → check CI → advance → review |
+| `/herd dispatch` | Issue | Dispatch the current issue (must be ready or blocked) |
+| `/herd dispatch <N>` | Issue or PR | Dispatch issue #N (must be ready or blocked) |
+
+### Monitor Integration
+
 The Monitor posts `/herd retry <N>` and `/herd fix-ci` comments instead of dispatching workflows directly. This ensures all command execution flows through the same handler, maintaining single responsibility.
 
 ### Failure Recovery
