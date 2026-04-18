@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +87,7 @@ func (m *mockPlatform) Repository() platform.RepositoryService     { return m.re
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 type mockIssueService struct {
+	mu                sync.Mutex
 	getResult         *platform.Issue
 	getErr            error
 	addedLabels       []string
@@ -125,11 +127,15 @@ func (m *mockIssueService) AddComment(_ context.Context, _ int, body string) err
 	return nil
 }
 func (m *mockIssueService) AddCommentReturningID(_ context.Context, _ int, body string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.comments = append(m.comments, body)
 	m.nextCommentID++
 	return m.nextCommentID, nil
 }
 func (m *mockIssueService) UpdateComment(_ context.Context, commentID int64, body string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.updatedComments == nil {
 		m.updatedComments = make(map[int64]string)
 	}
@@ -137,6 +143,8 @@ func (m *mockIssueService) UpdateComment(_ context.Context, commentID int64, bod
 	return nil
 }
 func (m *mockIssueService) DeleteComment(_ context.Context, commentID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.deletedComments = append(m.deletedComments, commentID)
 	return nil
 }
@@ -500,26 +508,32 @@ func TestPostProgressUpdates_PostsAndUpdates(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 
 	// Should have created a comment
+	issueSvc.mu.Lock()
 	require.NotEmpty(t, issueSvc.comments, "should have posted progress comment")
 	assert.Contains(t, issueSvc.comments[0], "Step 1")
+	issueSvc.mu.Unlock()
 
 	// Update progress
 	require.NoError(t, os.WriteFile(progressFile, []byte("- [x] Step 1\n- [x] Step 2\n"), 0644))
 	time.Sleep(1500 * time.Millisecond)
 
 	// Should have updated the comment
+	issueSvc.mu.Lock()
 	require.NotEmpty(t, issueSvc.updatedComments, "should have updated progress comment")
 	var lastUpdate string
 	for _, body := range issueSvc.updatedComments {
 		lastUpdate = body
 	}
+	issueSvc.mu.Unlock()
 	assert.Contains(t, lastUpdate, "Step 2")
 
 	close(done)
 	time.Sleep(100 * time.Millisecond)
 
 	// Should NOT have deleted the comment (kept for history)
+	issueSvc.mu.Lock()
 	assert.Empty(t, issueSvc.deletedComments, "progress comment should be kept for history")
+	issueSvc.mu.Unlock()
 }
 
 func TestPostProgressUpdates_DisabledWhenZero(t *testing.T) {
@@ -558,10 +572,12 @@ func TestPostProgressUpdates_FinalUpdateOnDone(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Final update should contain "(final)" marker
+	issueSvc.mu.Lock()
 	var finalBody string
 	for _, body := range issueSvc.updatedComments {
 		finalBody = body
 	}
+	issueSvc.mu.Unlock()
 	assert.Contains(t, finalBody, "final")
 	assert.Contains(t, finalBody, "Step 2")
 }
