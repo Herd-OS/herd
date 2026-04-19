@@ -561,7 +561,7 @@ func postProgressUpdates(ctx context.Context, p platform.Platform, issueNumber i
 				continue
 			}
 			lastContent = string(content)
-			body := fmt.Sprintf("📋 **Worker Progress** _(updating every %ds)_\n\n%s", intervalSeconds, lastContent)
+			body := "📋 **Worker Progress** _(live)_\n\n" + lastContent
 			if commentID == 0 {
 				id, createErr := p.Issues().AddCommentReturningID(ctx, issueNumber, body)
 				if createErr == nil {
