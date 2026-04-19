@@ -230,6 +230,9 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	// Close stale conflict/rebase issues whose worker branches no longer exist
 	closeStaleConflictIssues(ctx, p, issue.Milestone)
 
+	// If this was a conflict resolution issue, retry the original failed issue
+	retryConflictOriginIssues(ctx, p, cfg, issue, batchBranch)
+
 	// Delete worker branch
 	if err := p.Repository().DeleteBranch(ctx, workerBranch); err != nil {
 		// Non-fatal — log but don't fail
@@ -572,6 +575,60 @@ func removeBatchPRRebasePending(ctx context.Context, p platform.Platform, batchB
 		return
 	}
 	_ = p.Issues().RemoveLabels(ctx, prs[0].Number, []string{issues.RebasePending})
+}
+
+// retryConflictOriginIssues checks if the consolidated issue was a conflict
+// resolution issue, and if so, re-dispatches the original failed issue whose
+// worker branch caused the conflict.
+func retryConflictOriginIssues(ctx context.Context, p platform.Platform, cfg *config.Config, issue *platform.Issue, batchBranch string) {
+	parsed, err := issues.ParseBody(issue.Body)
+	if err != nil || !parsed.FrontMatter.ConflictResolution {
+		return
+	}
+
+	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
+	if err != nil {
+		fmt.Printf("Warning: failed to get default branch for conflict retry: %v\n", err)
+		return
+	}
+
+	for _, branch := range parsed.FrontMatter.ConflictingBranches {
+		if !strings.HasPrefix(branch, "herd/worker/") {
+			continue
+		}
+		// Extract issue number from branch name: herd/worker/471-slug → 471
+		parts := strings.SplitN(strings.TrimPrefix(branch, "herd/worker/"), "-", 2)
+		if len(parts) == 0 {
+			continue
+		}
+		origNum, parseErr := strconv.Atoi(parts[0])
+		if parseErr != nil {
+			continue
+		}
+
+		origIssue, getErr := p.Issues().Get(ctx, origNum)
+		if getErr != nil {
+			continue
+		}
+		if issues.StatusLabel(origIssue.Labels) != issues.StatusFailed {
+			continue
+		}
+
+		fmt.Printf("Conflict resolved — re-dispatching original issue #%d.\n", origNum)
+		_ = p.Issues().RemoveLabels(ctx, origNum, []string{issues.StatusFailed})
+		_ = p.Issues().AddLabels(ctx, origNum, []string{issues.StatusInProgress})
+		_, dispatchErr := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
+			"issue_number":    fmt.Sprintf("%d", origNum),
+			"batch_branch":    batchBranch,
+			"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+			"runner_label":    cfg.Workers.RunnerLabel,
+		})
+		if dispatchErr != nil {
+			_ = p.Issues().RemoveLabels(ctx, origNum, []string{issues.StatusInProgress})
+			_ = p.Issues().AddLabels(ctx, origNum, []string{issues.StatusFailed})
+			fmt.Printf("Warning: failed to re-dispatch #%d after conflict resolution: %v\n", origNum, dispatchErr)
+		}
+	}
 }
 
 func closeStaleConflictIssues(ctx context.Context, p platform.Platform, ms *platform.Milestone) {
