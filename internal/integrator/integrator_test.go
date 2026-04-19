@@ -2277,3 +2277,90 @@ func TestDispatchRebaseConflictWorker_TaskDescriptionContainsGitInstructions(t *
 	assert.Contains(t, body, "conflict markers")
 	assert.Contains(t, body, "git rebase --continue")
 }
+
+func TestRetryConflictOriginIssues(t *testing.T) {
+	// Issue 50 is a conflict resolution issue referencing worker branch for issue 42
+	conflictIssue := &platform.Issue{
+		Number: 50, Title: "Resolve conflict: #42",
+		Body: "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/42-some-task\n    - herd/batch/1-batch\n---\n\n## Task\nResolve conflict\n",
+	}
+	// Issue 42 is the original failed issue
+	origIssue := &platform.Issue{
+		Number: 42, Title: "Some task",
+		Labels:    []string{issues.StatusFailed},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = origIssue
+
+	wf := &mockWorkflowService{
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	retryConflictOriginIssues(context.Background(), mock, cfg, conflictIssue, "herd/batch/1-batch")
+
+	// Original issue should be relabeled in-progress and dispatched
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusFailed)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusInProgress)
+	assert.Len(t, wf.dispatched, 1)
+}
+
+func TestRetryConflictOriginIssues_SkipsNonFailed(t *testing.T) {
+	conflictIssue := &platform.Issue{
+		Number: 50, Title: "Resolve conflict: #42",
+		Body: "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/42-some-task\n    - herd/batch/1-batch\n---\n\n## Task\nResolve conflict\n",
+	}
+	origIssue := &platform.Issue{
+		Number: 42, Title: "Some task",
+		Labels:    []string{issues.StatusDone}, // already done, should skip
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = origIssue
+
+	wf := &mockWorkflowService{}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	retryConflictOriginIssues(context.Background(), mock, cfg, conflictIssue, "herd/batch/1-batch")
+
+	// Should NOT dispatch — issue is not failed
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestRetryConflictOriginIssues_SkipsNonConflictIssue(t *testing.T) {
+	regularIssue := &platform.Issue{
+		Number: 50, Title: "Regular task",
+		Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo something\n",
+	}
+
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:    newMockIssueService(),
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{}
+
+	retryConflictOriginIssues(context.Background(), mock, cfg, regularIssue, "herd/batch/1-batch")
+
+	// Should NOT dispatch — not a conflict resolution issue
+	assert.Empty(t, wf.dispatched)
+}
