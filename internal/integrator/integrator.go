@@ -372,7 +372,7 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 // dispatchReadyIssues dispatches ready/blocked issues from a tier, respecting
 // concurrency limits. Returns the number of issues dispatched.
 func dispatchReadyIssues(ctx context.Context, p platform.Platform, cfg *config.Config, tierIssues []int, allIssues []*platform.Issue, batchBranch string) (int, error) {
-	activeRuns, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "in_progress"})
+	activeRuns, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "in_progress", WorkflowFileName: "herd-worker.yml"})
 	if err != nil {
 		return 0, fmt.Errorf("counting active workers: %w", err)
 	}

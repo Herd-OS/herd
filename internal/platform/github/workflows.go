@@ -64,7 +64,15 @@ func (s *workflowService) ListRuns(ctx context.Context, filters platform.RunFilt
 
 	var result []*platform.Run
 
-	if filters.WorkflowID != 0 {
+	if filters.WorkflowFileName != "" {
+		runs, _, err := s.c.gh.Actions.ListWorkflowRunsByFileName(ctx, s.c.owner, s.c.repo, filters.WorkflowFileName, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing workflow runs by file: %w", err)
+		}
+		for _, r := range runs.WorkflowRuns {
+			result = append(result, mapRun(r))
+		}
+	} else if filters.WorkflowID != 0 {
 		runs, _, err := s.c.gh.Actions.ListWorkflowRunsByID(ctx, s.c.owner, s.c.repo, filters.WorkflowID, opts)
 		if err != nil {
 			return nil, fmt.Errorf("listing workflow runs: %w", err)
