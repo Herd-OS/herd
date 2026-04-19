@@ -119,9 +119,10 @@ type PRFilters struct {
 }
 
 type RunFilters struct {
-	WorkflowID int64
-	Status     string // "queued", "in_progress", "completed"
-	Branch     string
+	WorkflowID       int64
+	WorkflowFileName string // e.g. "herd-worker.yml" — used to filter by workflow file
+	Status           string // "queued", "in_progress", "completed"
+	Branch           string
 }
 
 type MilestoneUpdate struct {

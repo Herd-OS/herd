@@ -92,6 +92,30 @@ func TestWorkflowServiceListRuns(t *testing.T) {
 	assert.Equal(t, int64(100), runs[0].ID)
 }
 
+func TestWorkflowServiceListRuns_ByWorkflowFileName(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/workflows/herd-worker.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "in_progress", r.URL.Query().Get("status"))
+		resp := gh.WorkflowRuns{
+			TotalCount: gh.Ptr(1),
+			WorkflowRuns: []*gh.WorkflowRun{
+				{ID: gh.Ptr(int64(200)), Status: gh.Ptr("in_progress")},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	client, _ := newTestClient(t, mux)
+	runs, err := client.Workflows().ListRuns(context.Background(), platform.RunFilters{
+		Status:           "in_progress",
+		WorkflowFileName: "herd-worker.yml",
+	})
+
+	require.NoError(t, err)
+	assert.Len(t, runs, 1)
+	assert.Equal(t, int64(200), runs[0].ID)
+}
+
 func TestWorkflowServiceGetRun_ParsesRunName(t *testing.T) {
 	ts := gh.Timestamp{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	mux := http.NewServeMux()

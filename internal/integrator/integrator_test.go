@@ -167,10 +167,11 @@ func (m *mockPRService) Close(_ context.Context, _ int) error {
 }
 
 type mockWorkflowService struct {
-	runs         map[int64]*platform.Run
-	listResult   []*platform.Run
-	dispatched   []map[string]string
-	onDispatch   func() // optional; called before recording each dispatch
+	runs              map[int64]*platform.Run
+	listResult        []*platform.Run
+	dispatched        []map[string]string
+	onDispatch        func() // optional; called before recording each dispatch
+	lastListRunFilter platform.RunFilters
 }
 
 func (m *mockWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) { return 0, nil }
@@ -187,7 +188,8 @@ func (m *mockWorkflowService) GetRun(_ context.Context, id int64) (*platform.Run
 	}
 	return nil, nil
 }
-func (m *mockWorkflowService) ListRuns(_ context.Context, _ platform.RunFilters) ([]*platform.Run, error) {
+func (m *mockWorkflowService) ListRuns(_ context.Context, filters platform.RunFilters) ([]*platform.Run, error) {
+	m.lastListRunFilter = filters
 	return m.listResult, nil
 }
 func (m *mockWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
@@ -573,6 +575,8 @@ func TestAdvance_TierComplete(t *testing.T) {
 	assert.Contains(t, issueSvc.removedLabels[11], issues.StatusBlocked)
 	assert.Contains(t, issueSvc.addedLabels[11], issues.StatusInProgress)
 	assert.Len(t, wf.dispatched, 1)
+	// Concurrency check should filter by worker workflow only
+	assert.Equal(t, "herd-worker.yml", wf.lastListRunFilter.WorkflowFileName)
 }
 
 func TestAdvance_DispatchesReadyIssues(t *testing.T) {
