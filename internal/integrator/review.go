@@ -521,6 +521,40 @@ func collectPriorReviewComments(comments []*platform.Comment) []string {
 	return prior
 }
 
+// collectUserFeedbackComments returns the full body of non-HerdOS user comments.
+// These are regular user comments that may contain feedback on review findings
+// (e.g., marking false positives). HerdOS bot comments are excluded by checking
+// for known marker prefixes.
+func collectUserFeedbackComments(comments []*platform.Comment) []string {
+	herdPrefixes := []string{
+		"🔍 **HerdOS",
+		"✅ **HerdOS",
+		"⚠️ **HerdOS",
+		"🔧 ",
+		"🔄 **Integrator",
+		"📋 **Worker Progress",
+		"/herd ",
+	}
+	var feedback []string
+	for _, c := range comments {
+		body := strings.TrimSpace(c.Body)
+		if body == "" {
+			continue
+		}
+		isHerd := false
+		for _, prefix := range herdPrefixes {
+			if strings.HasPrefix(body, prefix) {
+				isHerd = true
+				break
+			}
+		}
+		if !isHerd {
+			feedback = append(feedback, body)
+		}
+	}
+	return feedback
+}
+
 func findMaxFixCycle(allIssues []*platform.Issue) int {
 	max := 0
 	for _, issue := range allIssues {
