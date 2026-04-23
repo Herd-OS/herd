@@ -16,6 +16,8 @@ services:
   worker:
     build:
       dockerfile: Dockerfile.herd_runner
+      additional_contexts:
+        herd-runner-base: service:herd-runner-base
     depends_on:
       herd-runner-base:
         condition: service_completed_successfully
