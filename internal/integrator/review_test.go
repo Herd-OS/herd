@@ -1984,6 +1984,68 @@ func TestCollectPriorReviewComments(t *testing.T) {
 	}
 }
 
+func TestCollectUserFeedbackComments(t *testing.T) {
+	tests := []struct {
+		name     string
+		comments []*platform.Comment
+		want     []string
+	}{
+		{
+			name:     "nil comments",
+			comments: nil,
+			want:     nil,
+		},
+		{
+			name: "only HerdOS comments excluded",
+			comments: []*platform.Comment{
+				{Body: "🔍 **HerdOS Agent Review** (cycle 1)\nFound issues"},
+				{Body: "✅ **HerdOS Agent Review**\nApproved"},
+				{Body: "⚠️ **HerdOS Integrator**\nMax cycles"},
+				{Body: "🔧 some tool output"},
+				{Body: "🔄 **Integrator** consolidating"},
+				{Body: "📋 **Worker Progress** 50%"},
+			},
+			want: nil,
+		},
+		{
+			name: "user comments collected",
+			comments: []*platform.Comment{
+				{Body: "This finding about the nil check is a false positive, the caller guarantees non-nil"},
+				{Body: "🔍 **HerdOS Agent Review**\nFindings"},
+				{Body: "Actually the error handling in auth.go is intentional, please don't flag it"},
+			},
+			want: []string{
+				"This finding about the nil check is a false positive, the caller guarantees non-nil",
+				"Actually the error handling in auth.go is intentional, please don't flag it",
+			},
+		},
+		{
+			name: "empty and whitespace-only comments excluded",
+			comments: []*platform.Comment{
+				{Body: ""},
+				{Body: "   "},
+				{Body: "real feedback"},
+			},
+			want: []string{"real feedback"},
+		},
+		{
+			name: "slash commands excluded",
+			comments: []*platform.Comment{
+				{Body: "/herd fix make the logo bigger"},
+				{Body: "/herd review"},
+				{Body: "please fix the typo"},
+			},
+			want: []string{"please fix the typo"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := collectUserFeedbackComments(tt.comments)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestReview_PassesPriorReviewCommentsToAgent(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
