@@ -169,14 +169,16 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		allCriteria = append(allCriteria, "User requested: "+fix)
 	}
 	priorReviewComments := collectPriorReviewComments(prComments)
+	userFeedback := collectUserFeedbackComments(prComments)
 
 	// Run agent review
 	reviewOpts := agent.ReviewOptions{
-		AcceptanceCriteria:  allCriteria,
-		RepoRoot:            params.RepoRoot,
-		Strictness:          cfg.Integrator.ReviewStrictness,
-		MinFixSeverity:      cfg.Integrator.ReviewFixSeverity,
-		PriorReviewComments: priorReviewComments,
+		AcceptanceCriteria:   allCriteria,
+		RepoRoot:             params.RepoRoot,
+		Strictness:           cfg.Integrator.ReviewStrictness,
+		MinFixSeverity:       cfg.Integrator.ReviewFixSeverity,
+		PriorReviewComments:  priorReviewComments,
+		UserFeedbackComments: userFeedback,
 	}
 
 	// Load integrator role instructions
@@ -386,6 +388,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	prComments, commentErr := p.Issues().ListComments(ctx, params.PRNumber)
 	if commentErr == nil {
 		reviewOpts.PriorReviewComments = collectPriorReviewComments(prComments)
+		reviewOpts.UserFeedbackComments = collectUserFeedbackComments(prComments)
 	}
 
 	reviewResult, err := ag.Review(ctx, diff, reviewOpts)
@@ -519,6 +522,40 @@ func collectPriorReviewComments(comments []*platform.Comment) []string {
 		}
 	}
 	return prior
+}
+
+// collectUserFeedbackComments returns the full body of non-HerdOS user comments.
+// These are regular user comments that may contain feedback on review findings
+// (e.g., marking false positives). HerdOS bot comments are excluded by checking
+// for known marker prefixes.
+func collectUserFeedbackComments(comments []*platform.Comment) []string {
+	herdPrefixes := []string{
+		"🔍 **HerdOS",
+		"✅ **HerdOS",
+		"⚠️ **HerdOS",
+		"🔧 ",
+		"🔄 **Integrator",
+		"📋 **Worker Progress",
+		"/herd ",
+	}
+	var feedback []string
+	for _, c := range comments {
+		body := strings.TrimSpace(c.Body)
+		if body == "" {
+			continue
+		}
+		isHerd := false
+		for _, prefix := range herdPrefixes {
+			if strings.HasPrefix(body, prefix) {
+				isHerd = true
+				break
+			}
+		}
+		if !isHerd {
+			feedback = append(feedback, body)
+		}
+	}
+	return feedback
 }
 
 func findMaxFixCycle(allIssues []*platform.Issue) int {

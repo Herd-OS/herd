@@ -34,6 +34,18 @@ The following review comments were posted in previous cycles on this PR. Do NOT 
 ---
 {{end}}
 {{end}}
+{{if .UserFeedbackComments}}
+## User Feedback
+The following comments were left by users (repository owners/collaborators) on this PR. Treat user feedback as authoritative:
+- If a user says a finding is a false positive, do NOT re-flag it.
+- If a user provides context explaining why code is correct, accept their explanation.
+- If a user requests a specific change, treat it as a requirement.
+{{range .UserFeedbackComments}}
+---
+{{.}}
+---
+{{end}}
+{{end}}
 ## Diff
 
 ` + "```diff" + `
@@ -61,14 +73,15 @@ Severity guide:
 const reviewSystemPrompt = `You are a HerdOS code reviewer. Your job is to review a batch of changes produced by AI workers and identify issues. Classify each finding by severity: HIGH (bugs, security), MEDIUM (edge cases, error handling), LOW (style, naming). Respond with JSON only.`
 
 type reviewPromptData struct {
-	AcceptanceCriteria  []string
-	Diff                string
-	RoleInstructions    string
-	Strictness          string
-	StrictnessUpper     string
-	MinFixSeverity      string
-	MinFixSeverityDesc  string
-	PriorReviewComments []string
+	AcceptanceCriteria   []string
+	Diff                 string
+	RoleInstructions     string
+	Strictness           string
+	StrictnessUpper      string
+	MinFixSeverity       string
+	MinFixSeverityDesc   string
+	PriorReviewComments  []string
+	UserFeedbackComments []string
 }
 
 // Review runs the configured agent in headless mode to review a diff.
@@ -158,13 +171,14 @@ func renderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 	}
 
 	data := reviewPromptData{
-		AcceptanceCriteria:  opts.AcceptanceCriteria,
-		Diff:                diff,
-		Strictness:          strictness,
-		StrictnessUpper:     strings.ToUpper(strictness),
-		MinFixSeverity:      minSev,
-		MinFixSeverityDesc:  sevDesc,
-		PriorReviewComments: opts.PriorReviewComments,
+		AcceptanceCriteria:   opts.AcceptanceCriteria,
+		Diff:                 diff,
+		Strictness:           strictness,
+		StrictnessUpper:      strings.ToUpper(strictness),
+		MinFixSeverity:       minSev,
+		MinFixSeverityDesc:   sevDesc,
+		PriorReviewComments:  opts.PriorReviewComments,
+		UserFeedbackComments: opts.UserFeedbackComments,
 	}
 
 	// Use role instructions passed by the caller (integrator loads .herd/integrator.md)

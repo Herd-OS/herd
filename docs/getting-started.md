@@ -230,7 +230,7 @@ When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the
 | `/herd fix-ci` | Batch PR | Checks CI status and dispatches fix workers if failing |
 | `/herd fix-ci <hint>` | Batch PR | Same as above, with context passed to the fix worker |
 | `/herd retry <issue-number>` | Any issue/PR | Re-dispatches a failed issue |
-| `/herd review` | Any PR | Triggers agent review of the PR. On batch PRs, findings create fix issues and dispatch workers; on non-batch PRs, only the severity-classified findings comment is posted. |
+| `/herd review` | Any PR | Triggers agent review of the PR. On batch PRs, findings create fix issues and dispatch workers; on non-batch PRs, only the severity-classified findings comment is posted. Non-HerdOS user comments on the PR are passed to the agent as feedback (e.g., to mark findings as false positives — see [User Feedback in Reviews](#user-feedback-in-reviews)). |
 | `/herd review <focus area>` | Any PR | Same as above, with extra review instructions |
 | `/herd fix <description>` | Batch PR | Creates a fix issue and dispatches a worker. The full PR comment thread is included in the fix issue so the worker has context of prior iterations. The reviewer automatically recognizes these fixes and will not flag them as acceptance criteria violations. |
 | `/herd integrate` | Any batch issue or PR | Manually triggers the integrator cycle (consolidate → check-ci → advance → review) for the batch. Useful for retrying after integrator failures. |
@@ -252,3 +252,13 @@ When the integrator fails during any step (consolidation, CI check, advancement,
 Quotes around the prompt text are optional. You can paste error logs, JSON snippets, or any text directly after the command — everything after the command name (including subsequent lines) is treated as the prompt. The quoted format (`/herd fix "description"`) is also still supported.
 
 The Monitor also uses comment commands internally — it posts `/herd retry <N>` and `/herd fix-ci` comments instead of dispatching directly, keeping all command execution flowing through a single handler.
+
+### User Feedback in Reviews
+
+When `/herd review` runs on a PR, it collects non-HerdOS user comments from the PR and passes them to the review agent as context. This means:
+
+- If a review flags a false positive, comment on the PR explaining why (e.g., "The nil check finding is a false positive — the caller guarantees non-nil").
+- On the next review cycle, the agent will see your comment and avoid re-flagging the same issue.
+- User feedback is treated as authoritative by the review agent — if a user says a finding is a false positive or provides context explaining why the code is correct, the agent will accept that.
+
+HerdOS bot comments (review findings, integrator messages, worker progress) are automatically excluded from user feedback collection. This works for both batch PRs and standalone PRs reviewed with `/herd review`.
