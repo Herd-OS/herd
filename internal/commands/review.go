@@ -15,8 +15,17 @@ func handleReview(hctx *HandlerContext, cmd Command) Result {
 	if err != nil {
 		return Result{Error: fmt.Errorf("getting PR #%d: %w", hctx.IssueNumber, err)}
 	}
+
 	if !strings.HasPrefix(pr.Head, "herd/batch/") {
-		return Result{Message: "⚠️ `/herd review` can only be used on batch PRs."}
+		_, err := integrator.ReviewStandalone(hctx.Ctx, hctx.Platform, hctx.Agent, hctx.Config, integrator.ReviewStandaloneParams{
+			PRNumber:          pr.Number,
+			RepoRoot:          hctx.RepoRoot,
+			ExtraInstructions: cmd.Prompt,
+		})
+		if err != nil {
+			return Result{Error: err}
+		}
+		return Result{}
 	}
 
 	result, err := integrator.Review(hctx.Ctx, hctx.Platform, hctx.Agent, hctx.Git, hctx.Config, integrator.ReviewParams{

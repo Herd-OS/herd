@@ -2159,3 +2159,149 @@ func TestBuildBatchSummaryComment(t *testing.T) {
 		})
 	}
 }
+
+// --- Tests for ReviewStandalone ---
+
+func newStandalonePlatform() (*mockPlatform, *mockCapturingPRService, *mockIssueService, *mockWorkflowService) {
+	issueSvc := newMockIssueService()
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{diffResult: "diff --git a/main.go b/main.go\n"},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+	return mock, prSvc, issueSvc, wf
+}
+
+func TestReviewStandalone_PostsComment(t *testing.T) {
+	mock, prSvc, issueSvc, wf := newStandalonePlatform()
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Missing error handling"},
+				{Severity: "MEDIUM", Description: "Consider adding tests"},
+			},
+		},
+	}
+
+	result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{Review: true},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 2, result.FindingsCount)
+
+	// Findings comment posted
+	require.Len(t, prSvc.comments, 1)
+	assert.True(t, strings.HasPrefix(prSvc.comments[0], "🔍"), "expected findings comment with 🔍 prefix")
+	assert.Contains(t, prSvc.comments[0], "**HIGH**")
+	assert.Contains(t, prSvc.comments[0], "Missing error handling")
+	assert.Contains(t, prSvc.comments[0], "**MEDIUM**")
+
+	// No fix issues, no workers
+	assert.Empty(t, issueSvc.createdTitle, "standalone review must not create fix issues")
+	assert.Empty(t, wf.dispatched, "standalone review must not dispatch workers")
+
+	// No review event should be a request-changes one (Approved path posts CreateReview)
+	for _, r := range prSvc.reviews {
+		assert.NotEqual(t, platform.ReviewRequestChanges, r.event, "standalone review must not create request-changes review")
+	}
+}
+
+func TestReviewStandalone_Approved(t *testing.T) {
+	mock, prSvc, issueSvc, wf := newStandalonePlatform()
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+	}
+
+	result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{Review: true},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 0, result.FindingsCount)
+
+	// Approval comment posted
+	require.Len(t, prSvc.comments, 1)
+	assert.True(t, strings.HasPrefix(prSvc.comments[0], "✅"))
+	assert.Contains(t, prSvc.comments[0], "LGTM")
+
+	// Approve review submitted
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewApprove, prSvc.reviews[0].event)
+
+	// No fix issues, no workers
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestReviewStandalone_NoFixIssues(t *testing.T) {
+	mock, prSvc, issueSvc, wf := newStandalonePlatform()
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Security bug in auth.go"},
+				{Severity: "HIGH", Description: "Broken concurrency"},
+			},
+		},
+	}
+
+	_, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewFixSeverity: "medium"},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+
+	// A findings comment must be posted
+	require.NotEmpty(t, prSvc.comments)
+
+	// No fix issues and no workers dispatched regardless of severity
+	assert.Empty(t, issueSvc.createdTitle, "standalone review must NOT create fix issues")
+	assert.Empty(t, wf.dispatched, "standalone review must NOT dispatch workers")
+}
+
+func TestReviewStandalone_ExtraInstructions(t *testing.T) {
+	issueSvc := newMockIssueService()
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{diffResult: "diff --git a/main.go b/main.go\n"},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	var capturedOpts agent.ReviewOptions
+	ag := &capturingMockAgent{
+		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		capturedOpts: &capturedOpts,
+	}
+
+	dir := t.TempDir()
+	// Create a .herd/integrator.md so SystemPrompt is pre-populated before extra instructions are appended.
+	require.NoError(t, os.MkdirAll(dir+"/.herd", 0755))
+	require.NoError(t, os.WriteFile(dir+"/.herd/integrator.md", []byte("Base instructions"), 0644))
+
+	_, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{Review: true},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: dir, ExtraInstructions: "Focus on security issues"})
+
+	require.NoError(t, err)
+	assert.Contains(t, capturedOpts.SystemPrompt, "Base instructions")
+	assert.Contains(t, capturedOpts.SystemPrompt, "Focus on security issues")
+}

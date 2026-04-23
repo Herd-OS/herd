@@ -66,6 +66,18 @@ type ReviewResult struct {
 	FindingsCount    int  // number of review findings (agent comments); set when AllCreatesFailed is true
 }
 
+// ReviewStandaloneParams holds parameters for reviewing a non-batch PR.
+type ReviewStandaloneParams struct {
+	PRNumber          int
+	RepoRoot          string
+	ExtraInstructions string
+}
+
+// ReviewStandaloneResult holds the result of a standalone PR review.
+type ReviewStandaloneResult struct {
+	FindingsCount int
+}
+
 // Consolidate merges a completed worker branch into the batch branch.
 // It resolves the worker branch from the workflow run, merges it, and cleans up.
 func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, params ConsolidateParams) (*ConsolidateResult, error) {

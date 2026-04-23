@@ -230,8 +230,8 @@ When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the
 | `/herd fix-ci` | Batch PR | Checks CI status and dispatches fix workers if failing |
 | `/herd fix-ci <hint>` | Batch PR | Same as above, with context passed to the fix worker |
 | `/herd retry <issue-number>` | Any issue/PR | Re-dispatches a failed issue |
-| `/herd review` | Batch PR | Triggers agent review of the batch PR |
-| `/herd review <focus area>` | Batch PR | Same as above, with extra review instructions |
+| `/herd review` | Any PR | Triggers agent review of the PR. On batch PRs, findings create fix issues and dispatch workers; on non-batch PRs, only the severity-classified findings comment is posted. |
+| `/herd review <focus area>` | Any PR | Same as above, with extra review instructions |
 | `/herd fix <description>` | Batch PR | Creates a fix issue and dispatches a worker. The full PR comment thread is included in the fix issue so the worker has context of prior iterations. The reviewer automatically recognizes these fixes and will not flag them as acceptance criteria violations. |
 | `/herd integrate` | Any batch issue or PR | Manually triggers the integrator cycle (consolidate → check-ci → advance → review) for the batch. Useful for retrying after integrator failures. |
 

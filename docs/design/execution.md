@@ -801,11 +801,15 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 | `/herd fix-ci` | Issue or PR | Check CI status and dispatch a fix worker if CI failed |
 | `/herd retry` | Issue | Re-dispatch the current failed issue's worker |
 | `/herd retry <N>` | Issue or PR | Re-dispatch failed issue #N's worker |
-| `/herd review` | PR | Trigger an agent review of the batch PR |
+| `/herd review` | PR | Trigger an agent review of the PR |
 | `/herd fix <description>` | PR | Create a fix issue from the description and dispatch a worker |
 | `/herd integrate` | Issue or PR | Run the full integrator cycle: consolidate → check CI → advance → review |
 | `/herd dispatch` | Issue | Dispatch the current issue (must be ready or blocked) |
 | `/herd dispatch <N>` | Issue or PR | Dispatch issue #N (must be ready or blocked) |
+
+#### Non-Batch PR Reviews
+
+`/herd review` works on any PR, not just batch PRs. When used on a non-batch PR, it runs the same agent review and posts a severity-classified findings comment, but skips all batch-specific logic: no fix issues are created, no workers are dispatched, and no fix cycles are tracked. This is useful for getting an AI review on regular PRs without the full Herd orchestration.
 
 ### Monitor Integration
 
