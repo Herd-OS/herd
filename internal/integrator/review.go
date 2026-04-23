@@ -356,6 +356,64 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}, nil
 }
 
+// ReviewStandalone runs an agent review on a non-batch PR.
+// It posts a findings comment but does NOT create fix issues, dispatch workers,
+// look up milestones, or track fix cycles.
+func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.Config, params ReviewStandaloneParams) (*ReviewStandaloneResult, error) {
+	diff, err := p.PullRequests().GetDiff(ctx, params.PRNumber)
+	if err != nil {
+		return nil, fmt.Errorf("getting PR diff: %w", err)
+	}
+
+	reviewOpts := agent.ReviewOptions{
+		RepoRoot:       params.RepoRoot,
+		Strictness:     cfg.Integrator.ReviewStrictness,
+		MinFixSeverity: cfg.Integrator.ReviewFixSeverity,
+	}
+
+	ri, readErr := os.ReadFile(filepath.Join(params.RepoRoot, ".herd", "integrator.md"))
+	if readErr == nil {
+		reviewOpts.SystemPrompt = string(ri)
+	}
+
+	if params.ExtraInstructions != "" {
+		if reviewOpts.SystemPrompt != "" {
+			reviewOpts.SystemPrompt += "\n\n"
+		}
+		reviewOpts.SystemPrompt += params.ExtraInstructions
+	}
+
+	prComments, commentErr := p.Issues().ListComments(ctx, params.PRNumber)
+	if commentErr == nil {
+		reviewOpts.PriorReviewComments = collectPriorReviewComments(prComments)
+	}
+
+	reviewResult, err := ag.Review(ctx, diff, reviewOpts)
+	if err != nil {
+		fmt.Printf("Review agent failed: %s\n", err)
+		return &ReviewStandaloneResult{}, nil
+	}
+
+	if strings.HasPrefix(reviewResult.Summary, "Failed to parse") {
+		fmt.Printf("Review agent returned unparseable output.\n")
+		return &ReviewStandaloneResult{}, nil
+	}
+
+	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
+
+	if reviewResult.Approved {
+		comment := fmt.Sprintf("✅ **HerdOS Agent Review**\n\n%s\n", reviewResult.Summary)
+		_ = p.PullRequests().AddComment(ctx, params.PRNumber, comment)
+		_ = p.PullRequests().CreateReview(ctx, params.PRNumber, "", platform.ReviewApprove)
+		return &ReviewStandaloneResult{}, nil
+	}
+
+	findingsComment := buildReviewCycleComment(0, 0, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
+	_ = p.PullRequests().AddComment(ctx, params.PRNumber, findingsComment)
+
+	return &ReviewStandaloneResult{FindingsCount: len(reviewResult.Findings)}, nil
+}
+
 // postCloseCleanup closes all issues in the milestone (labeling non-done ones
 // as cancelled), closes the milestone, and deletes the batch branch.
 // Used when a batch PR is closed without merging.

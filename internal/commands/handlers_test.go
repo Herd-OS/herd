@@ -717,7 +717,7 @@ func TestHandleReview_NotPR(t *testing.T) {
 	assert.Contains(t, result.Message, "can only be used on pull requests")
 }
 
-func TestHandleReview_NotBatchPR(t *testing.T) {
+func TestHandleReview_NonBatchPR(t *testing.T) {
 	prSvc := &testPRService{
 		getResult: map[int]*platform.PullRequest{
 			10: {Number: 10, Head: "feature/something"},
@@ -731,17 +731,64 @@ func TestHandleReview_NotBatchPR(t *testing.T) {
 		milestones: &testMilestoneService{},
 	}
 
+	ag := &testAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	dir := t.TempDir()
+
 	hctx := &HandlerContext{
 		Ctx:         context.Background(),
 		Platform:    p,
 		Config:      baseConfig(),
+		Agent:       ag,
+		RepoRoot:    dir,
 		IssueNumber: 10,
 		IsPR:        true,
 	}
 	result := handleReview(hctx, Command{Name: "review"})
 
 	assert.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "can only be used on batch PRs")
+	assert.Empty(t, result.Message)
+}
+
+func TestHandleReview_NonBatchPR_NoFixIssues(t *testing.T) {
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			10: {Number: 10, Head: "feature/something"},
+		},
+	}
+	issueSvc := newTestIssueService()
+	wfSvc := &testWorkflowService{}
+	p := &testPlatform{
+		prs:        prSvc,
+		issues:     issueSvc,
+		workflows:  wfSvc,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{},
+	}
+
+	ag := &testAgent{reviewResult: &agent.ReviewResult{
+		Approved: false,
+		Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "Bug found"},
+		},
+	}}
+	dir := t.TempDir()
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		Agent:       ag,
+		RepoRoot:    dir,
+		IssueNumber: 10,
+		IsPR:        true,
+	}
+	result := handleReview(hctx, Command{Name: "review"})
+
+	assert.NoError(t, result.Error)
+	assert.Empty(t, result.Message)
+	assert.Empty(t, issueSvc.createdIssues, "non-batch review must not create fix issues")
+	assert.Empty(t, wfSvc.dispatched, "non-batch review must not dispatch workers")
+	assert.GreaterOrEqual(t, len(prSvc.comments), 1, "review should post a findings comment")
 }
 
 func TestHandleReview_Approved(t *testing.T) {
