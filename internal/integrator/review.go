@@ -169,14 +169,16 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		allCriteria = append(allCriteria, "User requested: "+fix)
 	}
 	priorReviewComments := collectPriorReviewComments(prComments)
+	userFeedback := collectUserFeedbackComments(prComments)
 
 	// Run agent review
 	reviewOpts := agent.ReviewOptions{
-		AcceptanceCriteria:  allCriteria,
-		RepoRoot:            params.RepoRoot,
-		Strictness:          cfg.Integrator.ReviewStrictness,
-		MinFixSeverity:      cfg.Integrator.ReviewFixSeverity,
-		PriorReviewComments: priorReviewComments,
+		AcceptanceCriteria:   allCriteria,
+		RepoRoot:             params.RepoRoot,
+		Strictness:           cfg.Integrator.ReviewStrictness,
+		MinFixSeverity:       cfg.Integrator.ReviewFixSeverity,
+		PriorReviewComments:  priorReviewComments,
+		UserFeedbackComments: userFeedback,
 	}
 
 	// Load integrator role instructions
@@ -386,6 +388,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	prComments, commentErr := p.Issues().ListComments(ctx, params.PRNumber)
 	if commentErr == nil {
 		reviewOpts.PriorReviewComments = collectPriorReviewComments(prComments)
+		reviewOpts.UserFeedbackComments = collectUserFeedbackComments(prComments)
 	}
 
 	reviewResult, err := ag.Review(ctx, diff, reviewOpts)
