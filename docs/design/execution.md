@@ -339,6 +339,24 @@ to the acceptance criteria list as `"User requested: <description>"`. This
 ensures the reviewer checks user-requested changes equally alongside original
 acceptance criteria, rather than treating them as a separate prompt section.
 
+### User Feedback
+
+The reviewer also collects non-HerdOS user comments from the PR and passes them
+to the agent as a `## User Feedback` section. Users can comment on a PR to push
+back on findings (e.g., "The nil check finding is a false positive — the caller
+guarantees non-nil") and the next review cycle will see that comment and skip
+re-flagging the issue. The agent is instructed to treat user feedback as
+authoritative:
+
+- If a user says a finding is a false positive, the agent will not re-flag it.
+- If a user provides context explaining why code is correct, the agent accepts their explanation.
+- If a user requests a specific change, the agent treats it as a requirement.
+
+HerdOS bot comments (review findings, integrator messages, worker progress) are
+filtered out of user feedback collection so they don't feed back into the
+reviewer's prompt. This applies to both batch PR reviews and standalone
+`/herd review` runs on non-batch PRs.
+
 ### Severity-Based Filtering
 
 Review findings are classified by severity:
