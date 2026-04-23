@@ -2120,6 +2120,122 @@ func TestReview_NoPriorReviewComments_EmptyField(t *testing.T) {
 	assert.Nil(t, capturedOpts.PriorReviewComments)
 }
 
+func TestCollectUserFeedbackComments(t *testing.T) {
+	tests := []struct {
+		name     string
+		comments []*platform.Comment
+		want     []string
+	}{
+		{
+			name:     "no comments",
+			comments: nil,
+			want:     nil,
+		},
+		{
+			name: "only user comments returned",
+			comments: []*platform.Comment{
+				{Body: "🔍 **HerdOS Agent Review**\nFindings..."},
+				{Body: "This nil check finding is a false positive"},
+				{Body: "/herd fix something"},
+			},
+			want: []string{"This nil check finding is a false positive"},
+		},
+		{
+			name: "all HerdOS prefixes excluded",
+			comments: []*platform.Comment{
+				{Body: "🔍 **HerdOS Agent Review**\nFindings"},
+				{Body: "✅ **HerdOS Agent Review**\nApproved"},
+				{Body: "⚠️ **HerdOS Integrator**\nWarning"},
+				{Body: "🔧 Fix something"},
+				{Body: "🔄 **Integrator**\nRetrying"},
+				{Body: "📋 **Worker Progress**\nUpdate"},
+				{Body: "/herd fix thing"},
+				{Body: "/herd retry"},
+			},
+			want: nil,
+		},
+		{
+			name: "empty and whitespace-only comments excluded",
+			comments: []*platform.Comment{
+				{Body: ""},
+				{Body: "   "},
+				{Body: "\n\t\n"},
+				{Body: "Real feedback here"},
+			},
+			want: []string{"Real feedback here"},
+		},
+		{
+			name: "trimmed body is used for prefix check",
+			comments: []*platform.Comment{
+				{Body: "   🔍 **HerdOS Agent Review**\nFindings"},
+				{Body: "  user feedback with leading space  "},
+			},
+			want: []string{"user feedback with leading space"},
+		},
+		{
+			name: "multiple user comments preserved in order",
+			comments: []*platform.Comment{
+				{Body: "first feedback"},
+				{Body: "🔍 **HerdOS Agent Review**\nFindings"},
+				{Body: "second feedback"},
+			},
+			want: []string{"first feedback", "second feedback"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := collectUserFeedbackComments(tt.comments)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestReview_UserFeedbackPassedToAgent(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: "🔍 **HerdOS Agent Review**\nFindings..."},
+		{Body: "This nil check finding is a false positive"},
+		{Body: "/herd fix something"},
+	}
+
+	var capturedOpts agent.ReviewOptions
+	captureAgent := &capturingMockAgent{
+		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		capturedOpts: &capturedOpts,
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	dir, g := initTestRepo(t)
+	_, err := Review(context.Background(), mock, captureAgent, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"This nil check finding is a false positive"}, capturedOpts.UserFeedbackComments)
+}
+
 func TestBuildBatchSummaryComment(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -2366,4 +2482,36 @@ func TestReviewStandalone_ExtraInstructions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, capturedOpts.SystemPrompt, "Base instructions")
 	assert.Contains(t, capturedOpts.SystemPrompt, "Focus on security issues")
+}
+
+func TestReviewStandalone_UserFeedbackPassedToAgent(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: "🔍 **HerdOS Agent Review**\nFindings..."},
+		{Body: "This nil check finding is a false positive"},
+		{Body: "/herd fix something"},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{diffResult: "diff --git a/main.go b/main.go\n"},
+	}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  &mockWorkflowService{},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	var capturedOpts agent.ReviewOptions
+	ag := &capturingMockAgent{
+		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		capturedOpts: &capturedOpts,
+	}
+
+	_, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{Review: true},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"This nil check finding is a false positive"}, capturedOpts.UserFeedbackComments)
 }
