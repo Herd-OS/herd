@@ -69,12 +69,13 @@ type ReviewFinding struct {
 }
 
 type ReviewOptions struct {
-	AcceptanceCriteria  []string
-	RepoRoot            string
-	SystemPrompt        string
-	Strictness          string   // "standard", "strict", "lenient" — controls review aggressiveness
-	MinFixSeverity      string   // minimum severity that blocks approval: "high", "medium", "low"
-	PriorReviewComments []string // Full text of previous HerdOS review comments on this PR
+	AcceptanceCriteria   []string
+	RepoRoot             string
+	SystemPrompt         string
+	Strictness           string   // "standard", "strict", "lenient" — controls review aggressiveness
+	MinFixSeverity       string   // minimum severity that blocks approval: "high", "medium", "low"
+	PriorReviewComments  []string // Full text of previous HerdOS review comments on this PR
+	UserFeedbackComments []string // Non-HerdOS user comments providing feedback on review findings
 }
 
 type ReviewResult struct {
