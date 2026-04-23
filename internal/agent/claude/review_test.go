@@ -419,3 +419,54 @@ func TestRenderReviewPrompt_PriorReviewComments(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderReviewPrompt_UserFeedbackComments(t *testing.T) {
+	tests := []struct {
+		name                 string
+		userFeedbackComments []string
+		wantSection          bool
+	}{
+		{
+			name:                 "nil omits section",
+			userFeedbackComments: nil,
+			wantSection:          false,
+		},
+		{
+			name:                 "empty slice omits section",
+			userFeedbackComments: []string{},
+			wantSection:          false,
+		},
+		{
+			name:                 "one comment includes section",
+			userFeedbackComments: []string{"The nil check finding is a false positive"},
+			wantSection:          true,
+		},
+		{
+			name:                 "multiple comments lists all",
+			userFeedbackComments: []string{"False positive on auth.go", "The error handling is intentional"},
+			wantSection:          true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := agent.ReviewOptions{
+				AcceptanceCriteria:   []string{"works"},
+				UserFeedbackComments: tt.userFeedbackComments,
+			}
+			prompt, err := renderReviewPrompt("diff", opts)
+			require.NoError(t, err)
+
+			if tt.wantSection {
+				assert.Contains(t, prompt, "## User Feedback")
+				assert.Contains(t, prompt, "Treat user feedback as authoritative")
+				assert.Contains(t, prompt, "do NOT re-flag it")
+				for _, comment := range tt.userFeedbackComments {
+					assert.Contains(t, prompt, comment)
+				}
+			} else {
+				assert.NotContains(t, prompt, "## User Feedback")
+				assert.NotContains(t, prompt, "Treat user feedback as authoritative")
+			}
+		})
+	}
+}
