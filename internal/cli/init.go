@@ -10,6 +10,8 @@ import (
 	"strings"
 	"text/template"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/herd-os/herd/internal/cli/runner"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/display"
@@ -357,10 +359,20 @@ func createRunnerFiles(dir, owner, repo string) error {
 	}
 	fmt.Println(display.Success("Installed entrypoint.herd.sh"))
 
-	// docker-compose.herd.yml (templated with owner/repo)
+	// docker-compose.herd.yml (templated with owner/repo, merged with override if present)
 	rendered, err := renderDockerCompose(owner, repo)
 	if err != nil {
 		return fmt.Errorf("rendering docker-compose.herd.yml: %w", err)
+	}
+	overridePath := filepath.Join(dir, "docker-compose.herd.override.yml")
+	if overrideData, readErr := os.ReadFile(overridePath); readErr == nil {
+		merged, mergeErr := mergeComposeOverride([]byte(rendered), overrideData)
+		if mergeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to merge docker-compose.herd.override.yml: %v (using base only)\n", mergeErr)
+		} else {
+			rendered = string(merged)
+			fmt.Println(display.Success("Merged docker-compose.herd.override.yml"))
+		}
 	}
 	if err := os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), []byte(rendered), 0644); err != nil {
 		return fmt.Errorf("writing docker-compose.herd.yml: %w", err)
@@ -378,6 +390,60 @@ func createRunnerFiles(dir, owner, repo string) error {
 	fmt.Println(display.Success("Installed .env.herd.example"))
 
 	return nil
+}
+
+// mergeComposeOverride deep-merges an override YAML into the base compose YAML.
+// Maps are merged recursively; slices and scalars from the override replace the base.
+func mergeComposeOverride(base, override []byte) ([]byte, error) {
+	var baseMap, overrideMap map[string]any
+	if err := yaml.Unmarshal(base, &baseMap); err != nil {
+		return nil, fmt.Errorf("parsing base: %w", err)
+	}
+	if err := yaml.Unmarshal(override, &overrideMap); err != nil {
+		return nil, fmt.Errorf("parsing override: %w", err)
+	}
+	deepMerge(baseMap, overrideMap)
+
+	// Re-serialize with the original comment header
+	merged, err := yaml.Marshal(baseMap)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling merged: %w", err)
+	}
+
+	// Preserve the comment header from the base
+	header := extractYAMLHeader(string(base))
+	return []byte(header + string(merged)), nil
+}
+
+// deepMerge recursively merges src into dst. Maps are merged; everything else is replaced.
+func deepMerge(dst, src map[string]any) {
+	for k, srcVal := range src {
+		dstVal, exists := dst[k]
+		if !exists {
+			dst[k] = srcVal
+			continue
+		}
+		dstMap, dstIsMap := dstVal.(map[string]any)
+		srcMap, srcIsMap := srcVal.(map[string]any)
+		if dstIsMap && srcIsMap {
+			deepMerge(dstMap, srcMap)
+		} else {
+			dst[k] = srcVal
+		}
+	}
+}
+
+// extractYAMLHeader returns the leading comment lines from a YAML string.
+func extractYAMLHeader(s string) string {
+	var header string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, "#") || line == "" {
+			header += line + "\n"
+		} else {
+			break
+		}
+	}
+	return header
 }
 
 func renderDockerCompose(owner, repo string) (string, error) {

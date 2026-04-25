@@ -354,6 +354,72 @@ func TestRenderDockerCompose(t *testing.T) {
 	assert.Contains(t, rendered, "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}")
 }
 
+func TestMergeComposeOverride(t *testing.T) {
+	base := []byte(`# Header comment
+services:
+  worker:
+    build:
+      dockerfile: Dockerfile.herd_runner
+    environment:
+      - GITHUB_TOKEN=test
+`)
+
+	override := []byte(`services:
+  worker:
+    build:
+      args:
+        BUNDLE_TOKEN: secret
+    environment:
+      - EXTRA_VAR=value
+`)
+
+	merged, err := mergeComposeOverride(base, override)
+	require.NoError(t, err)
+	result := string(merged)
+
+	// Header preserved
+	assert.Contains(t, result, "# Header comment")
+	// Base values preserved
+	assert.Contains(t, result, "Dockerfile.herd_runner")
+	// Override values merged
+	assert.Contains(t, result, "BUNDLE_TOKEN")
+}
+
+func TestMergeComposeOverride_NoOverride(t *testing.T) {
+	base := []byte(`services:
+  worker:
+    build:
+      dockerfile: Dockerfile.herd_runner
+`)
+
+	// Merging empty override should return base content
+	merged, err := mergeComposeOverride(base, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Contains(t, string(merged), "Dockerfile.herd_runner")
+}
+
+func TestMergeComposeOverride_InvalidYAML(t *testing.T) {
+	base := []byte(`services:
+  worker:
+    build:
+      dockerfile: Dockerfile.herd_runner
+`)
+	_, err := mergeComposeOverride(base, []byte(`invalid: yaml: [`))
+	assert.Error(t, err)
+}
+
+func TestExtractYAMLHeader(t *testing.T) {
+	input := "# Comment 1\n# Comment 2\n\nservices:\n  worker:\n"
+	header := extractYAMLHeader(input)
+	assert.Equal(t, "# Comment 1\n# Comment 2\n\n", header)
+}
+
+func TestExtractYAMLHeader_NoComments(t *testing.T) {
+	input := "services:\n  worker:\n"
+	header := extractYAMLHeader(input)
+	assert.Equal(t, "", header)
+}
+
 func TestCommitInitFiles_BranchNaming(t *testing.T) {
 	oldVersion := version
 	defer func() { version = oldVersion }()
