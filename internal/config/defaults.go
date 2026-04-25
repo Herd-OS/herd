@@ -22,10 +22,10 @@ func Default() *Config {
 			MaxConflictResolutionAttempts: 2,
 			RequireCI:                     true,
 			Review:                        true,
-			ReviewMaxFixCycles:            10,
+			ReviewMaxFixCycles:            0,
 			ReviewStrictness:              "standard",
-			ReviewFixSeverity:             "medium",
-			CIMaxFixCycles:                10,
+			ReviewFixSeverity:             "low",
+			CIMaxFixCycles:                0,
 		},
 		Monitor: Monitor{
 			PatrolIntervalMinutes: 15,
