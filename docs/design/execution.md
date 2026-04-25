@@ -420,8 +420,8 @@ resolution procedure rather than attempting ad-hoc fixes.
 
 On each re-review, the reviewer receives its prior review comments as context to
 maintain consistency and avoid contradicting previous decisions. This cycle
-repeats until the agent approves or `review_max_fix_cycles` (default 3) is
-reached, at which point the Integrator comments on the PR with the remaining
+repeats until the agent approves or `review_max_fix_cycles` is
+reached (default 0 = unlimited), at which point the Integrator comments on the PR with the remaining
 issues and waits for human intervention.
 
 ### Safety Valve
@@ -733,7 +733,7 @@ graph TD
     D -->|CI failed| G["Agent analyzes failure logs,<br>creates fix issues"]
     G --> H["Fix workers execute →<br>re-consolidate → CI runs again"]
     H -->|Passes| DONE2["Done"]
-    H -->|Fails| I{"ci_max_fix_cycles<br>reached? (default: 2)"}
+    H -->|Fails| I{"ci_max_fix_cycles<br>reached? (default: 0/unlimited)"}
     I -->|No| G
     I -->|Yes| J["Integrator reverts consolidation<br>Issue labeled failed,<br>comment with CI details"]
 ```
@@ -859,10 +859,10 @@ Every automated feedback loop has a hard cap:
 
 | Loop | Config Key | Default | At Limit | Dedup Label |
 |------|-----------|---------|----------|-------------|
-| Agent review / fix / re-review | review_max_fix_cycles | 3 | Comments on PR, waits for human | — |
+| Agent review / fix / re-review | review_max_fix_cycles | 0 (unlimited) | Comments on PR, waits for human | — |
 | Monitor re-dispatch | max_redispatch_attempts | 3 | Labels issue failed, stops | — |
 | Conflict resolution | max_conflict_resolution_attempts | 2 | Falls back to notify | `herd/rebase-pending` |
-| CI failure fix cycles | ci_max_fix_cycles | 2 | Reverts consolidation, notifies user (0 = notify-only) | `herd/ci-fix-pending` |
+| CI failure fix cycles | ci_max_fix_cycles | 0 (unlimited) | Notifies user | `herd/ci-fix-pending` |
 
 ### Merge Strategy
 

@@ -31,10 +31,10 @@ integrator:
   max_conflict_resolution_attempts: 2
   require_ci: true
   review: true                   # agent reviews batch PRs before merge
-  review_max_fix_cycles: 3       # max fix-and-re-review cycles (reviewer reads its prior comments to avoid contradictions)
+  review_max_fix_cycles: 0       # max fix-and-re-review cycles (0 = unlimited)
   review_strictness: "standard"  # standard | strict | lenient
-  review_fix_severity: "medium"  # minimum severity to create fix workers: high | medium | low
-  ci_max_fix_cycles: 2           # max CI-failure fix cycles (0 = notify-only)
+  review_fix_severity: "low"     # minimum severity to create fix workers: high | medium | low
+  ci_max_fix_cycles: 0           # max CI-failure fix cycles (0 = unlimited)
 
 monitor:
   patrol_interval_minutes: 15
