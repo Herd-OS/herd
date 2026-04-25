@@ -378,3 +378,48 @@ func TestCheckCI_FixIssueOnFirstFailure(t *testing.T) {
 	assert.Equal(t, 1, result.FixCycle)
 	assert.False(t, checkSvc.rerunCalled, "RerunFailedChecks must not be called")
 }
+
+func TestCheckCI_SkipsWhenCIFixInProgress(t *testing.T) {
+	issueSvc, wf, prSvc := baseCIMocks()
+	// Existing CI fix issue that's still in progress
+	issueSvc.listResult = []*platform.Issue{
+		{
+			Number: 80,
+			Labels: []string{issues.StatusInProgress},
+			Body:   "---\nherd:\n  version: 1\n  ci_fix_cycle: 1\n---\n\n## Task\nFix CI\n",
+		},
+	}
+
+	createdIssues := []*platform.Issue{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			iss := &platform.Issue{Number: 99, Title: title}
+			createdIssues = append(createdIssues, iss)
+			return iss, nil
+		},
+	}
+
+	checkSvc := &mockCheckService{status: "failure"}
+	mock := &mockPlatformWithChecks{
+		mockPlatform: &mockPlatform{
+			issues:     mockCreate,
+			prs:        prSvc,
+			workflows:  wf,
+			repo:       &mockRepoService{defaultBranch: "main"},
+			milestones: &mockMilestoneService{},
+		},
+		checks: checkSvc,
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true, CIMaxFixCycles: 0},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := CheckCI(context.Background(), mock, cfg, CheckCIParams{RunID: 100})
+	require.NoError(t, err)
+	assert.Equal(t, "failure", result.Status)
+	assert.Empty(t, createdIssues, "should not create fix issue when one is already in progress")
+	assert.Empty(t, wf.dispatched, "should not dispatch when fix is in progress")
+}

@@ -101,11 +101,19 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		return nil, fmt.Errorf("listing milestone issues: %w", err)
 	}
 
+	// Skip if a CI fix worker is already in progress
 	currentCycle := 0
 	for _, iss := range allIssues {
 		parsed, parseErr := issues.ParseBody(iss.Body)
 		if parseErr != nil {
 			continue
+		}
+		if parsed.FrontMatter.CIFixCycle > 0 {
+			status := issues.StatusLabel(iss.Labels)
+			if status == issues.StatusInProgress || status == issues.StatusReady {
+				fmt.Printf("Skipping CI fix: fix issue #%d is still %s\n", iss.Number, status)
+				return &CheckCIResult{Status: "failure"}, nil
+			}
 		}
 		if parsed.FrontMatter.CIFixCycle > currentCycle {
 			currentCycle = parsed.FrontMatter.CIFixCycle
