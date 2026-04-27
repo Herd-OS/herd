@@ -318,7 +318,8 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		}
 	}
 	if triggerTier < 0 {
-		return nil, fmt.Errorf("issue #%d not found in any tier", issueNumber)
+		fmt.Printf("Warning: issue #%d not found in any tier of milestone #%d (possibly partial API response); skipping advance\n", issueNumber, ms.Number)
+		return &AdvanceResult{}, nil
 	}
 
 	// Check if the triggering issue's tier is complete
@@ -361,6 +362,11 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 
 	// Tier is complete — check if this was the last tier
 	if triggerTier+1 >= len(tiers) {
+		if !hasCompleteIssueList(allIssues, ms) {
+			fmt.Printf("Warning: milestone #%d has %d expected issues (%d open + %d closed) but only %d were returned by the API; skipping batch PR to avoid premature open\n",
+				ms.Number, ms.OpenIssues+ms.ClosedIssues, ms.OpenIssues, ms.ClosedIssues, len(allIssues))
+			return &AdvanceResult{TierComplete: true}, nil
+		}
 		// All tiers done — open batch PR
 		prNum, err := openBatchPR(ctx, p, g, cfg, ms, allIssues, tiers, batchBranch)
 		if err != nil {
@@ -538,6 +544,11 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 
 	// All tiers complete
 	if incompleteTier == -1 {
+		if !hasCompleteIssueList(allIssues, ms) {
+			fmt.Printf("Warning: milestone #%d has %d expected issues (%d open + %d closed) but only %d were returned by the API; skipping batch PR to avoid premature open\n",
+				ms.Number, ms.OpenIssues+ms.ClosedIssues, ms.OpenIssues, ms.ClosedIssues, len(allIssues))
+			return &AdvanceResult{TierComplete: true}, nil
+		}
 		prNum, err := openBatchPR(ctx, p, g, cfg, ms, allIssues, tiers, batchBranch)
 		if err != nil {
 			return nil, fmt.Errorf("opening batch PR: %w", err)
@@ -560,6 +571,18 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 // isBatchComplete checks if the milestone is closed (batch already merged).
 func isBatchComplete(ms *platform.Milestone) bool {
 	return ms != nil && ms.State == "closed"
+}
+
+// hasCompleteIssueList reports whether the listed issues match the milestone's
+// expected issue count. It guards against partial GitHub API responses that
+// could otherwise make a batch look complete when issues are missing.
+// Returns true when len(allIssues) >= ms.OpenIssues + ms.ClosedIssues.
+func hasCompleteIssueList(allIssues []*platform.Issue, ms *platform.Milestone) bool {
+	if ms == nil {
+		return true
+	}
+	expected := ms.OpenIssues + ms.ClosedIssues
+	return len(allIssues) >= expected
 }
 
 func findIssue(allIssues []*platform.Issue, number int) *platform.Issue {
