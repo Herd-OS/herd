@@ -144,6 +144,9 @@ func (m *testPRService) AddComment(_ context.Context, _ int, body string) error 
 func (m *testPRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
 	return nil
 }
+func (m *testPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
 func (m *testPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "", nil
 }

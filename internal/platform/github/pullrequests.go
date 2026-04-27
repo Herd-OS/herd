@@ -132,6 +132,35 @@ func (s *pullRequestService) AddComment(ctx context.Context, number int, body st
 	return nil
 }
 
+func (s *pullRequestService) ListReviewComments(ctx context.Context, number int) ([]*platform.ReviewComment, error) {
+	opts := &gh.PullRequestListCommentsOptions{
+		ListOptions: gh.ListOptions{PerPage: 100},
+	}
+	var out []*platform.ReviewComment
+	for {
+		comments, resp, err := s.c.gh.PullRequests.ListComments(ctx, s.c.owner, s.c.repo, number, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing review comments for PR #%d: %w", number, err)
+		}
+		for _, c := range comments {
+			out = append(out, &platform.ReviewComment{
+				ID:                c.GetID(),
+				Body:              c.GetBody(),
+				AuthorLogin:       c.GetUser().GetLogin(),
+				AuthorAssociation: c.GetAuthorAssociation(),
+				Path:              c.GetPath(),
+				Line:              c.GetLine(),
+				DiffHunk:          c.GetDiffHunk(),
+			})
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return out, nil
+}
+
 func (s *pullRequestService) GetDiff(ctx context.Context, number int) (string, error) {
 	diff, _, err := s.c.gh.PullRequests.GetRaw(ctx, s.c.owner, s.c.repo, number, gh.RawOptions{Type: gh.Diff})
 	if err != nil {

@@ -194,7 +194,7 @@ func TestPullRequestCreateReview(t *testing.T) {
 	}{
 		{"approve", platform.ReviewApprove},
 		{"request changes", platform.ReviewRequestChanges},
-		{"comment", platform.ReviewComment},
+		{"comment", platform.ReviewCommentEvent},
 	}
 
 	for _, tt := range tests {
@@ -261,6 +261,107 @@ func TestPullRequestGetDiff(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, diff, "diff --git")
 	assert.Contains(t, diff, "+added line")
+}
+
+func TestPullRequestListReviewComments(t *testing.T) {
+	callCount := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test-org/test-repo/pulls/42/comments", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		callCount++
+		switch callCount {
+		case 1:
+			w.Header().Set("Link", `</repos/test-org/test-repo/pulls/42/comments?page=2>; rel="next"`)
+			json.NewEncoder(w).Encode([]gh.PullRequestComment{
+				{
+					ID:                gh.Ptr(int64(1001)),
+					Body:              gh.Ptr("first comment"),
+					User:              &gh.User{Login: gh.Ptr("alice")},
+					AuthorAssociation: gh.Ptr("MEMBER"),
+					Path:              gh.Ptr("foo.go"),
+					Line:              gh.Ptr(10),
+					DiffHunk:          gh.Ptr("@@ -1 +1 @@\n-old\n+new"),
+				},
+				{
+					ID:                gh.Ptr(int64(1002)),
+					Body:              gh.Ptr("second comment"),
+					User:              &gh.User{Login: gh.Ptr("bob")},
+					AuthorAssociation: gh.Ptr("OWNER"),
+					Path:              gh.Ptr("bar.go"),
+					Line:              gh.Ptr(25),
+					DiffHunk:          gh.Ptr("@@ -2 +2 @@\n-x\n+y"),
+				},
+			})
+		case 2:
+			json.NewEncoder(w).Encode([]gh.PullRequestComment{
+				{
+					ID:                gh.Ptr(int64(1003)),
+					Body:              gh.Ptr("third comment"),
+					User:              &gh.User{Login: gh.Ptr("carol")},
+					AuthorAssociation: gh.Ptr("CONTRIBUTOR"),
+					Path:              gh.Ptr("baz.go"),
+					Line:              gh.Ptr(7),
+					DiffHunk:          gh.Ptr("@@ -3 +3 @@\n-a\n+b"),
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: callCount=%d", callCount)
+		}
+	})
+
+	client, _ := newTestClient(t, mux)
+	comments, err := client.PullRequests().ListReviewComments(context.Background(), 42)
+	require.NoError(t, err)
+	require.Len(t, comments, 3)
+	assert.Equal(t, 2, callCount)
+
+	assert.Equal(t, int64(1001), comments[0].ID)
+	assert.Equal(t, "first comment", comments[0].Body)
+	assert.Equal(t, "alice", comments[0].AuthorLogin)
+	assert.Equal(t, "MEMBER", comments[0].AuthorAssociation)
+	assert.Equal(t, "foo.go", comments[0].Path)
+	assert.Equal(t, 10, comments[0].Line)
+	assert.Equal(t, "@@ -1 +1 @@\n-old\n+new", comments[0].DiffHunk)
+
+	assert.Equal(t, int64(1002), comments[1].ID)
+	assert.Equal(t, "second comment", comments[1].Body)
+	assert.Equal(t, "bob", comments[1].AuthorLogin)
+	assert.Equal(t, "OWNER", comments[1].AuthorAssociation)
+	assert.Equal(t, "bar.go", comments[1].Path)
+	assert.Equal(t, 25, comments[1].Line)
+
+	assert.Equal(t, int64(1003), comments[2].ID)
+	assert.Equal(t, "third comment", comments[2].Body)
+	assert.Equal(t, "carol", comments[2].AuthorLogin)
+	assert.Equal(t, "CONTRIBUTOR", comments[2].AuthorAssociation)
+	assert.Equal(t, "baz.go", comments[2].Path)
+	assert.Equal(t, 7, comments[2].Line)
+}
+
+func TestPullRequestListReviewComments_SinglePage(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test-org/test-repo/pulls/7/comments", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		json.NewEncoder(w).Encode([]gh.PullRequestComment{
+			{
+				ID:                gh.Ptr(int64(99)),
+				Body:              gh.Ptr("only"),
+				User:              &gh.User{Login: gh.Ptr("dee")},
+				AuthorAssociation: gh.Ptr("NONE"),
+				Path:              gh.Ptr("only.go"),
+				Line:              gh.Ptr(1),
+				DiffHunk:          gh.Ptr("@@ -0 +0 @@"),
+			},
+		})
+	})
+
+	client, _ := newTestClient(t, mux)
+	comments, err := client.PullRequests().ListReviewComments(context.Background(), 7)
+	require.NoError(t, err)
+	require.Len(t, comments, 1)
+	assert.Equal(t, int64(99), comments[0].ID)
+	assert.Equal(t, "only", comments[0].Body)
+	assert.Equal(t, "dee", comments[0].AuthorLogin)
 }
 
 func TestPullRequestService_Close(t *testing.T) {
