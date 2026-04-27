@@ -60,6 +60,8 @@ When the Integrator processes commands (Consolidate, Advance, AdvanceByBatch, Ch
 
 Opening a batch PR is idempotent: if two concurrent integrator runs both attempt to create the PR, the second detects the existing one (via listing or by handling a 422 race) and returns the existing PR number.
 
+The Integrator also guards against partial GitHub API responses: before opening the batch PR it verifies the milestone's issue list is complete, and if the issue triggering an advance is not in any tier it treats the trigger as a no-op. Both cases log a warning and retry on the next advance rather than erroring or opening a premature PR.
+
 ### Worker, Consolidate, PR flow
 
 ```mermaid

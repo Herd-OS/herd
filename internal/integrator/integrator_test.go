@@ -2374,3 +2374,204 @@ func TestRetryConflictOriginIssues_SkipsNonConflictIssue(t *testing.T) {
 	// Should NOT dispatch — not a conflict resolution issue
 	assert.Empty(t, wf.dispatched)
 }
+
+func TestAdvance_UnknownTriggerIssueReturnsNoOp(t *testing.T) {
+	issueSvc := newMockIssueService()
+	// Triggering issue #99 exists and has a milestone, but is NOT in listResult
+	// (simulates partial API response where the issue is missing from the milestone listing).
+	issueSvc.getResult[99] = &platform.Issue{
+		Number: 99, Title: "Mystery Task",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		// Note: #99 is intentionally absent from the milestone list
+		{Number: 10, Title: "Task A", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "99"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, nil, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err, "unknown trigger issue must NOT return an error")
+	require.NotNil(t, result)
+	assert.False(t, result.TierComplete)
+	assert.False(t, result.AllComplete)
+	assert.Equal(t, 0, result.DispatchedCount)
+	assert.Equal(t, 0, result.BatchPRNumber)
+	// No workers should have been dispatched
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestAdvanceByBatch_SkipsPROnPartialIssueList(t *testing.T) {
+	tests := []struct {
+		name         string
+		openIssues   int
+		closedIssues int
+		listed       []*platform.Issue
+		wantPRSkip   bool // true: PR creation must be skipped; false: PR is opened
+	}{
+		{
+			name:         "partial list — fewer than expected",
+			openIssues:   0,
+			closedIssues: 3, // milestone reports 3 closed issues
+			listed: []*platform.Issue{
+				// Only 1 issue returned — clearly partial
+				{Number: 10, Title: "Task A", State: "closed", Labels: []string{issues.StatusDone},
+					Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+			},
+			wantPRSkip: true,
+		},
+		{
+			name:         "complete list — equal to expected",
+			openIssues:   0,
+			closedIssues: 1,
+			listed: []*platform.Issue{
+				{Number: 10, Title: "Task A", State: "closed", Labels: []string{issues.StatusDone},
+					Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+			},
+			wantPRSkip: false,
+		},
+		{
+			name:         "list larger than expected — still proceeds",
+			openIssues:   0,
+			closedIssues: 1,
+			listed: []*platform.Issue{
+				{Number: 10, Title: "Task A", State: "closed", Labels: []string{issues.StatusDone},
+					Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+				{Number: 11, Title: "Task B", State: "closed", Labels: []string{issues.StatusDone},
+					Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo B\n"},
+			},
+			wantPRSkip: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.listResult = tc.listed
+
+			prSvc := &mockPRService{}
+			wf := &mockWorkflowService{listResult: []*platform.Run{}}
+
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       prSvc,
+				workflows: wf,
+				repo:      &mockRepoService{defaultBranch: "main"},
+				milestones: &mockMilestoneService{
+					getResult: map[int]*platform.Milestone{
+						1: {
+							Number:       1,
+							Title:        "Batch",
+							OpenIssues:   tc.openIssues,
+							ClosedIssues: tc.closedIssues,
+						},
+					},
+				},
+			}
+
+			cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+			// On the complete-list paths, openBatchPR will run git operations
+			// (fetch/checkout/rebase). Provide a real repo so they don't nil-panic.
+			var g *git.Git
+			if !tc.wantPRSkip {
+				g = setupBatchRepo(t)
+			}
+
+			result, err := AdvanceByBatch(context.Background(), mock, g, cfg, 1)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+
+			if tc.wantPRSkip {
+				assert.False(t, result.AllComplete, "AllComplete must be false when partial data is detected")
+				assert.Equal(t, 0, result.BatchPRNumber, "no PR should be created on partial data")
+				assert.Nil(t, prSvc.created, "PullRequests().Create must not be called")
+			} else {
+				assert.True(t, result.AllComplete, "AllComplete should be true when list is complete")
+				assert.NotNil(t, prSvc.created, "PullRequests().Create must be called")
+			}
+		})
+	}
+}
+
+// setupBatchRepo creates a bare-origin git repo with a herd/batch/1-batch
+// branch suitable for tests that exercise openBatchPR's git operations.
+func setupBatchRepo(t *testing.T) *git.Git {
+	t.Helper()
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	runGit(t, dir, "checkout", "-b", "herd/batch/1-batch")
+	runGit(t, dir, "push", "origin", "herd/batch/1-batch")
+
+	return git.New(dir)
+}
+
+func TestAdvance_AllComplete_SkipsPROnPartialIssueList(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[10] = &platform.Issue{
+		Number: 10, Title: "Task A",
+		Labels: []string{issues.StatusDone},
+		Milestone: &platform.Milestone{
+			Number:       1,
+			Title:        "Batch",
+			OpenIssues:   0,
+			ClosedIssues: 5, // milestone reports 5 closed issues
+		},
+	}
+	// Only 1 issue returned — partial response
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Task A", Labels: []string{issues.StatusDone},
+			Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
+	}
+
+	prSvc := &mockPRService{}
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "10"}},
+		},
+		listResult: []*platform.Run{},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{MaxConcurrent: 3, TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Advance(context.Background(), mock, nil, cfg, AdvanceParams{RunID: 100})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.AllComplete, "must NOT mark batch complete on partial data")
+	assert.Equal(t, 0, result.BatchPRNumber)
+	assert.Nil(t, prSvc.created, "PullRequests().Create must not be called")
+}
