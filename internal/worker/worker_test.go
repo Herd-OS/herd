@@ -35,6 +35,9 @@ func (m *mockAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOpt
 func (m *mockAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return nil, nil
 }
+func (m *mockAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
+}
 
 // --- Mock Platform ---
 

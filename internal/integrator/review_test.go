@@ -52,6 +52,9 @@ func (m *mockReviewAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.E
 func (m *mockReviewAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return m.reviewResult, m.reviewErr
 }
+func (m *mockReviewAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
+}
 
 // Helper to build a standard test platform for review tests
 func newReviewTestPlatform(prList []*platform.PullRequest, milestoneIssues []*platform.Issue) *mockPlatform {
@@ -999,6 +1002,9 @@ func (m *capturingMockAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agen
 func (m *capturingMockAgent) Review(_ context.Context, _ string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
 	*m.capturedOpts = opts
 	return m.result, nil
+}
+func (m *capturingMockAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
 }
 
 // mockPRServiceWithMergeErr wraps mockPRService to fail on Merge

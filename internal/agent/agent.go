@@ -14,6 +14,22 @@ type Agent interface {
 
 	// Review runs a code review on a diff in headless mode (used by the Integrator).
 	Review(ctx context.Context, diff string, opts ReviewOptions) (*ReviewResult, error)
+
+	// Discuss launches an interactive agent session with a fully rendered
+	// system prompt and an optional initial user prompt. Unlike Plan, it has
+	// no structured output — the agent is expected to converse with the user
+	// and may make changes if the user asks. Returns nil on a clean exit.
+	Discuss(ctx context.Context, opts DiscussOptions) error
+}
+
+// DiscussOptions configures an interactive discussion session.
+// SystemPrompt is passed verbatim to the agent (caller is responsible for
+// rendering / templating). InitialPrompt is optional; if non-empty it is
+// sent as the first user message after the agent starts.
+type DiscussOptions struct {
+	RepoRoot      string
+	SystemPrompt  string
+	InitialPrompt string
 }
 
 type PlanOptions struct {
