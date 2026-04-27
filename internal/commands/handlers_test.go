@@ -144,6 +144,9 @@ func (m *testPRService) AddComment(_ context.Context, _ int, body string) error 
 func (m *testPRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
 	return nil
 }
+func (m *testPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
 func (m *testPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "", nil
 }
@@ -246,6 +249,9 @@ func (m *testAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOpt
 }
 func (m *testAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return m.reviewResult, m.reviewErr
+}
+func (m *testAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
 }
 
 // initHandlerTestRepo creates a minimal git repo with main and batch branches.
@@ -1414,4 +1420,7 @@ func (m *capturingTestAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agen
 func (m *capturingTestAgent) Review(_ context.Context, _ string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
 	*m.capturedOpts = opts
 	return m.result, nil
+}
+func (m *capturingTestAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
 }

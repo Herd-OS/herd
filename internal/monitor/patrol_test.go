@@ -196,6 +196,9 @@ func (m *mockPRService) AddComment(_ context.Context, number int, body string) e
 	}
 	return nil
 }
+func (m *mockPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
 func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "", nil
 }

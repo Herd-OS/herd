@@ -243,6 +243,9 @@ func (s *statefulPRService) AddComment(_ context.Context, _ int, _ string) error
 func (s *statefulPRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
 	return nil
 }
+func (s *statefulPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
 func (s *statefulPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "diff --git a/file.go b/file.go\n", nil
 }
@@ -670,4 +673,7 @@ func (a *mockAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOpt
 }
 func (a *mockAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return &agent.ReviewResult{Approved: a.approved, Summary: "LGTM"}, nil
+}
+func (a *mockAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
 }

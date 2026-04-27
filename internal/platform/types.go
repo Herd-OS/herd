@@ -75,6 +75,17 @@ type Comment struct {
 	AuthorAssociation string // "OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE", etc.
 }
 
+// ReviewComment is an inline (line-level) comment on a pull request diff.
+type ReviewComment struct {
+	ID                int64
+	Body              string
+	AuthorLogin       string
+	AuthorAssociation string // "OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE", etc.
+	Path              string // file path the comment is on
+	Line              int    // line number in the diff (0 if not anchored)
+	DiffHunk          string // short diff hunk surrounding the comment
+}
+
 type MergeMethod string
 
 const (
@@ -88,7 +99,7 @@ type ReviewEvent string
 const (
 	ReviewApprove        ReviewEvent = "APPROVE"
 	ReviewRequestChanges ReviewEvent = "REQUEST_CHANGES"
-	ReviewComment        ReviewEvent = "COMMENT"
+	ReviewCommentEvent   ReviewEvent = "COMMENT"
 )
 
 type MergeResult struct {

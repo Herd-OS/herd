@@ -41,6 +41,7 @@ type PullRequestService interface {
 	UpdateBranch(ctx context.Context, number int) error
 	CreateReview(ctx context.Context, number int, body string, event ReviewEvent) error
 	AddComment(ctx context.Context, number int, body string) error
+	ListReviewComments(ctx context.Context, number int) ([]*ReviewComment, error)
 	GetDiff(ctx context.Context, number int) (string, error)
 	Close(ctx context.Context, number int) error
 }

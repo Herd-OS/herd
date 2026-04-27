@@ -269,7 +269,7 @@ func TestIntegration_PullRequests(t *testing.T) {
 	require.NoError(t, err)
 
 	// CreateReview (comment — non-destructive)
-	err = prSvc.CreateReview(ctx, pr.Number, "Integration test review", platform.ReviewComment)
+	err = prSvc.CreateReview(ctx, pr.Number, "Integration test review", platform.ReviewCommentEvent)
 	require.NoError(t, err)
 }
 

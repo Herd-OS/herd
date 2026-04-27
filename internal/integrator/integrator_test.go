@@ -153,6 +153,9 @@ func (m *mockPRService) AddComment(_ context.Context, number int, body string) e
 	m.comments[number] = append(m.comments[number], body)
 	return nil
 }
+func (m *mockPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
 func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	if m.diffResult != "" {
 		return m.diffResult, nil
@@ -1708,6 +1711,9 @@ func (s *statefulMockPRService) UpdateBranch(ctx context.Context, n int) error {
 }
 func (s *statefulMockPRService) AddComment(ctx context.Context, number int, body string) error {
 	return s.inner.AddComment(ctx, number, body)
+}
+func (s *statefulMockPRService) ListReviewComments(ctx context.Context, n int) ([]*platform.ReviewComment, error) {
+	return s.inner.ListReviewComments(ctx, n)
 }
 func (s *statefulMockPRService) GetDiff(ctx context.Context, n int) (string, error) {
 	return s.inner.GetDiff(ctx, n)

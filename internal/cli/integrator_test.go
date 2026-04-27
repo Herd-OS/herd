@@ -380,8 +380,11 @@ func (m *mockFailurePRService) CreateReview(_ context.Context, _ int, _ string, 
 	return nil
 }
 func (m *mockFailurePRService) AddComment(_ context.Context, _ int, _ string) error { return nil }
-func (m *mockFailurePRService) GetDiff(_ context.Context, _ int) (string, error)    { return "", nil }
-func (m *mockFailurePRService) Close(_ context.Context, _ int) error                { return nil }
+func (m *mockFailurePRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
+func (m *mockFailurePRService) GetDiff(_ context.Context, _ int) (string, error) { return "", nil }
+func (m *mockFailurePRService) Close(_ context.Context, _ int) error             { return nil }
 
 func TestIssueNumberFromRun(t *testing.T) {
 	tests := []struct {

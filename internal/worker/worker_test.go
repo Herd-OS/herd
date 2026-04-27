@@ -35,6 +35,9 @@ func (m *mockAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOpt
 func (m *mockAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return nil, nil
 }
+func (m *mockAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
+}
 
 // --- Mock Platform ---
 
@@ -65,6 +68,9 @@ func (m *mockPRService) CreateReview(_ context.Context, _ int, _ string, _ platf
 func (m *mockPRService) AddComment(_ context.Context, _ int, body string) error {
 	m.comments = append(m.comments, body)
 	return nil
+}
+func (m *mockPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
+	return nil, nil
 }
 func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) { return "", nil }
 func (m *mockPRService) Close(_ context.Context, _ int) error              { return nil }
