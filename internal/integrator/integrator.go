@@ -127,7 +127,14 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	// Check if worker branch exists (no-op worker = no branch, or already consolidated)
 	_, err = p.Repository().GetBranchSHA(ctx, workerBranch)
 	if err != nil {
-		// Branch doesn't exist — either no-op worker or already consolidated by another integrator run
+		// Branch doesn't exist — either no-op worker or already consolidated by another integrator run.
+		// If this is a conflict-resolution issue, we still need to retry the original failed issue
+		// and close any other stale conflict issues — otherwise the original issue stays stuck as failed.
+		parsed, parseErr := issues.ParseBody(issue.Body)
+		if parseErr == nil && parsed.FrontMatter.ConflictResolution {
+			closeStaleConflictIssues(ctx, p, issue.Milestone)
+			retryConflictOriginIssues(ctx, p, cfg, issue, batchBranch)
+		}
 		return &ConsolidateResult{IssueNumber: issueNumber, NoOp: true, Merged: false}, nil
 	}
 
@@ -759,15 +766,16 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 			ConflictingBranches: []string{workerBranch, batchBranch},
 		},
 		Task: fmt.Sprintf("Resolve merge conflict between `%s` and `%s`.\n\n"+
+			"**IMPORTANT:** You are already on your own worker branch (`herd/worker/<this-issue>-<slug>`). Do NOT checkout `%s` or any other branch — your commits must land on your worker branch so the worker framework can push them. The integrator will then merge your worker branch into `%s`.\n\n"+
 			"Follow these steps exactly:\n"+
 			"1. `git fetch origin`\n"+
-			"2. `git checkout %s`\n"+
+			"2. Stay on your current worker branch — do NOT run `git checkout %s`.\n"+
 			"3. `git merge origin/%s`\n"+
 			"4. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch — only fix the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) produced by git.\n"+
 			"5. `git add <resolved files>`\n"+
-			"6. `git commit` (accept the default merge commit message)\n"+
-			"7. `git push origin %s`",
-			workerBranch, batchBranch, batchBranch, workerBranch, batchBranch),
+			"6. `git commit` (accept the default merge commit message).\n"+
+			"7. Do NOT push — the worker framework handles pushing your worker branch.",
+			workerBranch, batchBranch, batchBranch, batchBranch, batchBranch, workerBranch),
 		Context: fmt.Sprintf("Worker branch `%s` (from issue #%d) conflicts with the batch branch `%s`.", workerBranch, issue.Number, batchBranch),
 	})
 
@@ -934,17 +942,17 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 			ConflictResolution:  true,
 			ConflictingBranches: []string{batchBranch, defaultBranch},
 		},
-		Task: fmt.Sprintf("Rebase the batch branch `%s` onto the latest `%s`.\n\n"+
+		Task: fmt.Sprintf("Resolve the conflict between batch branch `%s` and the latest `%s`.\n\n"+
+			"**IMPORTANT:** You are already on your own worker branch (`herd/worker/<this-issue>-<slug>`). Do NOT checkout `%s` or `%s` — your commits must land on your worker branch so the worker framework can push them. The integrator will then merge your worker branch into `%s`.\n\n"+
 			"Follow these steps exactly:\n"+
 			"1. `git fetch origin`\n"+
-			"2. `git checkout %s`\n"+
-			"3. `git rebase origin/%s`\n"+
+			"2. Stay on your current worker branch — do NOT run `git checkout %s` or `git checkout %s`.\n"+
+			"3. `git merge origin/%s` (this brings the latest default-branch commits into your worker branch).\n"+
 			"4. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch — only fix the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) produced by git.\n"+
 			"5. `git add <resolved files>`\n"+
-			"6. `git rebase --continue`\n"+
-			"7. Repeat steps 4-6 for each conflicting commit.\n"+
-			"8. `git push --force origin %s`",
-			batchBranch, defaultBranch, batchBranch, defaultBranch, batchBranch),
+			"6. `git commit` (accept the default merge commit message).\n"+
+			"7. Do NOT push — the worker framework handles pushing your worker branch.",
+			batchBranch, defaultBranch, batchBranch, defaultBranch, batchBranch, batchBranch, defaultBranch, defaultBranch),
 		Context: fmt.Sprintf("Automatic rebase of batch branch `%s` onto `%s` failed due to conflicts.", batchBranch, defaultBranch),
 	})
 
