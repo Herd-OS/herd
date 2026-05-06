@@ -1,10 +1,13 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -281,4 +284,77 @@ func writeTempPlan(t *testing.T, plan agent.Plan) string {
 	path := filepath.Join(t.TempDir(), "plan.json")
 	require.NoError(t, os.WriteFile(path, data, 0o644))
 	return path
+}
+
+func TestPlan_LargeSystemPrompt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+
+	repoRoot := t.TempDir()
+	outputPath := filepath.Join(repoRoot, "plan.json")
+
+	planJSON := `{"batch_name":"fake-batch","tasks":[{"title":"x","description":"y"}]}`
+
+	tests := []struct {
+		name     string
+		exitCode int
+		wantErr  bool
+	}{
+		{name: "success path", exitCode: 0, wantErr: false},
+		{name: "agent failure cleans up", exitCode: 1, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each subcase needs its own binary + argv dump. Reuse the helper.
+			outPath := outputPath
+			if tc.exitCode != 0 {
+				// Failure path doesn't need to write the plan file.
+				outPath = ""
+			}
+			binary, argvDump := writeFakeClaude(t, tc.exitCode, outPath, planJSON)
+			c := New(binary, "")
+
+			plan, err := c.Plan(context.Background(), "tiny prompt", agent.PlanOptions{
+				RepoRoot:   repoRoot,
+				OutputPath: outputPath,
+				Context:    map[string]string{},
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, plan)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, plan)
+				assert.Equal(t, "fake-batch", plan.BatchName)
+			}
+
+			argv := readArgvDump(t, argvDump)
+			require.NotEmpty(t, argv, "fake binary should have recorded argv")
+
+			// The rendered system prompt always contains this template phrase.
+			joined := strings.Join(argv, "\n")
+			assert.NotContains(t, joined, "You are a planning assistant for HerdOS",
+				"the rendered system prompt must NOT appear on argv")
+
+			var promptFile string
+			for i, a := range argv {
+				if a == "--system-prompt-file" {
+					require.Less(t, i+1, len(argv), "expected a path after --system-prompt-file")
+					promptFile = argv[i+1]
+					break
+				}
+			}
+			require.NotEmpty(t, promptFile, "argv must contain --system-prompt-file with a path")
+
+			assert.Contains(t, argv, "--initial-prompt")
+			assert.Contains(t, argv, "tiny prompt")
+
+			_, statErr := os.Stat(promptFile)
+			assert.True(t, os.IsNotExist(statErr),
+				"temp prompt file %s should be removed after Plan returns (statErr=%v)",
+				promptFile, statErr)
+		})
+	}
 }

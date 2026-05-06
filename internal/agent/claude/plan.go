@@ -193,7 +193,13 @@ func (c *ClaudeAgent) Plan(ctx context.Context, initialPrompt string, opts agent
 		return nil, fmt.Errorf("rendering system prompt: %w", err)
 	}
 
-	args := []string{"--system-prompt", systemPrompt}
+	promptFile, err := writeSystemPromptFile(systemPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("plan: writing system prompt file: %w", err)
+	}
+	defer func() { _ = os.Remove(promptFile) }()
+
+	args := []string{"--system-prompt-file", promptFile}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}
