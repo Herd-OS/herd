@@ -11,10 +11,11 @@ func Default() *Config {
 			Provider: "claude",
 		},
 		Workers: Workers{
-			MaxConcurrent:          3,
-			RunnerLabel:            "herd-worker",
-			TimeoutMinutes:         30,
+			MaxConcurrent:           3,
+			RunnerLabel:             "herd-worker",
+			TimeoutMinutes:          30,
 			ProgressIntervalSeconds: 30,
+			ExtraEnv:                []string{},
 		},
 		Integrator: Integrator{
 			Strategy:                      "squash",

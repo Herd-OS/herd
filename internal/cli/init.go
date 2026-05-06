@@ -70,6 +70,13 @@ func runInit(skipLabels, skipWorkflows bool) error {
 		fmt.Println(display.Success(config.ConfigFile + " already exists"))
 	}
 
+	// Load the (possibly user-edited) config so workflow rendering picks up
+	// fields like workers.extra_env.
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
 	// 3. Create .herd/ directory with role instruction files
 	herdDir := filepath.Join(dir, ".herd")
 	if err := os.MkdirAll(herdDir, 0755); err != nil {
@@ -97,7 +104,7 @@ func runInit(skipLabels, skipWorkflows bool) error {
 
 	// 5. Install workflow files
 	if !skipWorkflows {
-		if err := installWorkflows(dir); err != nil {
+		if err := installWorkflows(dir, cfg); err != nil {
 			return err
 		}
 	} else {
@@ -276,23 +283,23 @@ func createLabelViaCLI(owner, repo string, def issues.LabelDef) error {
 	return nil
 }
 
-func installWorkflows(dir string) error {
+func installWorkflows(dir string, cfg *config.Config) error {
 	workflowDir := filepath.Join(dir, ".github", "workflows")
 	if err := os.MkdirAll(workflowDir, 0755); err != nil {
 		return fmt.Errorf("creating .github/workflows/: %w", err)
 	}
 
-	for _, name := range WorkflowFiles() {
-		data, err := workflowFS.ReadFile("workflows/" + name)
+	for _, wf := range workflowFiles() {
+		data, err := RenderWorkflow(wf, cfg)
 		if err != nil {
-			return fmt.Errorf("reading embedded workflow %s: %w", name, err)
+			return err
 		}
 
-		dest := filepath.Join(workflowDir, name)
+		dest := filepath.Join(workflowDir, wf.DestName)
 		if err := os.WriteFile(dest, data, 0644); err != nil {
-			return fmt.Errorf("writing %s: %w", name, err)
+			return fmt.Errorf("writing %s: %w", wf.DestName, err)
 		}
-		fmt.Println(display.Success("Installed " + name))
+		fmt.Println(display.Success("Installed " + wf.DestName))
 	}
 
 	return nil

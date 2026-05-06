@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/herd-os/herd/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -104,7 +105,7 @@ func TestEnsureGitignoreNoTrailingNewline(t *testing.T) {
 
 func TestInstallWorkflows(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, installWorkflows(dir))
+	require.NoError(t, installWorkflows(dir, config.Default()))
 
 	for _, name := range WorkflowFiles() {
 		path := filepath.Join(dir, ".github", "workflows", name)
@@ -119,7 +120,7 @@ func TestInstallWorkflows(t *testing.T) {
 
 func TestInstallWorkflowsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, installWorkflows(dir))
+	require.NoError(t, installWorkflows(dir, config.Default()))
 
 	// Get content of first workflow
 	first := filepath.Join(dir, ".github", "workflows", WorkflowFiles()[0])
@@ -127,7 +128,7 @@ func TestInstallWorkflowsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run again
-	require.NoError(t, installWorkflows(dir))
+	require.NoError(t, installWorkflows(dir, config.Default()))
 
 	content2, err := os.ReadFile(first)
 	require.NoError(t, err)

@@ -34,10 +34,11 @@ type Agent struct {
 }
 
 type Workers struct {
-	MaxConcurrent          int    `yaml:"max_concurrent"`
-	RunnerLabel            string `yaml:"runner_label"`
-	TimeoutMinutes         int    `yaml:"timeout_minutes"`
-	ProgressIntervalSeconds int   `yaml:"progress_interval_seconds"` // how often to post progress updates (0 = disabled)
+	MaxConcurrent           int      `yaml:"max_concurrent"`
+	RunnerLabel             string   `yaml:"runner_label"`
+	TimeoutMinutes          int      `yaml:"timeout_minutes"`
+	ProgressIntervalSeconds int      `yaml:"progress_interval_seconds"` // how often to post progress updates (0 = disabled)
+	ExtraEnv                []string `yaml:"extra_env"`                 // GitHub Actions secret names to pass through to workers
 }
 
 type Integrator struct {
