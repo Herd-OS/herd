@@ -170,11 +170,13 @@ func (m *mockPRService) Close(_ context.Context, _ int) error {
 }
 
 type mockWorkflowService struct {
-	runs              map[int64]*platform.Run
-	listResult        []*platform.Run
-	dispatched        []map[string]string
-	onDispatch        func() // optional; called before recording each dispatch
-	lastListRunFilter platform.RunFilters
+	runs               map[int64]*platform.Run
+	listResult         []*platform.Run
+	listResultByStatus map[string][]*platform.Run // optional: keyed by RunFilters.Status
+	dispatched         []map[string]string
+	onDispatch         func() // optional; called before recording each dispatch
+	lastListRunFilter  platform.RunFilters
+	listRunFilters     []platform.RunFilters
 }
 
 func (m *mockWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) { return 0, nil }
@@ -193,6 +195,10 @@ func (m *mockWorkflowService) GetRun(_ context.Context, id int64) (*platform.Run
 }
 func (m *mockWorkflowService) ListRuns(_ context.Context, filters platform.RunFilters) ([]*platform.Run, error) {
 	m.lastListRunFilter = filters
+	m.listRunFilters = append(m.listRunFilters, filters)
+	if m.listResultByStatus != nil {
+		return m.listResultByStatus[filters.Status], nil
+	}
 	return m.listResult, nil
 }
 func (m *mockWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
@@ -2751,4 +2757,168 @@ func TestHandleConflictResolution_TaskBodyKeepsAgentOnWorkerBranch(t *testing.T)
 		"3. `git checkout",
 		"git push origin " + batchBranch,
 	})
+}
+
+func TestDispatchReadyIssues_SkipsAlreadyInProgress(t *testing.T) {
+	type wantDispatch struct {
+		issueNumber int
+	}
+	type wantLabel struct {
+		issueNumber int
+		label       string
+		removed     bool // true if expected to be in removedLabels, false in addedLabels
+	}
+
+	tests := []struct {
+		name           string
+		tierIssues     []int
+		issues         []*platform.Issue
+		inProgressRuns []*platform.Run
+		queuedRuns     []*platform.Run
+		maxConcurrent  int
+		wantDispatched int
+		wantDispatches []wantDispatch
+		wantLabels     []wantLabel // labels that MUST be present (added or removed)
+		// noLabelChange lists issues that must have NO label changes recorded.
+		noLabelChange []int
+	}{
+		{
+			name:       "issue with active in_progress run is skipped",
+			tierIssues: []int{42},
+			issues: []*platform.Issue{
+				{Number: 42, Labels: []string{issues.StatusReady}},
+			},
+			inProgressRuns: []*platform.Run{
+				{ID: 1, Status: "in_progress", Inputs: map[string]string{"issue_number": "42"}},
+			},
+			maxConcurrent:  3,
+			wantDispatched: 0,
+			noLabelChange:  []int{42},
+		},
+		{
+			name:       "issue with active queued run is skipped",
+			tierIssues: []int{42},
+			issues: []*platform.Issue{
+				{Number: 42, Labels: []string{issues.StatusReady}},
+			},
+			queuedRuns: []*platform.Run{
+				{ID: 1, Status: "queued", Inputs: map[string]string{"issue_number": "42"}},
+			},
+			maxConcurrent:  3,
+			wantDispatched: 0,
+			noLabelChange:  []int{42},
+		},
+		{
+			name:       "issue with no active run dispatches normally",
+			tierIssues: []int{42},
+			issues: []*platform.Issue{
+				{Number: 42, Labels: []string{issues.StatusReady}},
+			},
+			maxConcurrent:  3,
+			wantDispatched: 1,
+			wantDispatches: []wantDispatch{{issueNumber: 42}},
+			wantLabels: []wantLabel{
+				{issueNumber: 42, label: issues.StatusReady, removed: true},
+				{issueNumber: 42, label: issues.StatusInProgress, removed: false},
+			},
+		},
+		{
+			name:       "mixed batch dispatches only issue without active run",
+			tierIssues: []int{42, 43},
+			issues: []*platform.Issue{
+				{Number: 42, Labels: []string{issues.StatusReady}},
+				{Number: 43, Labels: []string{issues.StatusReady}},
+			},
+			inProgressRuns: []*platform.Run{
+				{ID: 1, Status: "in_progress", Inputs: map[string]string{"issue_number": "42"}},
+			},
+			maxConcurrent:  3,
+			wantDispatched: 1,
+			wantDispatches: []wantDispatch{{issueNumber: 43}},
+			wantLabels: []wantLabel{
+				{issueNumber: 43, label: issues.StatusReady, removed: true},
+				{issueNumber: 43, label: issues.StatusInProgress, removed: false},
+			},
+			noLabelChange: []int{42},
+		},
+		{
+			name:       "active runs at MaxConcurrent prevents any dispatch",
+			tierIssues: []int{50, 51},
+			issues: []*platform.Issue{
+				{Number: 50, Labels: []string{issues.StatusReady}},
+				{Number: 51, Labels: []string{issues.StatusReady}},
+			},
+			inProgressRuns: []*platform.Run{
+				{ID: 1, Status: "in_progress", Inputs: map[string]string{"issue_number": "10"}},
+				{ID: 2, Status: "in_progress", Inputs: map[string]string{"issue_number": "11"}},
+				{ID: 3, Status: "in_progress", Inputs: map[string]string{"issue_number": "12"}},
+			},
+			maxConcurrent:  3,
+			wantDispatched: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			wf := &mockWorkflowService{
+				listResultByStatus: map[string][]*platform.Run{
+					"in_progress": tc.inProgressRuns,
+					"queued":      tc.queuedRuns,
+				},
+			}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       &mockPRService{},
+				workflows: wf,
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+			cfg := &config.Config{Workers: config.Workers{
+				MaxConcurrent:  tc.maxConcurrent,
+				TimeoutMinutes: 30,
+				RunnerLabel:    "herd-worker",
+			}}
+
+			dispatched, err := dispatchReadyIssues(
+				context.Background(), mock, cfg, tc.tierIssues, tc.issues, "herd/batch/1-batch",
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDispatched, dispatched, "dispatched count")
+			assert.Len(t, wf.dispatched, len(tc.wantDispatches), "dispatch call count")
+
+			dispatchedNums := map[string]bool{}
+			for _, d := range wf.dispatched {
+				dispatchedNums[d["issue_number"]] = true
+			}
+			for _, want := range tc.wantDispatches {
+				key := fmt.Sprintf("%d", want.issueNumber)
+				assert.True(t, dispatchedNums[key], "expected dispatch for issue #%d", want.issueNumber)
+			}
+
+			for _, want := range tc.wantLabels {
+				if want.removed {
+					assert.Contains(t, issueSvc.removedLabels[want.issueNumber], want.label,
+						"issue #%d should have %s removed", want.issueNumber, want.label)
+				} else {
+					assert.Contains(t, issueSvc.addedLabels[want.issueNumber], want.label,
+						"issue #%d should have %s added", want.issueNumber, want.label)
+				}
+			}
+
+			for _, num := range tc.noLabelChange {
+				assert.Empty(t, issueSvc.addedLabels[num], "issue #%d should not have labels added", num)
+				assert.Empty(t, issueSvc.removedLabels[num], "issue #%d should not have labels removed", num)
+			}
+
+			// Verify both in_progress and queued were queried, with the worker workflow filter.
+			require.Len(t, wf.listRunFilters, 2, "should call ListRuns twice (in_progress + queued)")
+			seenStatuses := map[string]bool{}
+			for _, f := range wf.listRunFilters {
+				assert.Equal(t, "herd-worker.yml", f.WorkflowFileName)
+				seenStatuses[f.Status] = true
+			}
+			assert.True(t, seenStatuses["in_progress"], "should query in_progress runs")
+			assert.True(t, seenStatuses["queued"], "should query queued runs")
+		})
+	}
 }
