@@ -456,9 +456,14 @@ reconciles during consolidation:
 1. **Auto-rebase.** If changes don't textually conflict, rebase succeeds.
 2. **Dispatch a conflict-resolution worker.** The Integrator creates a fix issue
    describing the conflict, the conflicting files, and the intent of each
-   worker. The resolver checks out the batch branch, reads both worker branches,
-   and produces a merged result. It pushes to its own worker branch and the
-   normal consolidate/advance flow handles it.
+   worker. The resolver runs as a normal worker on its own assigned worker
+   branch (`herd/worker/<fix-issue>-<slug>`). It runs `git fetch origin`,
+   `git merge origin/<conflicting-branch>`, resolves the conflict markers,
+   `git add`, and `git commit`. It does **not** `git push` and does **not**
+   `git checkout` the batch branch. The worker framework's normal
+   force-push of the worker branch carries the resolution commit, and the
+   Integrator's standard consolidate flow then merges the resolved worker
+   branch into the batch branch.
 3. **Notify the user.** Comment on the relevant issues with conflict details.
    The user resolves manually.
 
@@ -466,8 +471,11 @@ reconciles during consolidation:
 
 Main may advance while the batch executes. Before opening the PR, the Integrator
 rebases the batch branch onto latest main. If this conflicts, the same
-resolution strategies apply. The resolver force-pushes to the batch branch (the
-one acceptable force-push -- HerdOS owns the branch).
+resolution strategies apply: a resolver worker is dispatched and follows the
+same flow described above (stay on its own worker branch, `git merge` the
+default branch, commit, do not push). The worker framework pushes the worker
+branch, and the Integrator's consolidate flow merges it into the batch branch.
+No agent force-pushes the batch branch.
 
 The configured strategy (`on_conflict: notify | dispatch-resolver`) controls
 which path is taken. The resolver is capped at `max_conflict_resolution_attempts`
@@ -497,23 +505,32 @@ graph TD
     A["Batch A merges to main"] --> B["Batch B PR has conflicts"]
     B --> C["Monitor patrol detects Mergeable == false"]
     C --> D["Dispatch rebase conflict resolution worker"]
-    D --> E["Worker rebases batch branch onto main"]
-    E --> F["PR is mergeable again"]
+    D --> E["Worker stays on its own worker branch,<br>merges origin/main into it,<br>commits resolution"]
+    E --> F["Worker framework pushes worker branch;<br>Integrator consolidates it into batch branch"]
+    F --> G["PR is mergeable again"]
 ```
 
-### Improved Conflict Resolution Instructions
+### Conflict Resolution Instructions
 
 Conflict resolution issues (both worker-vs-worker and batch-vs-main) include
-explicit step-by-step git instructions to guide the resolver worker:
+explicit step-by-step git instructions to guide the resolver worker. Both
+flows use `git merge` against the resolver's own worker branch — the resolver
+never checks out the batch branch and never pushes:
 
-- **For merge conflicts:** `git fetch origin`, `git merge origin/main`, resolve
-  conflict markers, `git add`, `git commit`
-- **For rebase conflicts:** `git fetch origin`, `git rebase origin/main`, resolve
-  conflict markers, `git add`, `git rebase --continue`
-
-Workers are instructed to resolve actual conflict markers in-place rather than
-rewriting files from scratch, which preserves intentional changes from both
-sides.
+1. `git fetch origin`
+2. Stay on the assigned worker branch (`herd/worker/<fix-issue>-<slug>`); do
+   **not** run `git checkout` for the batch branch or default branch.
+3. `git merge origin/<conflicting-branch>` (the worker branch of the other
+   task for worker-vs-worker conflicts, or the default branch for
+   batch-vs-main conflicts).
+4. Resolve the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) in place —
+   do not rewrite files from scratch — to preserve intentional changes from
+   both sides.
+5. `git add <resolved files>` and `git commit` (accept the default merge
+   commit message).
+6. Do **not** `git push`. The worker framework pushes the worker branch
+   automatically; the Integrator's normal consolidate flow then merges the
+   resolved worker branch into the batch branch.
 
 ---
 
