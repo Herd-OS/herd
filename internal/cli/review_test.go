@@ -26,6 +26,8 @@ func TestRenderReviewSystemPrompt_AllSections(t *testing.T) {
 			{Author: "dave", Path: "bar.go", Line: 7, DiffHunk: "@@ -5,2 +5,3 @@", Body: "Consider extracting helper."},
 		},
 		RoleInstructions: "Always be polite.",
+		RepoOwner:        "example",
+		RepoName:         "repo",
 	}
 
 	out, err := renderReviewSystemPrompt(data)
@@ -56,6 +58,8 @@ func TestRenderReviewSystemPrompt_OptionalSectionsOmitted(t *testing.T) {
 		PRHeadBranch: "feature/x",
 		Diff:         "diff content",
 		CIStatus:     "success",
+		RepoOwner:    "example",
+		RepoName:     "repo",
 	}
 
 	out, err := renderReviewSystemPrompt(data)
@@ -76,12 +80,65 @@ func TestRenderReviewSystemPrompt_EmptyDiffStillRenders(t *testing.T) {
 		PRHeadBranch: "feature/empty",
 		Diff:         "",
 		CIStatus:     "unknown",
+		RepoOwner:    "example",
+		RepoName:     "repo",
 	}
 
 	out, err := renderReviewSystemPrompt(data)
 	require.NoError(t, err)
 	assert.Contains(t, out, "```diff")
 	assert.Contains(t, out, "CI status (head ref): unknown")
+}
+
+func TestReviewSystemPrompt_IncludesFixGuidance(t *testing.T) {
+	data := &reviewCmdPromptData{
+		PRNumber:     99,
+		PRTitle:      "Some PR",
+		PRURL:        "https://github.com/example/repo/pull/99",
+		PRBaseBranch: "main",
+		PRHeadBranch: "feature/fix-guidance",
+		Diff:         "diff body",
+		CIStatus:     "success",
+		RepoOwner:    "example",
+		RepoName:     "repo",
+	}
+
+	out, err := renderReviewSystemPrompt(data)
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "/herd fix", "drafting instruction should reference /herd fix")
+	assert.True(t,
+		strings.Contains(out, "draft") || strings.Contains(out, "Draft"),
+		"prompt should include drafting language")
+	assert.True(t,
+		strings.Contains(out, "approval") || strings.Contains(out, "approve"),
+		"prompt should ask for user approval")
+	assert.Contains(t, out, "gh pr comment", "prompt should mention gh pr comment for posting")
+	assert.Contains(t, out, "--repo example/repo", "owner/repo should be interpolated into post command")
+	assert.Contains(t, out, "Acceptance criteria", "drafted comment template should include acceptance criteria")
+	assert.True(t,
+		strings.Contains(out, "informational") || strings.Contains(out, "do NOT"),
+		"prompt should describe negative path: no draft for purely informational discussion")
+}
+
+func TestReviewSystemPrompt_FixGuidanceWithHyphenatedOwner(t *testing.T) {
+	data := &reviewCmdPromptData{
+		PRNumber:     123,
+		PRTitle:      "Multi-segment owner",
+		PRURL:        "https://github.com/Herd-OS/herd/pull/123",
+		PRBaseBranch: "main",
+		PRHeadBranch: "feature/x",
+		Diff:         "diff body",
+		CIStatus:     "success",
+		RepoOwner:    "Herd-OS",
+		RepoName:     "herd",
+	}
+
+	out, err := renderReviewSystemPrompt(data)
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "--repo Herd-OS/herd", "hyphenated owner should be interpolated")
+	assert.Contains(t, out, "gh pr comment 123", "PR number should be interpolated")
 }
 
 func TestNewReviewCmd_Setup(t *testing.T) {

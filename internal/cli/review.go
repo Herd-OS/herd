@@ -62,7 +62,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
-	data, err := buildReviewPromptData(ctx, client, prNumber)
+	data, err := buildReviewPromptData(ctx, client, prNumber, cfg.Platform.Owner, cfg.Platform.Repo)
 	if err != nil {
 		return err
 	}
@@ -84,7 +84,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 	})
 }
 
-func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int) (*reviewCmdPromptData, error) {
+func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int, owner, repo string) (*reviewCmdPromptData, error) {
 	pr, err := client.PullRequests().Get(ctx, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("getting PR #%d: %w", prNumber, err)
@@ -135,6 +135,8 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		Comments:       general,
 		InlineComments: inline,
 		CIStatus:       ciStatus,
+		RepoOwner:      owner,
+		RepoName:       repo,
 	}, nil
 }
 
@@ -149,6 +151,8 @@ type reviewCmdPromptData struct {
 	InlineComments   []reviewCmdInlineComment
 	CIStatus         string
 	RoleInstructions string
+	RepoOwner        string
+	RepoName         string
 }
 
 type reviewCmdComment struct {
@@ -196,10 +200,43 @@ CI status (head ref): {{.CIStatus}}
 You are a reviewer/fixer assistant for this PR. The user drives the conversation. You can:
 - Read the codebase to investigate findings
 - Discuss the diff, the comments, and the CI status with the user
-- Make code changes ONLY if the user explicitly asks you to
+- Make code changes locally ONLY if the user explicitly asks you to
+
+### Drafting /herd fix comments
+
+When the conversation reaches a concrete actionable conclusion (e.g., "this finding is wrong, but we should fix X" or "yes, let's add a test for Y"), proactively draft a ` + "`/herd fix`" + ` comment that scopes the work clearly. Each draft must contain:
+
+- A single, focused task — one bullet of work, not a list of unrelated changes
+- The specific files and/or functions to touch
+- Acceptance criteria that describe how the fix will be verified
+
+Use this exact format for the drafted comment:
+
+` + "```" + `
+/herd fix <one-line summary>
+
+Scope: <files/functions to touch>
+
+Acceptance criteria:
+- <criterion 1>
+- <criterion 2>
+` + "```" + `
+
+After drafting, SHOW the comment to the user and ASK for explicit approval before posting. Never auto-post. Wait for the user to clearly approve (e.g., "yes, post it", "go ahead", "looks good, send it") before invoking ` + "`gh`" + `.
+
+Once the user approves, post the comment with:
+
+` + "```" + `
+gh pr comment {{.PRNumber}} --repo {{.RepoOwner}}/{{.RepoName}} --body "..."
+` + "```" + `
+
+After the comment is posted, tell the user the comment was posted and the herd workers will handle it from here.
+
+If the conversation does NOT reach an actionable conclusion (e.g., the user is just asking informational questions, exploring the diff, or thinking out loud), do NOT propose a ` + "`/herd fix`" + ` comment. Purely informational discussion does not warrant a draft.
 
 You MUST NOT:
-- Automatically dispatch workers, create GitHub issues, or post comments on the PR
+- Post ` + "`/herd fix`" + ` comments without first drafting them and receiving the user's explicit approval in this session — auto-posting is forbidden, but posting is allowed once the user approves a draft you showed them
+- Automatically dispatch workers, create GitHub issues, or post any other comments on the PR
 - Take action on findings without the user's go-ahead
 - Treat this session as a planning session (no JSON output, no batch creation)
 
