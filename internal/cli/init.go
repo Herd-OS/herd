@@ -469,7 +469,66 @@ func renderDockerCompose(owner, repo string) (string, error) {
 	return buf.String(), nil
 }
 
+// versionStateFile is the path (relative to repo root) where herd init records
+// the version it last installed. It lives under .herd/state/ which is already
+// gitignored.
+const versionStateFile = ".herd/state/version"
+
+// readPreviousInitVersion returns the version recorded by the most recent
+// successful `herd init` run on this repo, or "" if no state file exists yet.
+// Any read error other than not-existing is also reported as "" since the file
+// is purely informational — callers should treat unreadable as "fresh install".
+func readPreviousInitVersion(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, versionStateFile))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// writeInitVersion records the currently-installed version to the state file.
+// It creates the parent directory if needed. Errors are returned so the caller
+// can decide whether to surface them — but this is non-fatal for the init flow.
+func writeInitVersion(dir, v string) error {
+	path := filepath.Join(dir, versionStateFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(v+"\n"), 0o644)
+}
+
+// initMessages holds the human-facing strings for the herd init commit and PR.
+type initMessages struct {
+	Title string
+	Body  string
+}
+
+// selectInitMessages returns the commit message / PR title and PR body based
+// on the relationship between the previously-installed version ("" if none)
+// and the currently-running binary version.
+func selectInitMessages(previous, current string) initMessages {
+	switch {
+	case previous == "":
+		return initMessages{
+			Title: fmt.Sprintf("Install HerdOS %s", current),
+			Body:  fmt.Sprintf("Installs HerdOS workflows and runner infrastructure at %s.\n\nCreated by `herd init`.", current),
+		}
+	case previous == current:
+		return initMessages{
+			Title: "Sync HerdOS files",
+			Body:  "Regenerates HerdOS workflows and runner infrastructure from current .herdos.yml.\n\nCreated by `herd init`.",
+		}
+	default:
+		return initMessages{
+			Title: fmt.Sprintf("Update HerdOS to %s", current),
+			Body:  fmt.Sprintf("Updates HerdOS workflows and runner infrastructure from %s to %s.\n\nCreated by `herd init`.", previous, current),
+		}
+	}
+}
+
 func commitInitFiles(dir, owner, repo string) error {
+	previousVersion := readPreviousInitVersion(dir)
+
 	// Use version-based branch name to avoid collisions on re-runs
 	branch := "herd/init-" + version
 
@@ -487,6 +546,8 @@ func commitInitFiles(dir, owner, repo string) error {
 		switchBack(dir)
 		cleanupBranch(dir, branch)
 	}()
+
+	msgs := selectInitMessages(previousVersion, version)
 
 	// Stage the files herd init creates
 	filesToAdd := []string{
@@ -512,10 +573,13 @@ func commitInitFiles(dir, owner, repo string) error {
 	cmd.Dir = dir
 	if err := cmd.Run(); err == nil {
 		fmt.Println(display.Success("All init files up to date"))
+		if err := writeInitVersion(dir, version); err != nil {
+			fmt.Println(display.Warning(fmt.Sprintf("Could not record installed version: %v", err)))
+		}
 		return nil
 	}
 
-	commitMsg := fmt.Sprintf("Update HerdOS to %s", version)
+	commitMsg := msgs.Title
 	cmd = exec.Command("git", "commit", "-m", commitMsg)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -531,12 +595,14 @@ func commitInitFiles(dir, owner, repo string) error {
 	}
 	fmt.Println(display.Success("Pushed to remote"))
 
+	if err := writeInitVersion(dir, version); err != nil {
+		fmt.Println(display.Warning(fmt.Sprintf("Could not record installed version: %v", err)))
+	}
+
 	// Open PR
-	prTitle := fmt.Sprintf("Update HerdOS to %s", version)
-	prBody := fmt.Sprintf("Updates HerdOS workflows and runner infrastructure to %s.\n\nCreated by `herd init`.", version)
 	cmd = exec.Command("gh", "pr", "create",
-		"--title", prTitle,
-		"--body", prBody,
+		"--title", msgs.Title,
+		"--body", msgs.Body,
 		"--repo", owner+"/"+repo,
 	)
 	cmd.Dir = dir

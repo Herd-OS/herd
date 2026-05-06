@@ -518,6 +518,209 @@ func TestCommitInitFiles_DifferentVersionsDontCollide(t *testing.T) {
 	}
 }
 
+func TestSelectInitMessages(t *testing.T) {
+	tests := []struct {
+		name      string
+		previous  string
+		current   string
+		wantTitle string
+		wantBody  string
+	}{
+		{
+			name:      "fresh install",
+			previous:  "",
+			current:   "v1.2.3",
+			wantTitle: "Install HerdOS v1.2.3",
+			wantBody:  "Installs HerdOS workflows and runner infrastructure at v1.2.3.\n\nCreated by `herd init`.",
+		},
+		{
+			name:      "same version sync",
+			previous:  "v1.2.3",
+			current:   "v1.2.3",
+			wantTitle: "Sync HerdOS files",
+			wantBody:  "Regenerates HerdOS workflows and runner infrastructure from current .herdos.yml.\n\nCreated by `herd init`.",
+		},
+		{
+			name:      "version update",
+			previous:  "v1.0.0",
+			current:   "v1.2.3",
+			wantTitle: "Update HerdOS to v1.2.3",
+			wantBody:  "Updates HerdOS workflows and runner infrastructure from v1.0.0 to v1.2.3.\n\nCreated by `herd init`.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msgs := selectInitMessages(tt.previous, tt.current)
+			assert.Equal(t, tt.wantTitle, msgs.Title)
+			assert.Equal(t, tt.wantBody, msgs.Body)
+		})
+	}
+}
+
+func TestReadPreviousInitVersion_Missing(t *testing.T) {
+	dir := t.TempDir()
+	assert.Empty(t, readPreviousInitVersion(dir))
+}
+
+func TestReadPreviousInitVersion_Trims(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd", "state"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "state", "version"), []byte("v1.2.3\n"), 0644))
+	assert.Equal(t, "v1.2.3", readPreviousInitVersion(dir))
+}
+
+func TestWriteInitVersion(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, writeInitVersion(dir, "v1.2.3"))
+
+	content, err := os.ReadFile(filepath.Join(dir, ".herd", "state", "version"))
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3\n", string(content))
+	assert.Equal(t, "v1.2.3", readPreviousInitVersion(dir))
+}
+
+func TestCommitInitFiles_FreshInstall_UsesInstallTitle(t *testing.T) {
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "v1.2.3"
+
+	dir := setupTestGitRepoWithInitFilesAndRemote(t)
+
+	// Ensure no prior state file exists.
+	_, err := os.Stat(filepath.Join(dir, ".herd", "state", "version"))
+	require.True(t, os.IsNotExist(err), "expected no prior version state file, got err=%v", err)
+
+	require.NoError(t, commitInitFiles(dir, "test-org", "test-repo"))
+
+	msg := latestRemoteCommitMessage(t, dir, "herd/init-v1.2.3")
+	assert.Equal(t, "Install HerdOS v1.2.3", msg)
+}
+
+func TestCommitInitFiles_SameVersion_UsesSyncTitle(t *testing.T) {
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "v1.2.3"
+
+	dir := setupTestGitRepoWithInitFilesAndRemote(t)
+
+	// Pre-populate the state file with the same version.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd", "state"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "state", "version"), []byte("v1.2.3\n"), 0644))
+
+	require.NoError(t, commitInitFiles(dir, "test-org", "test-repo"))
+
+	msg := latestRemoteCommitMessage(t, dir, "herd/init-v1.2.3")
+	assert.Equal(t, "Sync HerdOS files", msg)
+}
+
+func TestCommitInitFiles_DifferentVersion_UsesUpdateTitle(t *testing.T) {
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "v1.2.3"
+
+	dir := setupTestGitRepoWithInitFilesAndRemote(t)
+
+	// Pre-populate the state file with an older version.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd", "state"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "state", "version"), []byte("v1.0.0\n"), 0644))
+
+	require.NoError(t, commitInitFiles(dir, "test-org", "test-repo"))
+
+	msg := latestRemoteCommitMessage(t, dir, "herd/init-v1.2.3")
+	assert.Equal(t, "Update HerdOS to v1.2.3", msg)
+}
+
+func TestCommitInitFiles_WritesVersionFile(t *testing.T) {
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "v1.2.3"
+
+	dir := setupTestGitRepoWithInitFilesAndRemote(t)
+
+	require.NoError(t, commitInitFiles(dir, "test-org", "test-repo"))
+
+	content, err := os.ReadFile(filepath.Join(dir, ".herd", "state", "version"))
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", strings.TrimSpace(string(content)))
+}
+
+func TestCommitInitFiles_WritesVersionFile_NothingToCommit(t *testing.T) {
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "v1.2.3"
+
+	dir := setupTestGitRepoWithInitFilesAndRemote(t)
+
+	// Commit init files first so commitInitFiles short-circuits.
+	gitCmd(t, dir, "add", "-A")
+	gitCommit(t, dir, "pre-commit init files")
+
+	require.NoError(t, commitInitFiles(dir, "test-org", "test-repo"))
+
+	content, err := os.ReadFile(filepath.Join(dir, ".herd", "state", "version"))
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", strings.TrimSpace(string(content)))
+}
+
+// setupTestGitRepoWithInitFilesAndRemote creates a test git repo whose origin
+// points to a local bare repo, so that `git push` succeeds inside tests.
+func setupTestGitRepoWithInitFilesAndRemote(t *testing.T) string {
+	t.Helper()
+
+	// Create the bare remote in a separate temp dir.
+	bareDir := t.TempDir()
+	cmd := exec.Command("git", "init", "--bare")
+	cmd.Dir = bareDir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git init --bare: %s", string(out))
+
+	// Create the working repo with the bare repo as origin.
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "remote", "add", "origin", bareDir)
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+
+	// Initial commit on main.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	gitCmd(t, dir, "add", "README.md")
+	gitCommit(t, dir, "initial commit")
+	gitCmd(t, dir, "branch", "-M", "main")
+
+	// Create files herd init produces.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herdos.yml"), []byte("version: 1"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".herd/state/\n.env\n"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "planner.md"), []byte{}, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "worker.md"), []byte{}, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "integrator.md"), []byte{}, 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".github", "workflows"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".github", "workflows", "herd-worker.yml"), []byte("name: worker"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".github", "workflows", "herd-monitor.yml"), []byte("name: monitor"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".github", "workflows", "herd-integrator.yml"), []byte("name: integrator"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner_base"), []byte("FROM ubuntu"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), []byte("FROM herd-runner-base"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), []byte("#!/bin/bash"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), []byte("services:"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.herd.example"), []byte("GITHUB_TOKEN="), 0644))
+
+	return dir
+}
+
+// latestRemoteCommitMessage returns the subject of the latest commit on the
+// given branch in the local repo's `origin` remote-tracking ref.
+// `commitInitFiles` deletes the local branch on return but the remote-tracking
+// ref and the bare remote still hold the commit, so we read from there.
+func latestRemoteCommitMessage(t *testing.T, dir, branch string) string {
+	t.Helper()
+	cmd := exec.Command("git", "log", "-1", "--format=%s", "refs/remotes/origin/"+branch)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git log: %s", string(out))
+	return strings.TrimSpace(string(out))
+}
+
 // setupTestGitRepoWithInitFiles creates a test git repo with the files commitInitFiles expects.
 func setupTestGitRepoWithInitFiles(t *testing.T) string {
 	t.Helper()
