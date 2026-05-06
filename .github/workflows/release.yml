@@ -23,6 +23,13 @@ jobs:
       - name: Generate checksums
         run: cd bin && sha256sum herd-* > checksums.txt
 
+      - name: Upload linux-amd64 binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: herd-linux-amd64
+          path: bin/herd-linux-amd64
+          retention-days: 1
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -42,3 +49,70 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           ./scripts/update-homebrew.sh $VERSION bin/checksums.txt
+
+  # self-init: regenerates herd-managed files (workflows, runner Dockerfile/base,
+  # entrypoint, docker-compose, .env.example) on every release by running the
+  # just-built `herd init --skip-labels` against this repo. If herd init produces
+  # no changes, it short-circuits and no PR is opened. The end-to-end behavior of
+  # `herd init --skip-labels` is covered by TestRunInitSkipLabelsEndToEnd in
+  # internal/cli/init_test.go.
+  self-init:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Download herd binary
+        uses: actions/download-artifact@v4
+        with:
+          name: herd-linux-amd64
+          path: .
+
+      - name: Make herd executable
+        run: |
+          mv herd-linux-amd64 herd
+          chmod +x herd
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Delete stale remote branch (if any)
+        env:
+          GH_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="herd/init-${GITHUB_REF_NAME}"
+          # Best-effort: remove any leftover branch from a previous run of the same tag.
+          git push origin --delete "$BRANCH" || true
+
+      - name: Run herd init
+        env:
+          HERD_VERSION: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ./herd init --skip-labels
+          # Note: herd init internally creates branch `herd/init-<version>`, commits,
+          # pushes (with --force), and opens a PR. If there are no changes, its own
+          # `git diff --cached --quiet` check makes the function a no-op and it returns
+          # without committing. We additionally guard below to print a clear log line.
+
+      - name: Report no-op (if applicable)
+        run: |
+          # If herd init produced no changes, no remote branch will exist for this tag.
+          BRANCH="herd/init-${GITHUB_REF_NAME}"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Self-init PR created on branch $BRANCH"
+          else
+            echo "No herd-managed files changed in this release; skipping self-init PR."
+          fi
