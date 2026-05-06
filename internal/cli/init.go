@@ -21,7 +21,7 @@ import (
 )
 
 func newInitCmd() *cobra.Command {
-	var skipLabels, skipWorkflows bool
+	var skipLabels, skipWorkflows, checkOnly, dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -29,12 +29,18 @@ func newInitCmd() *cobra.Command {
 		Long:  "Initialize a repository for HerdOS. Creates config, labels, workflow files, and guides secrets setup.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if checkOnly || dryRun {
+				return runInitCheck()
+			}
 			return runInit(skipLabels, skipWorkflows)
 		},
+		SilenceUsage: true,
 	}
 
 	cmd.Flags().BoolVar(&skipLabels, "skip-labels", false, "Don't create labels")
 	cmd.Flags().BoolVar(&skipWorkflows, "skip-workflows", false, "Don't install workflow files")
+	cmd.Flags().BoolVar(&checkOnly, "check", false, "Compare what `herd init` would write against on-disk files; exit 1 if any drift is detected. Writes nothing.")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Alias for --check")
 
 	return cmd
 }
@@ -283,23 +289,145 @@ func createLabelViaCLI(owner, repo string, def issues.LabelDef) error {
 	return nil
 }
 
+// managedFile represents a herd-managed file with its target path (relative to repo root)
+// and its rendered content.
+type managedFile struct {
+	Path    string // relative path, e.g. ".github/workflows/herd-worker.yml"
+	Content []byte
+	Mode    os.FileMode // 0644 for most, 0755 for entrypoint.herd.sh
+}
+
+// renderRunnerFiles returns the runner-infrastructure files (Dockerfile.herd_runner_base,
+// entrypoint.herd.sh, .env.herd.example, docker-compose.herd.yml) in stable order.
+// The compose result reflects docker-compose.herd.override.yml if present in dir.
+// Dockerfile.herd_runner is intentionally NOT included — it is user-owned.
+func renderRunnerFiles(dir, owner, repo string) ([]managedFile, error) {
+	dockerfileBase, err := runner.FS.ReadFile("Dockerfile.herd_runner_base")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded Dockerfile.herd_runner_base: %w", err)
+	}
+	entrypoint, err := runner.FS.ReadFile("entrypoint.herd.sh")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded entrypoint.herd.sh: %w", err)
+	}
+	envExample, err := runner.FS.ReadFile(".env.herd.example")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded .env.herd.example: %w", err)
+	}
+
+	composeContent, _, _ := renderMergedCompose(dir, owner, repo)
+	if composeContent == nil {
+		return nil, fmt.Errorf("rendering docker-compose.herd.yml")
+	}
+
+	return []managedFile{
+		{Path: "Dockerfile.herd_runner_base", Content: dockerfileBase, Mode: 0644},
+		{Path: "entrypoint.herd.sh", Content: entrypoint, Mode: 0755},
+		{Path: ".env.herd.example", Content: envExample, Mode: 0644},
+		{Path: "docker-compose.herd.yml", Content: composeContent, Mode: 0644},
+	}, nil
+}
+
+// renderWorkflowFiles renders every workflow in workflowFiles() against cfg and
+// returns the resulting managedFile slice in workflowFiles() order.
+func renderWorkflowFiles(cfg *config.Config) ([]managedFile, error) {
+	wfs := workflowFiles()
+	out := make([]managedFile, 0, len(wfs))
+	for _, wf := range wfs {
+		data, err := RenderWorkflow(wf, cfg)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, managedFile{
+			Path:    filepath.Join(".github", "workflows", wf.DestName),
+			Content: data,
+			Mode:    0644,
+		})
+	}
+	return out, nil
+}
+
+// renderManagedFiles returns the full set of files `herd init` would write for the
+// given dir+cfg, EXCLUDING Dockerfile.herd_runner (which is user-owned and only
+// created if missing — it is checked separately by existence only).
+//
+// Reads dir for docker-compose.herd.override.yml so the merged compose result is
+// included if an override is present.
+func renderManagedFiles(dir, owner, repo string, cfg *config.Config) ([]managedFile, error) {
+	runners, err := renderRunnerFiles(dir, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	workflows, err := renderWorkflowFiles(cfg)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]managedFile, 0, len(runners)+len(workflows))
+	out = append(out, runners...)
+	out = append(out, workflows...)
+	return out, nil
+}
+
+// renderMergedCompose returns the rendered+merged docker-compose content. If the
+// override file is missing or unreadable, returns the base render. If the override
+// exists but fails to merge, returns the base content and the merge error so the
+// caller can decide whether to surface a warning.
+func renderMergedCompose(dir, owner, repo string) ([]byte, bool, error) {
+	rendered, err := renderDockerCompose(owner, repo)
+	if err != nil {
+		return nil, false, fmt.Errorf("rendering docker-compose.herd.yml: %w", err)
+	}
+	base := []byte(rendered)
+	overridePath := filepath.Join(dir, "docker-compose.herd.override.yml")
+	overrideData, readErr := os.ReadFile(overridePath)
+	if readErr != nil {
+		return base, false, nil
+	}
+	merged, mergeErr := mergeComposeOverride(base, overrideData)
+	if mergeErr != nil {
+		return base, false, mergeErr
+	}
+	return merged, true, nil
+}
+
+// installManagedFilesOnly writes the herd-managed files (excluding Dockerfile.herd_runner)
+// produced by renderManagedFiles to disk. It performs no console output and creates
+// any missing parent directories. Used internally by tests and by runInit's file-writing
+// portion.
+func installManagedFilesOnly(dir, owner, repo string, cfg *config.Config) error {
+	files, err := renderManagedFiles(dir, owner, repo, cfg)
+	if err != nil {
+		return err
+	}
+	for _, mf := range files {
+		full := filepath.Join(dir, mf.Path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			return fmt.Errorf("creating directory for %s: %w", mf.Path, err)
+		}
+		if err := os.WriteFile(full, mf.Content, mf.Mode); err != nil {
+			return fmt.Errorf("writing %s: %w", mf.Path, err)
+		}
+	}
+	return nil
+}
+
 func installWorkflows(dir string, cfg *config.Config) error {
 	workflowDir := filepath.Join(dir, ".github", "workflows")
 	if err := os.MkdirAll(workflowDir, 0755); err != nil {
 		return fmt.Errorf("creating .github/workflows/: %w", err)
 	}
 
-	for _, wf := range workflowFiles() {
-		data, err := RenderWorkflow(wf, cfg)
-		if err != nil {
-			return err
+	files, err := renderWorkflowFiles(cfg)
+	if err != nil {
+		return err
+	}
+	for _, mf := range files {
+		dest := filepath.Join(dir, mf.Path)
+		name := filepath.Base(mf.Path)
+		if err := os.WriteFile(dest, mf.Content, mf.Mode); err != nil {
+			return fmt.Errorf("writing %s: %w", name, err)
 		}
-
-		dest := filepath.Join(workflowDir, wf.DestName)
-		if err := os.WriteFile(dest, data, 0644); err != nil {
-			return fmt.Errorf("writing %s: %w", wf.DestName, err)
-		}
-		fmt.Println(display.Success("Installed " + wf.DestName))
+		fmt.Println(display.Success("Installed " + name))
 	}
 
 	return nil
@@ -332,11 +460,11 @@ func createRunnerFiles(dir, owner, repo string) error {
 	// them in sync with the installed herd version.
 
 	// Dockerfile.herd_runner_base (herd-managed, always overwritten)
-	data, err := runner.FS.ReadFile("Dockerfile.herd_runner_base")
+	dockerfileBase, err := runner.FS.ReadFile("Dockerfile.herd_runner_base")
 	if err != nil {
 		return fmt.Errorf("reading embedded Dockerfile.herd_runner_base: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner_base"), data, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner_base"), dockerfileBase, 0644); err != nil {
 		return fmt.Errorf("writing Dockerfile.herd_runner_base: %w", err)
 	}
 	fmt.Println(display.Success("Installed Dockerfile.herd_runner_base"))
@@ -344,7 +472,7 @@ func createRunnerFiles(dir, owner, repo string) error {
 	// Dockerfile.herd_runner (user-owned, only created if missing)
 	herdRunnerPath := filepath.Join(dir, "Dockerfile.herd_runner")
 	if _, err := os.Stat(herdRunnerPath); os.IsNotExist(err) {
-		data, err = runner.FS.ReadFile("Dockerfile.herd_runner.tmpl")
+		data, err := runner.FS.ReadFile("Dockerfile.herd_runner.tmpl")
 		if err != nil {
 			return fmt.Errorf("reading embedded Dockerfile.herd_runner.tmpl: %w", err)
 		}
@@ -357,41 +485,36 @@ func createRunnerFiles(dir, owner, repo string) error {
 	}
 
 	// entrypoint.herd.sh (static, executable)
-	data, err = runner.FS.ReadFile("entrypoint.herd.sh")
+	entrypoint, err := runner.FS.ReadFile("entrypoint.herd.sh")
 	if err != nil {
 		return fmt.Errorf("reading embedded entrypoint.herd.sh: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), data, 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), entrypoint, 0755); err != nil {
 		return fmt.Errorf("writing entrypoint.herd.sh: %w", err)
 	}
 	fmt.Println(display.Success("Installed entrypoint.herd.sh"))
 
 	// docker-compose.herd.yml (templated with owner/repo, merged with override if present)
-	rendered, err := renderDockerCompose(owner, repo)
-	if err != nil {
-		return fmt.Errorf("rendering docker-compose.herd.yml: %w", err)
+	composeContent, mergedOK, mergeErr := renderMergedCompose(dir, owner, repo)
+	if composeContent == nil {
+		return fmt.Errorf("rendering docker-compose.herd.yml: %w", mergeErr)
 	}
-	overridePath := filepath.Join(dir, "docker-compose.herd.override.yml")
-	if overrideData, readErr := os.ReadFile(overridePath); readErr == nil {
-		merged, mergeErr := mergeComposeOverride([]byte(rendered), overrideData)
-		if mergeErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to merge docker-compose.herd.override.yml: %v (using base only)\n", mergeErr)
-		} else {
-			rendered = string(merged)
-			fmt.Println(display.Success("Merged docker-compose.herd.override.yml"))
-		}
+	if mergeErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to merge docker-compose.herd.override.yml: %v (using base only)\n", mergeErr)
+	} else if mergedOK {
+		fmt.Println(display.Success("Merged docker-compose.herd.override.yml"))
 	}
-	if err := os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), []byte(rendered), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), composeContent, 0644); err != nil {
 		return fmt.Errorf("writing docker-compose.herd.yml: %w", err)
 	}
 	fmt.Println(display.Success("Installed docker-compose.herd.yml"))
 
 	// .env.herd.example (static)
-	data, err = runner.FS.ReadFile(".env.herd.example")
+	envExample, err := runner.FS.ReadFile(".env.herd.example")
 	if err != nil {
 		return fmt.Errorf("reading embedded .env.herd.example: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".env.herd.example"), data, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".env.herd.example"), envExample, 0644); err != nil {
 		return fmt.Errorf("writing .env.herd.example: %w", err)
 	}
 	fmt.Println(display.Success("Installed .env.herd.example"))
