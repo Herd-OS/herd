@@ -348,13 +348,61 @@ func TestPlan_LargeSystemPrompt(t *testing.T) {
 			}
 			require.NotEmpty(t, promptFile, "argv must contain --system-prompt-file with a path")
 
-			assert.Contains(t, argv, "--initial-prompt")
+			assert.NotContains(t, argv, "--initial-prompt",
+				"prompt must be passed as a positional, not via --initial-prompt flag")
 			assert.Contains(t, argv, "tiny prompt")
+			assert.Equal(t, "tiny prompt", argv[len(argv)-1],
+				"initial prompt must be the last argv element when set")
 
 			_, statErr := os.Stat(promptFile)
 			assert.True(t, os.IsNotExist(statErr),
 				"temp prompt file %s should be removed after Plan returns (statErr=%v)",
 				promptFile, statErr)
+		})
+	}
+}
+
+func TestPlan_PassesInitialPromptAsPositional(t *testing.T) {
+	const promptFile = "/tmp/system-prompt-xyz.txt"
+
+	tests := []struct {
+		name          string
+		model         string
+		initialPrompt string
+	}{
+		{name: "prompt set, model set", model: "sonnet-4", initialPrompt: "plan a feature"},
+		{name: "prompt set, model empty", model: "", initialPrompt: "plan a feature"},
+		{name: "prompt empty, model set", model: "sonnet-4", initialPrompt: ""},
+		{name: "prompt empty, model empty", model: "", initialPrompt: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New("/fake/claude", tc.model)
+			argv := buildPlanArgs(c, tc.initialPrompt, promptFile)
+
+			assert.NotContains(t, argv, "--initial-prompt",
+				"argv must never contain the --initial-prompt flag")
+
+			if tc.initialPrompt != "" {
+				assert.Contains(t, argv, tc.initialPrompt,
+					"initial prompt value must appear in argv as a positional")
+				assert.Equal(t, tc.initialPrompt, argv[len(argv)-1],
+					"initial prompt must be the last argv element")
+			} else {
+				assert.NotContains(t, argv, "",
+					"empty initial prompt must not be appended as a positional")
+			}
+
+			assert.Contains(t, argv, "--system-prompt-file")
+			assert.Contains(t, argv, promptFile)
+
+			if tc.model != "" {
+				assert.Contains(t, argv, "--model")
+				assert.Contains(t, argv, tc.model)
+			} else {
+				assert.NotContains(t, argv, "--model")
+			}
 		})
 	}
 }

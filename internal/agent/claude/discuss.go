@@ -24,13 +24,7 @@ func (c *ClaudeAgent) Discuss(ctx context.Context, opts agent.DiscussOptions) er
 	}
 	defer func() { _ = os.Remove(promptFile) }()
 
-	args := []string{"--system-prompt-file", promptFile}
-	if c.Model != "" {
-		args = append(args, "--model", c.Model)
-	}
-	if opts.InitialPrompt != "" {
-		args = append(args, "--initial-prompt", opts.InitialPrompt)
-	}
+	args := buildDiscussArgs(c, opts, promptFile)
 
 	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
 	cmd.Dir = opts.RepoRoot
@@ -42,4 +36,19 @@ func (c *ClaudeAgent) Discuss(ctx context.Context, opts agent.DiscussOptions) er
 		return fmt.Errorf("claude exited with error: %w", err)
 	}
 	return nil
+}
+
+// buildDiscussArgs constructs the argv passed to the Claude Code binary for a
+// Discuss session. The initial prompt is appended as a positional argument
+// after all flag args because Claude Code accepts the prompt only as a
+// positional, not via a flag.
+func buildDiscussArgs(c *ClaudeAgent, opts agent.DiscussOptions, promptFile string) []string {
+	args := []string{"--system-prompt-file", promptFile}
+	if c.Model != "" {
+		args = append(args, "--model", c.Model)
+	}
+	if opts.InitialPrompt != "" {
+		args = append(args, opts.InitialPrompt)
+	}
+	return args
 }

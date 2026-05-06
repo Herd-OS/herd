@@ -199,13 +199,7 @@ func (c *ClaudeAgent) Plan(ctx context.Context, initialPrompt string, opts agent
 	}
 	defer func() { _ = os.Remove(promptFile) }()
 
-	args := []string{"--system-prompt-file", promptFile}
-	if c.Model != "" {
-		args = append(args, "--model", c.Model)
-	}
-	if initialPrompt != "" {
-		args = append(args, "--initial-prompt", initialPrompt)
-	}
+	args := buildPlanArgs(c, initialPrompt, promptFile)
 
 	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
 	cmd.Dir = opts.RepoRoot
@@ -222,6 +216,21 @@ func (c *ClaudeAgent) Plan(ctx context.Context, initialPrompt string, opts agent
 		return nil, err
 	}
 	return plan, nil
+}
+
+// buildPlanArgs constructs the argv passed to the Claude Code binary for a
+// Plan session. The initial prompt is appended as a positional argument after
+// all flag args because Claude Code accepts the prompt only as a positional,
+// not via a flag.
+func buildPlanArgs(c *ClaudeAgent, initialPrompt, promptFile string) []string {
+	args := []string{"--system-prompt-file", promptFile}
+	if c.Model != "" {
+		args = append(args, "--model", c.Model)
+	}
+	if initialPrompt != "" {
+		args = append(args, initialPrompt)
+	}
+	return args
 }
 
 func renderPrompt(opts agent.PlanOptions) (string, error) {
