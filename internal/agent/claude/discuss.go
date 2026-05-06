@@ -18,7 +18,13 @@ func (c *ClaudeAgent) Discuss(ctx context.Context, opts agent.DiscussOptions) er
 		return fmt.Errorf("discuss: system prompt is required")
 	}
 
-	args := []string{"--system-prompt", opts.SystemPrompt}
+	promptFile, err := writeSystemPromptFile(opts.SystemPrompt)
+	if err != nil {
+		return fmt.Errorf("discuss: writing system prompt file: %w", err)
+	}
+	defer os.Remove(promptFile)
+
+	args := []string{"--system-prompt-file", promptFile}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
 	}
