@@ -847,6 +847,10 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 
 Note on `herd review <pr-number>` vs `/herd review`: the CLI command opens an interactive local agent session for discussing and optionally fixing a PR — you stay in the loop and the agent only makes changes you approve. The slash command runs an automated agent review on the PR and posts findings as a comment. Use the CLI when you want a back-and-forth; use the slash command when you want a one-shot pre-screen.
 
+#### Draft-and-confirm /herd fix comments
+
+When the interactive `herd review <pr-number>` session reaches a concrete actionable conclusion — for example, "this finding is wrong, but we should still fix X" or "yes, let's add a test for Y" — the agent proactively drafts a `/herd fix` comment scoped to a single, focused task with specific files/functions and acceptance criteria. The agent shows the draft to the user and asks for approval; it never auto-posts. On approval, the agent posts the comment using `gh pr comment <pr-number> --repo <owner>/<repo> --body "..."`. Once posted, the herd workers (via the existing [`/herd fix` comment-command pipeline](#available-commands)) take over. If the conversation is purely informational, the agent does not propose a `/herd fix` comment.
+
 #### Non-Batch PR Reviews
 
 `/herd review` works on any PR, not just batch PRs. When used on a non-batch PR, it runs the same agent review and posts a severity-classified findings comment, but skips all batch-specific logic: no fix issues are created, no workers are dispatched, and no fix cycles are tracked. This is useful for getting an AI review on regular PRs without the full Herd orchestration.
