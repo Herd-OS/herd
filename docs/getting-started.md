@@ -162,6 +162,37 @@ herd status --json
 herd status --runners
 ```
 
+### Live dashboard
+
+`herd dashboard` is a read-only terminal UI that shows active workers, open batches, and recent failures, refreshing on a timer.
+
+```bash
+herd dashboard
+```
+
+Override the refresh interval with `--refresh-seconds`:
+
+```bash
+herd dashboard --refresh-seconds 30
+```
+
+The interval is clamped to 5–300 seconds (default 15).
+
+Keybinds:
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit |
+| `r` | Manual refresh |
+| `↑` / `↓` | Select batch |
+| `Enter` | Open the selected batch's PR (or milestone, if no PR) in the browser |
+
+Worker rows in the top panel are emitted as OSC 8 hyperlinks pointing at the workflow run; supporting terminals render them as clickable links and others fall back to plain text.
+
+The dashboard is read-only and single-repo — cross-repo views and in-TUI actions are out of scope for v1.
+
+**See also:** `herd status` for one-shot or JSON output.
+
 ## Managing Batches
 
 ```bash
