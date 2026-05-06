@@ -225,6 +225,8 @@ This makes it easy to wire into CI as a guard against forgetting to re-run `herd
 
 For day-to-day use, `herd plan` also prints a one-line warning when drift is detected, so you'll be nudged to re-run `herd init` without having to remember to check explicitly.
 
+Both `herd plan` and `herd init --check` additionally perform a best-effort lookup against `api.github.com` and warn when a newer herd release is published. The check is bounded by a 3-second timeout and never blocks; it is intentionally skipped for dev builds and pre-release tags. See [Installation → Upgrade notifications](installation.md#upgrade-notifications) for details.
+
 ## Private dependencies and extra secrets
 
 Worker runners often need to install private dependencies — Bundler from GitHub Packages, npm from a private registry, pip from a private index, cargo from a private Maven mirror, and so on. The package managers usually read credentials from environment variables (e.g. `BUNDLE_RUBYGEMS__PKG__GITHUB__COM`, `NPM_TOKEN`, `PIP_INDEX_URL`).

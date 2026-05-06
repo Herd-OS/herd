@@ -57,6 +57,20 @@ sudo cp bin/herd /usr/local/bin/
 
 ## Updating
 
+### Upgrade notifications
+
+`herd plan` and `herd init --check` perform a best-effort version check at start-up and print a one-line warning when a newer release is published. The check queries `https://api.github.com/repos/Herd-OS/herd/releases/latest` with a 3-second timeout; if it fails (no network, GitHub unreachable, non-200 response, etc.) nothing is printed and the command continues normally — the warning never blocks, and a missing warning is not a failure.
+
+Example warning:
+
+```
+⚠ A newer herd version is available: v0.6.0 (you are running v0.5.3). See https://github.com/Herd-OS/herd/releases/latest
+```
+
+When you see the warning, follow the [release page](https://github.com/Herd-OS/herd/releases/latest) and the steps below to upgrade.
+
+The check is skipped by design for development builds (`herd --version` reports `dev`) and for pre-release tags (anything containing `-`, e.g. `v0.5.3-rc.1`), so contributors and rc testers are not nagged about a "newer" stable release.
+
 ### Update the binary
 
 ```bash

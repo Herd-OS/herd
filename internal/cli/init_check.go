@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -100,6 +101,13 @@ func loadConfigForCheck(dir, owner, repo string) (cfg *config.Config, missing bo
 // a per-file diff summary. Returns errCheckDrift if any file would change. Skips:
 // label creation, git commit/push/PR, workflow API installation.
 func runInitCheck() error {
+	if latest, ok := checkLatestVersion(context.Background()); ok {
+		fmt.Println(display.Warning(fmt.Sprintf(
+			"A newer herd version is available: %s (you are running %s). See https://github.com/Herd-OS/herd/releases/latest",
+			latest, version,
+		)))
+	}
+
 	dir, err := os.Getwd()
 	if err != nil {
 		return err

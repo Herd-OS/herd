@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/platform"
@@ -386,6 +388,34 @@ func TestWarnIfHerdFilesDrifted_PrintsWarningWithPaths(t *testing.T) {
 	assert.Contains(t, stdout, "Drifted:")
 	assert.Contains(t, stdout, ".github/workflows/herd-monitor.yml")
 	assert.Contains(t, stdout, "Run `herd init` to update them.")
+}
+
+// TestRunPlan_VersionWarningDoesNotBlock proves the version check inserted at
+// the top of runPlan does not block on an unreachable network endpoint. A full
+// runPlan invocation is too heavy to drive from a unit test (it would launch
+// the configured agent subprocess), so per the issue we exercise the call site
+// behavior directly: invoke checkLatestVersion with the same network-failure
+// setup runPlan would see and bound it inside a goroutine.
+func TestRunPlan_VersionWarningDoesNotBlock(t *testing.T) {
+	setLatestReleaseURL(t, "http://127.0.0.1:1")
+	setVersionCheckTimeout(t, 100*time.Millisecond)
+	setVersionForTest(t, "v0.5.3")
+
+	done := make(chan struct{})
+	var latest string
+	var ok bool
+	go func() {
+		latest, ok = checkLatestVersion(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		require.False(t, ok)
+		assert.Equal(t, "", latest)
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkLatestVersion should not block past versionCheckTimeout")
+	}
 }
 
 func TestWarnIfHerdFilesDrifted_MultipleDriftedFilesListed(t *testing.T) {

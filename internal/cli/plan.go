@@ -156,6 +156,14 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 		warnIfHerdFilesDrifted(dir)
 	}
 
+	// Best-effort: warn if a newer herd release is available. Never blocks.
+	if latest, ok := checkLatestVersion(ctx); ok {
+		fmt.Println(display.Warning(fmt.Sprintf(
+			"A newer herd version is available: %s (you are running %s). See https://github.com/Herd-OS/herd/releases/latest",
+			latest, version,
+		)))
+	}
+
 	// Fetch open milestones (best-effort: client creation or API failure is silently ignored)
 	milestonesCtx := ""
 	client, clientErr := newClientOrExit(cfg.Platform.Owner, cfg.Platform.Repo)
