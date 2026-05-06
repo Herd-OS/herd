@@ -22,7 +22,7 @@ func (c *ClaudeAgent) Discuss(ctx context.Context, opts agent.DiscussOptions) er
 	if err != nil {
 		return fmt.Errorf("discuss: writing system prompt file: %w", err)
 	}
-	defer os.Remove(promptFile)
+	defer func() { _ = os.Remove(promptFile) }()
 
 	args := []string{"--system-prompt-file", promptFile}
 	if c.Model != "" {

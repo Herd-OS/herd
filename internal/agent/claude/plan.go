@@ -197,7 +197,7 @@ func (c *ClaudeAgent) Plan(ctx context.Context, initialPrompt string, opts agent
 	if err != nil {
 		return nil, fmt.Errorf("plan: writing system prompt file: %w", err)
 	}
-	defer os.Remove(promptFile)
+	defer func() { _ = os.Remove(promptFile) }()
 
 	args := []string{"--system-prompt-file", promptFile}
 	if c.Model != "" {
