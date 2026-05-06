@@ -204,6 +204,27 @@ You can run on cloud VMs instead of Docker. Requirements:
 
 See [GitHub's self-hosted runner docs](https://docs.github.com/en/actions/hosting-your-own-runners) for detailed setup.
 
+## 8. Checking for updates
+
+`herd init` lays down a set of managed files — workflow YAMLs in `.github/workflows/`, `Dockerfile.herd_runner_base`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`. Newer versions of the `herd` binary may render different content for those files, so a repository that was initialized against an older version can drift from the current templates over time.
+
+`herd init --check` (with `--dry-run` as an alias) re-renders every managed file, compares the result against what's on disk, and prints a per-file summary: `✓` for files that match and `✗ <path> (would change)` followed by up to 5 lines of diff preview for files that differ. After the per-file output, it prints a final line of the form `N files would be modified, M unchanged`. The command exits 0 when nothing would change and 1 when any drift is detected.
+
+`Dockerfile.herd_runner` is user-owned — it is created once by `herd init` and never overwritten — so check mode only verifies that it exists and does not compare its content. No labels, workflows, secrets, or git operations are touched in check mode; it is purely read-only.
+
+```
+herd init --check
+```
+
+This makes it easy to wire into CI as a guard against forgetting to re-run `herd init` after upgrading the binary:
+
+```
+- name: Verify HerdOS files are current
+  run: herd init --check
+```
+
+For day-to-day use, `herd plan` also prints a one-line warning when drift is detected, so you'll be nudged to re-run `herd init` without having to remember to check explicitly.
+
 ## Private dependencies and extra secrets
 
 Worker runners often need to install private dependencies — Bundler from GitHub Packages, npm from a private registry, pip from a private index, cargo from a private Maven mirror, and so on. The package managers usually read credentials from environment variables (e.g. `BUNDLE_RUBYGEMS__PKG__GITHUB__COM`, `NPM_TOKEN`, `PIP_INDEX_URL`).
