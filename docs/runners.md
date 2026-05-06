@@ -204,6 +204,33 @@ You can run on cloud VMs instead of Docker. Requirements:
 
 See [GitHub's self-hosted runner docs](https://docs.github.com/en/actions/hosting-your-own-runners) for detailed setup.
 
+## Private dependencies and extra secrets
+
+Worker runners often need to install private dependencies — Bundler from GitHub Packages, npm from a private registry, pip from a private index, cargo from a private Maven mirror, and so on. The package managers usually read credentials from environment variables (e.g. `BUNDLE_RUBYGEMS__PKG__GITHUB__COM`, `NPM_TOKEN`, `PIP_INDEX_URL`).
+
+Use `workers.extra_env` in `.herdos.yml` to surface those credentials into the worker job:
+
+```yaml
+workers:
+  extra_env:
+    - BUNDLE_RUBYGEMS__PKG__GITHUB__COM
+    - NPM_TOKEN
+```
+
+For each name listed, `herd init` renders one line into the `env:` block of the worker workflow's `Execute task` step:
+
+```yaml
+BUNDLE_RUBYGEMS__PKG__GITHUB__COM: ${{ secrets.BUNDLE_RUBYGEMS__PKG__GITHUB__COM }}
+```
+
+The named secrets must be configured as GitHub repository or organization secrets. herd reads from `secrets.<NAME>` at workflow runtime; it does not create or manage the secrets themselves. Add them under **Settings → Secrets and variables → Actions** at the repo or org level before listing them in `extra_env`.
+
+This passthrough applies only to the worker workflow. The integrator and monitor workflows are not affected.
+
+After editing `extra_env`, re-run `herd init` to regenerate `.github/workflows/herd-worker.yml`.
+
+See [configuration.md](configuration.md) for the full field reference.
+
 ## Troubleshooting
 
 | Problem | Cause | Fix |
