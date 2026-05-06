@@ -125,13 +125,65 @@ func TestDiscuss_LargeSystemPrompt(t *testing.T) {
 			}
 			require.NotEmpty(t, promptFile, "argv must contain --system-prompt-file with a path")
 
-			assert.Contains(t, argv, "--initial-prompt")
+			assert.NotContains(t, argv, "--initial-prompt",
+				"prompt must be passed as a positional, not via --initial-prompt flag")
 			assert.Contains(t, argv, "kick off")
+			assert.Equal(t, "kick off", argv[len(argv)-1],
+				"initial prompt must be the last argv element when set")
 
 			_, statErr := os.Stat(promptFile)
 			assert.True(t, os.IsNotExist(statErr),
 				"temp prompt file %s should be removed after Discuss returns (statErr=%v)",
 				promptFile, statErr)
+		})
+	}
+}
+
+func TestDiscuss_PassesInitialPromptAsPositional(t *testing.T) {
+	const promptFile = "/tmp/system-prompt-xyz.txt"
+
+	tests := []struct {
+		name          string
+		model         string
+		initialPrompt string
+	}{
+		{name: "prompt set, model set", model: "sonnet-4", initialPrompt: "kick off"},
+		{name: "prompt set, model empty", model: "", initialPrompt: "kick off"},
+		{name: "prompt empty, model set", model: "sonnet-4", initialPrompt: ""},
+		{name: "prompt empty, model empty", model: "", initialPrompt: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New("/fake/claude", tc.model)
+			argv := buildDiscussArgs(c, agent.DiscussOptions{
+				InitialPrompt: tc.initialPrompt,
+			}, promptFile)
+
+			assert.NotContains(t, argv, "--initial-prompt",
+				"argv must never contain the --initial-prompt flag")
+
+			if tc.initialPrompt != "" {
+				assert.Contains(t, argv, tc.initialPrompt,
+					"initial prompt value must appear in argv as a positional")
+				assert.Equal(t, tc.initialPrompt, argv[len(argv)-1],
+					"initial prompt must be the last argv element")
+			} else {
+				// No empty-string trailing positional should be appended.
+				assert.NotContains(t, argv, "",
+					"empty initial prompt must not be appended as a positional")
+			}
+
+			// --system-prompt-file flag is always present with a path argument.
+			assert.Contains(t, argv, "--system-prompt-file")
+			assert.Contains(t, argv, promptFile)
+
+			if tc.model != "" {
+				assert.Contains(t, argv, "--model")
+				assert.Contains(t, argv, tc.model)
+			} else {
+				assert.NotContains(t, argv, "--model")
+			}
 		})
 	}
 }
