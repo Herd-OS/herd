@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -818,4 +819,164 @@ func runGit(t *testing.T, dir string, args ...string) error {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = dir
 	return cmd.Run()
+}
+
+// TestRunInitSkipLabelsEndToEnd is the integration-level regression guard
+// for the release self-update path: it exercises the full runInit flow with
+// skipLabels=true and verifies every herd-managed file is produced.
+//
+// Test setup pre-creates the herd/init-<version> branch so that commitInitFiles
+// fails fast at "git checkout -b" before its deferred branch-cleanup fires.
+// Without this, the deferred switch-back-to-main wipes the just-committed
+// herd files from the working tree, leaving nothing to assert on.
+//
+// skipLabels=true guarantees no GitHub API call is attempted: runInit
+// short-circuits on the !skipLabels branch before reaching createLabels.
+func TestRunInitSkipLabelsEndToEnd(t *testing.T) {
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "v9.9.9-test"
+
+	dir := setupTestGitRepoWithCommit(t, "git@github.com:test-org/test-repo.git")
+
+	gitCmd(t, dir, "checkout", "-b", "herd/init-"+version)
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	require.NoError(t, runInit(true, false))
+
+	herdosYml := filepath.Join(dir, ".herdos.yml")
+	info, err := os.Stat(herdosYml)
+	require.NoError(t, err, ".herdos.yml should exist")
+	assert.Greater(t, info.Size(), int64(0), ".herdos.yml should not be empty")
+
+	gi, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	require.NoError(t, err)
+	assert.Contains(t, string(gi), ".herd/state/")
+	assert.Contains(t, string(gi), ".env")
+
+	for _, name := range RoleInstructionFiles() {
+		path := filepath.Join(dir, ".herd", name)
+		_, err := os.Stat(path)
+		assert.NoError(t, err, ".herd/%s should exist", name)
+	}
+
+	for _, name := range WorkflowFiles() {
+		t.Run("workflow_"+name, func(t *testing.T) {
+			path := filepath.Join(dir, ".github", "workflows", name)
+			info, err := os.Stat(path)
+			require.NoError(t, err)
+			assert.Greater(t, info.Size(), int64(0), "%s should not be empty", name)
+		})
+	}
+
+	dfBase, err := os.ReadFile(filepath.Join(dir, "Dockerfile.herd_runner_base"))
+	require.NoError(t, err)
+	assert.Contains(t, string(dfBase), "FROM ubuntu:24.04")
+
+	dfRunner, err := os.ReadFile(filepath.Join(dir, "Dockerfile.herd_runner"))
+	require.NoError(t, err)
+	assert.Contains(t, string(dfRunner), "FROM herd-runner-base")
+
+	ep, err := os.ReadFile(filepath.Join(dir, "entrypoint.herd.sh"))
+	require.NoError(t, err)
+	assert.Contains(t, string(ep), "#!/bin/bash")
+	epInfo, err := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0755), epInfo.Mode().Perm(), "entrypoint.herd.sh should be executable")
+
+	dc, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(dc), "REPO_URL=https://github.com/test-org/test-repo")
+
+	envEx, err := os.ReadFile(filepath.Join(dir, ".env.herd.example"))
+	require.NoError(t, err)
+	assert.Contains(t, string(envEx), "GITHUB_TOKEN=")
+}
+
+// TestRunInitSkipLabelsIdempotent verifies that running runInit twice in the
+// same dir does not produce duplicate .gitignore entries, does not overwrite
+// .herdos.yml, and produces byte-identical herd-managed workflow/runner files.
+// See TestRunInitSkipLabelsEndToEnd for why we pre-create the herd/init-<version>
+// branch.
+func TestRunInitSkipLabelsIdempotent(t *testing.T) {
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "v9.9.9-test"
+
+	dir := setupTestGitRepoWithCommit(t, "git@github.com:test-org/test-repo.git")
+
+	gitCmd(t, dir, "checkout", "-b", "herd/init-"+version)
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	require.NoError(t, runInit(true, false), "first runInit")
+
+	herdosFirst, err := os.ReadFile(filepath.Join(dir, ".herdos.yml"))
+	require.NoError(t, err)
+
+	gitignoreFirst, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	require.NoError(t, err)
+
+	workflowFirst := make(map[string][]byte, len(WorkflowFiles()))
+	for _, name := range WorkflowFiles() {
+		data, err := os.ReadFile(filepath.Join(dir, ".github", "workflows", name))
+		require.NoError(t, err)
+		workflowFirst[name] = data
+	}
+
+	runnerFiles := []string{
+		"Dockerfile.herd_runner_base",
+		"Dockerfile.herd_runner",
+		"entrypoint.herd.sh",
+		"docker-compose.herd.yml",
+		".env.herd.example",
+	}
+	runnerFirst := make(map[string][]byte, len(runnerFiles))
+	for _, name := range runnerFiles {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		require.NoError(t, err)
+		runnerFirst[name] = data
+	}
+
+	require.NoError(t, runInit(true, false), "second runInit")
+
+	herdosSecond, err := os.ReadFile(filepath.Join(dir, ".herdos.yml"))
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(herdosFirst, herdosSecond), ".herdos.yml should not change on re-run")
+
+	gitignoreSecond, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	require.NoError(t, err)
+	assert.Equal(t, string(gitignoreFirst), string(gitignoreSecond), ".gitignore should not change on re-run")
+	gitignoreLines := strings.Split(strings.TrimSpace(string(gitignoreSecond)), "\n")
+	assert.Equal(t, 1, countMatching(gitignoreLines, ".herd/state/"), ".gitignore should not duplicate .herd/state/")
+	assert.Equal(t, 1, countMatching(gitignoreLines, ".env"), ".gitignore should not duplicate .env")
+
+	for _, name := range WorkflowFiles() {
+		data, err := os.ReadFile(filepath.Join(dir, ".github", "workflows", name))
+		require.NoError(t, err)
+		assert.True(t, bytes.Equal(workflowFirst[name], data), "%s should be byte-identical on re-run", name)
+	}
+
+	for _, name := range runnerFiles {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		require.NoError(t, err)
+		assert.True(t, bytes.Equal(runnerFirst[name], data), "%s should be byte-identical on re-run", name)
+	}
+}
+
+func countMatching(lines []string, want string) int {
+	n := 0
+	for _, l := range lines {
+		if strings.TrimSpace(l) == want {
+			n++
+		}
+	}
+	return n
 }
