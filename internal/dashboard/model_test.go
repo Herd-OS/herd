@@ -107,6 +107,73 @@ func TestModel_StateMsgPreservesOnEmptyError(t *testing.T) {
 	assert.Equal(t, "list milestones: boom", mu.state.FetchError)
 }
 
+func TestModel_StateMsgPreservesEachSliceIndependently(t *testing.T) {
+	priorBatches := []BatchEntry{{MilestoneNumber: 1, MilestoneTitle: "alpha"}}
+	priorWorkers := []WorkerEntry{{RunID: 100, IssueNumber: 7}}
+	priorFailures := []FailureEntry{{Number: 5, Title: "broken"}}
+
+	tests := []struct {
+		name         string
+		newState     State
+		errStr       string
+		wantBatches  []BatchEntry
+		wantWorkers  []WorkerEntry
+		wantFailures []FailureEntry
+	}{
+		{
+			name: "workers fetch failed, batches and failures succeeded",
+			newState: State{
+				Owner:    "o",
+				Repo:     "r",
+				Batches:  []BatchEntry{{MilestoneNumber: 9, MilestoneTitle: "fresh"}},
+				Failures: []FailureEntry{{Number: 8, Title: "newfail"}},
+			},
+			errStr:       "list worker runs: boom",
+			wantBatches:  []BatchEntry{{MilestoneNumber: 9, MilestoneTitle: "fresh"}},
+			wantWorkers:  priorWorkers,
+			wantFailures: []FailureEntry{{Number: 8, Title: "newfail"}},
+		},
+		{
+			name: "failures fetch failed, batches and workers succeeded",
+			newState: State{
+				Owner:   "o",
+				Repo:    "r",
+				Batches: []BatchEntry{{MilestoneNumber: 9, MilestoneTitle: "fresh"}},
+				Workers: []WorkerEntry{{RunID: 200, IssueNumber: 8}},
+			},
+			errStr:       "list failures: boom",
+			wantBatches:  []BatchEntry{{MilestoneNumber: 9, MilestoneTitle: "fresh"}},
+			wantWorkers:  []WorkerEntry{{RunID: 200, IssueNumber: 8}},
+			wantFailures: priorFailures,
+		},
+		{
+			name:         "all fetches failed, everything preserved",
+			newState:     State{Owner: "o", Repo: "r"},
+			errStr:       "list milestones: boom; list worker runs: boom; list failures: boom",
+			wantBatches:  priorBatches,
+			wantWorkers:  priorWorkers,
+			wantFailures: priorFailures,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModel(nil, "o", "r", 15)
+			m.state.Batches = priorBatches
+			m.state.Workers = priorWorkers
+			m.state.Failures = priorFailures
+
+			updated, _ := m.Update(stateMsg{s: tt.newState, errStr: tt.errStr})
+			mu, ok := updated.(Model)
+			require.True(t, ok)
+			assert.Equal(t, tt.wantBatches, mu.state.Batches)
+			assert.Equal(t, tt.wantWorkers, mu.state.Workers)
+			assert.Equal(t, tt.wantFailures, mu.state.Failures)
+			assert.Equal(t, tt.errStr, mu.state.FetchError)
+		})
+	}
+}
+
 func TestModel_StateMsgReplacesOnSuccess(t *testing.T) {
 	m := NewModel(nil, "o", "r", 15)
 	m.state.Batches = []BatchEntry{{MilestoneNumber: 1, MilestoneTitle: "old"}}

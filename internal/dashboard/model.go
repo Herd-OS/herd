@@ -88,15 +88,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tea.Batch(m.fetchCmd(), m.tickCmd())
 	case stateMsg:
-		// Preserve previous data on partial failure: only replace populated slices.
-		if msg.errStr != "" && len(msg.s.Batches) == 0 && len(m.state.Batches) > 0 {
-			prev := m.state
-			prev.LastRefresh = msg.s.LastRefresh
-			prev.FetchError = msg.errStr
-			m.state = prev
+		if msg.errStr != "" {
+			// Partial failure: preserve each slice independently. A slice that
+			// came back empty while we had prior data is likely the fetch that
+			// errored, so we keep showing the last-known-good rows.
+			merged := msg.s
+			if len(merged.Batches) == 0 && len(m.state.Batches) > 0 {
+				merged.Batches = m.state.Batches
+			}
+			if len(merged.Workers) == 0 && len(m.state.Workers) > 0 {
+				merged.Workers = m.state.Workers
+			}
+			if len(merged.Failures) == 0 && len(m.state.Failures) > 0 {
+				merged.Failures = m.state.Failures
+			}
+			merged.FetchError = msg.errStr
+			m.state = merged
 		} else {
 			m.state = msg.s
-			m.state.FetchError = msg.errStr
+			m.state.FetchError = ""
 		}
 		if m.selected >= len(m.state.Batches) {
 			m.selected = len(m.state.Batches) - 1

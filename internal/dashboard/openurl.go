@@ -13,7 +13,10 @@ func OpenURL(url string) error {
 	case "darwin":
 		cmd = exec.Command("open", url)
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", url)
+		// Avoid `cmd /c start` because cmd.exe re-interprets characters like
+		// `&`, `^`, and `%` in the URL argument. rundll32 hands the URL
+		// directly to the protocol handler without a shell pass.
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	default:
 		cmd = exec.Command("xdg-open", url)
 	}

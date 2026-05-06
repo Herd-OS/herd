@@ -1,13 +1,6 @@
 package dashboard
 
-import (
-	"time"
-
-	// Reserved for the dashboard TUI program added in the follow-up task; the
-	// State below is intended to back a bubbletea.Model. Imported here so the
-	// module dependency is retained by go mod tidy.
-	_ "github.com/charmbracelet/bubbletea"
-)
+import "time"
 
 // State is the snapshot the TUI renders on each tick. All fields are populated
 // by Fetch; on partial failure, the previous State is reused and FetchError is
