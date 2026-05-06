@@ -17,6 +17,8 @@ This will:
 5. **Create runner files** — `Dockerfile.herd_runner_base`, `Dockerfile.herd_runner`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example` for self-hosted runner setup
 6. **Commit and open a PR** — creates a `herd/init-<version>` branch, commits all generated files, pushes, and opens a PR. Review and merge the PR to apply the changes.
 
+The installed version is recorded in `.herd/state/version` (gitignored) and used on subsequent runs to decide between install, update, and sync.
+
 ### Enable Workflows
 
 Workflows are installed but inactive until you enable them. After setting up runners (see [Runner Setup](runners.md)), set the `HERD_ENABLED` repository variable:
