@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -39,8 +40,26 @@ func newRetryTransport(base http.RoundTripper, baseDelay time.Duration) *retryTr
 	}
 }
 
+// isNonIdempotentDispatch returns true for POST requests targeting GitHub's
+// workflow_dispatch endpoint. workflow_dispatch is NOT idempotent: GitHub may
+// queue the workflow run internally and then return a 5xx, so retrying after
+// such a failure can trigger a duplicate worker run. We opt these requests out
+// of the retry loop entirely.
+// Match: POST .../actions/workflows/{id_or_filename}/dispatches
+func isNonIdempotentDispatch(req *http.Request) bool {
+	if req.Method != http.MethodPost {
+		return false
+	}
+	p := req.URL.Path
+	return strings.Contains(p, "/actions/workflows/") && strings.HasSuffix(p, "/dispatches")
+}
+
 // RoundTrip executes the request with retry logic for transient 5xx errors.
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if isNonIdempotentDispatch(req) {
+		return t.base.RoundTrip(req)
+	}
+
 	var resp *http.Response
 	var err error
 
