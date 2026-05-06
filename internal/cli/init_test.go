@@ -1277,3 +1277,95 @@ func TestCheckHerdFilesUpToDate_MissingConfig(t *testing.T) {
 	}
 	assert.True(t, found, "expected %s in drift, got: %+v", config.ConfigFile, drifted)
 }
+
+// TestRunInitCheck_DisplayUsesWouldChangeForMissingFiles verifies the per-file
+// output uses the literal "(would change)" suffix for every drifted entry,
+// including absent .herdos.yml and Dockerfile.herd_runner. The internal Reason
+// field on DriftedFile may still be "would be created" — that's a separate
+// data label not surfaced verbatim to users.
+func TestRunInitCheck_DisplayUsesWouldChangeForMissingFiles(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	require.NoError(t, os.Remove(filepath.Join(dir, config.ConfigFile)))
+	require.NoError(t, os.Remove(filepath.Join(dir, "Dockerfile.herd_runner")))
+	require.NoError(t, os.Remove(filepath.Join(dir, "docker-compose.herd.yml")))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	stdout, _ := captureStdio(t, func() {
+		err := runInitCheck()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, errCheckDrift))
+	})
+
+	assert.Contains(t, stdout, config.ConfigFile+" (would change)",
+		".herdos.yml line should use the literal '(would change)' suffix")
+	assert.Contains(t, stdout, "Dockerfile.herd_runner (would change)",
+		"Dockerfile.herd_runner line should use the literal '(would change)' suffix")
+	assert.Contains(t, stdout, "docker-compose.herd.yml (would change)",
+		"a missing managed file should be displayed with '(would change)'")
+	assert.NotContains(t, stdout, "(would be created)",
+		"per-file output should never use '(would be created)'")
+}
+
+// TestRunInitCheck_WarnsOnUnparseableOverride verifies that --check surfaces a
+// stderr warning when docker-compose.herd.override.yml fails to merge, rather
+// than silently rendering base-only and reporting spurious drift.
+func TestRunInitCheck_WarnsOnUnparseableOverride(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	// Write a malformed override that will fail to YAML-unmarshal.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "docker-compose.herd.override.yml"),
+		[]byte("services:\n  worker:\n    bad: [unterminated\n"), 0644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	_, stderr := captureStdio(t, func() {
+		_ = runInitCheck()
+	})
+
+	assert.Contains(t, stderr, "docker-compose.herd.override.yml",
+		"check path should warn about the failed override merge")
+}
+
+// TestComputeManagedDrift_ReturnsRenderedFilesAndDrift verifies the helper that
+// runInitCheck and CheckHerdFilesUpToDate share: a single pass returning both
+// the rendered managed-file set and the drift list, so the check path doesn't
+// re-render or re-load config.
+func TestComputeManagedDrift_ReturnsRenderedFilesAndDrift(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	target := filepath.Join(dir, ".github", "workflows", "herd-worker.yml")
+	require.NoError(t, os.WriteFile(target, []byte("# tampered\n"), 0644))
+
+	cfg, cfgMissing, files, drifted, err := computeManagedDrift(dir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.False(t, cfgMissing)
+	assert.NotEmpty(t, files, "should return the rendered managed file set")
+
+	var foundFile bool
+	for _, mf := range files {
+		if mf.Path == ".github/workflows/herd-worker.yml" {
+			foundFile = true
+			assert.NotEmpty(t, mf.Content)
+		}
+	}
+	assert.True(t, foundFile, "rendered files should include herd-worker.yml")
+
+	var foundDrift bool
+	for _, d := range drifted {
+		if d.Path == ".github/workflows/herd-worker.yml" {
+			foundDrift = true
+			assert.Equal(t, "content differs", d.Reason)
+		}
+	}
+	assert.True(t, foundDrift, "drift should include the tampered workflow")
+}

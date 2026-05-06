@@ -315,9 +315,12 @@ func renderRunnerFiles(dir, owner, repo string) ([]managedFile, error) {
 		return nil, fmt.Errorf("reading embedded .env.herd.example: %w", err)
 	}
 
-	composeContent, _, _ := renderMergedCompose(dir, owner, repo)
+	composeContent, _, mergeErr := renderMergedCompose(dir, owner, repo)
 	if composeContent == nil {
-		return nil, fmt.Errorf("rendering docker-compose.herd.yml")
+		return nil, fmt.Errorf("rendering docker-compose.herd.yml: %w", mergeErr)
+	}
+	if mergeErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to merge docker-compose.herd.override.yml: %v (using base only)\n", mergeErr)
 	}
 
 	return []managedFile{

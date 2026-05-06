@@ -28,14 +28,22 @@ type DriftedFile struct {
 // (e.g. cannot read embedded assets); a missing .herdos.yml is treated as drift,
 // not an error.
 func CheckHerdFilesUpToDate(dir string) ([]DriftedFile, error) {
+	_, _, _, drifted, err := computeManagedDrift(dir)
+	return drifted, err
+}
+
+// computeManagedDrift loads config, renders all herd-managed files, and computes
+// the drift list in one pass. Returned to callers that need both the rendered
+// file set and the drift result without re-doing the work.
+func computeManagedDrift(dir string) (*config.Config, bool, []managedFile, []DriftedFile, error) {
 	owner, repo, err := detectOwnerRepo(dir)
 	if err != nil {
-		return nil, fmt.Errorf("detecting repository: %w", err)
+		return nil, false, nil, nil, fmt.Errorf("detecting repository: %w", err)
 	}
 
 	cfg, cfgMissing, err := loadConfigForCheck(dir, owner, repo)
 	if err != nil {
-		return nil, err
+		return nil, false, nil, nil, err
 	}
 
 	var drifted []DriftedFile
@@ -45,7 +53,7 @@ func CheckHerdFilesUpToDate(dir string) ([]DriftedFile, error) {
 
 	files, err := renderManagedFiles(dir, owner, repo, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("rendering managed files: %w", err)
+		return nil, false, nil, nil, fmt.Errorf("rendering managed files: %w", err)
 	}
 
 	for _, mf := range files {
@@ -55,7 +63,7 @@ func CheckHerdFilesUpToDate(dir string) ([]DriftedFile, error) {
 				drifted = append(drifted, DriftedFile{Path: mf.Path, Reason: "missing"})
 				continue
 			}
-			return nil, fmt.Errorf("reading %s: %w", mf.Path, readErr)
+			return nil, false, nil, nil, fmt.Errorf("reading %s: %w", mf.Path, readErr)
 		}
 		if !bytes.Equal(existing, mf.Content) {
 			drifted = append(drifted, DriftedFile{Path: mf.Path, Reason: "content differs"})
@@ -67,7 +75,7 @@ func CheckHerdFilesUpToDate(dir string) ([]DriftedFile, error) {
 		drifted = append(drifted, DriftedFile{Path: "Dockerfile.herd_runner", Reason: "would be created"})
 	}
 
-	return drifted, nil
+	return cfg, cfgMissing, files, drifted, nil
 }
 
 // loadConfigForCheck loads .herdos.yml, treating its absence as drift rather than
@@ -101,17 +109,7 @@ func runInitCheck() error {
 		return err
 	}
 
-	owner, repo, err := detectOwnerRepo(dir)
-	if err != nil {
-		return fmt.Errorf("could not detect repository: %w — make sure a GitHub remote is configured", err)
-	}
-
-	cfg, cfgMissing, err := loadConfigForCheck(dir, owner, repo)
-	if err != nil {
-		return err
-	}
-
-	drifted, err := CheckHerdFilesUpToDate(dir)
+	_, cfgMissing, files, drifted, err := computeManagedDrift(dir)
 	if err != nil {
 		return err
 	}
@@ -120,16 +118,11 @@ func runInitCheck() error {
 		driftedSet[d.Path] = d.Reason
 	}
 
-	files, err := renderManagedFiles(dir, owner, repo, cfg)
-	if err != nil {
-		return fmt.Errorf("rendering managed files: %w", err)
-	}
-
 	var countDrifted, countUnchanged int
 
 	if cfgMissing {
 		countDrifted++
-		fmt.Println(display.Error(config.ConfigFile + " (would be created)"))
+		fmt.Println(display.Error(config.ConfigFile + " (would change)"))
 	} else {
 		countUnchanged++
 		fmt.Println(display.Success(config.ConfigFile))
@@ -156,7 +149,7 @@ func runInitCheck() error {
 
 	if _, drift := driftedSet["Dockerfile.herd_runner"]; drift {
 		countDrifted++
-		fmt.Println(display.Error("Dockerfile.herd_runner (would be created)"))
+		fmt.Println(display.Error("Dockerfile.herd_runner (would change)"))
 	} else {
 		countUnchanged++
 		fmt.Println(display.Success("Dockerfile.herd_runner (user-owned, content not checked)"))
