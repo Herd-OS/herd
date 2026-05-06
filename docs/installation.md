@@ -78,6 +78,8 @@ cd /path/to/your/repo
 herd init
 ```
 
+You can preview what would change first with `herd init --check`, which re-renders every managed file and exits 1 if any are out of date — see [Runner Setup → Checking for updates](runners.md#8-checking-for-updates) for details.
+
 `herd init` creates a `herd/init-<version>` branch, commits the updated files, pushes, and opens a PR. Review and merge the PR to apply the changes. Configuration (`.herdos.yml`) and role instructions (`.herd/*.md`) are never overwritten.
 
 ### Update runner containers

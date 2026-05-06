@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/herd-os/herd/internal/cli/runner"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -979,4 +981,391 @@ func countMatching(lines []string, want string) int {
 		}
 	}
 	return n
+}
+
+// setupCleanInitRepo creates a temp git repo with origin pointing at
+// git@github.com:acme/widgets.git and writes every herd-managed file
+// (.herdos.yml, the workflow files, runner infrastructure, and Dockerfile.herd_runner)
+// such that CheckHerdFilesUpToDate(dir) reports no drift.
+func setupCleanInitRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "remote", "add", "origin", "git@github.com:acme/widgets.git")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+
+	cfg := config.Default()
+	cfg.Platform.Owner = "acme"
+	cfg.Platform.Repo = "widgets"
+	require.NoError(t, config.Save(dir, cfg))
+
+	require.NoError(t, installManagedFilesOnly(dir, "acme", "widgets", cfg))
+
+	herdRunner, err := runner.FS.ReadFile("Dockerfile.herd_runner.tmpl")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), herdRunner, 0644))
+
+	return dir
+}
+
+func TestRunInitCheck_AllUpToDate(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	drifted, err := CheckHerdFilesUpToDate(dir)
+	require.NoError(t, err)
+	assert.Empty(t, drifted, "freshly-installed repo should have no drift, got: %+v", drifted)
+}
+
+func TestRunInitCheck_DetectsWorkflowDrift(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	target := filepath.Join(dir, ".github", "workflows", "herd-worker.yml")
+	require.NoError(t, os.WriteFile(target, []byte("# tampered\n"), 0644))
+
+	drifted, err := CheckHerdFilesUpToDate(dir)
+	require.NoError(t, err)
+	require.Len(t, drifted, 1)
+	assert.Equal(t, ".github/workflows/herd-worker.yml", drifted[0].Path)
+	assert.Equal(t, "content differs", drifted[0].Reason)
+}
+
+func TestRunInitCheck_DetectsDockerfileBaseDrift(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	target := filepath.Join(dir, "Dockerfile.herd_runner_base")
+	original, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(target, append(original, []byte("\n# tampered\n")...), 0644))
+
+	drifted, err := CheckHerdFilesUpToDate(dir)
+	require.NoError(t, err)
+
+	var found bool
+	for _, d := range drifted {
+		if d.Path == "Dockerfile.herd_runner_base" {
+			found = true
+			assert.Equal(t, "content differs", d.Reason)
+		}
+	}
+	assert.True(t, found, "expected Dockerfile.herd_runner_base in drift, got: %+v", drifted)
+}
+
+func TestRunInitCheck_HonorsOverride(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	overrideYAML := []byte(`services:
+  worker:
+    environment:
+      - EXTRA_VAR=hello
+`)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.override.yml"), overrideYAML, 0644))
+
+	cfg, err := config.Load(dir)
+	require.NoError(t, err)
+	require.NoError(t, installManagedFilesOnly(dir, "acme", "widgets", cfg))
+
+	t.Run("merged_compose_matches", func(t *testing.T) {
+		drifted, err := CheckHerdFilesUpToDate(dir)
+		require.NoError(t, err)
+		for _, d := range drifted {
+			assert.NotEqual(t, "docker-compose.herd.yml", d.Path,
+				"docker-compose.herd.yml should match the freshly merged render, got drift: %+v", d)
+		}
+	})
+
+	t.Run("stale_compose_drifts", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), []byte("# stale\n"), 0644))
+
+		drifted, err := CheckHerdFilesUpToDate(dir)
+		require.NoError(t, err)
+		var found bool
+		for _, d := range drifted {
+			if d.Path == "docker-compose.herd.yml" {
+				found = true
+				assert.Equal(t, "content differs", d.Reason)
+			}
+		}
+		assert.True(t, found, "expected docker-compose.herd.yml in drift, got: %+v", drifted)
+	})
+}
+
+func TestRunInitCheck_MissingDockerfileHerdRunner(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "Dockerfile.herd_runner")))
+
+	drifted, err := CheckHerdFilesUpToDate(dir)
+	require.NoError(t, err)
+
+	var found bool
+	for _, d := range drifted {
+		if d.Path == "Dockerfile.herd_runner" {
+			found = true
+			assert.Equal(t, "would be created", d.Reason)
+		}
+	}
+	assert.True(t, found, "expected Dockerfile.herd_runner in drift, got: %+v", drifted)
+}
+
+func TestRunInitCheck_WritesNothing(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	type fileSnap struct {
+		mtime int64
+		size  int64
+		data  []byte
+	}
+
+	collect := func() map[string]fileSnap {
+		snaps := make(map[string]fileSnap)
+		require.NoError(t, filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(dir, path)
+			require.NoError(t, err)
+			if strings.HasPrefix(rel, ".git"+string(filepath.Separator)) || rel == ".git" {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			snaps[rel] = fileSnap{
+				mtime: info.ModTime().UnixNano(),
+				size:  info.Size(),
+				data:  data,
+			}
+			return nil
+		}))
+		return snaps
+	}
+
+	before := collect()
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	require.NoError(t, runInitCheck())
+
+	after := collect()
+	assert.Equal(t, len(before), len(after), "no files should be created or removed by --check")
+	for path, b := range before {
+		a, ok := after[path]
+		require.True(t, ok, "%s disappeared after --check", path)
+		assert.Equal(t, b.size, a.size, "%s size changed", path)
+		assert.True(t, bytes.Equal(b.data, a.data), "%s content changed", path)
+	}
+}
+
+func TestRunInitCheck_ReturnsDriftSentinelOnDrift(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".github", "workflows", "herd-worker.yml"),
+		[]byte("# tampered\n"), 0644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	err = runInitCheck()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errCheckDrift), "expected errCheckDrift, got: %v", err)
+}
+
+func TestFirstDiffLines_TruncatesAt5(t *testing.T) {
+	tests := []struct {
+		name string
+		old  string
+		new  string
+		max  int
+	}{
+		{
+			name: "many lines added",
+			old:  "a\nb\nc\n",
+			new:  "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n",
+			max:  5,
+		},
+		{
+			name: "many lines removed",
+			old:  "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n",
+			new:  "a\nb\nc\n",
+			max:  5,
+		},
+		{
+			name: "completely different",
+			old:  "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\ngolf\n",
+			new:  "one\ntwo\nthree\nfour\nfive\nsix\nseven\n",
+			max:  5,
+		},
+		{
+			name: "identical content",
+			old:  "a\nb\nc\n",
+			new:  "a\nb\nc\n",
+			max:  5,
+		},
+		{
+			name: "single line change",
+			old:  "a\nb\nc\n",
+			new:  "a\nB\nc\n",
+			max:  5,
+		},
+		{
+			name: "empty old",
+			old:  "",
+			new:  "x\ny\nz\n1\n2\n3\n4\n",
+			max:  5,
+		},
+		{
+			name: "empty new",
+			old:  "x\ny\nz\n1\n2\n3\n4\n",
+			new:  "",
+			max:  5,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := firstDiffLines([]byte(tt.old), []byte(tt.new), tt.max)
+			lines := []string{}
+			if result != "" {
+				lines = strings.Split(result, "\n")
+			}
+			assert.LessOrEqual(t, len(lines), tt.max+5,
+				"output line count should not exceed max+context, got %d lines:\n%s", len(lines), result)
+
+			nonContext := 0
+			for _, l := range lines {
+				if strings.HasPrefix(l, "-") || strings.HasPrefix(l, "+") {
+					nonContext++
+				}
+			}
+			assert.LessOrEqual(t, nonContext, tt.max,
+				"non-context line count should not exceed max")
+		})
+	}
+}
+
+func TestFirstDiffLines_MaxZero(t *testing.T) {
+	out := firstDiffLines([]byte("a\nb\n"), []byte("c\nd\n"), 0)
+	assert.Empty(t, out)
+}
+
+func TestCheckHerdFilesUpToDate_MissingConfig(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	require.NoError(t, os.Remove(filepath.Join(dir, config.ConfigFile)))
+
+	drifted, err := CheckHerdFilesUpToDate(dir)
+	require.NoError(t, err)
+
+	var found bool
+	for _, d := range drifted {
+		if d.Path == config.ConfigFile {
+			found = true
+			assert.Equal(t, "would be created", d.Reason)
+		}
+	}
+	assert.True(t, found, "expected %s in drift, got: %+v", config.ConfigFile, drifted)
+}
+
+// TestRunInitCheck_DisplayUsesWouldChangeForMissingFiles verifies the per-file
+// output uses the literal "(would change)" suffix for every drifted entry,
+// including absent .herdos.yml and Dockerfile.herd_runner. The internal Reason
+// field on DriftedFile may still be "would be created" — that's a separate
+// data label not surfaced verbatim to users.
+func TestRunInitCheck_DisplayUsesWouldChangeForMissingFiles(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	require.NoError(t, os.Remove(filepath.Join(dir, config.ConfigFile)))
+	require.NoError(t, os.Remove(filepath.Join(dir, "Dockerfile.herd_runner")))
+	require.NoError(t, os.Remove(filepath.Join(dir, "docker-compose.herd.yml")))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	stdout, _ := captureStdio(t, func() {
+		err := runInitCheck()
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, errCheckDrift))
+	})
+
+	assert.Contains(t, stdout, config.ConfigFile+" (would change)",
+		".herdos.yml line should use the literal '(would change)' suffix")
+	assert.Contains(t, stdout, "Dockerfile.herd_runner (would change)",
+		"Dockerfile.herd_runner line should use the literal '(would change)' suffix")
+	assert.Contains(t, stdout, "docker-compose.herd.yml (would change)",
+		"a missing managed file should be displayed with '(would change)'")
+	assert.NotContains(t, stdout, "(would be created)",
+		"per-file output should never use '(would be created)'")
+}
+
+// TestRunInitCheck_WarnsOnUnparseableOverride verifies that --check surfaces a
+// stderr warning when docker-compose.herd.override.yml fails to merge, rather
+// than silently rendering base-only and reporting spurious drift.
+func TestRunInitCheck_WarnsOnUnparseableOverride(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	// Write a malformed override that will fail to YAML-unmarshal.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "docker-compose.herd.override.yml"),
+		[]byte("services:\n  worker:\n    bad: [unterminated\n"), 0644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	_, stderr := captureStdio(t, func() {
+		_ = runInitCheck()
+	})
+
+	assert.Contains(t, stderr, "docker-compose.herd.override.yml",
+		"check path should warn about the failed override merge")
+}
+
+// TestComputeManagedDrift_ReturnsRenderedFilesAndDrift verifies the helper that
+// runInitCheck and CheckHerdFilesUpToDate share: a single pass returning both
+// the rendered managed-file set and the drift list, so the check path doesn't
+// re-render or re-load config.
+func TestComputeManagedDrift_ReturnsRenderedFilesAndDrift(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	target := filepath.Join(dir, ".github", "workflows", "herd-worker.yml")
+	require.NoError(t, os.WriteFile(target, []byte("# tampered\n"), 0644))
+
+	cfg, cfgMissing, files, drifted, err := computeManagedDrift(dir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.False(t, cfgMissing)
+	assert.NotEmpty(t, files, "should return the rendered managed file set")
+
+	var foundFile bool
+	for _, mf := range files {
+		if mf.Path == ".github/workflows/herd-worker.yml" {
+			foundFile = true
+			assert.NotEmpty(t, mf.Content)
+		}
+	}
+	assert.True(t, foundFile, "rendered files should include herd-worker.yml")
+
+	var foundDrift bool
+	for _, d := range drifted {
+		if d.Path == ".github/workflows/herd-worker.yml" {
+			foundDrift = true
+			assert.Equal(t, "content differs", d.Reason)
+		}
+	}
+	assert.True(t, foundDrift, "drift should include the tampered workflow")
 }

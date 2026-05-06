@@ -65,6 +65,7 @@ func runPlanFromFile(ctx context.Context, filePath, batchNameOverride string, no
 		if err := runPreflight(dir); err != nil {
 			return err
 		}
+		warnIfHerdFilesDrifted(dir)
 	}
 
 	// Read and parse the plan file
@@ -152,6 +153,7 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 		if err := runPreflight(dir); err != nil {
 			return err
 		}
+		warnIfHerdFilesDrifted(dir)
 	}
 
 	// Fetch open milestones (best-effort: client creation or API failure is silently ignored)
@@ -401,6 +403,26 @@ func printDryRun(plan *agent.Plan, tiers [][]int) {
 		}
 	}
 	fmt.Printf("Would dispatch Tier 0 (%d issues)\n", len(tiers[0]))
+}
+
+// warnIfHerdFilesDrifted prints a single-line warning if any herd-managed file
+// is out of date with the installed herd binary. It never returns an error and
+// never blocks plan execution — drift is informational only.
+func warnIfHerdFilesDrifted(dir string) {
+	drifted, err := CheckHerdFilesUpToDate(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not check herd file freshness: %v\n", err)
+		return
+	}
+	if len(drifted) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(drifted))
+	for _, d := range drifted {
+		paths = append(paths, d.Path)
+	}
+	msg := fmt.Sprintf("Some herd-managed files are out of date with the installed herd version. Run `herd init` to update them. Drifted: %s.", strings.Join(paths, ", "))
+	fmt.Println(display.Warning(msg))
 }
 
 // formatOpenMilestones formats open milestones as a newline-separated string.

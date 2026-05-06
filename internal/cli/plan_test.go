@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -319,4 +321,88 @@ func TestSlugifyUsedInBatchBranch(t *testing.T) {
 	slug := planner.Slugify("Add JWT authentication")
 	branch := "herd/batch/5-" + slug
 	assert.Equal(t, "herd/batch/5-add-jwt-authentication", branch)
+}
+
+// captureStdio runs fn with os.Stdout and os.Stderr redirected to pipes and
+// returns whatever fn wrote to each stream.
+func captureStdio(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	}()
+
+	rOut, wOut, err := os.Pipe()
+	require.NoError(t, err)
+	rErr, wErr, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = wOut
+	os.Stderr = wErr
+
+	doneOut := make(chan []byte)
+	doneErr := make(chan []byte)
+	go func() {
+		b, _ := io.ReadAll(rOut)
+		doneOut <- b
+	}()
+	go func() {
+		b, _ := io.ReadAll(rErr)
+		doneErr <- b
+	}()
+
+	fn()
+
+	require.NoError(t, wOut.Close())
+	require.NoError(t, wErr.Close())
+	return string(<-doneOut), string(<-doneErr)
+}
+
+func TestWarnIfHerdFilesDrifted_NoDrift(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	stdout, stderr := captureStdio(t, func() {
+		warnIfHerdFilesDrifted(dir)
+	})
+
+	combined := stdout + stderr
+	assert.NotContains(t, combined, "out of date")
+	assert.NotContains(t, combined, "Drifted:")
+}
+
+func TestWarnIfHerdFilesDrifted_PrintsWarningWithPaths(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	target := filepath.Join(dir, ".github", "workflows", "herd-monitor.yml")
+	require.NoError(t, os.WriteFile(target, []byte("# tampered\n"), 0644))
+
+	stdout, _ := captureStdio(t, func() {
+		warnIfHerdFilesDrifted(dir)
+	})
+
+	assert.Contains(t, stdout, "out of date")
+	assert.Contains(t, stdout, "Drifted:")
+	assert.Contains(t, stdout, ".github/workflows/herd-monitor.yml")
+	assert.Contains(t, stdout, "Run `herd init` to update them.")
+}
+
+func TestWarnIfHerdFilesDrifted_MultipleDriftedFilesListed(t *testing.T) {
+	dir := setupCleanInitRepo(t)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".github", "workflows", "herd-monitor.yml"),
+		[]byte("# tampered\n"), 0644))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "entrypoint.herd.sh"),
+		[]byte("#!/bin/bash\n# tampered\n"), 0755))
+
+	stdout, _ := captureStdio(t, func() {
+		warnIfHerdFilesDrifted(dir)
+	})
+
+	assert.Contains(t, stdout, ".github/workflows/herd-monitor.yml")
+	assert.Contains(t, stdout, "entrypoint.herd.sh")
+	assert.Contains(t, stdout, ", ", "drifted paths should be comma-separated")
 }
