@@ -240,6 +240,119 @@ func (d *drainingBody) Close() error {
 	return nil
 }
 
+func TestRetryTransport_SkipsWorkflowDispatch(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{
+			name: "workflow filename variant",
+			url:  "http://example.com/repos/owner/repo/actions/workflows/herd-worker.yml/dispatches",
+		},
+		{
+			name: "numeric workflow id variant",
+			url:  "http://example.com/repos/owner/repo/actions/workflows/123/dispatches",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockTransport{
+				responses: []*http.Response{
+					newResponse(502),
+					newResponse(200),
+				},
+			}
+			transport := newRetryTransport(mock, 1*time.Millisecond)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, tt.url, strings.NewReader("{}"))
+			require.NoError(t, err)
+
+			resp, err := transport.RoundTrip(req)
+
+			require.NoError(t, err)
+			assert.Equal(t, 1, mock.calls, "dispatch endpoint must not be retried")
+			assert.Equal(t, 502, resp.StatusCode, "5xx from dispatch endpoint must be returned as-is")
+		})
+	}
+}
+
+func TestRetryTransport_RetriesOtherPosts(t *testing.T) {
+	mock := &mockTransport{
+		responses: []*http.Response{
+			newResponse(502),
+			newResponse(200),
+		},
+	}
+	transport := newRetryTransport(mock, 1*time.Millisecond)
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		"http://example.com/repos/owner/repo/issues",
+		strings.NewReader("{}"),
+	)
+	require.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, mock.calls, "non-dispatch POST must still retry on 5xx")
+	assert.Equal(t, 200, resp.StatusCode)
+}
+
+func TestIsNonIdempotentDispatch(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		url    string
+		want   bool
+	}{
+		{
+			name:   "POST to dispatches with workflow filename",
+			method: http.MethodPost,
+			url:    "http://example.com/repos/owner/repo/actions/workflows/herd-worker.yml/dispatches",
+			want:   true,
+		},
+		{
+			name:   "POST to dispatches with numeric workflow id",
+			method: http.MethodPost,
+			url:    "http://example.com/repos/owner/repo/actions/workflows/123/dispatches",
+			want:   true,
+		},
+		{
+			name:   "GET to workflows path is not a dispatch",
+			method: http.MethodGet,
+			url:    "http://example.com/repos/owner/repo/actions/workflows/123/runs",
+			want:   false,
+		},
+		{
+			name:   "POST without /actions/workflows/ prefix is not a dispatch",
+			method: http.MethodPost,
+			url:    "http://example.com/repos/owner/repo/issues",
+			want:   false,
+		},
+		{
+			name:   "POST to workflows path not ending in /dispatches is not a dispatch",
+			method: http.MethodPost,
+			url:    "http://example.com/repos/owner/repo/actions/workflows/123/enable",
+			want:   false,
+		},
+		{
+			name:   "GET to a dispatches URL is not a (non-idempotent) dispatch POST",
+			method: http.MethodGet,
+			url:    "http://example.com/repos/owner/repo/actions/workflows/123/dispatches",
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(context.Background(), tt.method, tt.url, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, isNonIdempotentDispatch(req))
+		})
+	}
+}
+
 func TestRetryTransport_DrainsResponseBody(t *testing.T) {
 	body := &drainingBody{Reader: strings.NewReader("response data")}
 	resp1 := &http.Response{

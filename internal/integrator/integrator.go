@@ -397,11 +397,28 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 // dispatchReadyIssues dispatches ready/blocked issues from a tier, respecting
 // concurrency limits. Returns the number of issues dispatched.
 func dispatchReadyIssues(ctx context.Context, p platform.Platform, cfg *config.Config, tierIssues []int, allIssues []*platform.Issue, batchBranch string) (int, error) {
-	activeRuns, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "in_progress", WorkflowFileName: "herd-worker.yml"})
+	inProgress, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "in_progress", WorkflowFileName: "herd-worker.yml"})
 	if err != nil {
-		return 0, fmt.Errorf("counting active workers: %w", err)
+		return 0, fmt.Errorf("counting active workers (in_progress): %w", err)
 	}
+	queued, err := p.Workflows().ListRuns(ctx, platform.RunFilters{Status: "queued", WorkflowFileName: "herd-worker.yml"})
+	if err != nil {
+		return 0, fmt.Errorf("counting active workers (queued): %w", err)
+	}
+	activeRuns := make([]*platform.Run, 0, len(inProgress)+len(queued))
+	activeRuns = append(activeRuns, inProgress...)
+	activeRuns = append(activeRuns, queued...)
 	remaining := cfg.Workers.MaxConcurrent - len(activeRuns)
+
+	// Build a set of issue numbers that already have an active run, to prevent
+	// duplicate dispatch (e.g. if a previous dispatch retried after GitHub
+	// queued the workflow but returned a 5xx).
+	activeByIssue := make(map[string]bool, len(activeRuns))
+	for _, r := range activeRuns {
+		if n, ok := r.Inputs["issue_number"]; ok && n != "" {
+			activeByIssue[n] = true
+		}
+	}
 
 	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
 	if err != nil {
@@ -418,6 +435,12 @@ func dispatchReadyIssues(ctx context.Context, p platform.Platform, cfg *config.C
 		status := issues.StatusLabel(issue.Labels)
 		// Only act on blocked or ready issues — skip done, in-progress, failed
 		if status != issues.StatusBlocked && status != issues.StatusReady {
+			continue
+		}
+
+		issueKey := fmt.Sprintf("%d", num)
+		if activeByIssue[issueKey] {
+			fmt.Printf("warning: issue #%d already has an active worker run; skipping dispatch\n", num)
 			continue
 		}
 
