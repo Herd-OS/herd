@@ -181,7 +181,7 @@ Multiple workers can complete near-simultaneously, triggering concurrent Integra
 
 **Concurrent consolidation:** If two merges into the batch branch race, the second push is rejected (non-fast-forward). The consolidate command handles this by pulling, retrying, and pushing again.
 
-**Double-dispatch prevention:** The `advance` command uses issue labels as an atomic guard -- it sets `in-progress` before dispatching, and skips any issue already `in-progress`. Label transitions via the GitHub API are atomic, so only one advance call can transition a given issue.
+**Double-dispatch prevention:** The `advance` command uses issue labels as an atomic guard -- it sets `in-progress` before dispatching, and skips any issue already `in-progress`. Label transitions via the GitHub API are atomic, so only one advance call can transition a given issue. As a belt-and-suspenders check, `dispatchReadyIssues` also lists `in_progress` and `queued` worker runs and skips any tier issue whose number already appears in an active run's inputs (labels are left untouched and the issue does not count against `dispatched`). This catches edge cases where labels and run state diverge — for example, if a prior dispatch's HTTP call failed after GitHub queued the run.
 
 **General rule:** All operations are idempotent. Labeling an already-labeled issue, dispatching an already-in-progress issue, and merging an already-merged branch are all detected and skipped.
 
@@ -307,7 +307,7 @@ The GitHub API client automatically retries requests that receive transient serv
 
 Network errors and client errors (4xx) are **not** retried — these indicate a problem with the request itself, not a transient server issue. If the request's context is cancelled during a backoff wait, the retry loop exits immediately.
 
-The retry transport wraps the underlying `http.RoundTripper`, so it applies to all GitHub API calls made through the client.
+The retry transport wraps the underlying `http.RoundTripper`, so it applies to all GitHub API calls made through the client, with one exception: `POST` requests targeting `/actions/workflows/{id}/dispatches` (workflow_dispatch) are sent as a single round trip with no retries. workflow_dispatch is not idempotent — GitHub may queue the run internally and then return a 5xx, so a retry would trigger a duplicate worker run. Callers that need to surface a transient dispatch failure must handle the 5xx themselves.
 
 ### Rate Limits and Audit
 
