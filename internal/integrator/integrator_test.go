@@ -2254,7 +2254,7 @@ func TestDispatchRebaseConflictWorker_AtCap(t *testing.T) {
 	assert.Equal(t, 0, issueNum)
 }
 
-func TestDispatchRebaseConflictWorker_TaskDescriptionContainsGitInstructions(t *testing.T) {
+func TestDispatchRebaseConflictWorker_TaskBodyKeepsAgentOnWorkerBranch(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.createResult = &platform.Issue{Number: 555}
 	wf := &mockWorkflowService{}
@@ -2278,14 +2278,29 @@ func TestDispatchRebaseConflictWorker_TaskDescriptionContainsGitInstructions(t *
 
 	assert.Len(t, wf.dispatched, 1)
 
-	// Verify the created issue body contains git rebase instructions
 	body := issueSvc.createdBody
-	assert.Contains(t, body, "git fetch origin")
-	assert.Contains(t, body, "git checkout herd/batch/1-batch")
-	assert.Contains(t, body, "git rebase origin/main")
-	assert.Contains(t, body, "git push --force origin herd/batch/1-batch")
-	assert.Contains(t, body, "conflict markers")
-	assert.Contains(t, body, "git rebase --continue")
+	// The new body tells the agent to stay on its own worker branch and merge
+	// origin/<defaultBranch>. It must NOT contain positive checkout steps,
+	// rebase commands, or force-push commands.
+	assertBodyInstructionsKeepAgentOnWorkerBranch(t, body, []string{
+		"Do NOT push",
+		"Stay on your current worker branch",
+		"git merge origin/main",
+		"git fetch origin",
+		"conflict markers",
+		// Negation warnings: prove the fix is in place. The body says
+		// `do NOT run \`git checkout <batch>\` or \`git checkout <default>\``.
+		"do NOT run `git checkout herd/batch/1-batch`",
+		"or `git checkout main`",
+	}, []string{
+		// No positive `git checkout`/`git rebase`/`git push --force` instructions
+		// (they would appear as a numbered step `<N>. \`git ...\``).
+		"1. `git checkout",
+		"2. `git checkout",
+		"3. `git checkout",
+		"`git rebase ",
+		"`git push --force",
+	})
 }
 
 func TestRetryConflictOriginIssues(t *testing.T) {
@@ -2574,4 +2589,166 @@ func TestAdvance_AllComplete_SkipsPROnPartialIssueList(t *testing.T) {
 	assert.False(t, result.AllComplete, "must NOT mark batch complete on partial data")
 	assert.Equal(t, 0, result.BatchPRNumber)
 	assert.Nil(t, prSvc.created, "PullRequests().Create must not be called")
+}
+
+// assertBodyInstructionsKeepAgentOnWorkerBranch asserts that a task body contains
+// all expected substrings and contains none of the disallowed substrings.
+func assertBodyInstructionsKeepAgentOnWorkerBranch(t *testing.T, body string, mustContain, mustNotContain []string) {
+	t.Helper()
+	for _, want := range mustContain {
+		assert.Contains(t, body, want, "task body must contain %q", want)
+	}
+	for _, bad := range mustNotContain {
+		assert.NotContains(t, body, bad, "task body must NOT contain %q", bad)
+	}
+}
+
+func TestConsolidate_ConflictResolutionNoOp_RetriesOriginal(t *testing.T) {
+	// Conflict-resolution issue #50: its worker branch is missing.
+	// Original failed issue #100 should be re-dispatched.
+	conflictBody := "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/100-original\n    - herd/batch/1-foo\n---\n\n## Task\nResolve conflict\n"
+
+	conflictIssue := &platform.Issue{
+		Number: 50, Title: "Resolve conflict: #100",
+		Body:      conflictBody,
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Foo"},
+	}
+	origIssue := &platform.Issue{
+		Number: 100, Title: "Original",
+		Labels:    []string{issues.StatusFailed},
+		Milestone: &platform.Milestone{Number: 1, Title: "Foo"},
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[50] = conflictIssue
+	issueSvc.getResult[100] = origIssue
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			200: {ID: 200, Conclusion: "success", Inputs: map[string]string{"issue_number": "50"}},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		workflows: wf,
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{}, // conflict-resolution worker branch doesn't exist
+		},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Consolidate(context.Background(), mock, nil, cfg, ConsolidateParams{RunID: 200})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.NoOp, "should be NoOp when worker branch is missing")
+	assert.False(t, result.Merged, "should not have merged")
+
+	// Original issue #100 should have been relabeled and re-dispatched.
+	assert.Contains(t, issueSvc.removedLabels[100], issues.StatusFailed,
+		"original failed issue must have herd/status:failed removed")
+	assert.Contains(t, issueSvc.addedLabels[100], issues.StatusInProgress,
+		"original failed issue must have herd/status:in-progress added")
+
+	require.Len(t, wf.dispatched, 1, "exactly one dispatch should fire (for original issue #100)")
+	assert.Equal(t, "100", wf.dispatched[0]["issue_number"],
+		"dispatched workflow must target original issue #100")
+}
+
+func TestConsolidate_ConflictResolutionNoOp_OriginalNotFailed_NoDispatch(t *testing.T) {
+	// Same setup as the retry test, but the original issue is already done — no dispatch should fire.
+	conflictBody := "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/100-original\n    - herd/batch/1-foo\n---\n\n## Task\nResolve conflict\n"
+
+	conflictIssue := &platform.Issue{
+		Number: 50, Title: "Resolve conflict: #100",
+		Body:      conflictBody,
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 1, Title: "Foo"},
+	}
+	origIssue := &platform.Issue{
+		Number: 100, Title: "Original",
+		Labels:    []string{issues.StatusDone}, // already resolved by another path
+		Milestone: &platform.Milestone{Number: 1, Title: "Foo"},
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[50] = conflictIssue
+	issueSvc.getResult[100] = origIssue
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			200: {ID: 200, Conclusion: "success", Inputs: map[string]string{"issue_number": "50"}},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		workflows: wf,
+		repo: &mockRepoService{
+			defaultBranch: "main",
+			branchExists:  map[string]bool{},
+		},
+	}
+
+	cfg := &config.Config{Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"}}
+
+	result, err := Consolidate(context.Background(), mock, nil, cfg, ConsolidateParams{RunID: 200})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.NoOp)
+	assert.False(t, result.Merged)
+
+	// retryConflictOriginIssues guards on StatusFailed — no dispatch must fire for #100.
+	assert.Empty(t, wf.dispatched, "no dispatch should fire when original issue is not failed")
+}
+
+func TestHandleConflictResolution_TaskBodyKeepsAgentOnWorkerBranch(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.createResult = &platform.Issue{Number: 777}
+	wf := &mockWorkflowService{}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        &mockPRService{},
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	ms := &platform.Milestone{Number: 1, Title: "Batch 1"}
+	issue := &platform.Issue{
+		Number: 42, Title: "Some task",
+		Milestone: ms,
+	}
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}
+
+	workerBranch := "herd/worker/42-some-task"
+	batchBranch := "herd/batch/1-batch-1"
+
+	_, err := handleConflictResolution(context.Background(), mock, cfg, issue, ms, workerBranch, batchBranch)
+	require.NoError(t, err)
+
+	body := issueSvc.createdBody
+	// The new body tells the agent to stay on its own worker branch and merge
+	// origin/<workerBranch>. The negation warning ("do NOT run `git checkout
+	// <batch>`") must be present, but no positive checkout/push step.
+	assertBodyInstructionsKeepAgentOnWorkerBranch(t, body, []string{
+		"Do NOT push",
+		"Stay on your current worker branch",
+		"git merge origin/" + workerBranch,
+		// Negation warning: proves the bug is fixed.
+		"do NOT run `git checkout " + batchBranch + "`",
+	}, []string{
+		// No positive checkout step or push to the batch branch.
+		"1. `git checkout",
+		"2. `git checkout",
+		"3. `git checkout",
+		"git push origin " + batchBranch,
+	})
 }
