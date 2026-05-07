@@ -32,16 +32,18 @@ func (f *fakePlatform) Repository() platform.RepositoryService   { return nil }
 func (f *fakePlatform) Checks() platform.CheckService            { return f.checks }
 
 type fakeIssueService struct {
-	getResult     map[int]*platform.Issue
-	listResult    []*platform.Issue
-	listByFilter  func(filters platform.IssueFilters) ([]*platform.Issue, error)
-	listErr       error
+	getResult    map[int]*platform.Issue
+	getCalls     int
+	listResult   []*platform.Issue
+	listByFilter func(filters platform.IssueFilters) ([]*platform.Issue, error)
+	listErr      error
 }
 
 func (s *fakeIssueService) Create(ctx context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
 	return nil, errors.New("not implemented")
 }
 func (s *fakeIssueService) Get(ctx context.Context, number int) (*platform.Issue, error) {
+	s.getCalls++
 	if iss, ok := s.getResult[number]; ok {
 		return iss, nil
 	}
@@ -219,7 +221,7 @@ func TestFetchState_PartialFailure(t *testing.T) {
 func TestFetch_PopulatesWorkersFromRuns(t *testing.T) {
 	now := time.Now()
 	runs := []*platform.Run{
-		{ID: 100, URL: "https://example/run/100", CreatedAt: now, Inputs: map[string]string{"issue": "42"}},
+		{ID: 100, URL: "https://example/run/100", CreatedAt: now, Inputs: map[string]string{"issue_number": "42"}},
 		{ID: 101, URL: "https://example/run/101", CreatedAt: now, Inputs: map[string]string{}},
 	}
 
@@ -367,6 +369,54 @@ func TestFetch_SkipsClosedMilestones(t *testing.T) {
 	state, errStr := Fetch(context.Background(), platformMock, "o", "r")
 	assert.Empty(t, errStr)
 	assert.Empty(t, state.Batches)
+}
+
+func TestFetch_PopulatesIssueNumberFromRunInputs(t *testing.T) {
+	now := time.Now()
+	runs := []*platform.Run{
+		{ID: 100, URL: "https://example/run/100", CreatedAt: now, Inputs: map[string]string{"issue_number": "42"}},
+	}
+	issueSvc := &fakeIssueService{
+		getResult: map[int]*platform.Issue{
+			42: {Number: 42, Title: "Add auth"},
+		},
+		listByFilter: func(filters platform.IssueFilters) ([]*platform.Issue, error) { return nil, nil },
+	}
+	platformMock := &fakePlatform{
+		issues:     issueSvc,
+		prs:        &fakePRService{},
+		workflows:  &fakeWorkflowService{listRunsResult: runs},
+		milestones: &fakeMilestoneService{listResult: nil},
+		checks:     &fakeCheckService{},
+	}
+	state, errStr := Fetch(context.Background(), platformMock, "o", "r")
+	assert.Empty(t, errStr)
+	require.Len(t, state.Workers, 1)
+	assert.Equal(t, 42, state.Workers[0].IssueNumber)
+	assert.Equal(t, "Add auth", state.Workers[0].IssueTitle)
+}
+
+func TestFetch_HandlesMissingIssueNumber(t *testing.T) {
+	now := time.Now()
+	runs := []*platform.Run{
+		{ID: 101, URL: "https://example/run/101", CreatedAt: now, Inputs: map[string]string{}},
+	}
+	issueSvc := &fakeIssueService{
+		listByFilter: func(filters platform.IssueFilters) ([]*platform.Issue, error) { return nil, nil },
+	}
+	platformMock := &fakePlatform{
+		issues:     issueSvc,
+		prs:        &fakePRService{},
+		workflows:  &fakeWorkflowService{listRunsResult: runs},
+		milestones: &fakeMilestoneService{listResult: nil},
+		checks:     &fakeCheckService{},
+	}
+	state, errStr := Fetch(context.Background(), platformMock, "o", "r")
+	assert.Empty(t, errStr)
+	require.Len(t, state.Workers, 1)
+	assert.Equal(t, 0, state.Workers[0].IssueNumber)
+	assert.Equal(t, "", state.Workers[0].IssueTitle)
+	assert.Equal(t, 0, issueSvc.getCalls, "Issues().Get should not be called when IssueNumber is 0")
 }
 
 func TestPrimaryTypeLabel(t *testing.T) {

@@ -51,13 +51,46 @@ func (m Model) workersPanel() string {
 		return b.String()
 	}
 	now := time.Now()
+	const maxRowWidth = 80
 	for _, w := range m.state.Workers {
-		elapsed := now.Sub(w.StartedAt).Round(time.Second)
-		title := truncate(w.IssueTitle, 60)
-		line := fmt.Sprintf("  #%d %s  (%s)", w.IssueNumber, title, elapsed)
+		elapsed := formatElapsed(now.Sub(w.StartedAt))
+		elapsedSeg := "(" + elapsed + ")"
+
+		var line string
+		switch {
+		case w.IssueNumber == 0 && w.IssueTitle == "":
+			line = "  " + elapsedSeg
+		case w.IssueTitle == "":
+			line = fmt.Sprintf("  #%d %s", w.IssueNumber, elapsedSeg)
+		default:
+			prefix := fmt.Sprintf("  #%d ", w.IssueNumber)
+			available := maxRowWidth - len(prefix) - len(elapsedSeg) - 1
+			if available < 8 {
+				available = 8
+			}
+			title := truncate(w.IssueTitle, available)
+			line = fmt.Sprintf("%s%s %s", prefix, title, elapsedSeg)
+		}
 		b.WriteString(Hyperlink(w.URL, line) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatElapsed(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		m := int(d / time.Minute)
+		s := int((d % time.Minute) / time.Second)
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	h := int(d / time.Hour)
+	m := int((d % time.Hour) / time.Minute)
+	return fmt.Sprintf("%dh %dm", h, m)
 }
 
 func (m Model) batchesPanel() string {

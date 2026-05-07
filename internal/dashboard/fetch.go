@@ -59,7 +59,7 @@ func Fetch(ctx context.Context, p platform.Platform, owner, repo string) (State,
 	// Workers (sequentially enrich titles — usually small N).
 	for _, r := range runs {
 		we := WorkerEntry{RunID: r.ID, URL: r.URL, StartedAt: r.CreatedAt}
-		if v, ok := r.Inputs["issue"]; ok {
+		if v, ok := r.Inputs["issue_number"]; ok {
 			if n, err := strconv.Atoi(v); err == nil {
 				we.IssueNumber = n
 			}
