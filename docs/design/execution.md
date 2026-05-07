@@ -341,6 +341,14 @@ to the acceptance criteria list as `"User requested: <description>"`. This
 ensures the reviewer checks user-requested changes equally alongside original
 acceptance criteria, rather than treating them as a separate prompt section.
 
+The review agent runs under a strict output contract: it must not call tools,
+shell out to `gh`/`git`/`bash`, create issues or comments, or modify files. Its
+only output is a single JSON object describing findings. The user prompt
+includes a self-check section that asks the agent to confirm it produced JSON
+only and took no action. If unparseable output is returned, the integrator
+retries once in-call (see [Agent Error Resilience](#10-agent-error-resilience))
+before posting a manual-intervention comment.
+
 ### User Feedback
 
 The reviewer also collects non-HerdOS user comments from the PR and passes them
@@ -723,7 +731,15 @@ The claude agent package validates output from every agent invocation. When Clau
 3. The worker posts a **"Worker failed"** comment on the issue explaining what happened
 4. The deferred error handler labels the issue as `failed` and triggers the Monitor
 
-This prevents the system from marking issues as done when the agent didn't actually do any work (e.g., during API instability). The integrator also handles review agent failures gracefully -- if the review agent fails, the review cycle is skipped entirely (no approval, no fix issues) and will retry on the next trigger.
+This prevents the system from marking issues as done when the agent didn't actually do any work (e.g., during API instability).
+
+The integrator also guards the review path. The review agent runs under a strict output contract: no tool calls, no `gh`/`git`/`bash` invocations, no issue or file mutations — its only output is a JSON object. If the agent returns unparseable output, the integrator retries once after a 5-second delay within the same invocation. If both attempts still fail, it posts the comment
+
+```
+⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry.
+```
+
+on the batch PR and returns `ManualInterventionNeeded=true`, leaving the review surfaced for the operator rather than silently dropped.
 
 ---
 

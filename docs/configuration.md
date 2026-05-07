@@ -68,6 +68,18 @@ Findings are classified by severity:
 
 HIGH and MEDIUM severity findings create fix issues and dispatch workers. LOW findings are listed in the PR comment for reference.
 
+## Agent Review
+
+The review agent runs in a strict output mode. It is instructed not to take any actions — no tool calls, no `gh`/`git`/`bash` invocations, no issue or comment creation, no file edits. Its only output is a single JSON object describing findings. Any mention of `.herd/integrator.md` or extra review instructions is appended to that contract; it does not loosen it.
+
+If the agent returns unparseable output (e.g., the JSON cannot be decoded, or the output is empty/error-like), the integrator retries once after a 5-second delay within the same invocation. If both attempts fail, the integrator posts the following comment on the batch PR and sets the review aside without creating fix workers:
+
+```
+⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry.
+```
+
+When you see that comment, run `/herd review` (optionally with a focus area) on the batch PR to trigger a fresh review. The integrator does not silently drop the review or auto-approve the PR.
+
 ## Worker Extra Env
 
 `workers.extra_env` is a list of GitHub Actions secret names to surface as environment variables in the worker workflow's `Execute task` step, in addition to the built-in AI provider keys.
