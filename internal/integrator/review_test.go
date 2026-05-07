@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
@@ -41,6 +42,10 @@ func initTestRepo(t *testing.T) (string, *git.Git) {
 type mockReviewAgent struct {
 	reviewResult *agent.ReviewResult
 	reviewErr    error
+	// results, when non-nil, returns scripted ReviewResults on successive
+	// calls. After the slice is exhausted, the last entry is repeated.
+	results []*agent.ReviewResult
+	calls   int
 }
 
 func (m *mockReviewAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
@@ -50,6 +55,15 @@ func (m *mockReviewAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.E
 	return nil, nil
 }
 func (m *mockReviewAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	if m.results != nil {
+		idx := m.calls
+		if idx >= len(m.results) {
+			idx = len(m.results) - 1
+		}
+		m.calls++
+		return m.results[idx], m.reviewErr
+	}
+	m.calls++
 	return m.reviewResult, m.reviewErr
 }
 func (m *mockReviewAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
@@ -2458,4 +2472,219 @@ func TestReviewStandalone_UserFeedbackPassedToAgent(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"This nil check finding is a false positive"}, capturedOpts.UserFeedbackComments)
+}
+
+// --- Unparseable-output retry tests ---
+
+func newUnparseableRetryPlatform() (*mockPlatform, *mockCapturingPRService) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+	}
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+	return mock, prSvc
+}
+
+func TestReview_RetriesOnUnparseableOutput(t *testing.T) {
+	old := unparseableRetryDelay
+	unparseableRetryDelay = 1 * time.Millisecond
+	t.Cleanup(func() { unparseableRetryDelay = old })
+
+	mock, _ := newUnparseableRetryPlatform()
+
+	ag := &mockReviewAgent{results: []*agent.ReviewResult{
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+		{Approved: true, Summary: "LGTM"},
+	}}
+
+	dir, g := initTestRepo(t)
+	res, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.True(t, res.Approved)
+	assert.Equal(t, 2, ag.calls)
+	assert.False(t, res.ManualInterventionNeeded)
+}
+
+func TestReview_PostsCommentOnRepeatedUnparseable(t *testing.T) {
+	old := unparseableRetryDelay
+	unparseableRetryDelay = 1 * time.Millisecond
+	t.Cleanup(func() { unparseableRetryDelay = old })
+
+	mock, prSvc := newUnparseableRetryPlatform()
+
+	ag := &mockReviewAgent{results: []*agent.ReviewResult{
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+	}}
+
+	dir, g := initTestRepo(t)
+	res, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.True(t, res.ManualInterventionNeeded)
+	assert.Equal(t, 50, res.BatchPRNumber)
+	assert.Equal(t, 2, ag.calls)
+
+	require.NotEmpty(t, prSvc.comments)
+	found := false
+	for _, c := range prSvc.comments {
+		if strings.Contains(c, "Agent review failed to produce valid output after 2 attempts") &&
+			strings.Contains(c, "/herd review") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected a manual-intervention comment containing the canonical text and `/herd review`")
+}
+
+func TestReview_DoesNotSilentlyDrop(t *testing.T) {
+	old := unparseableRetryDelay
+	unparseableRetryDelay = 1 * time.Millisecond
+	t.Cleanup(func() { unparseableRetryDelay = old })
+
+	mock, _ := newUnparseableRetryPlatform()
+
+	ag := &mockReviewAgent{results: []*agent.ReviewResult{
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+	}}
+
+	dir, g := initTestRepo(t)
+	res, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.True(t, res.ManualInterventionNeeded, "ManualInterventionNeeded must be true to prove the silent-drop is gone")
+	assert.False(t, res.Approved)
+}
+
+func TestReview_NoRetryWhenFirstCallSucceeds(t *testing.T) {
+	old := unparseableRetryDelay
+	unparseableRetryDelay = 1 * time.Millisecond
+	t.Cleanup(func() { unparseableRetryDelay = old })
+
+	mock, _ := newUnparseableRetryPlatform()
+
+	ag := &mockReviewAgent{results: []*agent.ReviewResult{
+		{Approved: true, Summary: "LGTM"},
+	}}
+
+	dir, g := initTestRepo(t)
+	res, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.True(t, res.Approved)
+	assert.Equal(t, 1, ag.calls, "must not retry when first call succeeds")
+}
+
+func TestReview_BackwardCompatLegacyFailedToParse(t *testing.T) {
+	// Older claude package versions did not set IsUnparseable; instead the
+	// failure was signaled via a Summary prefix. The retry/manual-intervention
+	// flow must still trigger.
+	old := unparseableRetryDelay
+	unparseableRetryDelay = 1 * time.Millisecond
+	t.Cleanup(func() { unparseableRetryDelay = old })
+
+	mock, prSvc := newUnparseableRetryPlatform()
+
+	ag := &mockReviewAgent{results: []*agent.ReviewResult{
+		{IsUnparseable: false, Summary: "Failed to parse review output"},
+		{IsUnparseable: false, Summary: "Failed to parse review output"},
+	}}
+
+	dir, g := initTestRepo(t)
+	res, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.True(t, res.ManualInterventionNeeded)
+	assert.Equal(t, 2, ag.calls)
+	require.NotEmpty(t, prSvc.comments)
+}
+
+// blockingMockReviewAgent returns an unparseable result on the first call,
+// then blocks on ctx for any subsequent calls.
+type blockingMockReviewAgent struct {
+	calls int
+}
+
+func (b *blockingMockReviewAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
+	return nil, nil
+}
+func (b *blockingMockReviewAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOptions) (*agent.ExecResult, error) {
+	return nil, nil
+}
+func (b *blockingMockReviewAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
+}
+func (b *blockingMockReviewAgent) Review(ctx context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	b.calls++
+	if b.calls == 1 {
+		return &agent.ReviewResult{IsUnparseable: true, Summary: "Failed to parse ..."}, nil
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestReview_CtxCancelledDuringRetryWait(t *testing.T) {
+	// Use a delay long enough that we can cancel the context before it expires.
+	old := unparseableRetryDelay
+	unparseableRetryDelay = 5 * time.Second
+	t.Cleanup(func() { unparseableRetryDelay = old })
+
+	mock, _ := newUnparseableRetryPlatform()
+
+	ag := &blockingMockReviewAgent{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	dir, g := initTestRepo(t)
+	res, err := Review(ctx, mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	// Review() swallows the agent-side error and returns a neutral result.
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.False(t, res.Approved)
+	assert.False(t, res.ManualInterventionNeeded)
+	assert.Equal(t, 1, ag.calls, "second Review call should not fire after ctx cancellation")
 }

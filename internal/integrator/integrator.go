@@ -64,6 +64,10 @@ type ReviewResult struct {
 	BatchPRNumber   int
 	AllCreatesFailed bool // true when issues were found but every fix-issue Create call failed
 	FindingsCount    int  // number of review findings (agent comments); set when AllCreatesFailed is true
+	// ManualInterventionNeeded is true when the agent produced
+	// unparseable output on every attempt and the integrator gave up.
+	// The user has been told to re-run `/herd review` manually.
+	ManualInterventionNeeded bool
 }
 
 // ReviewStandaloneParams holds parameters for reviewing a non-batch PR.

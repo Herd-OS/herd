@@ -230,7 +230,7 @@ Once workers are dispatched, the system runs autonomously via GitHub Actions:
 
 3. **Integrator advances** — After consolidation, the Integrator checks if the current tier is complete. If so, it unblocks and dispatches the next tier. When all tiers are done, it rebases the batch branch onto `main` and opens a single batch PR.
 
-4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. If issues are found, the Integrator creates fix issues and dispatches fix workers. This cycle repeats up to `review_max_fix_cycles` times.
+4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. The review agent runs in a strict output mode (no tool calls, JSON-only output — see [Configuration: Agent Review](configuration.md#agent-review)). If issues are found, the Integrator creates fix issues and dispatches fix workers. This cycle repeats up to `review_max_fix_cycles` times.
 
 5. **CI failure detection** — When CI completes on the batch branch, a `check_suite` event triggers the Integrator. If CI failed, it re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`.
 
@@ -253,6 +253,7 @@ These are loaded automatically when the respective role runs.
 - **Tier stuck** — If any issue in a tier fails, the tier is stuck and the next tier won't be dispatched until the failure is resolved (manually or by the Monitor's auto-redispatch)
 - **Merge conflict** — When `on_conflict: dispatch-resolver`, the Integrator creates a conflict-resolution issue and dispatches a worker to resolve it. The number of attempts is limited by `max_conflict_resolution_attempts`. When `on_conflict: notify`, a comment is posted on the issue for manual resolution.
 - **Review safety valve** — If a single agent review finds more than 10 issues, fix workers are not created (to prevent runaway invocations). The PR is flagged for manual intervention.
+- **Unparseable review output** — If the review agent returns output that can't be parsed, the Integrator retries once after a 5-second delay within the same invocation. If both attempts fail, it posts a `⚠️ HerdOS Integrator — Agent review failed to produce valid output after 2 attempts` comment on the batch PR. Run `/herd review` on the PR to retry — the Integrator does not silently drop the review.
 
 ### Manual Tasks
 

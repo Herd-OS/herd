@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
@@ -194,7 +195,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		reviewOpts.SystemPrompt += params.ExtraInstructions
 	}
 
-	reviewResult, err := ag.Review(ctx, diff, reviewOpts)
+	reviewResult, err := runReviewWithRetry(ctx, ag, p, diff, reviewOpts, pr.Number)
 	if err != nil {
 		// Agent failed (e.g., API error, suspicious output). Don't propagate the
 		// error — return a neutral result so the workflow succeeds and the review
@@ -202,12 +203,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		fmt.Printf("Review agent failed: %s. Will retry on next trigger.\n", err)
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
-
-	// Guard against failed review that returned a result instead of an error
-	// (backward compatibility with older claude package).
-	if strings.HasPrefix(reviewResult.Summary, "Failed to parse") {
-		fmt.Printf("Review agent returned unparseable output. Will retry on next trigger.\n")
-		return &ReviewResult{BatchPRNumber: pr.Number}, nil
+	if reviewResult == nil {
+		// Both attempts produced unparseable output. A manual-intervention
+		// comment was already posted by runReviewWithRetry.
+		return &ReviewResult{
+			BatchPRNumber:            pr.Number,
+			ManualInterventionNeeded: true,
+		}, nil
 	}
 
 	// Partition findings by severity
@@ -570,6 +572,53 @@ func findMaxFixCycle(allIssues []*platform.Issue) int {
 		}
 	}
 	return max
+}
+
+// unparseableRetryDelay is the wait between unparseable-output review
+// attempts. Exposed as a package-level var so tests can shorten it.
+var unparseableRetryDelay = 5 * time.Second
+
+// runReviewWithRetry runs ag.Review and retries once on unparseable
+// output. If both attempts fail, it posts a manual-intervention comment
+// on the batch PR and returns (nil, nil). On agent-side error it
+// returns (nil, err). On success it returns the parsed result.
+func runReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform, diff string, opts agent.ReviewOptions, prNumber int) (*agent.ReviewResult, error) {
+	res, err := ag.Review(ctx, diff, opts)
+	if err != nil {
+		return nil, err
+	}
+	if !isUnparseable(res) {
+		return res, nil
+	}
+	fmt.Printf("Review agent returned unparseable output. Retrying in %s...\n", unparseableRetryDelay)
+	select {
+	case <-time.After(unparseableRetryDelay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	res2, err := ag.Review(ctx, diff, opts)
+	if err != nil {
+		return nil, err
+	}
+	if !isUnparseable(res2) {
+		return res2, nil
+	}
+	comment := "⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry."
+	_ = p.PullRequests().AddComment(ctx, prNumber, comment)
+	return nil, nil
+}
+
+// isUnparseable returns true when the agent layer signaled an
+// unparseable review, either via the explicit flag or (for backward
+// compatibility) via the legacy "Failed to parse" Summary prefix.
+func isUnparseable(res *agent.ReviewResult) bool {
+	if res == nil {
+		return false
+	}
+	if res.IsUnparseable {
+		return true
+	}
+	return strings.HasPrefix(res.Summary, "Failed to parse")
 }
 
 // ParseBatchBranchMilestone extracts the milestone number from a batch branch name.
