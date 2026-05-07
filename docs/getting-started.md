@@ -187,7 +187,17 @@ Keybinds:
 | `↑` / `↓` | Select batch |
 | `Enter` | Open the selected batch's PR (or milestone, if no PR) in the browser |
 
-Worker rows in the top panel are emitted as OSC 8 hyperlinks pointing at the workflow run; supporting terminals render them as clickable links and others fall back to plain text.
+Each row in the active workers panel shows the issue number, issue title, and elapsed wall-clock time since the workflow started:
+
+```
+Active workers (2)
+  #42 Add tenant scope to Rake tasks (4m 12s)
+  #43 Wire dashboard refresh interval flag (49s)
+```
+
+Elapsed is rendered as `Ns` under a minute, `Nm Ns` under an hour, and `Nh Nm` beyond. Long titles are truncated with an ellipsis so the elapsed segment stays visible. If the issue title cannot be resolved, the row falls back to `#N (elapsed)`; if the issue number is also unavailable, only `(elapsed)` is shown.
+
+Each worker row is emitted as an OSC 8 hyperlink pointing at the workflow run; supporting terminals render them as clickable links and others fall back to plain text.
 
 The dashboard is read-only and single-repo — cross-repo views and in-TUI actions are out of scope for v1.
 
