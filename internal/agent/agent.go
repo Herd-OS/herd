@@ -99,4 +99,9 @@ type ReviewResult struct {
 	Findings []ReviewFinding `json:"findings"`
 	Comments []string        `json:"comments"` // Deprecated: populated from Findings for backward compatibility
 	Summary  string          `json:"summary"`
+	// IsUnparseable is true when the agent returned output that could
+	// not be parsed as the expected JSON contract. The agent layer sets
+	// this together with a Summary that begins with "Failed to parse"
+	// so callers can detect it without string matching.
+	IsUnparseable bool `json:"-"`
 }

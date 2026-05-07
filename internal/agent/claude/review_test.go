@@ -420,6 +420,61 @@ func TestRenderReviewPrompt_PriorReviewComments(t *testing.T) {
 	}
 }
 
+func TestReviewPrompt_ForbidsActions(t *testing.T) {
+	// The rendered prompt + system prompt together must explicitly
+	// forbid tool use and require JSON-only output.
+	opts := agent.ReviewOptions{AcceptanceCriteria: []string{"works"}}
+	got, err := renderReviewPrompt("diff", opts)
+	require.NoError(t, err)
+
+	userPromptWants := []string{
+		"Self-Check Before Returning",
+		"single JSON object",
+		"no surrounding text",
+	}
+	for _, want := range userPromptWants {
+		t.Run("user_prompt_contains_"+want, func(t *testing.T) {
+			assert.Contains(t, got, want, "user prompt missing %q", want)
+		})
+	}
+
+	systemPromptWants := []string{
+		"Do NOT use any tools",
+		"Do NOT call gh, git, bash",
+		"Your ONLY output",
+		"JSON",
+	}
+	for _, want := range systemPromptWants {
+		t.Run("system_prompt_contains_"+want, func(t *testing.T) {
+			assert.Contains(t, reviewSystemPrompt, want, "system prompt missing %q", want)
+		})
+	}
+}
+
+func TestReview_SetsIsUnparseableOnBadOutput(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	// Stub binary emits non-JSON output that is long enough to bypass
+	// the suspicious-output detector but cannot be parsed as JSON.
+	err := os.WriteFile(script, []byte(`#!/bin/sh
+cat > /dev/null
+echo 'this is not json at all and is long enough to pass the suspicious-output filter'
+`), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	result, reviewErr := a.Review(context.Background(), "diff", agent.ReviewOptions{
+		AcceptanceCriteria: []string{"works"},
+		RepoRoot:           dir,
+	})
+	require.NoError(t, reviewErr)
+	require.NotNil(t, result)
+	assert.True(t, result.IsUnparseable, "expected IsUnparseable=true on bad output")
+	assert.False(t, result.Approved, "expected Approved=false on bad output")
+	assert.True(t, strings.HasPrefix(result.Summary, "Failed to parse"),
+		"expected Summary to start with %q, got %q", "Failed to parse", result.Summary)
+}
+
 func TestRenderReviewPrompt_UserFeedbackComments(t *testing.T) {
 	tests := []struct {
 		name                 string

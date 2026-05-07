@@ -68,9 +68,27 @@ Severity guide:
 {{if .RoleInstructions}}
 ## Project-Specific Review Instructions
 {{.RoleInstructions}}
-{{end}}`
+{{end}}
 
-const reviewSystemPrompt = `You are a HerdOS code reviewer. Your job is to review a batch of changes produced by AI workers and identify issues. Classify each finding by severity: HIGH (bugs, security), MEDIUM (edge cases, error handling), LOW (style, naming). Respond with JSON only.`
+## Self-Check Before Returning
+Before returning, verify:
+1. Your output is a single JSON object with no surrounding text, markdown fencing, or commentary.
+2. You have not used any tools, called gh/git/bash, created issues, or modified files.
+
+If you have already taken any action (issue creation, file writes, tool calls), the run is invalid — return JSON with approved=false and a single CRITERIA finding describing what went wrong so a human can investigate. Example:
+{"approved": false, "findings": [{"severity": "CRITERIA", "description": "Reviewer took action (created issue #N) instead of returning JSON. Manual investigation required."}], "summary": "Review aborted — reviewer violated strict output contract."}
+`
+
+const reviewSystemPrompt = `You are a HerdOS code reviewer running in a strict output mode.
+
+## Strict Output Contract
+Do NOT use any tools. Do NOT call gh, git, bash, or any external command. Do NOT create issues, comments, files, or pull requests. Your ONLY output is a single JSON object matching the schema described in the user prompt.
+
+If you find yourself wanting to take action — creating an issue, writing a file, running a command — STOP. Describe what should happen in the JSON "description" fields and return.
+
+Classify each finding by severity: HIGH (bugs, security), MEDIUM (edge cases, error handling), LOW (style, naming), CRITERIA (the acceptance criterion itself is wrong).
+
+Respond with JSON only — no markdown fencing, no surrounding text.`
 
 type reviewPromptData struct {
 	AcceptanceCriteria   []string
@@ -94,6 +112,12 @@ func (c *ClaudeAgent) Review(ctx context.Context, diff string, opts agent.Review
 	}
 
 	// Pass prompt via stdin to avoid "argument list too long" on large diffs.
+	// NOTE: Claude Code's headless `-p` mode does not currently accept a
+	// --disallowed-tools flag. Until it does, we rely on the strict output
+	// contract in reviewSystemPrompt and the self-check section in the
+	// user prompt to prevent the agent from taking action during review.
+	// If a future Claude Code version exposes such a flag, pass it here
+	// (e.g. --disallowed-tools=Bash,gh,Write,Edit) for defense in depth.
 	args := []string{"--dangerously-skip-permissions", "--system-prompt", reviewSystemPrompt}
 	if c.Model != "" {
 		args = append(args, "--model", c.Model)
@@ -139,8 +163,9 @@ func (c *ClaudeAgent) Review(ctx context.Context, diff string, opts agent.Review
 	if err != nil {
 		// If JSON parsing fails, treat as non-approved with raw output
 		return &agent.ReviewResult{
-			Approved: false,
-			Summary:  fmt.Sprintf("Failed to parse agent output as JSON: %s\nRaw output: %s", err, stdout),
+			Approved:      false,
+			IsUnparseable: true,
+			Summary:       fmt.Sprintf("Failed to parse agent output as JSON: %s\nRaw output: %s", err, stdout),
 		}, nil
 	}
 
