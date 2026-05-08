@@ -80,6 +80,12 @@ If the agent returns unparseable output (e.g., the JSON cannot be decoded, or th
 
 When you see that comment, run `/herd review` (optionally with a focus area) on the batch PR to trigger a fresh review. The integrator does not silently drop the review or auto-approve the PR.
 
+## CI Fix Loop
+
+`integrator.require_ci` enables CI failure detection on the batch branch, and `integrator.ci_max_fix_cycles` caps how many CI-failure fix cycles the Integrator will dispatch (0 = unlimited).
+
+CheckCI pauses dispatching a new CI fix worker if any fix-type worker — review fix, CI fix, or conflict resolution — is still in progress in the same batch milestone. The next `workflow_run` trigger (when that worker completes) re-runs CheckCI, which then proceeds with dispatch if CI is still failing. This prevents the Integrator from creating overlapping fix workers that would race on the same batch branch.
+
 ## Worker Extra Env
 
 `workers.extra_env` is a list of GitHub Actions secret names to surface as environment variables in the worker workflow's `Execute task` step, in addition to the built-in AI provider keys.

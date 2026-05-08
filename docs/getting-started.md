@@ -232,7 +232,7 @@ Once workers are dispatched, the system runs autonomously via GitHub Actions:
 
 4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. The review agent runs in a strict output mode (no tool calls, JSON-only output — see [Configuration: Agent Review](configuration.md#agent-review)). If issues are found, the Integrator creates fix issues and dispatches fix workers. This cycle repeats up to `review_max_fix_cycles` times.
 
-5. **CI failure detection** — When CI completes on the batch branch, a `check_suite` event triggers the Integrator. If CI failed, it re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`.
+5. **CI failure detection** — When CI completes on the batch branch, a `check_suite` event triggers the Integrator. If CI failed, it re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`. CheckCI pauses dispatching a new CI fix worker if any fix-type worker — review fix, CI fix, or conflict resolution — is still in progress in the same batch milestone. The next `workflow_run` trigger (when that worker completes) re-runs CheckCI.
 
 6. **Monitor patrols** — A cron-triggered Action detects stale workers (in-progress with no active run), failed issues (auto-redispatches with exponential backoff), CI failures on batch PRs, and stuck PRs (open longer than `max_pr_age_hours`). It escalates to `notify_users` when retries are exhausted.
 
