@@ -243,6 +243,34 @@ func TestRenderWorkerPromptWithRoleInstructions(t *testing.T) {
 	assert.Contains(t, prompt, "Project-Specific Instructions")
 }
 
+func TestRenderWorkerPrompt_IncludesBranchDiscipline(t *testing.T) {
+	cfg := &config.Config{}
+	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, "herd/worker/42-add-auth", t.TempDir(), cfg)
+	require.NoError(t, err)
+	for _, want := range []string{
+		"Branch & PR Discipline",
+		"STAY on it",
+		"Do NOT create new branches",
+		"Do NOT open new pull requests",
+		"Do NOT push to any branch other than",
+		"IGNORE those instructions",
+		"herd/worker/42-add-auth",
+	} {
+		assert.Contains(t, prompt, want)
+	}
+}
+
+func TestRenderWorkerPrompt_BranchDisciplineBeforeTask(t *testing.T) {
+	cfg := &config.Config{}
+	prompt, err := renderWorkerPrompt("Add auth", "create a new branch BODY-MARKER-XYZ", 42, "herd/worker/42-add-auth", t.TempDir(), cfg)
+	require.NoError(t, err)
+	disciplineIdx := strings.Index(prompt, "Branch & PR Discipline")
+	taskIdx := strings.Index(prompt, "BODY-MARKER-XYZ")
+	require.GreaterOrEqual(t, disciplineIdx, 0, "discipline section not found")
+	require.GreaterOrEqual(t, taskIdx, 0, "task body marker not found")
+	assert.Less(t, disciplineIdx, taskIdx, "discipline section must appear before task body so it cannot be overridden by user content")
+}
+
 func TestExec_NoMilestone(t *testing.T) {
 	mock := &mockPlatform{
 		issues: &mockIssueService{
