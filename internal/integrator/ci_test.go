@@ -600,6 +600,73 @@ func TestCheckCI_DispatchesWhenAllFixWorkersDone(t *testing.T) {
 	assert.Equal(t, "200", wf.dispatched[0]["issue_number"])
 }
 
+func TestCheckCI_SilentlySkipsUnparseableIssueBody(t *testing.T) {
+	// Edge case (b): an issue whose body fails YAML front-matter parsing must
+	// be silently skipped — CheckCI must not panic, and must not treat the
+	// unparseable issue as an in-progress fix worker. Even though the issue
+	// here carries the in-progress label, the parse error path (`continue`)
+	// means CheckCI proceeds to dispatch a new CI fix.
+	issueSvc, wf, prSvc := baseCIMocks()
+
+	const malformedBody = "---\nthis is not: : valid yaml [\n---\n\n## Task\nMalformed\n"
+	// Sanity-check that the body really does fail to parse — otherwise the
+	// test would not exercise the parseErr branch we are trying to cover.
+	_, parseErr := issues.ParseBody(malformedBody)
+	require.Error(t, parseErr, "test body must fail ParseBody so the parseErr branch is exercised")
+
+	issueSvc.listResult = []*platform.Issue{
+		{
+			Number: 90,
+			Labels: []string{issues.TypeFix, issues.StatusInProgress},
+			Body:   malformedBody,
+		},
+	}
+
+	createdIssues := []*platform.Issue{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			iss := &platform.Issue{Number: 99, Title: title}
+			createdIssues = append(createdIssues, iss)
+			return iss, nil
+		},
+	}
+
+	checkSvc := &mockCheckService{status: "failure"}
+	mock := &mockPlatformWithChecks{
+		mockPlatform: &mockPlatform{
+			issues:     mockCreate,
+			prs:        prSvc,
+			workflows:  wf,
+			repo:       &mockRepoService{defaultBranch: "main"},
+			milestones: &mockMilestoneService{},
+		},
+		checks: checkSvc,
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{RequireCI: true, CIMaxFixCycles: 0},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	var result *CheckCIResult
+	var err error
+	require.NotPanics(t, func() {
+		result, err = CheckCI(context.Background(), mock, cfg, CheckCIParams{RunID: 100})
+	}, "CheckCI must not panic when an issue body fails to parse")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "failure", result.Status)
+
+	// The unparseable issue must not be treated as an active fix worker.
+	// CheckCI proceeds to create and dispatch a new CI fix.
+	require.Len(t, createdIssues, 1, "unparseable issue must not gate dispatch — a new CI fix should be created")
+	require.Len(t, result.FixIssues, 1)
+	assert.Equal(t, 99, result.FixIssues[0])
+	require.Len(t, wf.dispatched, 1, "unparseable issue must not gate dispatch — worker should be dispatched")
+	assert.Equal(t, "99", wf.dispatched[0]["issue_number"])
+}
+
 func TestCheckCI_SkipsWhenCIFixInProgress(t *testing.T) {
 	issueSvc, wf, prSvc := baseCIMocks()
 	// Existing CI fix issue that's still in progress
