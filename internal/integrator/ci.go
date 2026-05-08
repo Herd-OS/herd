@@ -101,22 +101,44 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		return nil, fmt.Errorf("listing milestone issues: %w", err)
 	}
 
-	// Skip if a CI fix worker is already in progress
+	// Skip if any fix-type worker is already in progress in this milestone.
+	// This includes:
+	//   - review fix issues (FrontMatter.Type == "fix", no CIFixCycle, not ConflictResolution)
+	//   - CI fix issues (FrontMatter.CIFixCycle > 0)
+	//   - conflict resolution issues (FrontMatter.ConflictResolution == true)
+	// Any of these still active should pause CI fix dispatch — the next workflow_run
+	// trigger when that worker completes will re-run CheckCI.
 	currentCycle := 0
 	for _, iss := range allIssues {
 		parsed, parseErr := issues.ParseBody(iss.Body)
 		if parseErr != nil {
 			continue
 		}
-		if parsed.FrontMatter.CIFixCycle > 0 {
+		fm := parsed.FrontMatter
+
+		isCIFix := fm.CIFixCycle > 0
+		isConflictRes := fm.ConflictResolution
+		isReviewFix := fm.Type == "fix" && !isCIFix && !isConflictRes
+
+		if isCIFix || isConflictRes || isReviewFix {
 			status := issues.StatusLabel(iss.Labels)
 			if status == issues.StatusInProgress || status == issues.StatusReady {
-				fmt.Printf("Skipping CI fix: fix issue #%d is still %s\n", iss.Number, status)
+				kind := "fix"
+				switch {
+				case isCIFix:
+					kind = "CI fix"
+				case isConflictRes:
+					kind = "conflict resolution"
+				case isReviewFix:
+					kind = "review fix"
+				}
+				fmt.Printf("Skipping CI fix: %s worker #%d is still %s\n", kind, iss.Number, status)
 				return &CheckCIResult{Status: "failure"}, nil
 			}
 		}
-		if parsed.FrontMatter.CIFixCycle > currentCycle {
-			currentCycle = parsed.FrontMatter.CIFixCycle
+
+		if fm.CIFixCycle > currentCycle {
+			currentCycle = fm.CIFixCycle
 		}
 	}
 
