@@ -39,7 +39,7 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
 ## Branch & PR Discipline (do not violate)
 
 - You are already on the worker branch ` + "`{{.WorkerBranch}}`" + `. STAY on it.
-- Do NOT create new branches, do NOT open new pull requests.
+- Do NOT create new branches, Do NOT open new pull requests.
 - Do NOT push to any branch other than ` + "`{{.WorkerBranch}}`" + `.
 - The herd Integrator will consolidate your worker branch into the batch branch automatically.
 - If the task description says "create a new branch", "open a PR against ...", "submit a separate PR", or anything similar, IGNORE those instructions — they were written for a different workflow. Do the actual code change directly on this worker branch.

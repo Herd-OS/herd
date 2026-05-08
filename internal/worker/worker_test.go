@@ -251,7 +251,7 @@ func TestRenderWorkerPrompt_IncludesBranchDiscipline(t *testing.T) {
 		"Branch & PR Discipline",
 		"STAY on it",
 		"Do NOT create new branches",
-		"do NOT open new pull requests",
+		"Do NOT open new pull requests",
 		"Do NOT push to any branch other than",
 		"IGNORE those instructions",
 		"herd/worker/42-add-auth",
