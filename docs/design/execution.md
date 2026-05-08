@@ -773,6 +773,8 @@ graph TD
     I -->|Yes| J["Integrator reverts consolidation<br>Issue labeled failed,<br>comment with CI details"]
 ```
 
+CheckCI pauses dispatching a new CI fix worker if any fix-type worker — review fix, CI fix, or conflict resolution — is still in progress in the same batch milestone. When the guard skips, CheckCI returns without creating fix issues; the next `workflow_run` trigger (when the in-flight fix worker completes) re-runs CheckCI, which proceeds with dispatch if CI is still failing.
+
 ### Merge Conflict Between Parallel Workers
 
 ```mermaid
