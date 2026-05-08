@@ -52,6 +52,18 @@ sequenceDiagram
     Note over GitHub Actions: Integrator consolidates<br>into batch branch
 ```
 
+### Branch Discipline
+
+Workers operate exclusively on their assigned worker branch
+(`herd/worker/<N>-<slug>`). They do not create new branches, do not push to
+any other branch, and do not open pull requests — only the Integrator opens
+the single batch PR after all tiers complete. This rule is enforced via a
+hard `## Branch & PR Discipline` section near the top of the worker prompt
+template, which also instructs the agent to ignore any inline task body
+content that says to create a new branch or open a separate PR. Consolidation
+of the worker branch onto the batch branch is the Integrator's
+responsibility (see [Section 4: Consolidation](#4-consolidation)).
+
 ### Headless Permissions
 
 Workers run in fully automated CI with no human present. The agent must never
