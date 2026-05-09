@@ -1225,9 +1225,9 @@ func TestReview_DedupFindings(t *testing.T) {
 		Labels:    []string{issues.StatusDone},
 		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 	}
-	// Include open fix issues (one with StatusDone, one without) that both
-	// participate in dedup. StatusDone means the worker finished but the issue
-	// is still open — it should still dedup to prevent duplicate fix work.
+	// Open fix issues from prior cycles — neither is "active" (in-progress
+	// or ready), so neither suppresses the corresponding new finding. The
+	// done issue is a past attempt and the unlabeled issue is not active.
 	issueSvc.listResult = []*platform.Issue{
 		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
 		{Number: 80, State: "open", Title: "Review fixes (cycle 1)",
@@ -1278,23 +1278,31 @@ func TestReview_DedupFindings(t *testing.T) {
 	}, ReviewParams{RunID: 100, RepoRoot: dir})
 
 	require.NoError(t, err)
-	assert.True(t, createCalled, "Should create fix issue for non-duplicate finding")
+	assert.True(t, createCalled, "Should create fix issue")
 	assert.Len(t, result.FixIssues, 1)
-	// Only "SQL injection in query builder" should survive dedup — the other
-	// two findings match open fix issues #80 and #81 respectively.
+	// All three findings survive — neither prior fix issue is active
+	// (in-progress or ready), so neither participates in dedup. The
+	// done fix issue is a past attempt and recurring findings against
+	// it must produce a fresh fix worker.
 	assert.Contains(t, createdBody, "SQL injection in query builder")
-	assert.NotContains(t, createdBody, "Missing error handling in auth.go")
-	assert.NotContains(t, createdBody, "Race condition in worker pool")
+	assert.Contains(t, createdBody, "Missing error handling in auth.go")
+	assert.Contains(t, createdBody, "Race condition in worker pool")
 }
 
-func TestReview_AllFindingsDeduped_Approves(t *testing.T) {
+// TestReview_RecurringFindingNotSwallowed verifies that recurring findings
+// matching a prior-cycle fix issue with status=done (worker finished, awaiting
+// batch merge) are NOT deduped — the recurrence is evidence the prior fix
+// did not take, so a fresh fix worker must be created.
+func TestReview_RecurringFindingNotSwallowed(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
 		Number: 42, Title: "Test",
 		Labels:    []string{issues.StatusDone},
 		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 	}
-	// Open fix issue whose body matches ALL high findings
+	// Prior fix issue from a previous cycle — status=done means the worker
+	// finished but the issue is still open awaiting batch merge. The new
+	// dedup logic must NOT suppress findings against this issue.
 	issueSvc.listResult = []*platform.Issue{
 		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
 		{Number: 80, State: "open", Title: "Review fixes (cycle 1)",
@@ -1303,10 +1311,12 @@ func TestReview_AllFindingsDeduped_Approves(t *testing.T) {
 	}
 
 	createCalled := false
+	var createdBody string
 	mockCreate := &mockIssueServiceWithCreate{
 		mockIssueService: issueSvc,
 		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
 			createCalled = true
+			createdBody = body
 			return &platform.Issue{Number: 100, Title: title}, nil
 		},
 	}
@@ -1344,17 +1354,13 @@ func TestReview_AllFindingsDeduped_Approves(t *testing.T) {
 	}, ReviewParams{RunID: 100, RepoRoot: dir})
 
 	require.NoError(t, err)
-	assert.True(t, result.Approved, "Should approve when all findings are deduped")
-	assert.Equal(t, 50, result.BatchPRNumber)
-	assert.False(t, createCalled, "Should not create new fix issues")
-
-	// Should post an informational comment
-	require.NotEmpty(t, prSvc.comments)
-	assert.Contains(t, prSvc.comments[0], "already covered by existing fix workers")
-
-	// Should submit an approval review
-	require.Len(t, prSvc.reviews, 1)
-	assert.Equal(t, platform.ReviewApprove, prSvc.reviews[0].event)
+	assert.True(t, createCalled, "Should create a new fix issue — done fix issues do not dedup")
+	assert.False(t, result.Approved, "Should not approve when actionable findings remain")
+	assert.Len(t, result.FixIssues, 1)
+	// Both recurring findings should appear in the new fix issue body since
+	// the prior fix issue is done (a past attempt), not active.
+	assert.Contains(t, createdBody, "Missing error handling in auth.go")
+	assert.Contains(t, createdBody, "Race condition in worker pool")
 }
 
 func TestReview_SkipsCompletedBatch(t *testing.T) {
@@ -1635,6 +1641,146 @@ func TestDedupFindings(t *testing.T) {
 			}
 		})
 	}
+}
+
+const fixBody = "---\nherd:\n  version: 1\n  type: fix\n---\n\n## Task\nFix: Missing error handling in auth.go\n"
+
+func TestActiveFixIssues_FiltersByStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		issue       *platform.Issue
+		wantInclude bool
+	}{
+		{
+			name: "closed issue with type=fix in-progress is excluded",
+			issue: &platform.Issue{Number: 1, State: "closed",
+				Labels: []string{issues.StatusInProgress}, Body: fixBody},
+			wantInclude: false,
+		},
+		{
+			name: "open type=feature in-progress is excluded",
+			issue: &platform.Issue{Number: 2, State: "open",
+				Labels: []string{issues.StatusInProgress},
+				Body:   "---\nherd:\n  version: 1\n  type: feature\n---\n\n## Task\nDo it\n"},
+			wantInclude: false,
+		},
+		{
+			name: "open type=fix in-progress is included",
+			issue: &platform.Issue{Number: 3, State: "open",
+				Labels: []string{issues.StatusInProgress}, Body: fixBody},
+			wantInclude: true,
+		},
+		{
+			name: "open type=fix ready is included",
+			issue: &platform.Issue{Number: 4, State: "open",
+				Labels: []string{issues.StatusReady}, Body: fixBody},
+			wantInclude: true,
+		},
+		{
+			name: "open type=fix done is excluded",
+			issue: &platform.Issue{Number: 5, State: "open",
+				Labels: []string{issues.StatusDone}, Body: fixBody},
+			wantInclude: false,
+		},
+		{
+			name: "open type=fix failed is excluded",
+			issue: &platform.Issue{Number: 6, State: "open",
+				Labels: []string{issues.StatusFailed}, Body: fixBody},
+			wantInclude: false,
+		},
+		{
+			name: "open type=fix blocked is excluded",
+			issue: &platform.Issue{Number: 7, State: "open",
+				Labels: []string{issues.StatusBlocked}, Body: fixBody},
+			wantInclude: false,
+		},
+		{
+			name: "open type=fix cancelled is excluded",
+			issue: &platform.Issue{Number: 8, State: "open",
+				Labels: []string{issues.StatusCancelled}, Body: fixBody},
+			wantInclude: false,
+		},
+		{
+			name: "open type=fix with no status label is excluded",
+			issue: &platform.Issue{Number: 9, State: "open",
+				Labels: []string{}, Body: fixBody},
+			wantInclude: false,
+		},
+		{
+			name: "open issue with malformed body (no front matter) is excluded",
+			issue: &platform.Issue{Number: 10, State: "open",
+				Labels: []string{issues.StatusInProgress}, Body: "no front matter here"},
+			wantInclude: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := activeFixIssues([]*platform.Issue{tt.issue})
+			if tt.wantInclude {
+				require.Len(t, out, 1)
+				assert.Equal(t, tt.issue.Number, out[0].Number)
+			} else {
+				assert.Empty(t, out)
+			}
+		})
+	}
+}
+
+// TestDedupFindings_DoesNotDedupAgainstDoneFixIssues verifies that a finding
+// matching a done fix issue is preserved through the filter+dedup pipeline.
+func TestDedupFindings_DoesNotDedupAgainstDoneFixIssues(t *testing.T) {
+	allIssues := []*platform.Issue{
+		{Number: 80, State: "open", Title: "Review fixes (cycle 1)",
+			Labels: []string{issues.StatusDone},
+			Body:   "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\nFix: Missing error handling in auth.go\n"},
+	}
+	findings := []agent.ReviewFinding{
+		{Severity: "HIGH", Description: "Missing error handling in auth.go"},
+	}
+
+	result := dedupFindings(findings, activeFixIssues(allIssues))
+
+	require.Len(t, result, 1)
+	assert.Equal(t, "Missing error handling in auth.go", result[0].Description)
+}
+
+// TestDedupFindings_DedupsAgainstInProgressFixIssues verifies that findings
+// matching an in-progress fix issue ARE removed by the filter+dedup pipeline.
+func TestDedupFindings_DedupsAgainstInProgressFixIssues(t *testing.T) {
+	allIssues := []*platform.Issue{
+		{Number: 80, State: "open", Title: "Review fixes (cycle 1)",
+			Labels: []string{issues.StatusInProgress},
+			Body:   "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\n1. Missing error handling in auth.go\n"},
+	}
+	findings := []agent.ReviewFinding{
+		{Severity: "HIGH", Description: "Missing error handling in auth.go"},
+		{Severity: "HIGH", Description: "Brand new unrelated finding"},
+	}
+
+	result := dedupFindings(findings, activeFixIssues(allIssues))
+
+	require.Len(t, result, 1)
+	assert.Equal(t, "Brand new unrelated finding", result[0].Description)
+}
+
+// TestDedupFindings_DedupsAgainstReadyFixIssues verifies that findings
+// matching a ready fix issue ARE removed by the filter+dedup pipeline.
+func TestDedupFindings_DedupsAgainstReadyFixIssues(t *testing.T) {
+	allIssues := []*platform.Issue{
+		{Number: 80, State: "open", Title: "Review fixes (cycle 1)",
+			Labels: []string{issues.StatusReady},
+			Body:   "---\nherd:\n  version: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\n1. Missing error handling in auth.go\n"},
+	}
+	findings := []agent.ReviewFinding{
+		{Severity: "HIGH", Description: "Missing error handling in auth.go"},
+		{Severity: "HIGH", Description: "Brand new unrelated finding"},
+	}
+
+	result := dedupFindings(findings, activeFixIssues(allIssues))
+
+	require.Len(t, result, 1)
+	assert.Equal(t, "Brand new unrelated finding", result[0].Description)
 }
 
 func TestDescriptionMatch(t *testing.T) {

@@ -456,8 +456,18 @@ graph TD
 
 Fix issues are labeled `herd/type:fix`, have no dependencies (run in parallel),
 and track which review cycle spawned them via a `fix_cycle` field and a
-`batch_pr` reference back to the PR. Findings are deduplicated against open fix
-issues to avoid creating duplicate work.
+`batch_pr` reference back to the PR.
+
+#### Review fix-issue dedup
+
+New review findings are deduplicated only against fix issues whose herd status
+is `herd/status:in-progress` or `herd/status:ready` — the active set, where a
+worker is either running or queued to address the finding. Fix issues with
+status `herd/status:done` (worker completed but the batch has not yet merged)
+or `herd/status:failed` are past attempts and do **not** suppress new findings.
+If the reviewer flags the same finding in a later cycle, that is evidence the
+previous attempt did not resolve it, so the Integrator dispatches a fresh fix
+worker rather than treating the recurring finding as already covered.
 
 When a worker is dispatched for a fix issue, its system prompt includes an
 additional instruction prioritizing the reviewer's findings over original
