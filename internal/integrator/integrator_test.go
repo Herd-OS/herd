@@ -2209,6 +2209,399 @@ func runGit(t *testing.T, dir string, args ...string) {
 	require.NoError(t, err, "git %v failed: %s", args, string(out))
 }
 
+// initMultiWorkerRepo creates a bare-origin git repo, a batch branch for the
+// given milestone slug, and one worker branch per (issueNumber, slug) pair.
+// Each worker branch adds a unique file `worker<N>.txt` so callers can assert
+// per-branch merges via filesystem state rather than mocking *git.Git.
+func initMultiWorkerRepo(t *testing.T, batchBranch string, workers []struct {
+	num  int
+	slug string
+}) (string, *git.Git) {
+	t.Helper()
+
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	runGit(t, dir, "checkout", "-b", batchBranch)
+	runGit(t, dir, "push", "origin", batchBranch)
+
+	for _, w := range workers {
+		runGit(t, dir, "checkout", "main")
+		branch := fmt.Sprintf("herd/worker/%d-%s", w.num, w.slug)
+		runGit(t, dir, "checkout", "-b", branch)
+		f := fmt.Sprintf("worker%d.txt", w.num)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, f), []byte(fmt.Sprintf("worker %d", w.num)), 0644))
+		runGit(t, dir, "add", ".")
+		runGit(t, dir, "commit", "-m", fmt.Sprintf("Complete #%d", w.num))
+		runGit(t, dir, "push", "origin", branch)
+	}
+
+	runGit(t, dir, "checkout", batchBranch)
+	return dir, git.New(dir)
+}
+
+// TestConsolidate_PicksUpStrandedDoneWorkers verifies that a single Consolidate
+// call merges every done-labeled worker branch in the milestone, not just the
+// triggering issue. This makes consolidation idempotent and self-healing.
+func TestConsolidate_PicksUpStrandedDoneWorkers(t *testing.T) {
+	ms := &platform.Milestone{Number: 5, Title: "multi"}
+	batchBranch := "herd/batch/5-multi"
+
+	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
+		num  int
+		slug string
+	}{
+		{100, "task-a"},
+		{101, "task-b"},
+		{102, "task-c"},
+	})
+
+	issue100 := &platform.Issue{Number: 100, Title: "Task A", Labels: []string{issues.StatusDone}, Milestone: ms}
+	issue101 := &platform.Issue{Number: 101, Title: "Task B", Labels: []string{issues.StatusDone}, Milestone: ms}
+	issue102 := &platform.Issue{Number: 102, Title: "Task C", Labels: []string{issues.StatusDone}, Milestone: ms}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[100] = issue100
+	issueSvc.getResult[101] = issue101
+	issueSvc.getResult[102] = issue102
+	issueSvc.listResult = []*platform.Issue{issue100, issue101, issue102}
+
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			"herd/worker/100-task-a": true,
+			"herd/worker/101-task-b": true,
+			"herd/worker/102-task-c": true,
+		},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				200: {ID: 200, Conclusion: "success", Inputs: map[string]string{"issue_number": "101"}},
+			},
+		},
+		repo: repoSvc,
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 200, RepoRoot: dir})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, 101, result.IssueNumber)
+	assert.True(t, result.Merged, "trigger result should report Merged=true")
+
+	// All three worker.txt files must be present on the batch branch.
+	for _, n := range []int{100, 101, 102} {
+		_, statErr := os.Stat(filepath.Join(dir, fmt.Sprintf("worker%d.txt", n)))
+		assert.NoError(t, statErr, "worker%d.txt should be on batch branch (merge happened)", n)
+	}
+
+	// All three worker branches must have been deleted on the platform side.
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/100-task-a")
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/101-task-b")
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/102-task-c")
+}
+
+// TestConsolidate_SkipsFailedIssues verifies that worker branches whose issues
+// are labeled failed (or any non-done status) are NOT merged or deleted, even
+// when their branches still exist on the remote.
+func TestConsolidate_SkipsFailedIssues(t *testing.T) {
+	ms := &platform.Milestone{Number: 5, Title: "multi"}
+	batchBranch := "herd/batch/5-multi"
+
+	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
+		num  int
+		slug string
+	}{
+		{200, "task-a"},
+		{201, "task-b"},
+		{202, "task-c"},
+	})
+
+	issue200 := &platform.Issue{Number: 200, Title: "Task A", Labels: []string{issues.StatusDone}, Milestone: ms}
+	issue201 := &platform.Issue{Number: 201, Title: "Task B", Labels: []string{issues.StatusFailed}, Milestone: ms}
+	issue202 := &platform.Issue{Number: 202, Title: "Task C", Labels: []string{issues.StatusDone}, Milestone: ms}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[200] = issue200
+	issueSvc.getResult[201] = issue201
+	issueSvc.getResult[202] = issue202
+	issueSvc.listResult = []*platform.Issue{issue200, issue201, issue202}
+
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			"herd/worker/200-task-a": true,
+			"herd/worker/201-task-b": true,
+			"herd/worker/202-task-c": true,
+		},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				300: {ID: 300, Conclusion: "success", Inputs: map[string]string{"issue_number": "200"}},
+			},
+		},
+		repo: repoSvc,
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 300, RepoRoot: dir})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Merged)
+
+	// #200 and #202 must be on the batch branch; #201 must NOT.
+	_, statErr200 := os.Stat(filepath.Join(dir, "worker200.txt"))
+	assert.NoError(t, statErr200, "worker200.txt should be merged (issue done)")
+	_, statErr202 := os.Stat(filepath.Join(dir, "worker202.txt"))
+	assert.NoError(t, statErr202, "worker202.txt should be merged (issue done)")
+	_, statErr201 := os.Stat(filepath.Join(dir, "worker201.txt"))
+	assert.True(t, os.IsNotExist(statErr201), "worker201.txt must NOT be merged (issue failed)")
+
+	// #201's worker branch must NOT have been deleted; #200 and #202 must have been.
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/200-task-a")
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/202-task-c")
+	assert.NotContains(t, repoSvc.deletedBranches, "herd/worker/201-task-b")
+}
+
+// TestConsolidate_HandlesPartialConflict verifies that when one worker branch
+// hits a merge conflict, the loop continues processing the remaining
+// candidates instead of aborting, and a resolver issue is dispatched for the
+// conflicting branch only.
+func TestConsolidate_HandlesPartialConflict(t *testing.T) {
+	ms := &platform.Milestone{Number: 5, Title: "multi"}
+	batchBranch := "herd/batch/5-multi"
+
+	// Build a custom repo: batch has shared.txt, #301 also modifies shared.txt
+	// (conflicts), #300 and #302 add unique non-conflicting files.
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("original"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	runGit(t, dir, "checkout", "-b", batchBranch)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("from batch"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "batch change")
+	runGit(t, dir, "push", "origin", batchBranch)
+
+	// Worker #300 (non-conflicting): adds worker300.txt.
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/300-task-a")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker300.txt"), []byte("300"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "Complete #300")
+	runGit(t, dir, "push", "origin", "herd/worker/300-task-a")
+
+	// Worker #301 (conflicting): rewrites shared.txt.
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/301-task-b")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("from worker 301"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "Complete #301")
+	runGit(t, dir, "push", "origin", "herd/worker/301-task-b")
+
+	// Worker #302 (non-conflicting): adds worker302.txt.
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/302-task-c")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker302.txt"), []byte("302"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "Complete #302")
+	runGit(t, dir, "push", "origin", "herd/worker/302-task-c")
+
+	runGit(t, dir, "checkout", batchBranch)
+	g := git.New(dir)
+
+	issue300 := &platform.Issue{Number: 300, Title: "Task A", Labels: []string{issues.StatusDone}, Milestone: ms}
+	issue301 := &platform.Issue{Number: 301, Title: "Task B", Labels: []string{issues.StatusDone}, Milestone: ms}
+	issue302 := &platform.Issue{Number: 302, Title: "Task C", Labels: []string{issues.StatusDone}, Milestone: ms}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[300] = issue300
+	issueSvc.getResult[301] = issue301
+	issueSvc.getResult[302] = issue302
+	issueSvc.listResult = []*platform.Issue{issue300, issue301, issue302}
+
+	createdIssues := []*platform.Issue{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, _ string, _ []string, _ *int) (*platform.Issue, error) {
+			iss := &platform.Issue{Number: 999, Title: title}
+			createdIssues = append(createdIssues, iss)
+			return iss, nil
+		},
+	}
+
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			"herd/worker/300-task-a": true,
+			"herd/worker/301-task-b": true,
+			"herd/worker/302-task-c": true,
+		},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			400: {ID: 400, Conclusion: "success", Inputs: map[string]string{"issue_number": "300"}},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:    mockCreate,
+		workflows: wf,
+		repo:      repoSvc,
+	}
+
+	cfg := &config.Config{
+		Integrator: config.Integrator{OnConflict: "dispatch-resolver", MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 400, RepoRoot: dir})
+	require.NoError(t, err, "loop should not abort on a single conflict under dispatch-resolver")
+	require.NotNil(t, result)
+
+	// Trigger #300 should report a successful merge.
+	assert.Equal(t, 300, result.IssueNumber)
+	assert.True(t, result.Merged)
+
+	// Both non-conflicting workers must have been merged — proves the loop did
+	// not abort after the conflict in the middle.
+	_, statErr300 := os.Stat(filepath.Join(dir, "worker300.txt"))
+	assert.NoError(t, statErr300, "worker300.txt should be merged")
+	_, statErr302 := os.Stat(filepath.Join(dir, "worker302.txt"))
+	assert.NoError(t, statErr302, "worker302.txt should be merged AFTER the #301 conflict (loop continues)")
+
+	// A resolver issue must have been created — exactly one (only #301 conflicted).
+	require.Len(t, createdIssues, 1, "exactly one resolver issue should have been created")
+	assert.Contains(t, createdIssues[0].Title, "Resolve conflict: #301")
+
+	// Successful workers' branches deleted; conflicting one not deleted.
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/300-task-a")
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/302-task-c")
+	assert.NotContains(t, repoSvc.deletedBranches, "herd/worker/301-task-b",
+		"conflicting branch must NOT be deleted — resolver issue references it")
+
+	// #301 should be relabeled from done → failed.
+	assert.Contains(t, issueSvc.removedLabels[301], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[301], issues.StatusFailed)
+
+	// A resolver worker must have been dispatched.
+	assert.Len(t, wf.dispatched, 1, "exactly one resolver worker dispatch (for #301's conflict)")
+}
+
+// TestConsolidate_TriggeringIssueAlreadyMerged covers the case where the
+// triggering issue's worker branch is already an ancestor of the batch branch
+// (e.g. a previous integrator run merged it but failed to delete the branch).
+// The loop should still pick up other unmerged candidates in the milestone.
+func TestConsolidate_TriggeringIssueAlreadyMerged(t *testing.T) {
+	ms := &platform.Milestone{Number: 5, Title: "multi"}
+	batchBranch := "herd/batch/5-multi"
+
+	bareDir := t.TempDir()
+	runGit(t, "", "init", "--bare", "-b", "main", bareDir)
+
+	dir := t.TempDir()
+	runGit(t, "", "clone", bareDir, dir)
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "push", "origin", "main")
+
+	// Create worker #400 with a unique file.
+	runGit(t, dir, "checkout", "-b", "herd/worker/400-task-a")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker400.txt"), []byte("400"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "Complete #400")
+	runGit(t, dir, "push", "origin", "herd/worker/400-task-a")
+
+	// Create worker #401 with a different unique file off main (NOT yet merged).
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", "herd/worker/401-task-b")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker401.txt"), []byte("401"), 0644))
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "Complete #401")
+	runGit(t, dir, "push", "origin", "herd/worker/401-task-b")
+
+	// Build batch branch already containing worker #400 (its tip is an ancestor).
+	runGit(t, dir, "checkout", "main")
+	runGit(t, dir, "checkout", "-b", batchBranch)
+	runGit(t, dir, "merge", "--ff-only", "herd/worker/400-task-a")
+	runGit(t, dir, "push", "origin", batchBranch)
+
+	g := git.New(dir)
+
+	issue400 := &platform.Issue{Number: 400, Title: "Task A", Labels: []string{issues.StatusDone}, Milestone: ms}
+	issue401 := &platform.Issue{Number: 401, Title: "Task B", Labels: []string{issues.StatusDone}, Milestone: ms}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[400] = issue400
+	issueSvc.getResult[401] = issue401
+	issueSvc.listResult = []*platform.Issue{issue400, issue401}
+
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			"herd/worker/400-task-a": true,
+			"herd/worker/401-task-b": true,
+		},
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				500: {ID: 500, Conclusion: "success", Inputs: map[string]string{"issue_number": "400"}},
+			},
+		},
+		repo: repoSvc,
+	}
+
+	result, err := Consolidate(context.Background(), mock, g, &config.Config{}, ConsolidateParams{RunID: 500, RepoRoot: dir})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// Trigger result reflects the trigger's issue number even though its merge
+	// was a no-op (already contained).
+	assert.Equal(t, 400, result.IssueNumber)
+
+	// worker401.txt must now be on batch (proves #401 was merged after the
+	// trigger's already-merged short-circuit).
+	_, statErr := os.Stat(filepath.Join(dir, "worker401.txt"))
+	assert.NoError(t, statErr, "worker401.txt should be merged into batch")
+
+	// Both worker branches deleted: #400 because it was already contained
+	// (already-merged short-circuit deletes), #401 because it was just merged.
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/400-task-a")
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/401-task-b")
+}
+
 func TestDispatchRebaseConflictWorker_CreatesIssueAndDispatches(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.createResult = &platform.Issue{Number: 555}
