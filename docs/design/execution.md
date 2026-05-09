@@ -280,17 +280,51 @@ Opening the batch PR is idempotent: if concurrent advance-on-close triggers race
 
 Before opening the batch PR, the Integrator sanity-checks that the milestone's issue list returned by the GitHub API is complete (the count of fetched issues is at least `OpenIssues + ClosedIssues`). If the list is short — typically a transient partial API response — it logs `Warning: milestone #N has X expected issues (Y open + Z closed) but only K were returned by the API; skipping batch PR to avoid premature open` and skips PR creation; the PR opens on a subsequent advance once the API returns complete data. Likewise, if the issue triggering an advance is not found in any tier (another partial-response symptom), the Integrator logs `Warning: issue #N not found in any tier of milestone #M (possibly partial API response); skipping advance` and treats the trigger as a no-op rather than returning an error.
 
-### Run-to-Branch Resolution
+### Run-to-Milestone Resolution
 
-Given a completed workflow run ID, the Integrator resolves the worker branch:
+`herd integrator consolidate --run-id <N>` is a **milestone-wide, batch-level**
+operation, not a single-branch merge. The triggering run identifies which
+milestone to operate on; the Integrator then processes every eligible worker
+branch in that milestone in a single invocation.
 
-1. Query the run's workflow_dispatch inputs to extract the issue number
-2. Derive the worker branch name from convention: `herd/worker/<number>-<slug>`
-3. Check the run conclusion: success means look for a worker branch; failure
-   means update issue labels and skip merge
-4. If the worker branch exists, merge into batch branch. If no branch exists
-   (no-op worker), skip merge. Either way, the issue counts toward tier
-   completion.
+1. Query the run's workflow_dispatch inputs to extract the issue number, and
+   read that issue's milestone — this is the only role the run ID plays. The
+   triggering issue's per-call result is what the command returns; per-issue
+   outcomes for other workers in the milestone are logged but not returned.
+2. If the run's conclusion is `failure` or `cancelled`, relabel the triggering
+   issue as `herd/status:failed` and return. Skip the milestone-wide scan in
+   this case to preserve the trigger-failure semantics.
+3. Otherwise, list every issue in the milestone and build the candidate set:
+   issues labeled `herd/status:done` whose worker branch
+   (`herd/worker/<number>-<slug>`) still exists on the remote. Failed and
+   in-progress issues are skipped — their workers either didn't finish or are
+   not yet ready for consolidation.
+4. Sort candidates by issue number for deterministic ordering, then merge each
+   into the batch branch. Branches whose tip is already contained in the
+   batch branch are detected via `git merge-base` and skipped (the worker
+   branch is deleted as a no-op).
+5. Conflicts and push failures on one candidate do not abort the loop. The
+   per-branch handler (`handleConflictResolution` for `dispatch-resolver`, or
+   the notify path) runs for that branch only and the loop continues with
+   the next candidate.
+
+### Self-Healing Consolidation
+
+Because every successful consolidation invocation re-scans the whole
+milestone, stranded worker branches recover automatically on the next run.
+This matters whenever an integrator run is interrupted mid-loop —
+`cancel-in-progress` on the integrator workflow, runner timeouts, or transient
+GitHub Actions failures can all leave one or more `herd/status:done` issues
+whose worker branches were never merged. No manual cleanup is needed: the
+next workflow run that triggers consolidate (the next worker completion,
+manual `/herd integrate`, or any other event that fires the integrator)
+re-scans the milestone, finds the stranded branches still on the remote, and
+merges them in.
+
+Failed issues are explicitly excluded from the candidate set, so this
+self-healing property never resurrects work that was already abandoned. Only
+issues that reached `herd/status:done` and still have a remote worker branch
+are picked up.
 
 ### Post-Merge Failure Handling
 
@@ -300,12 +334,16 @@ and posts a diagnostic comment. This ensures the issue is retried automatically.
 The Integrator resets the local batch branch to match the remote before each
 checkout, preventing stale-branch issues.
 
-**Non-fatal consolidation failures do not block advance and review.** Push
-failures on stale branches and merge conflicts in notify mode are treated as
-warnings — the issue is relabeled as failed (for the Monitor to handle), but the
-consolidate command returns success so the workflow continues to run advance and
-review. Only truly fatal failures (git unavailable, authentication errors,
-corrupted state) cause the pipeline to stop.
+**Non-fatal consolidation failures do not block advance and review, and do not
+abort the milestone-wide loop.** Push failures on stale branches and merge
+conflicts in notify mode are treated as warnings — the issue is relabeled as
+failed (for the Monitor to handle) and the loop continues with the next
+candidate worker branch. Only the triggering issue's failure surfaces as the
+command's return value; failures on other in-milestone candidates are logged.
+The consolidate command returns success on the trigger so the workflow
+continues to run advance and review. Only truly fatal failures (git
+unavailable, authentication errors, corrupted state) cause the pipeline to
+stop.
 
 ### Stale Conflict Issue Cleanup
 
