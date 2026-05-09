@@ -277,20 +277,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Collect open fix issues for dedup
-	var openFixIssues []*platform.Issue
-	for _, iss := range allIssues {
-		if iss.State == "closed" {
-			continue
-		}
-		parsed, parseErr := issues.ParseBody(iss.Body)
-		if parseErr != nil {
-			continue
-		}
-		if parsed.FrontMatter.Type == "fix" {
-			openFixIssues = append(openFixIssues, iss)
-		}
-	}
+	// Collect open fix issues for dedup. Only fix issues that are actively
+	// in-progress or ready suppress new findings — done/failed issues are past
+	// attempts and recurring findings against them must produce a fresh fix.
+	openFixIssues := activeFixIssues(allIssues)
 
 	actionableFindings = dedupFindings(actionableFindings, openFixIssues)
 	if len(actionableFindings) == 0 {
@@ -828,6 +818,31 @@ func descriptionMatch(text, descPrefix string) bool {
 		return text == descPrefix
 	}
 	return strings.Contains(text, descPrefix)
+}
+
+// activeFixIssues returns fix-typed issues whose herd status is in-progress
+// or ready. Issues with status done/failed are past attempts and must not
+// suppress recurring findings — a reviewer flagging the same problem again
+// is evidence the previous fix attempt did not take.
+func activeFixIssues(allIssues []*platform.Issue) []*platform.Issue {
+	var out []*platform.Issue
+	for _, iss := range allIssues {
+		if iss.State == "closed" {
+			continue
+		}
+		parsed, parseErr := issues.ParseBody(iss.Body)
+		if parseErr != nil {
+			continue
+		}
+		if parsed.FrontMatter.Type != "fix" {
+			continue
+		}
+		status := issues.StatusLabel(iss.Labels)
+		if status == issues.StatusInProgress || status == issues.StatusReady {
+			out = append(out, iss)
+		}
+	}
+	return out
 }
 
 // dedupFindings removes findings that are similar to existing open fix issues.
