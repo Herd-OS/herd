@@ -340,7 +340,7 @@ func TestConsolidate_SuccessfulMerge(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
 		Number: 42, Title: "Test",
-		Labels:    []string{issues.StatusInProgress},
+		Labels:    []string{issues.StatusDone},
 		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 	}
 
@@ -399,7 +399,7 @@ func TestConsolidate_RemovesWorkerProgressFile(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
 		Number: 42, Title: "Test",
-		Labels:    []string{issues.StatusInProgress},
+		Labels:    []string{issues.StatusDone},
 		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 	}
 
@@ -484,7 +484,7 @@ func TestConsolidate_ConfiguresGitIdentity(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
 		Number: 42, Title: "Test",
-		Labels:    []string{issues.StatusInProgress},
+		Labels:    []string{issues.StatusDone},
 		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 	}
 
@@ -2134,7 +2134,7 @@ func TestConsolidate_ProgressOnlyWorkerBranch(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.getResult[42] = &platform.Issue{
 		Number: 42, Title: "Test",
-		Labels:    []string{issues.StatusInProgress},
+		Labels:    []string{issues.StatusDone},
 		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
 	}
 

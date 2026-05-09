@@ -592,13 +592,14 @@ func TestOrchestration_ConflictResolution(t *testing.T) {
 
 	ms := &platform.Milestone{Number: 1, Title: "Test Batch", State: "open"}
 
+	// Simulate sequential worker completion: #10 finishes first (Done), then #11.
 	issueSvc := newStatefulIssueService(
 		&platform.Issue{Number: 10, Title: "Task A", State: "open",
 			Labels:    []string{issues.StatusDone},
 			Milestone: ms,
 			Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n"},
 		&platform.Issue{Number: 11, Title: "Task B", State: "open",
-			Labels:    []string{issues.StatusDone},
+			Labels:    []string{issues.StatusInProgress},
 			Milestone: ms,
 			Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo B\n"},
 	)
@@ -637,12 +638,18 @@ func TestOrchestration_ConflictResolution(t *testing.T) {
 	runCmd(t, dir, "git", "commit", "-m", "Complete #11")
 	require.NoError(t, g.Push("origin", "herd/worker/11-task-b"))
 
-	// Consolidate #10 — should succeed (first merge is clean)
+	// Consolidate #10 — should succeed (first merge is clean). #11 is still
+	// in-progress, so it is NOT yet a candidate.
 	runID10 := wf.addRun(10, "success")
 	result10, err := integrator.Consolidate(ctx, mock, g, cfg, integrator.ConsolidateParams{RunID: runID10})
 	require.NoError(t, err)
 	assert.True(t, result10.Merged)
 	assert.False(t, result10.ConflictDetected)
+
+	// #11 worker now finishes — promote it to done so the next consolidate run
+	// picks it up.
+	_ = issueSvc.RemoveLabels(ctx, 11, []string{issues.StatusInProgress})
+	_ = issueSvc.AddLabels(ctx, 11, []string{issues.StatusDone})
 
 	// Consolidate #11 — should detect conflict
 	runID11 := wf.addRun(11, "success")
