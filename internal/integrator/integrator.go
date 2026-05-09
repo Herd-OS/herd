@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -82,16 +83,18 @@ type ReviewStandaloneResult struct {
 	FindingsCount int
 }
 
-// Consolidate merges a completed worker branch into the batch branch.
-// It resolves the worker branch from the workflow run, merges it, and cleans up.
+// Consolidate merges completed worker branches into the batch branch.
+// params.RunID identifies the triggering run; consolidation processes ALL
+// done-labeled issues in the milestone whose worker branches still exist
+// on the remote, making the operation idempotent and self-healing.
+// The returned *ConsolidateResult reflects the TRIGGERING issue's outcome;
+// other workers in the milestone are processed for side effects only.
 func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, params ConsolidateParams) (*ConsolidateResult, error) {
-	// Get the completed run
 	run, err := p.Workflows().GetRun(ctx, params.RunID)
 	if err != nil {
 		return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
 	}
 
-	// Extract issue number from run inputs
 	issueNumStr, ok := run.Inputs["issue_number"]
 	if !ok {
 		return nil, fmt.Errorf("run %d has no issue_number input", params.RunID)
@@ -101,7 +104,6 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		return nil, fmt.Errorf("invalid issue_number %q in run %d: %w", issueNumStr, params.RunID, err)
 	}
 
-	// Get the issue
 	issue, err := p.Issues().Get(ctx, issueNumber)
 	if err != nil {
 		return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
@@ -114,12 +116,12 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		return &ConsolidateResult{IssueNumber: issueNumber, NoOp: true}, nil
 	}
 
-	workerBranch := fmt.Sprintf("herd/worker/%d-%s", issueNumber, planner.Slugify(issue.Title))
+	triggerWorkerBranch := fmt.Sprintf("herd/worker/%d-%s", issueNumber, planner.Slugify(issue.Title))
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
 
-	// Handle failed/cancelled runs
+	// Failure/cancellation: relabel the trigger and return — do NOT scan other
+	// candidates in this case (preserves the trigger semantics for failed runs).
 	if run.Conclusion == "failure" || run.Conclusion == "cancelled" {
-		// Safety net: ensure issue is labeled failed
 		status := issues.StatusLabel(issue.Labels)
 		if status != issues.StatusFailed {
 			_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{status})
@@ -128,35 +130,106 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		return &ConsolidateResult{IssueNumber: issueNumber, Merged: false}, nil
 	}
 
-	// Check if worker branch exists (no-op worker = no branch, or already consolidated)
-	_, err = p.Repository().GetBranchSHA(ctx, workerBranch)
-	if err != nil {
-		// Branch doesn't exist — either no-op worker or already consolidated by another integrator run.
-		// If this is a conflict-resolution issue, we still need to retry the original failed issue
-		// and close any other stale conflict issues — otherwise the original issue stays stuck as failed.
+	// If the trigger's own worker branch is gone AND it's a conflict-resolution
+	// issue, run the existing close-stale + retry-original path before scanning.
+	triggerBranchExists := true
+	if _, err := p.Repository().GetBranchSHA(ctx, triggerWorkerBranch); err != nil {
+		triggerBranchExists = false
+	}
+	if !triggerBranchExists {
 		parsed, parseErr := issues.ParseBody(issue.Body)
 		if parseErr == nil && parsed.FrontMatter.ConflictResolution {
 			closeStaleConflictIssues(ctx, p, issue.Milestone)
 			retryConflictOriginIssues(ctx, p, cfg, issue, batchBranch)
 		}
+	}
+
+	// Build candidate list: all done-labeled issues in the milestone whose
+	// worker branches still exist on the remote.
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{State: "all", Milestone: &issue.Milestone.Number})
+	if err != nil {
+		return nil, fmt.Errorf("listing milestone issues: %w", err)
+	}
+
+	type candidate struct {
+		iss          *platform.Issue
+		workerBranch string
+	}
+	seen := make(map[int]bool)
+	var candidates []candidate
+	addCandidate := func(iss *platform.Issue) {
+		if iss == nil || seen[iss.Number] {
+			return
+		}
+		if issues.StatusLabel(iss.Labels) != issues.StatusDone {
+			return
+		}
+		wb := fmt.Sprintf("herd/worker/%d-%s", iss.Number, planner.Slugify(iss.Title))
+		if _, err := p.Repository().GetBranchSHA(ctx, wb); err != nil {
+			return
+		}
+		seen[iss.Number] = true
+		candidates = append(candidates, candidate{iss: iss, workerBranch: wb})
+	}
+	for _, iss := range allIssues {
+		addCandidate(iss)
+	}
+	// Defensive: ensure the triggering issue is included if it qualifies and the
+	// list response somehow missed it.
+	addCandidate(issue)
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].iss.Number < candidates[j].iss.Number
+	})
+
+	if len(candidates) == 0 {
 		return &ConsolidateResult{IssueNumber: issueNumber, NoOp: true, Merged: false}, nil
 	}
 
-	// Configure git identity for merge commits
 	if err := g.ConfigureIdentity("HerdOS Integrator", "herd@herd-os.com"); err != nil {
 		return nil, fmt.Errorf("configuring git identity: %w", err)
 	}
-
-	// Merge worker branch into batch branch
 	if err := g.Fetch("origin"); err != nil {
 		return nil, fmt.Errorf("fetching: %w", err)
 	}
+
+	var triggerResult *ConsolidateResult
+	for _, c := range candidates {
+		result, herr := consolidateWorkerBranch(ctx, p, g, cfg, params, c.iss, issue.Milestone, c.workerBranch, batchBranch)
+		if herr != nil {
+			if c.iss.Number == issueNumber {
+				return nil, herr
+			}
+			fmt.Printf("Warning: failed to consolidate worker branch %s for issue #%d: %v\n", c.workerBranch, c.iss.Number, herr)
+			continue
+		}
+		if c.iss.Number == issueNumber {
+			triggerResult = result
+		} else {
+			fmt.Printf("Consolidated worker branch %s for issue #%d (merged=%v noop=%v conflict=%v)\n",
+				c.workerBranch, c.iss.Number, result.Merged, result.NoOp, result.ConflictDetected)
+		}
+	}
+
+	if triggerResult == nil {
+		return &ConsolidateResult{IssueNumber: issueNumber, NoOp: true, Merged: false}, nil
+	}
+	return triggerResult, nil
+}
+
+// consolidateWorkerBranch performs a single worker-branch merge into the batch
+// branch. It returns the per-branch result and a non-nil error only for fatal
+// infrastructure errors that should abort the whole loop (e.g. failure to
+// checkout the batch branch). Conflict and push failures are non-fatal: they
+// label the issue failed (or dispatch a resolver) and return a normal result
+// so the caller continues with the next worker.
+func consolidateWorkerBranch(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, params ConsolidateParams, iss *platform.Issue, ms *platform.Milestone, workerBranch, batchBranch string) (*ConsolidateResult, error) {
 	if err := g.CheckoutReset(batchBranch); err != nil {
 		return nil, fmt.Errorf("checking out batch branch: %w", err)
 	}
 
-	// Check if worker branch is already contained in batch branch
-	// (merge base equals worker branch tip → already merged)
+	// Skip if worker branch is already contained in batch branch
+	// (merge base equals worker branch tip → already merged).
 	workerSHA, shaErr := g.RevParse("origin/" + workerBranch)
 	batchSHA, batchShaErr := g.RevParse(batchBranch)
 	if shaErr == nil && batchShaErr == nil {
@@ -167,7 +240,7 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 				fmt.Printf("Warning: failed to delete already-merged worker branch %s: %v\n", workerBranch, err)
 			}
 			return &ConsolidateResult{
-				IssueNumber:  issueNumber,
+				IssueNumber:  iss.Number,
 				WorkerBranch: workerBranch,
 				Merged:       false,
 				NoOp:         true,
@@ -177,14 +250,13 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	_ = batchSHA // used only for error check above
 
 	if err := g.Merge("origin/" + workerBranch); err != nil {
-		// Abort the failed merge to restore clean state
 		_ = g.AbortMerge()
 
 		if cfg.Integrator.OnConflict == "dispatch-resolver" {
-			return handleConflictResolution(ctx, p, cfg, issue, issue.Milestone, workerBranch, batchBranch)
+			return handleConflictResolution(ctx, p, cfg, iss, ms, workerBranch, batchBranch)
 		}
 
-		// Default: notify — comment on issue with @mentions and return error
+		// Default: notify — comment on issue with @mentions and relabel as failed.
 		mentions := ""
 		if len(cfg.Monitor.NotifyUsers) > 0 {
 			parts := make([]string, len(cfg.Monitor.NotifyUsers))
@@ -193,20 +265,20 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 			}
 			mentions = "\n\n/cc " + strings.Join(parts, " ")
 		}
-		_ = p.Issues().AddComment(ctx, issueNumber, fmt.Sprintf(
+		_ = p.Issues().AddComment(ctx, iss.Number, fmt.Sprintf(
 			"⚠️ **HerdOS Integrator**\n\nMerge conflict detected when consolidating `%s` into `%s`.\n\nManual resolution required.%s",
 			workerBranch, batchBranch, mentions))
-		// Relabel from done → failed to block tier advancement
-		_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusDone})
-		_ = p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
-		fmt.Printf("Warning: merge conflict for %s into %s (issue #%d relabeled as failed)\n", workerBranch, batchBranch, issueNumber)
+		_ = p.Issues().RemoveLabels(ctx, iss.Number, []string{issues.StatusDone})
+		_ = p.Issues().AddLabels(ctx, iss.Number, []string{issues.StatusFailed})
+		fmt.Printf("Warning: merge conflict for %s into %s (issue #%d relabeled as failed)\n", workerBranch, batchBranch, iss.Number)
 		return &ConsolidateResult{
-			IssueNumber:      issueNumber,
+			IssueNumber:      iss.Number,
 			WorkerBranch:     workerBranch,
 			ConflictDetected: true,
 		}, nil
 	}
-	// Clean up progress tracking artifacts (both new per-issue and legacy formats)
+
+	// Clean up progress tracking artifacts (both new per-issue and legacy formats).
 	needsCommit := false
 	progressDir := filepath.Join(params.RepoRoot, ".herd", "progress")
 	if _, statErr := os.Stat(progressDir); statErr == nil {
@@ -216,7 +288,6 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 			needsCommit = true
 		}
 	}
-	// Backward compat: remove legacy WORKER_PROGRESS.md at repo root
 	legacyFile := filepath.Join(params.RepoRoot, "WORKER_PROGRESS.md")
 	if _, statErr := os.Stat(legacyFile); statErr == nil {
 		if rmErr := g.Rm("WORKER_PROGRESS.md"); rmErr != nil {
@@ -233,37 +304,29 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	}
 
 	if err := g.Push("origin", batchBranch); err != nil {
-		// Merge succeeded but push failed — relabel so the issue gets retried
-		_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusDone})
-		_ = p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
-		_ = p.Issues().AddComment(ctx, issueNumber, fmt.Sprintf(
+		_ = p.Issues().RemoveLabels(ctx, iss.Number, []string{issues.StatusDone})
+		_ = p.Issues().AddLabels(ctx, iss.Number, []string{issues.StatusFailed})
+		_ = p.Issues().AddComment(ctx, iss.Number, fmt.Sprintf(
 			"⚠️ **HerdOS Integrator**\n\nCould not push consolidated batch branch `%s` (non-fast-forward). This issue will be retried.\n\nYou can also retry with `/herd integrate` on this issue.",
 			batchBranch))
-		fmt.Printf("Warning: push failed for batch branch %s: %v (issue #%d relabeled as failed)\n", batchBranch, err, issueNumber)
+		fmt.Printf("Warning: push failed for batch branch %s: %v (issue #%d relabeled as failed)\n", batchBranch, err, iss.Number)
 		return &ConsolidateResult{
-			IssueNumber:  issueNumber,
+			IssueNumber:  iss.Number,
 			WorkerBranch: workerBranch,
 			Merged:       false,
 		}, nil
 	}
 
-	// Remove rebase-pending label from batch PR if present
 	removeBatchPRRebasePending(ctx, p, batchBranch)
+	closeStaleConflictIssues(ctx, p, ms)
+	retryConflictOriginIssues(ctx, p, cfg, iss, batchBranch)
 
-	// Close stale conflict/rebase issues whose worker branches no longer exist
-	closeStaleConflictIssues(ctx, p, issue.Milestone)
-
-	// If this was a conflict resolution issue, retry the original failed issue
-	retryConflictOriginIssues(ctx, p, cfg, issue, batchBranch)
-
-	// Delete worker branch
 	if err := p.Repository().DeleteBranch(ctx, workerBranch); err != nil {
-		// Non-fatal — log but don't fail
 		fmt.Printf("Warning: failed to delete worker branch %s: %v\n", workerBranch, err)
 	}
 
 	return &ConsolidateResult{
-		IssueNumber:  issueNumber,
+		IssueNumber:  iss.Number,
 		WorkerBranch: workerBranch,
 		Merged:       true,
 	}, nil
