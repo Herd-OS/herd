@@ -40,9 +40,13 @@ func CreateFromPlan(ctx context.Context, p platform.Platform, plan *agent.Plan, 
 	}
 
 	// 2. Create milestone
-	ms, err := p.Milestones().Create(ctx, plan.BatchName, "", nil)
+	ms, resolvedTitle, err := createMilestoneWithUniqueName(ctx, p, plan.BatchName)
 	if err != nil {
 		return nil, fmt.Errorf("creating milestone: %w", err)
+	}
+	if resolvedTitle != plan.BatchName {
+		fmt.Printf("Note: batch name conflicted with existing milestone — using %q instead.\n", resolvedTitle)
+		plan.BatchName = resolvedTitle
 	}
 
 	// 3. Create issues — first pass with placeholder depends_on

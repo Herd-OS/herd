@@ -345,12 +345,20 @@ type createdMilestone struct {
 type mockMilestoneService struct {
 	nextNumber int
 	created    []createdMilestone
+	// CreateFunc, if non-nil, overrides the default Create behavior. Tests
+	// use this to inject conflict errors or other failure modes. The default
+	// behavior (when nil) records the call and returns a milestone with an
+	// incrementing number.
+	CreateFunc func(ctx context.Context, title, description string, dueDate *time.Time) (*platform.Milestone, error)
 }
 
-func (m *mockMilestoneService) Create(_ context.Context, title, description string, _ *time.Time) (*platform.Milestone, error) {
+func (m *mockMilestoneService) Create(ctx context.Context, title, description string, dueDate *time.Time) (*platform.Milestone, error) {
+	m.created = append(m.created, createdMilestone{title, description})
+	if m.CreateFunc != nil {
+		return m.CreateFunc(ctx, title, description, dueDate)
+	}
 	num := m.nextNumber
 	m.nextNumber++
-	m.created = append(m.created, createdMilestone{title, description})
 	return &platform.Milestone{Number: num, Title: title}, nil
 }
 

@@ -714,6 +714,22 @@ Milestone.
 
 Milestones fit because batches have a clear end state: all issues closed.
 
+### Milestone Creation
+
+Each batch is created by `herd plan` as a single GitHub Milestone titled with
+the batch name chosen during planning. If a milestone with that exact title
+already exists, the Planner retries with `<name> (2)`, `<name> (3)`, ..., up to
+`<name> (10)`, using the first variant that does not exist. Existing milestones
+are never adopted: a name collision usually indicates a prior `herd plan` run
+that failed partway through issue creation, so the existing milestone may
+contain stale issues that must not be mixed with the new plan. When a suffix is
+applied, `herd plan` prints `Note: batch name conflicted with existing
+milestone — using "<new-name>" instead.` and uses the resolved name for both
+the milestone title and the batch branch slug. Non-conflict errors (e.g., 5xx)
+are not retried — they surface immediately as `creating milestone: ...`. See
+[Planner → Milestone Name Conflicts](planner.md#milestone-name-conflicts) for
+the full rationale.
+
 ### Lifecycle
 
 ```mermaid

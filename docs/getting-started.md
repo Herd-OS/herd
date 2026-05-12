@@ -119,7 +119,9 @@ Preview what would be created:
 herd plan --dry-run "Add user authentication"
 ```
 
-If issue creation fails after planning (e.g., duplicate milestone), the plan file is preserved and the exact `--from-file` command is printed. Use it to retry without re-running the agent session:
+If the batch name collides with an existing milestone, herd will retry with a numeric suffix (e.g. `My batch (2)`, `My batch (3)`, …) until it finds an unused name, up to 10 attempts. The original milestone is never reused — existing milestones may contain stale issues from a prior failed run, and mixing them with the new plan would be confusing. When a suffix is applied, herd prints an informational note to stdout (`Note: batch name conflicted with existing milestone — using "My batch (2)" instead.`); the resolved name is also used for the batch branch slug.
+
+If issue creation fails after planning, the plan file is preserved and the exact `--from-file` command is printed. Use it to retry without re-running the agent session:
 
 ```bash
 herd plan --from-file .herd/state/1234567890.json
