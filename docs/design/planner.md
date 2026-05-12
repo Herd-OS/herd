@@ -107,7 +107,7 @@ The good version continues with exact interface signatures, type definitions, th
 
 The agent produces a structured plan containing:
 
-- **Batch name** -- a short descriptive name for the overall unit of work, which becomes the GitHub Milestone title.
+- **Batch name** -- a short descriptive name for the overall unit of work, which becomes the GitHub Milestone title. If the chosen name collides with an existing milestone, the Planner appends a numeric suffix (`<name> (2)`, `<name> (3)`, ..., up to `<name> (10)`) and uses the first variant that does not exist. See [Milestone Name Conflicts](#milestone-name-conflicts) below.
 - **Tasks** -- an ordered list where each task includes:
   - **Title** -- concise name for the task, becomes the GitHub Issue title.
   - **Description** -- what to build (the "what").
@@ -120,6 +120,20 @@ The agent produces a structured plan containing:
   - **Dependencies** -- references to other tasks in the plan that must complete first. These are translated to GitHub Issue numbers after issue creation.
 
 The `implementation_details`, `conventions`, and `context_from_dependencies` fields encode the research the Planner has already done, so workers do not repeat it. When creating GitHub Issues from the plan, dependency indices are translated to issue numbers, and complexity maps to estimated complexity in the issue metadata.
+
+## Milestone Name Conflicts
+
+After the plan is approved, the Planner creates a GitHub Milestone titled with the chosen batch name. If that title collides with an existing milestone (open or closed), the create call returns an `already_exists` error. Rather than aborting, the Planner retries with `<name> (2)`, `<name> (3)`, ..., up to `<name> (10)`, using the first variant that does not already exist. Non-conflict errors (for example, transient 5xx responses) are not retried — they surface immediately, wrapped as `creating milestone: ...`. If all ten attempts collide, the original `already_exists` error from the first attempt is returned.
+
+When a suffix is applied, the Planner prints an informational note to stdout:
+
+```
+Note: batch name conflicted with existing milestone — using "My batch (2)" instead.
+```
+
+The resolved title is used for both the milestone and the batch branch slug (`herd/batch/<num>-<slug>`).
+
+**Why we never reuse an existing milestone.** Adopting a milestone that happens to share the name would mix the new plan's issues with whatever is already attached to that milestone. In practice, the most common reason for a name collision is a prior `herd plan` invocation that failed partway through issue creation: the milestone exists but is populated with stale or partial issues from the failed run. Silently appending fresh issues to that milestone would interleave the two runs and make consolidation, dispatch, and cleanup ambiguous. Creating a uniquely-named milestone keeps each plan's issue set self-contained; the old milestone can be inspected or deleted separately by the user.
 
 ## Automatic Repository Context
 
