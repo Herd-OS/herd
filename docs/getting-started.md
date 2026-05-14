@@ -265,6 +265,14 @@ Some tasks in a batch may be labeled `herd/type:manual` — these require human 
 
 When a human submits a review on the batch PR, the Integrator's `re-review` job runs automatically, invoking the agent for a fresh review against the current diff. This allows you to push manual fixes and have the agent re-evaluate.
 
+## Interactive PR Review
+
+```bash
+herd review <pr-number>
+```
+
+Opens an interactive read-only review session pre-loaded with the PR's diff, comments, and CI status. The agent reads code and discusses findings with you, and drafts `/herd fix` comments for any actionable changes — it never edits files locally. When you approve a draft, the agent posts it via `gh pr comment`, and herd's batch workers handle the actual edit like any other fix task.
+
 ## Comment Commands
 
 You can interact with HerdOS by posting `/herd` commands as comments on issues and PRs. Commands are available to repository owners, members, and collaborators.
