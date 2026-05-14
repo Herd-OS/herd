@@ -937,10 +937,12 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 | `/herd integrate` | Slash | Issue or PR | Run the full integrator cycle: consolidate → check CI → advance → review |
 | `/herd dispatch` | Slash | Issue | Dispatch the current issue (must be ready or blocked) |
 | `/herd dispatch <N>` | Slash | Issue or PR | Dispatch issue #N (must be ready or blocked) |
-| `herd review <pr-number>` | CLI | Local terminal | Open an interactive Claude Code session pre-loaded with the PR's diff, comments, and CI status. The agent acts as a reviewer/fixer assistant — you drive the conversation; it can read code, discuss findings, and make changes if you ask. It does NOT auto-dispatch workers or create issues. |
+| `herd review <pr-number>` | CLI | Local terminal | Open an interactive Claude Code session pre-loaded with the PR's diff, comments, and CI status. The agent acts as a reviewer assistant — you drive the conversation; it can read code and discuss findings, and it drafts `/herd fix` comments for any actionable changes (it never edits files locally). It does NOT auto-dispatch workers or create issues. |
 | `herd dashboard` | CLI | Local terminal | Live read-only TUI showing active workers, open batches, and recent failures. Refreshes on a `--refresh-seconds` timer (default 15, clamp 5–300). Keybinds: `q` quit, `r` refresh, ↑/↓ select batch, Enter to open the batch's PR or milestone. Worker rows render as OSC 8 hyperlinks where supported. Single-repo and read-only in v1. |
 
-Note on `herd review <pr-number>` vs `/herd review`: the CLI command opens an interactive local agent session for discussing and optionally fixing a PR — you stay in the loop and the agent only makes changes you approve. The slash command runs an automated agent review on the PR and posts findings as a comment. Use the CLI when you want a back-and-forth; use the slash command when you want a one-shot pre-screen.
+Note on `herd review <pr-number>` vs `/herd review`: the CLI command opens an interactive local agent session for discussing a PR — the session is read-only on the working tree, and the only way it enacts changes is by drafting a `/herd fix` comment that you approve and post via `gh pr comment`; herd's batch workers then handle the actual edits. The slash command runs an automated agent review on the PR and posts findings as a comment. Use the CLI when you want a back-and-forth; use the slash command when you want a one-shot pre-screen.
+
+The review session is intentionally read-only on the working tree. Local edits during a review would create phantom commits that the integrator does not track and would conflict with any in-flight fix workers in the batch. All changes flow through `/herd fix` comments, which are dispatched to workers like any other batch task.
 
 #### Draft-and-confirm /herd fix comments
 

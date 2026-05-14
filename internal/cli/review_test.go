@@ -157,6 +157,80 @@ func TestNewReviewCmd_Setup(t *testing.T) {
 	assert.Equal(t, "p", flag.Shorthand)
 }
 
+func baseReviewData() *reviewCmdPromptData {
+	return &reviewCmdPromptData{
+		PRNumber:     42,
+		PRTitle:      "Test PR",
+		PRURL:        "https://github.com/example/repo/pull/42",
+		PRBaseBranch: "main",
+		PRHeadBranch: "feature/x",
+		Diff:         "diff body",
+		CIStatus:     "success",
+		RepoOwner:    "example",
+		RepoName:     "repo",
+	}
+}
+
+func TestReviewSystemPrompt_NoLocalEditPath(t *testing.T) {
+	out, err := renderReviewSystemPrompt(baseReviewData())
+	require.NoError(t, err)
+
+	lower := strings.ToLower(out)
+	assert.NotContains(t, lower, "make code changes locally",
+		"prompt must not advertise a local-edit path")
+	assert.NotContains(t, lower, "make changes if you ask",
+		"prompt must not advertise a conditional local-edit path")
+}
+
+func TestReviewSystemPrompt_ExplicitNoEditEvenIfUserAsks(t *testing.T) {
+	out, err := renderReviewSystemPrompt(baseReviewData())
+	require.NoError(t, err)
+
+	// The prompt must explicitly address the user-asks-for-local-edit case
+	// and instruct the agent to draft /herd fix instead.
+	assert.True(t,
+		strings.Contains(out, "edit the file directly") ||
+			strings.Contains(out, "do it locally") ||
+			strings.Contains(out, "just make the change"),
+		"prompt should enumerate the user-asks-for-local-edit phrasing")
+	assert.Contains(t, out, "never edits files locally",
+		"prompt should state herd review never edits files locally")
+	assert.Contains(t, out, "/herd fix",
+		"prompt should redirect the user to /herd fix")
+}
+
+func TestReviewSystemPrompt_MustNotIncludesFileMutation(t *testing.T) {
+	out, err := renderReviewSystemPrompt(baseReviewData())
+	require.NoError(t, err)
+
+	mustNotIdx := strings.Index(out, "You MUST NOT:")
+	require.NotEqual(t, -1, mustNotIdx, "prompt must contain a You MUST NOT: section")
+	mustNotSection := out[mustNotIdx:]
+
+	assert.Contains(t, mustNotSection, "Modify, create, or delete files",
+		"MUST NOT section should forbid file mutation")
+	assert.Contains(t, mustNotSection, "read-only on the working tree",
+		"MUST NOT section should describe read-only working tree")
+	assert.Contains(t, mustNotSection, "mutate state",
+		"MUST NOT section should forbid mutating shell commands")
+	assert.Contains(t, mustNotSection, "git commit",
+		"MUST NOT section should call out git commit as forbidden")
+	assert.Contains(t, mustNotSection, "gh pr comment",
+		"MUST NOT section should mention the allowed gh pr comment exception")
+}
+
+func TestReviewSystemPrompt_RationaleIncluded(t *testing.T) {
+	out, err := renderReviewSystemPrompt(baseReviewData())
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "managed by herd's batch workers",
+		"prompt should state the PR is managed by herd's batch workers")
+	assert.Contains(t, out, "phantom commits",
+		"prompt should mention phantom commits as a consequence of local edits")
+	assert.Contains(t, out, "in-flight fix workers",
+		"prompt should mention conflicts with in-flight fix workers")
+}
+
 func TestParsePRArg(t *testing.T) {
 	tests := []struct {
 		name    string
