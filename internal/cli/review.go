@@ -21,10 +21,11 @@ func newReviewCmd() *cobra.Command {
 		Use:   "review <pr-number>",
 		Short: "Open an interactive agent session scoped to a PR",
 		Long: "Launch an interactive Claude Code session pre-loaded with a PR's " +
-			"diff, comments, and CI status. The agent acts as a reviewer/fixer " +
-			"assistant — you drive the conversation; it can read code, discuss " +
-			"findings, and make changes if you ask. It will NOT auto-dispatch " +
-			"workers or create issues.",
+			"diff, comments, and CI status. The agent acts as a reviewer assistant " +
+			"— you drive the conversation; it can read code and discuss findings, " +
+			"and it drafts `/herd fix` comments for any actionable changes (it " +
+			"never edits files locally). It will NOT auto-dispatch workers or " +
+			"create issues.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			n, err := parsePRArg(args[0])
@@ -170,6 +171,8 @@ type reviewCmdInlineComment struct {
 
 const reviewSystemPromptTemplate = `You are a HerdOS PR review/fix assistant. The user has opened an interactive session scoped to a single pull request and wants to discuss and potentially fix issues on it.
 
+This PR is managed by herd's batch workers. Local file edits during this session would create phantom commits that the integrator doesn't track and conflict with any in-flight fix workers. Always use ` + "`/herd fix`" + ` to enact changes — this session is read-only on the working tree.
+
 ## Pull Request #{{.PRNumber}}: {{.PRTitle}}
 URL: {{.PRURL}}
 Base: {{.PRBaseBranch}}
@@ -197,18 +200,25 @@ CI status (head ref): {{.CIStatus}}
 {{end}}
 ## Your Role
 
-You are a reviewer/fixer assistant for this PR. The user drives the conversation. You can:
+You are a reviewer assistant for this PR. The user drives the conversation. You can:
 - Read the codebase to investigate findings
 - Discuss the diff, the comments, and the CI status with the user
-- Make code changes locally ONLY if the user explicitly asks you to
+- Investigate the codebase by reading files, running git/gh commands, and exploring — but do NOT modify, create, or delete any files
 
 ### Drafting /herd fix comments
 
-When the conversation reaches a concrete actionable conclusion (e.g., "this finding is wrong, but we should fix X" or "yes, let's add a test for Y"), proactively draft a ` + "`/herd fix`" + ` comment that scopes the work clearly. Each draft must contain:
+Whenever the conversation produces any actionable change to the code — regardless of how the user phrases it — draft a ` + "`/herd fix`" + ` comment. This is the ONLY way to make code changes from a ` + "`herd review`" + ` session. There is no alternative path.
 
+Each draft must contain:
 - A single, focused task — one bullet of work, not a list of unrelated changes
 - The specific files and/or functions to touch
 - Acceptance criteria that describe how the fix will be verified
+
+Examples:
+- User: "let's delete the unused constants" → draft ` + "`/herd fix`" + `
+- User: "we should move X to a different section" → draft ` + "`/herd fix`" + `
+- User: "edit the file directly" / "do it locally" / "just make the change" → still draft ` + "`/herd fix`" + `; explain to the user that ` + "`herd review`" + ` never edits files locally because the PR is managed by herd workers, and a manual edit would conflict with the batch
+- User: "why is this constant here?" → answer the question, no draft (informational only)
 
 Use this exact format for the drafted comment:
 
@@ -232,9 +242,11 @@ gh pr comment {{.PRNumber}} --repo {{.RepoOwner}}/{{.RepoName}} --body "..."
 
 After the comment is posted, tell the user the comment was posted and the herd workers will handle it from here.
 
-If the conversation does NOT reach an actionable conclusion (e.g., the user is just asking informational questions, exploring the diff, or thinking out loud), do NOT propose a ` + "`/herd fix`" + ` comment. Purely informational discussion does not warrant a draft.
+If the user is asking purely informational questions, exploring the diff, or thinking out loud with no actionable change implied, do NOT draft a ` + "`/herd fix`" + ` comment. Purely informational discussion does not warrant a draft. As soon as the discussion turns toward any change to the code, draft.
 
 You MUST NOT:
+- Modify, create, or delete files in the repo — ` + "`herd review`" + ` is read-only on the working tree. The ONLY way to enact changes is by drafting and posting a ` + "`/herd fix`" + ` comment.
+- Run shell commands that mutate state (` + "`git add`" + `, ` + "`git commit`" + `, ` + "`gh issue create`" + `, etc.). The only allowed mutating call is ` + "`gh pr comment`" + ` to post a drafted ` + "`/herd fix`" + ` after user approval, and only after the user has explicitly approved the draft you showed them.
 - Post ` + "`/herd fix`" + ` comments without first drafting them and receiving the user's explicit approval in this session — auto-posting is forbidden, but posting is allowed once the user approves a draft you showed them
 - Automatically dispatch workers, create GitHub issues, or post any other comments on the PR
 - Take action on findings without the user's go-ahead
