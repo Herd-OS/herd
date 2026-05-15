@@ -3846,3 +3846,225 @@ func TestBuildCascadeChain(t *testing.T) {
 		})
 	}
 }
+
+func TestCascadeFailedPR(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+
+	tests := []struct {
+		name       string
+		listResult []*platform.PullRequest
+		wantPR     bool
+	}{
+		{
+			name:       "label present returns PR",
+			listResult: []*platform.PullRequest{{Number: 500, Head: "herd/batch/1-batch", Labels: []string{issues.CascadeFailed}}},
+			wantPR:     true,
+		},
+		{
+			name:       "label absent returns nil",
+			listResult: []*platform.PullRequest{{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}}},
+			wantPR:     false,
+		},
+		{
+			name:       "no PR returns nil",
+			listResult: nil,
+			wantPR:     false,
+		},
+		{
+			name:       "unrelated labels returns nil",
+			listResult: []*platform.PullRequest{{Number: 500, Head: "herd/batch/1-batch", Labels: []string{"bug", "wontfix"}}},
+			wantPR:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prSvc := &mockPRService{listResult: tc.listResult}
+			mock := &mockPlatform{
+				issues: newMockIssueService(),
+				prs:    prSvc,
+			}
+			pr := cascadeFailedPR(context.Background(), mock, ms)
+			if tc.wantPR {
+				require.NotNil(t, pr)
+				assert.Equal(t, 500, pr.Number)
+			} else {
+				assert.Nil(t, pr)
+			}
+		})
+	}
+}
+
+func TestCascadeFailedPR_NilMilestone(t *testing.T) {
+	mock := &mockPlatform{issues: newMockIssueService(), prs: &mockPRService{}}
+	assert.Nil(t, cascadeFailedPR(context.Background(), mock, nil))
+}
+
+func TestPostCascadePausedNotice(t *testing.T) {
+	tests := []struct {
+		name          string
+		existing      []*platform.Comment
+		wantPostCount int
+	}{
+		{
+			name:          "no prior comments posts the notice",
+			existing:      nil,
+			wantPostCount: 1,
+		},
+		{
+			name: "unrelated prior comments still posts the notice",
+			existing: []*platform.Comment{
+				{Body: "Looks good to me"},
+				{Body: "Re-running CI"},
+			},
+			wantPostCount: 1,
+		},
+		{
+			name: "paused notice already present skips posting",
+			existing: []*platform.Comment{
+				{Body: cascadePausedComment},
+			},
+			wantPostCount: 0,
+		},
+		{
+			name: "paused notice after most recent cascade-failed marker skips posting",
+			existing: []*platform.Comment{
+				{Body: "⚠️ Conflict resolution cascade failed\n\nDetails about the cascade…"},
+				{Body: "Some unrelated comment"},
+				{Body: cascadePausedComment},
+			},
+			wantPostCount: 0,
+		},
+		{
+			name: "new cascade-failed marker after a paused notice re-enables posting",
+			existing: []*platform.Comment{
+				{Body: cascadePausedComment},
+				{Body: "Manual intervention happened"},
+				{Body: "⚠️ Conflict resolution cascade failed\n\nA fresh cascade occurred"},
+			},
+			wantPostCount: 1,
+		},
+		{
+			name: "only earliest comment is a paused notice and many comments after still skips",
+			existing: []*platform.Comment{
+				{Body: cascadePausedComment},
+				{Body: "ok"},
+				{Body: "still working"},
+			},
+			wantPostCount: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.listCommentsResult = tc.existing
+			mock := &mockPlatform{issues: issueSvc}
+
+			postCascadePausedNotice(context.Background(), mock, 500)
+
+			assert.Len(t, issueSvc.comments[500], tc.wantPostCount)
+			if tc.wantPostCount > 0 {
+				assert.Equal(t, cascadePausedComment, issueSvc.comments[500][0])
+			}
+		})
+	}
+}
+
+// listCommentsErrorIssueService overrides ListComments to return an error so
+// we can verify postCascadePausedNotice degrades to posting (rather than
+// silently swallowing the notice) when the comment-history lookup fails.
+type listCommentsErrorIssueService struct {
+	*mockIssueService
+}
+
+func (m *listCommentsErrorIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
+	return nil, fmt.Errorf("transient API failure")
+}
+
+func TestPostCascadePausedNotice_ListCommentsErrorStillPosts(t *testing.T) {
+	inner := newMockIssueService()
+	issueSvc := &listCommentsErrorIssueService{mockIssueService: inner}
+	mock := &mockPlatform{issues: issueSvc}
+
+	postCascadePausedNotice(context.Background(), mock, 500)
+
+	assert.Len(t, inner.comments[500], 1)
+	assert.Equal(t, cascadePausedComment, inner.comments[500][0])
+}
+
+func TestHandleConflictResolution_BlockedByCascadeLabelDoesNotDuplicateComment(t *testing.T) {
+	fx := newCascadeFailureFixture(3, []string{issues.CascadeFailed})
+	fx.issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+	}
+	// Simulate a paused notice already on the PR from a prior workflow_run.
+	fx.issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: cascadePausedComment},
+	}
+
+	_, err := handleConflictResolution(context.Background(), fx.mock, fx.cfg, fx.issue, fx.ms, "herd/worker/102-failing-worker", "herd/batch/1-batch")
+	require.NoError(t, err)
+
+	assert.Empty(t, fx.issueSvc.comments[500], "must not post a duplicate paused notice when one already exists")
+	// Issue is still relabeled even when the notice is suppressed.
+	assert.Contains(t, fx.issueSvc.removedLabels[102], issues.StatusDone)
+	assert.Contains(t, fx.issueSvc.addedLabels[102], issues.StatusFailed)
+}
+
+func TestDispatchRebaseConflictWorker_BlockedByCascadeLabelDoesNotDuplicateComment(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: cascadePausedComment},
+	}
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{issues.CascadeFailed}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 3}}
+
+	num, err := DispatchRebaseConflictWorker(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+	assert.Equal(t, 0, num)
+	assert.Empty(t, issueSvc.comments[500], "must not post a duplicate paused notice when one already exists")
+	assert.Empty(t, wf.dispatched, "no workflow dispatch when blocked")
+}
+
+func TestHandleRebaseConflictResolution_DelegatesCircuitBreakerToDispatch(t *testing.T) {
+	// Single round-trip: handleRebaseConflictResolution must rely on
+	// DispatchRebaseConflictWorker for the cascade-failed check, not perform
+	// its own duplicate findBatchPR lookup.
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{issues.CascadeFailed}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 3}}
+
+	err := handleRebaseConflictResolution(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+
+	// Single notice posted (by Dispatch's circuit breaker), no duplicate
+	// from a separate check in handleRebaseConflictResolution.
+	require.Len(t, issueSvc.comments[500], 1)
+	assert.Contains(t, issueSvc.comments[500][0], "Conflict resolution is paused")
+	assert.Empty(t, wf.dispatched)
+}

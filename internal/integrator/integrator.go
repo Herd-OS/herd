@@ -1016,6 +1016,61 @@ func markCascadeFailed(ctx context.Context, p platform.Platform, cfg *config.Con
 	_ = p.Issues().AddComment(ctx, pr.Number, body)
 }
 
+// cascadePausedComment is the body posted on the batch PR when conflict
+// resolution is paused (i.e. the cascade-failed label is set). It is kept as
+// a package-level constant so the rate-limiter helper can detect prior
+// instances by exact prefix match instead of fragile substring guessing.
+const cascadePausedComment = "⚠️ Conflict resolution is paused — batch is in cascade-failed state. Resolve the existing failure manually, then remove the `herd/cascade-failed` label and post `/herd integrate` to resume."
+
+// cascadePausedMarker is a stable prefix used to detect an existing paused
+// comment in the PR's comment history.
+const cascadePausedMarker = "⚠️ Conflict resolution is paused"
+
+// cascadeFailedMarker is a stable prefix of the rich markCascadeFailed comment
+// body. We use it as a "cascade event" boundary when deciding whether the
+// paused notice has already been posted *for the current cascade event*.
+const cascadeFailedMarker = "⚠️ Conflict resolution cascade failed"
+
+// cascadeFailedPR returns the batch PR if it currently carries the
+// herd/cascade-failed label, signalling that the conflict-resolution cascade
+// is paused. Returns nil if the label is absent, the PR cannot be found, or
+// the lookup fails. Callers use this as the single circuit-breaker check
+// across handleConflictResolution, DispatchRebaseConflictWorker, and
+// handleRebaseConflictResolution.
+func cascadeFailedPR(ctx context.Context, p platform.Platform, ms *platform.Milestone) *platform.PullRequest {
+	pr, err := findBatchPR(ctx, p, ms)
+	if err != nil || pr == nil {
+		return nil
+	}
+	if !issues.HasLabel(pr.Labels, issues.CascadeFailed) {
+		return nil
+	}
+	return pr
+}
+
+// postCascadePausedNotice posts the paused-state notice on the batch PR, but
+// only if we haven't already posted one for the current cascade event. A
+// "cascade event" is anchored by the rich comment that markCascadeFailed
+// emits when the budget is exhausted; we walk comments newest-first and
+// suppress the notice if we encounter another paused notice before that
+// cascade-failed marker. Errors fetching comments are non-fatal — the worst
+// case is a duplicate comment, which is what we are trying to avoid but is
+// still safer than dropping the notice entirely.
+func postCascadePausedNotice(ctx context.Context, p platform.Platform, prNumber int) {
+	if comments, err := p.Issues().ListComments(ctx, prNumber); err == nil {
+		for i := len(comments) - 1; i >= 0; i-- {
+			body := comments[i].Body
+			if strings.HasPrefix(body, cascadeFailedMarker) {
+				break
+			}
+			if strings.HasPrefix(body, cascadePausedMarker) {
+				return
+			}
+		}
+	}
+	_ = p.Issues().AddComment(ctx, prNumber, cascadePausedComment)
+}
+
 func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, issue *platform.Issue, ms *platform.Milestone, workerBranch, batchBranch string) (*ConsolidateResult, error) {
 	// Count existing conflict-resolution issues in this milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
@@ -1040,9 +1095,8 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 	// Circuit breaker: if the batch PR is in cascade-failed state, refuse to
 	// create any new conflict-resolution issues. The label is removed manually
 	// by a human after they handle the underlying problem.
-	if pr, err := findBatchPR(ctx, p, ms); err == nil && pr != nil && issues.HasLabel(pr.Labels, issues.CascadeFailed) {
-		_ = p.Issues().AddComment(ctx, pr.Number,
-			"⚠️ Conflict resolution is paused — batch is in cascade-failed state. Resolve the existing failure manually, then remove the `herd/cascade-failed` label and post `/herd integrate` to resume.")
+	if pr := cascadeFailedPR(ctx, p, ms); pr != nil {
+		postCascadePausedNotice(ctx, p, pr.Number)
 		_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
 		_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
 		return &ConsolidateResult{
@@ -1216,9 +1270,8 @@ func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers
 func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) (int, error) {
 	// Circuit breaker: if the batch PR is in cascade-failed state, refuse to
 	// create any new conflict-resolution issues.
-	if pr, err := findBatchPR(ctx, p, ms); err == nil && pr != nil && issues.HasLabel(pr.Labels, issues.CascadeFailed) {
-		_ = p.Issues().AddComment(ctx, pr.Number,
-			"⚠️ Conflict resolution is paused — batch is in cascade-failed state. Resolve the existing failure manually, then remove the `herd/cascade-failed` label and post `/herd integrate` to resume.")
+	if pr := cascadeFailedPR(ctx, p, ms); pr != nil {
+		postCascadePausedNotice(ctx, p, pr.Number)
 		return 0, nil
 	}
 
@@ -1307,14 +1360,8 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 }
 
 func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) error {
-	// Circuit breaker: if the batch PR is in cascade-failed state, refuse to
-	// create any new conflict-resolution issues. Symmetric with the checks at
-	// the entry of handleConflictResolution and DispatchRebaseConflictWorker.
-	if pr, err := findBatchPR(ctx, p, ms); err == nil && pr != nil && issues.HasLabel(pr.Labels, issues.CascadeFailed) {
-		_ = p.Issues().AddComment(ctx, pr.Number,
-			"⚠️ Conflict resolution is paused — batch is in cascade-failed state. Resolve the existing failure manually, then remove the `herd/cascade-failed` label and post `/herd integrate` to resume.")
-		return nil
-	}
+	// The cascade-failed circuit breaker is enforced inside
+	// DispatchRebaseConflictWorker so the two paths cannot diverge.
 	_, err := DispatchRebaseConflictWorker(ctx, p, cfg, ms, batchBranch, defaultBranch)
 	return err
 }
