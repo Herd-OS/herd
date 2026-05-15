@@ -879,15 +879,27 @@ func buildCascadeChain(ctx context.Context, p platform.Platform, ms *platform.Mi
 	return chain, nil
 }
 
+// cascadeKind distinguishes the two scenarios that can exhaust the conflict
+// resolution cap. It controls the wording of the recovery instructions in
+// markCascadeFailed — the merge path tells the user to fix a worker branch,
+// the rebase path tells them to fix the batch branch against the default.
+type cascadeKind int
+
+const (
+	cascadeKindMerge  cascadeKind = iota // worker → batch
+	cascadeKindRebase                    // batch → default
+)
+
 // markCascadeFailed performs all cascade-failure side effects: label the
 // failing issue as failed, label the batch PR with herd/cascade-failed,
 // and post a detailed notify comment on the batch PR. If the batch PR
-// cannot be found, falls back to a comment on the failing issue. The
-// batchBranch parameter is accepted for symmetry with callers but only
-// influences the comment via workerBranch (which is what the user must
-// rebase onto the batch).
-func markCascadeFailed(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, issue *platform.Issue, workerBranch, batchBranch string) {
-	_ = batchBranch
+// cannot be found, falls back to a comment on the failing issue.
+//
+// failingBranch is the branch the user must inspect/fix (worker branch for
+// merge cascades, batch branch for rebase cascades). targetBranch is what
+// failingBranch must merge cleanly into (batch branch for merge cascades,
+// default branch for rebase cascades).
+func markCascadeFailed(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, issue *platform.Issue, failingBranch, targetBranch string, kind cascadeKind) {
 	// Relabel the failing issue from done → failed.
 	if issue != nil {
 		_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
@@ -931,11 +943,31 @@ func markCascadeFailed(ctx context.Context, p platform.Platform, cfg *config.Con
 		mentions = "\n\n/cc " + strings.Join(us, " ")
 	}
 
-	origNum := 0
-	if len(chain) > 0 {
-		origNum = chain[0]
-	} else if issue != nil {
-		origNum = issue.Number
+	var recovery string
+	switch kind {
+	case cascadeKindRebase:
+		recovery = fmt.Sprintf(
+			"1. Inspect the failing batch branch locally:\n"+
+				"   ```\n   git fetch origin && git checkout %s\n   ```\n"+
+				"2. Rebase the batch branch onto the latest `%s` and resolve conflicts manually, then:\n"+
+				"   ```\n   git push --force origin %s\n   ```\n"+
+				"   and post `/herd integrate` on this PR.",
+			failingBranch, targetBranch, failingBranch)
+	default:
+		origNum := 0
+		if len(chain) > 0 {
+			origNum = chain[0]
+		} else if issue != nil {
+			origNum = issue.Number
+		}
+		recovery = fmt.Sprintf(
+			"1. Inspect the failing worker branch locally:\n"+
+				"   ```\n   git fetch origin && git checkout %s\n   ```\n"+
+				"2. Either rebase the worker branch onto the current batch branch and resolve conflicts manually, then:\n"+
+				"   ```\n   git push --force origin %s\n   ```\n"+
+				"   and post `/herd integrate` on this PR.\n"+
+				"3. Or close the original failing issue (#%d) if the work is no longer needed, then post `/herd integrate` to advance past it.",
+			failingBranch, failingBranch, origNum)
 	}
 
 	body := fmt.Sprintf(
@@ -943,14 +975,9 @@ func markCascadeFailed(ctx context.Context, p platform.Platform, cfg *config.Con
 			"The integrator attempted %d times to resolve a merge conflict and could not produce a clean merge.\n\n"+
 			"**Cascade chain:** %s\n\n"+
 			"**Suggested next steps (in order):**\n\n"+
-			"1. Inspect the failing worker branch locally:\n"+
-			"   ```\n   git fetch origin && git checkout %s\n   ```\n"+
-			"2. Either rebase the worker branch onto the current batch branch and resolve conflicts manually, then:\n"+
-			"   ```\n   git push --force origin %s\n   ```\n"+
-			"   and post `/herd integrate` on this PR.\n"+
-			"3. Or close the original failing issue (#%d) if the work is no longer needed, then post `/herd integrate` to advance past it.\n\n"+
+			"%s\n\n"+
 			"Herd will not retry conflict resolution while the `herd/cascade-failed` label is present on this PR. Remove the label and post `/herd integrate` once you've handled the underlying issue.%s",
-		cfg.Integrator.MaxConflictResolutionAttempts, chainStr, workerBranch, workerBranch, origNum, mentions)
+		cfg.Integrator.MaxConflictResolutionAttempts, chainStr, recovery, mentions)
 
 	_ = p.Issues().AddComment(ctx, pr.Number, body)
 }
@@ -992,7 +1019,7 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 	}
 
 	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
-		markCascadeFailed(ctx, p, cfg, ms, issue, workerBranch, batchBranch)
+		markCascadeFailed(ctx, p, cfg, ms, issue, workerBranch, batchBranch, cascadeKindMerge)
 		return &ConsolidateResult{
 			IssueNumber:      issue.Number,
 			WorkerBranch:     workerBranch,
@@ -1184,7 +1211,7 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 	}
 
 	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
-		markCascadeFailed(ctx, p, cfg, ms, lastConflictIssue, batchBranch, defaultBranch)
+		markCascadeFailed(ctx, p, cfg, ms, lastConflictIssue, batchBranch, defaultBranch, cascadeKindRebase)
 		return 0, nil // At cap
 	}
 
@@ -1234,6 +1261,14 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 }
 
 func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) error {
+	// Circuit breaker: if the batch PR is in cascade-failed state, refuse to
+	// create any new conflict-resolution issues. Symmetric with the checks at
+	// the entry of handleConflictResolution and DispatchRebaseConflictWorker.
+	if pr, err := findBatchPR(ctx, p, ms); err == nil && pr != nil && issues.HasLabel(pr.Labels, issues.CascadeFailed) {
+		_ = p.Issues().AddComment(ctx, pr.Number,
+			"⚠️ Conflict resolution is paused — batch is in cascade-failed state. Resolve the existing failure manually, then remove the `herd/cascade-failed` label and post `/herd integrate` to resume.")
+		return nil
+	}
 	_, err := DispatchRebaseConflictWorker(ctx, p, cfg, ms, batchBranch, defaultBranch)
 	return err
 }

@@ -2721,6 +2721,99 @@ func TestDispatchRebaseConflictWorker_TaskBodyKeepsAgentOnWorkerBranch(t *testin
 	})
 }
 
+func TestHandleRebaseConflictResolution_BlockedByCascadeLabel(t *testing.T) {
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{issues.CascadeFailed}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 3}}
+
+	err := handleRebaseConflictResolution(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+
+	// Must not create a new issue and must not dispatch a worker.
+	assert.Empty(t, issueSvc.createdBody, "no rebase resolver issue must be created when batch PR is in cascade-failed state")
+	assert.Empty(t, wf.dispatched, "no workflow dispatch when blocked")
+	// Must post the paused-state comment on the batch PR.
+	require.NotEmpty(t, issueSvc.comments[500])
+	assert.Contains(t, issueSvc.comments[500][0], "Conflict resolution is paused")
+}
+
+func TestHandleRebaseConflictResolution_DispatchesWhenNotBlocked(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.createResult = &platform.Issue{Number: 777}
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	err := handleRebaseConflictResolution(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+
+	// Dispatches when not blocked.
+	assert.NotEmpty(t, issueSvc.createdBody, "rebase resolver issue must be created when not blocked")
+	assert.Len(t, wf.dispatched, 1)
+}
+
+func TestMarkCascadeFailed_RebaseKindUsesBatchBranchWording(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 2}}
+	issue := &platform.Issue{Number: 200, Title: "Resolve rebase conflict", Milestone: ms, Labels: []string{issues.StatusDone}}
+
+	markCascadeFailed(context.Background(), mock, cfg, ms, issue, "herd/batch/1-batch", "main", cascadeKindRebase)
+
+	require.NotEmpty(t, issueSvc.comments[500])
+	body := issueSvc.comments[500][0]
+	// Rebase-path wording: instructs the user to inspect/fix the batch branch
+	// against the default branch, not a "worker branch".
+	assert.Contains(t, body, "Inspect the failing batch branch")
+	assert.Contains(t, body, "git fetch origin && git checkout herd/batch/1-batch")
+	assert.Contains(t, body, "git push --force origin herd/batch/1-batch")
+	assert.Contains(t, body, "Rebase the batch branch onto the latest `main`")
+	// Must not use the worker-branch-only wording for this path.
+	assert.NotContains(t, body, "Inspect the failing worker branch")
+	assert.NotContains(t, body, "Or close the original failing issue")
+	// Cascade-failed label still applied to PR.
+	assert.Contains(t, issueSvc.addedLabels[500], issues.CascadeFailed)
+}
+
 func TestRetryConflictOriginIssues(t *testing.T) {
 	// Issue 50 is a conflict resolution issue referencing worker branch for issue 42
 	conflictIssue := &platform.Issue{
@@ -3544,7 +3637,7 @@ func TestMarkCascadeFailed_NoPRFallsBackToIssueComment(t *testing.T) {
 	issue := &platform.Issue{Number: 42, Title: "Test", Milestone: ms, Labels: []string{issues.StatusDone}}
 
 	// Must not panic and must fall back to a comment on the issue.
-	markCascadeFailed(context.Background(), mock, cfg, ms, issue, "herd/worker/42-test", "herd/batch/1-batch")
+	markCascadeFailed(context.Background(), mock, cfg, ms, issue, "herd/worker/42-test", "herd/batch/1-batch", cascadeKindMerge)
 
 	require.NotEmpty(t, issueSvc.comments[42])
 	assert.Contains(t, issueSvc.comments[42][0], "Manual intervention required")
