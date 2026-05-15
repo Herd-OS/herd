@@ -45,6 +45,10 @@ type BatchEntry struct {
 	Blocked         int
 	LatestActivity  time.Time // max issue.UpdatedAt across milestone
 	HasAttention    bool      // any failed issue || CIStatus==failure || ReviewState==changes_requested
+	// CascadeFailed is true when the batch PR carries the herd/cascade-failed
+	// label, indicating the conflict-resolution cascade exhausted and is
+	// awaiting manual intervention.
+	CascadeFailed bool
 }
 
 // FailureEntry is one issue with herd/status:failed updated in the last 24h.

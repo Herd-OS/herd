@@ -180,6 +180,13 @@ func (s *pullRequestService) Close(ctx context.Context, number int) error {
 }
 
 func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
+	var labels []string
+	for _, l := range pr.Labels {
+		if l == nil {
+			continue
+		}
+		labels = append(labels, l.GetName())
+	}
 	return &platform.PullRequest{
 		Number:    pr.GetNumber(),
 		Title:     pr.GetTitle(),
@@ -187,6 +194,7 @@ func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 		State:     pr.GetState(),
 		Head:      pr.GetHead().GetRef(),
 		Base:      pr.GetBase().GetRef(),
+		Labels:    labels,
 		Mergeable:      pr.GetMergeable(),
 		MergeableKnown: pr.Mergeable != nil,
 		URL:       pr.GetHTMLURL(),

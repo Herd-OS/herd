@@ -159,6 +159,41 @@ func TestMapRunnerIdle(t *testing.T) {
 	assert.Empty(t, runner.Labels)
 }
 
+func TestMapPullRequest_Labels(t *testing.T) {
+	ghPR := &gh.PullRequest{
+		Number:  gh.Ptr(7),
+		Title:   gh.Ptr("Batch PR"),
+		Body:    gh.Ptr("body"),
+		State:   gh.Ptr("open"),
+		HTMLURL: gh.Ptr("https://github.com/org/repo/pull/7"),
+		Head:    &gh.PullRequestBranch{Ref: gh.Ptr("herd/batch/1-x")},
+		Base:    &gh.PullRequestBranch{Ref: gh.Ptr("main")},
+		Labels: []*gh.Label{
+			{Name: gh.Ptr("herd/cascade-failed")},
+			{Name: gh.Ptr("herd/ci-fix-pending")},
+		},
+	}
+
+	pr := mapPullRequest(ghPR)
+
+	assert.Equal(t, 7, pr.Number)
+	assert.Equal(t, "Batch PR", pr.Title)
+	assert.Equal(t, "open", pr.State)
+	assert.Equal(t, "herd/batch/1-x", pr.Head)
+	assert.Equal(t, "main", pr.Base)
+	assert.Equal(t, []string{"herd/cascade-failed", "herd/ci-fix-pending"}, pr.Labels)
+}
+
+func TestMapPullRequest_NoLabels(t *testing.T) {
+	ghPR := &gh.PullRequest{
+		Number: gh.Ptr(1),
+		State:  gh.Ptr("open"),
+	}
+
+	pr := mapPullRequest(ghPR)
+	assert.Empty(t, pr.Labels)
+}
+
 func TestMapLabel(t *testing.T) {
 	ghLabel := &gh.Label{
 		Name:        gh.Ptr("herd/status:ready"),

@@ -419,6 +419,76 @@ func TestFetch_HandlesMissingIssueNumber(t *testing.T) {
 	assert.Equal(t, 0, issueSvc.getCalls, "Issues().Get should not be called when IssueNumber is 0")
 }
 
+func TestBuildBatchEntry_SetsCascadeFailedFromPRLabel(t *testing.T) {
+	now := time.Now()
+	mile1 := 12
+	milestone := &platform.Milestone{Number: 12, Title: "Auth", State: "open"}
+	issuesList := []*platform.Issue{
+		{Number: 120, Labels: []string{"herd/type:feature", issues.StatusDone}, UpdatedAt: now, Milestone: &platform.Milestone{Number: mile1}},
+	}
+	pr := &platform.PullRequest{
+		Number: 300,
+		URL:    "https://example/pr/300",
+		Head:   "herd/batch/12-auth",
+		Labels: []string{issues.CascadeFailed},
+	}
+
+	issueSvc := &fakeIssueService{
+		listByFilter: func(filters platform.IssueFilters) ([]*platform.Issue, error) {
+			if filters.Milestone != nil && *filters.Milestone == 12 {
+				return issuesList, nil
+			}
+			return nil, nil
+		},
+	}
+	platformMock := &fakePlatform{
+		issues:     issueSvc,
+		prs:        &fakePRService{listResult: []*platform.PullRequest{pr}},
+		workflows:  &fakeWorkflowService{},
+		milestones: &fakeMilestoneService{listResult: []*platform.Milestone{milestone}},
+		checks:     &fakeCheckService{status: "success"},
+	}
+
+	state, errStr := Fetch(context.Background(), platformMock, "o", "r")
+	assert.Empty(t, errStr)
+	require.Len(t, state.Batches, 1)
+	be := state.Batches[0]
+	assert.True(t, be.CascadeFailed, "CascadeFailed should be set when PR carries herd/cascade-failed label")
+	assert.True(t, be.HasAttention, "HasAttention should follow CascadeFailed")
+}
+
+func TestBuildBatchEntry_NoPRCascadeFailedStaysFalse(t *testing.T) {
+	now := time.Now()
+	mile1 := 13
+	milestone := &platform.Milestone{Number: 13, Title: "NoPR", State: "open"}
+	issuesList := []*platform.Issue{
+		{Number: 130, Labels: []string{"herd/type:feature", issues.StatusDone}, UpdatedAt: now, Milestone: &platform.Milestone{Number: mile1}},
+	}
+
+	issueSvc := &fakeIssueService{
+		listByFilter: func(filters platform.IssueFilters) ([]*platform.Issue, error) {
+			if filters.Milestone != nil && *filters.Milestone == 13 {
+				return issuesList, nil
+			}
+			return nil, nil
+		},
+	}
+	platformMock := &fakePlatform{
+		issues:     issueSvc,
+		prs:        &fakePRService{listResult: nil},
+		workflows:  &fakeWorkflowService{},
+		milestones: &fakeMilestoneService{listResult: []*platform.Milestone{milestone}},
+		checks:     &fakeCheckService{},
+	}
+
+	state, errStr := Fetch(context.Background(), platformMock, "o", "r")
+	assert.Empty(t, errStr)
+	require.Len(t, state.Batches, 1)
+	be := state.Batches[0]
+	assert.False(t, be.CascadeFailed, "a batch with no PR cannot be cascade-failed")
+	assert.Equal(t, 0, be.PRNumber)
+}
+
 func TestPrimaryTypeLabel(t *testing.T) {
 	tests := []struct {
 		name   string

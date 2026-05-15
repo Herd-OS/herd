@@ -185,6 +185,10 @@ func buildBatchEntry(ctx context.Context, p platform.Platform, ms *platform.Mile
 		pr := prs[0]
 		be.PRNumber = pr.Number
 		be.PRURL = pr.URL
+		if issues.HasLabel(pr.Labels, issues.CascadeFailed) {
+			be.CascadeFailed = true
+			be.HasAttention = true
+		}
 		if status, err := p.Checks().GetCombinedStatus(ctx, pr.Head); err == nil {
 			be.CIStatus = status
 			if status == "failure" {
