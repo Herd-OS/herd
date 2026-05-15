@@ -170,7 +170,7 @@ Several automated feedback loops exist. Each has explicit termination:
 | Tier advancement | DAG is finite | -- |
 | Agent review -> fix -> re-review | `review_max_fix_cycles` | Default: 3 |
 | Monitor re-dispatch | `max_redispatch_attempts` | Default: 3 |
-| Conflict resolution | `max_conflict_resolution_attempts` | Default: 2, then notify |
+| Conflict resolution | `max_conflict_resolution_attempts` | Default: 2, then [cascade-failed](execution.md#when-cascades-fail) |
 | CI failure after consolidation | `ci_max_fix_cycles` | Default: 2 |
 
 Additional safeguards: actions performed with `GITHUB_TOKEN` do not trigger further workflow runs (GitHub's built-in loop prevention), label filters restrict reactions to `herd/`-prefixed labels, guard clauses check for bot actors, and all state changes are idempotent.

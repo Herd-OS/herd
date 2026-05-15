@@ -547,7 +547,8 @@ No agent force-pushes the batch branch.
 
 The configured strategy (`on_conflict: notify | dispatch-resolver`) controls
 which path is taken. The resolver is capped at `max_conflict_resolution_attempts`
-(default 2); after that, it falls back to notify regardless of config.
+(default 2); when that budget is exhausted, the batch enters cascade-failed
+state — see [When cascades fail](#when-cascades-fail).
 
 ### Monitor-Detected Batch-vs-Main Conflicts
 
@@ -599,6 +600,63 @@ never checks out the batch branch and never pushes:
 6. Do **not** `git push`. The worker framework pushes the worker branch
    automatically; the Integrator's normal consolidate flow then merges the
    resolved worker branch into the batch branch.
+
+### When cascades fail
+
+When a conflict-resolution worker itself produces a merge conflict, the
+integrator creates a follow-up conflict-resolution issue to resolve it.
+This can chain: an original failing worker → a first resolver → a second
+resolver, and so on. The chain is bounded by `integrator.max_conflict_resolution_attempts`
+(default: 2). When this budget is exhausted, the batch enters **cascade-failed**
+state.
+
+#### What triggers cascade-failed state
+
+The integrator reaches the cap when counting `conflict_resolution: true`
+issues in the milestone. On the next exhaustion event it:
+
+1. Relabels the current failing issue `herd/status:failed`.
+2. Adds the `herd/cascade-failed` label to the batch PR.
+3. Posts a detailed comment on the batch PR listing the full cascade
+   chain (e.g., `#641 → #643 → #644 (failed)`) and recovery steps.
+4. CC's everyone in `monitor.notify_users`.
+
+#### Label semantics
+
+The `herd/cascade-failed` label is **set automatically** by the
+integrator and **removed manually** by a human. While the label is
+present on a batch PR, Herd refuses to create any new
+conflict-resolution issues for that batch — every code path that would
+otherwise dispatch a conflict resolver (`handleConflictResolution`,
+`handleRebaseConflictResolution`, `DispatchRebaseConflictWorker`)
+short-circuits with a 'paused' comment.
+
+#### How to recover manually
+
+The batch PR comment lists three options in priority order:
+
+1. **Inspect** the failing worker branch:
+   ```
+   git fetch origin && git checkout <worker-branch>
+   ```
+2. **Rebase and resolve** locally, force-push the worker branch, then
+   post `/herd integrate` on the batch PR to resume consolidation.
+3. **Or close** the original failing issue if the work is no longer
+   needed, then post `/herd integrate` to advance past it.
+
+Once the underlying problem is handled, remove the `herd/cascade-failed`
+label from the batch PR. The next `/herd integrate` (or workflow_run
+trigger) will resume conflict resolution normally.
+
+#### Why we intentionally stop retrying
+
+Left unbounded, a single deep merge conflict can spawn an unbounded
+chain of conflict-resolution issues, each producing an orphan worker
+branch (e.g., `#641 → #643 → #644 → #645 → ...`). Each retry costs
+tokens and produces noise; once two automated attempts have failed, the
+remaining options require human judgment. The circuit breaker preserves
+the batch's invariants while making the failure loud and the recovery
+path explicit.
 
 ---
 
@@ -858,7 +916,8 @@ graph TD
     A["Worker A and Worker B<br>complete in the same tier"] --> B["Worker A merged into<br>batch branch successfully"]
     B --> C["Worker B conflicts with<br>Worker A's changes"]
     C --> D["Option A: Dispatch conflict-resolution worker<br>(on_conflict: dispatch-resolver,<br>capped at max_conflict_resolution_attempts)"]
-    C --> E["Option B: Notify user<br>(on_conflict: notify,<br>or after resolver cap reached)"]
+    C --> E["Option B: Notify user<br>(on_conflict: notify)"]
+    D --> F["Resolver cap reached?<br>Batch enters cascade-failed state<br>(see §6: When cascades fail)"]
 ```
 
 ### Recovering from a Stuck Tier
@@ -984,7 +1043,7 @@ Every automated feedback loop has a hard cap:
 |------|-----------|---------|----------|-------------|
 | Agent review / fix / re-review | review_max_fix_cycles | 0 (unlimited) | Comments on PR, waits for human | — |
 | Monitor re-dispatch | max_redispatch_attempts | 3 | Labels issue failed, stops | — |
-| Conflict resolution | max_conflict_resolution_attempts | 2 | Falls back to notify | `herd/rebase-pending` |
+| Conflict resolution | max_conflict_resolution_attempts | 2 | Batch enters [cascade-failed](#when-cascades-fail) state, blocks further resolvers | `herd/cascade-failed` |
 | CI failure fix cycles | ci_max_fix_cycles | 0 (unlimited) | Notifies user | `herd/ci-fix-pending` |
 
 ### Merge Strategy

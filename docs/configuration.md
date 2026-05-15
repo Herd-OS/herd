@@ -29,7 +29,8 @@ workers:
 integrator:
   strategy: "squash"             # squash | rebase | merge
   on_conflict: "notify"          # notify | dispatch-resolver
-  max_conflict_resolution_attempts: 2
+  max_conflict_resolution_attempts: 2  # when exhausted, batch enters cascade-failed state
+                                       # (see design/execution.md#when-cascades-fail)
   require_ci: true
   review: true                   # agent reviews batch PRs before merge
   review_max_fix_cycles: 0       # max fix-and-re-review cycles (0 = unlimited)
