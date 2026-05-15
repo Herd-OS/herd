@@ -23,6 +23,7 @@ type PullRequest struct {
 	Base      string // target branch
 	Mergeable        bool
 	MergeableKnown   bool // false when GitHub is still computing mergeability
+	Labels    []string
 	URL       string
 	CreatedAt time.Time
 }
