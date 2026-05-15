@@ -180,6 +180,9 @@ func (s *pullRequestService) Close(ctx context.Context, number int) error {
 }
 
 func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
+	if pr == nil {
+		return nil
+	}
 	labels := make([]string, 0, len(pr.Labels))
 	for _, l := range pr.Labels {
 		if l == nil {

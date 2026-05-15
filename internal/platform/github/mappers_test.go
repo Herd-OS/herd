@@ -194,6 +194,11 @@ func TestMapPullRequest_NoLabels(t *testing.T) {
 	assert.Empty(t, pr.Labels)
 }
 
+func TestMapPullRequest_NilInput(t *testing.T) {
+	// Guards against a panic if a caller hands us a nil pull request.
+	assert.Nil(t, mapPullRequest(nil))
+}
+
 func TestMapLabel(t *testing.T) {
 	ghLabel := &gh.Label{
 		Name:        gh.Ptr("herd/status:ready"),

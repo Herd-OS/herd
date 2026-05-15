@@ -3743,6 +3743,9 @@ func TestHandleConflictResolution_BlockedByCascadeLabel(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.ConflictDetected)
+	// Callers key on WorkerBranch for follow-up logging/cleanup; the circuit-breaker
+	// path must populate it like the cap-exhaustion and success paths do.
+	assert.Equal(t, "herd/worker/102-failing-worker", result.WorkerBranch)
 
 	require.NotEmpty(t, fx.issueSvc.comments[500])
 	assert.Contains(t, fx.issueSvc.comments[500][0], "Conflict resolution is paused")
