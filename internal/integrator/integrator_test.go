@@ -2780,7 +2780,7 @@ func TestHandleRebaseConflictResolution_DispatchesWhenNotBlocked(t *testing.T) {
 	assert.Len(t, wf.dispatched, 1)
 }
 
-func TestMarkCascadeFailed_RebaseKindUsesBatchBranchWording(t *testing.T) {
+func TestMarkCascadeFailed_RebaseKindUsesResolverWorkerBranchWording(t *testing.T) {
 	ms := &platform.Milestone{Number: 1, Title: "Batch"}
 	issueSvc := newMockIssueService()
 	prSvc := &mockPRService{
@@ -2797,21 +2797,174 @@ func TestMarkCascadeFailed_RebaseKindUsesBatchBranchWording(t *testing.T) {
 	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 2}}
 	issue := &platform.Issue{Number: 200, Title: "Resolve rebase conflict", Milestone: ms, Labels: []string{issues.StatusDone}}
 
-	markCascadeFailed(context.Background(), mock, cfg, ms, issue, "herd/batch/1-batch", "main", cascadeKindRebase)
+	// Caller passes the last resolver's worker branch — not the batch
+	// branch — because force-pushing the batch branch is forbidden.
+	markCascadeFailed(context.Background(), mock, cfg, ms, issue, "herd/worker/200-resolve-rebase-conflict", "main", cascadeKindRebase)
 
 	require.NotEmpty(t, issueSvc.comments[500])
 	body := issueSvc.comments[500][0]
-	// Rebase-path wording: instructs the user to inspect/fix the batch branch
-	// against the default branch, not a "worker branch".
-	assert.Contains(t, body, "Inspect the failing batch branch")
-	assert.Contains(t, body, "git fetch origin && git checkout herd/batch/1-batch")
-	assert.Contains(t, body, "git push --force origin herd/batch/1-batch")
-	assert.Contains(t, body, "Rebase the batch branch onto the latest `main`")
-	// Must not use the worker-branch-only wording for this path.
-	assert.NotContains(t, body, "Inspect the failing worker branch")
-	assert.NotContains(t, body, "Or close the original failing issue")
+	// Rebase-path wording: instructs the user to inspect/fix a worker
+	// branch against the default branch. Must NOT instruct the user to
+	// checkout or force-push the batch branch.
+	assert.Contains(t, body, "Inspect the failing worker branch")
+	assert.Contains(t, body, "git fetch origin && git checkout herd/worker/200-resolve-rebase-conflict")
+	assert.Contains(t, body, "git push --force origin herd/worker/200-resolve-rebase-conflict")
+	assert.Contains(t, body, "merge the latest `main` into the worker branch")
+	assert.NotContains(t, body, "git checkout herd/batch/1-batch")
+	assert.NotContains(t, body, "git push --force origin herd/batch/1-batch")
+	assert.NotContains(t, body, "Rebase the batch branch")
 	// Cascade-failed label still applied to PR.
 	assert.Contains(t, issueSvc.addedLabels[500], issues.CascadeFailed)
+}
+
+func TestDispatchRebaseConflictWorker_CascadeUsesResolverWorkerBranch(t *testing.T) {
+	// Two existing conflict-resolution issues (cap=2) — cascade triggers
+	// at the cap. The recovery message must point at the LAST resolver's
+	// worker branch, not the batch branch.
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 100, Title: "Resolve A", Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/batch/1-batch\n    - main\n---\n\n## Task\n"},
+		{Number: 101, Title: "Resolve B", Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/batch/1-batch\n    - main\n---\n\n## Task\n"},
+	}
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch 1"}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 2}}
+
+	num, err := DispatchRebaseConflictWorker(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+	assert.Equal(t, 0, num, "must return 0 at cap")
+	assert.Empty(t, wf.dispatched, "no dispatch at cap")
+
+	require.NotEmpty(t, issueSvc.comments[500])
+	body := issueSvc.comments[500][0]
+	// Points at the last resolver's worker branch (issue #101), not the batch.
+	assert.Contains(t, body, "herd/worker/101-resolve-b")
+	assert.Contains(t, body, "Inspect the failing worker branch")
+	assert.NotContains(t, body, "git push --force origin herd/batch/1-batch")
+	assert.NotContains(t, body, "Rebase the batch branch")
+}
+
+func TestMarkCascadeFailed_NilIssueOmitsCloseStep(t *testing.T) {
+	// When issue is nil but the batch PR exists, the comment must not
+	// include "close the original failing issue (#0)".
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 2}}
+
+	markCascadeFailed(context.Background(), mock, cfg, ms, nil, "herd/worker/42-test", "herd/batch/1-batch", cascadeKindMerge)
+
+	require.NotEmpty(t, issueSvc.comments[500])
+	body := issueSvc.comments[500][0]
+	assert.NotContains(t, body, "#0)", "nil issue must not produce `#0` in the close step")
+	assert.NotContains(t, body, "Or close the original failing issue", "step 3 must be omitted when no original issue is known")
+	// Cascade-failed label still applied to PR.
+	assert.Contains(t, issueSvc.addedLabels[500], issues.CascadeFailed)
+}
+
+// mockPRServiceWithErr returns a configurable error from List so we can
+// verify the cascade-failed comment path logs and falls back when the
+// batch-PR lookup transient-fails.
+type mockPRServiceWithErr struct {
+	mockPRService
+	listErr error
+}
+
+func (m *mockPRServiceWithErr) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	return m.listResult, nil
+}
+
+func TestMarkCascadeFailed_FindBatchPRErrorFallsBackToIssueComment(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRServiceWithErr{listErr: fmt.Errorf("simulated transient network failure")}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 2}}
+	issue := &platform.Issue{Number: 42, Title: "Test", Milestone: ms, Labels: []string{issues.StatusDone}}
+
+	markCascadeFailed(context.Background(), mock, cfg, ms, issue, "herd/worker/42-test", "herd/batch/1-batch", cascadeKindMerge)
+
+	// Falls back to issue comment on lookup error.
+	require.NotEmpty(t, issueSvc.comments[42])
+	assert.Contains(t, issueSvc.comments[42][0], "Manual intervention required")
+	// Issue still relabeled to failed.
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+}
+
+func TestParseWorkerBranchNumber(t *testing.T) {
+	tests := []struct {
+		name   string
+		branch string
+		want   int
+	}{
+		{name: "valid worker branch", branch: "herd/worker/42-some-slug", want: 42},
+		{name: "valid with multi-digit number", branch: "herd/worker/12345-foo", want: 12345},
+		{name: "valid with single-digit number", branch: "herd/worker/1-foo", want: 1},
+		{name: "no slug separator", branch: "herd/worker/42", want: 0},
+		{name: "non-numeric prefix", branch: "herd/worker/foo-bar", want: 0},
+		{name: "missing herd/worker prefix", branch: "feature/42-foo", want: 0},
+		{name: "empty branch", branch: "", want: 0},
+		{name: "batch branch", branch: "herd/batch/1-batch", want: 0},
+		{name: "prefix not preceded by dash", branch: "herd/worker/-foo", want: 0},
+		{name: "100 not matched by 10- prefix", branch: "herd/worker/100-foo", want: 100},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseWorkerBranchNumber(tc.branch))
+		})
+	}
+}
+
+func TestBuildCascadeChain_PrefixCollisionDoesNotMisidentifyParent(t *testing.T) {
+	// Issue #10 has branch herd/worker/10-foo. Issue #100 has branch
+	// herd/worker/100-foo. If we used `strings.HasPrefix` keyed on the
+	// branch prefix, "herd/worker/100-foo" could match the prefix
+	// "herd/worker/10-" depending on map iteration order. The exact-match
+	// parser must resolve unambiguously.
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Body: "---\nherd:\n  version: 1\n---\n\n## Task\n"},
+		{Number: 100, Body: "---\nherd:\n  version: 1\n---\n\n## Task\n"},
+		{Number: 101, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/100-foo\n    - herd/batch/1-batch\n---\n\n## Task\n"},
+	}
+	mock := &mockPlatform{issues: issueSvc}
+
+	current := &platform.Issue{Number: 101, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/100-foo\n    - herd/batch/1-batch\n---\n\n## Task\n"}
+	chain, err := buildCascadeChain(context.Background(), mock, ms, current)
+	require.NoError(t, err)
+	assert.Equal(t, []int{100, 101}, chain, "parent must be #100, not #10, despite shared numeric prefix")
 }
 
 func TestRetryConflictOriginIssues(t *testing.T) {

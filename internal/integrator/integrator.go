@@ -823,6 +823,28 @@ func findBatchPR(ctx context.Context, p platform.Platform, ms *platform.Mileston
 	return prs[0], nil
 }
 
+// parseWorkerBranchNumber extracts the numeric issue id from a worker branch
+// name of the form `herd/worker/<num>-<slug>`. Returns 0 if the branch does
+// not match this shape. Using exact-number parsing (instead of prefix
+// matching) avoids the ambiguous case where one issue's branch prefix
+// (e.g. `herd/worker/10-`) is itself a prefix of another's (`herd/worker/100-foo`).
+func parseWorkerBranchNumber(branch string) int {
+	const prefix = "herd/worker/"
+	if !strings.HasPrefix(branch, prefix) {
+		return 0
+	}
+	rest := branch[len(prefix):]
+	dash := strings.IndexByte(rest, '-')
+	if dash <= 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(rest[:dash])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // buildCascadeChain walks the chain of conflict-resolution issues in the
 // milestone, starting from the current failing issue and following
 // ConflictingBranches back to the original failing worker. Returns issue
@@ -842,18 +864,15 @@ func buildCascadeChain(ctx context.Context, p platform.Platform, ms *platform.Mi
 	for _, iss := range allIssues {
 		byNumber[iss.Number] = iss
 	}
-	branchToNum := map[string]int{}
-	for _, iss := range allIssues {
-		prefix := fmt.Sprintf("herd/worker/%d-", iss.Number)
-		branchToNum[prefix] = iss.Number
-	}
 	findParent := func(parentWorkerBranch string) int {
-		for prefix, num := range branchToNum {
-			if strings.HasPrefix(parentWorkerBranch, prefix) {
-				return num
-			}
+		num := parseWorkerBranchNumber(parentWorkerBranch)
+		if num == 0 {
+			return 0
 		}
-		return 0
+		if _, ok := byNumber[num]; !ok {
+			return 0
+		}
+		return num
 	}
 
 	chain := []int{currentIssue.Number}
@@ -895,8 +914,9 @@ const (
 // and post a detailed notify comment on the batch PR. If the batch PR
 // cannot be found, falls back to a comment on the failing issue.
 //
-// failingBranch is the branch the user must inspect/fix (worker branch for
-// merge cascades, batch branch for rebase cascades). targetBranch is what
+// failingBranch is the worker branch the user must inspect/fix. The design
+// forbids force-pushing the batch branch, so both cascade kinds instruct
+// the user to fix a worker branch and force-push that. targetBranch is what
 // failingBranch must merge cleanly into (batch branch for merge cascades,
 // default branch for rebase cascades).
 func markCascadeFailed(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, issue *platform.Issue, failingBranch, targetBranch string, kind cascadeKind) {
@@ -906,8 +926,13 @@ func markCascadeFailed(ctx context.Context, p platform.Platform, cfg *config.Con
 		_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
 	}
 
-	pr, err := findBatchPR(ctx, p, ms)
-	if err != nil || pr == nil {
+	pr, prErr := findBatchPR(ctx, p, ms)
+	if prErr != nil {
+		// Don't swallow lookup errors: a transient API failure must be
+		// visible in logs or the rich PR comment will be silently lost.
+		fmt.Printf("Warning: failed to look up batch PR for cascade-failed notification: %v\n", prErr)
+	}
+	if prErr != nil || pr == nil {
 		// Fall back to on-issue comment so cascade failure is not silent.
 		if issue != nil {
 			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
@@ -943,31 +968,40 @@ func markCascadeFailed(ctx context.Context, p platform.Platform, cfg *config.Con
 		mentions = "\n\n/cc " + strings.Join(us, " ")
 	}
 
+	origNum := 0
+	if len(chain) > 0 {
+		origNum = chain[0]
+	} else if issue != nil {
+		origNum = issue.Number
+	}
+	closeStep := ""
+	if origNum > 0 {
+		closeStep = fmt.Sprintf(
+			"\n3. Or close the original failing issue (#%d) if the work is no longer needed, then post `/herd integrate` to advance past it.",
+			origNum)
+	}
+
 	var recovery string
 	switch kind {
 	case cascadeKindRebase:
+		// Rebase-against-main path: instruct the user to fix the failing
+		// resolver's worker branch, not the batch branch. Force-pushing the
+		// batch branch is forbidden by the design.
 		recovery = fmt.Sprintf(
-			"1. Inspect the failing batch branch locally:\n"+
+			"1. Inspect the failing worker branch locally:\n"+
 				"   ```\n   git fetch origin && git checkout %s\n   ```\n"+
-				"2. Rebase the batch branch onto the latest `%s` and resolve conflicts manually, then:\n"+
+				"2. Either merge the latest `%s` into the worker branch and resolve conflicts manually, then:\n"+
 				"   ```\n   git push --force origin %s\n   ```\n"+
-				"   and post `/herd integrate` on this PR.",
-			failingBranch, targetBranch, failingBranch)
+				"   and post `/herd integrate` on this PR.%s",
+			failingBranch, targetBranch, failingBranch, closeStep)
 	default:
-		origNum := 0
-		if len(chain) > 0 {
-			origNum = chain[0]
-		} else if issue != nil {
-			origNum = issue.Number
-		}
 		recovery = fmt.Sprintf(
 			"1. Inspect the failing worker branch locally:\n"+
 				"   ```\n   git fetch origin && git checkout %s\n   ```\n"+
 				"2. Either rebase the worker branch onto the current batch branch and resolve conflicts manually, then:\n"+
 				"   ```\n   git push --force origin %s\n   ```\n"+
-				"   and post `/herd integrate` on this PR.\n"+
-				"3. Or close the original failing issue (#%d) if the work is no longer needed, then post `/herd integrate` to advance past it.",
-			failingBranch, failingBranch, origNum)
+				"   and post `/herd integrate` on this PR.%s",
+			failingBranch, failingBranch, closeStep)
 	}
 
 	body := fmt.Sprintf(
@@ -1211,7 +1245,19 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 	}
 
 	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
-		markCascadeFailed(ctx, p, cfg, ms, lastConflictIssue, batchBranch, defaultBranch, cascadeKindRebase)
+		// The design forbids force-pushing the batch branch. When the
+		// rebase-against-main cascade exhausts its budget, point the user
+		// at the last resolver's worker branch so the recovery
+		// instructions tell them to fix and force-push that, not the
+		// batch branch. If lastConflictIssue is somehow nil (e.g. cap
+		// is 0), fall back to the batch branch — but emit a warning.
+		failingBranch := batchBranch
+		if lastConflictIssue != nil {
+			failingBranch = fmt.Sprintf("herd/worker/%d-%s", lastConflictIssue.Number, planner.Slugify(lastConflictIssue.Title))
+		} else {
+			fmt.Printf("Warning: cascade-failed (rebase) reached with no conflict-resolution issue to reference; recovery instructions will point at the batch branch\n")
+		}
+		markCascadeFailed(ctx, p, cfg, ms, lastConflictIssue, failingBranch, defaultBranch, cascadeKindRebase)
 		return 0, nil // At cap
 	}
 
