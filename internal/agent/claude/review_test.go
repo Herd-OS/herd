@@ -475,6 +475,96 @@ echo 'this is not json at all and is long enough to pass the suspicious-output f
 		"expected Summary to start with %q, got %q", "Failed to parse", result.Summary)
 }
 
+func TestReviewPrompt_OmitsWorkerNoOpSectionWhenEmpty(t *testing.T) {
+	opts := agent.ReviewOptions{
+		AcceptanceCriteria: []string{"works"},
+		WorkerNoOpVerdicts: nil,
+	}
+	prompt, err := renderReviewPrompt("diff", opts)
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, "Worker No-Op Verdicts")
+}
+
+func TestReviewPrompt_IncludesWorkerNoOpSection(t *testing.T) {
+	verdicts := []string{
+		"**Worker #42 — no-op verdict**\n\nFindings reviewed against the current code:\n\n- **Foo**: bar\n\nConclusion: ok.",
+		"**Worker #43 — no-op verdict**\n\n…second body…",
+	}
+	tests := []struct {
+		name                 string
+		priorReviewComments  []string
+		userFeedbackComments []string
+		precedingHeading     string
+	}{
+		{
+			name:                 "after user feedback when present",
+			priorReviewComments:  []string{"prior review body"},
+			userFeedbackComments: []string{"user feedback body"},
+			precedingHeading:     "## User Feedback",
+		},
+		{
+			name:                 "after prior review when user feedback empty",
+			priorReviewComments:  []string{"prior review body"},
+			userFeedbackComments: nil,
+			precedingHeading:     "## Prior Review History",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := agent.ReviewOptions{
+				AcceptanceCriteria:   []string{"works"},
+				PriorReviewComments:  tt.priorReviewComments,
+				UserFeedbackComments: tt.userFeedbackComments,
+				WorkerNoOpVerdicts:   verdicts,
+			}
+			prompt, err := renderReviewPrompt("diff", opts)
+			require.NoError(t, err)
+
+			assert.Contains(t, prompt, "## Worker No-Op Verdicts")
+			for _, v := range verdicts {
+				assert.Contains(t, prompt, v)
+				// Each verdict body must be wrapped in `---` separators.
+				wrapped := "---\n" + v + "\n---"
+				assert.Contains(t, prompt, wrapped, "verdict body must be wrapped in --- separators")
+			}
+
+			precedingIdx := strings.Index(prompt, tt.precedingHeading)
+			workerIdx := strings.Index(prompt, "## Worker No-Op Verdicts")
+			diffIdx := strings.Index(prompt, "## Diff")
+			require.GreaterOrEqual(t, precedingIdx, 0, "preceding section must be present")
+			require.GreaterOrEqual(t, workerIdx, 0, "worker no-op section must be present")
+			require.GreaterOrEqual(t, diffIdx, 0, "diff section must be present")
+			assert.Greater(t, workerIdx, precedingIdx, "worker no-op section must appear after %s", tt.precedingHeading)
+			assert.Less(t, workerIdx, diffIdx, "worker no-op section must appear before ## Diff")
+		})
+	}
+}
+
+func TestReviewPrompt_WorkerNoOpSectionPositioning(t *testing.T) {
+	opts := agent.ReviewOptions{
+		AcceptanceCriteria:   []string{"works"},
+		PriorReviewComments:  []string{"prior review body"},
+		UserFeedbackComments: []string{"user feedback body"},
+		WorkerNoOpVerdicts:   []string{"worker no-op body"},
+	}
+	prompt, err := renderReviewPrompt("diff", opts)
+	require.NoError(t, err)
+
+	priorIdx := strings.Index(prompt, "## Prior Review History")
+	userIdx := strings.Index(prompt, "## User Feedback")
+	workerIdx := strings.Index(prompt, "## Worker No-Op Verdicts")
+	diffIdx := strings.Index(prompt, "## Diff")
+
+	require.GreaterOrEqual(t, priorIdx, 0, "prior review section must be present")
+	require.GreaterOrEqual(t, userIdx, 0, "user feedback section must be present")
+	require.GreaterOrEqual(t, workerIdx, 0, "worker no-op section must be present")
+	require.GreaterOrEqual(t, diffIdx, 0, "diff section must be present")
+
+	assert.Less(t, priorIdx, userIdx, "prior review must come before user feedback")
+	assert.Less(t, userIdx, workerIdx, "user feedback must come before worker no-op verdicts")
+	assert.Less(t, workerIdx, diffIdx, "worker no-op verdicts must come before diff")
+}
+
 func TestRenderReviewPrompt_UserFeedbackComments(t *testing.T) {
 	tests := []struct {
 		name                 string

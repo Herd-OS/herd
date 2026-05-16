@@ -92,6 +92,13 @@ type ReviewOptions struct {
 	MinFixSeverity       string   // minimum severity that blocks approval: "high", "medium", "low"
 	PriorReviewComments  []string // Full text of previous HerdOS review comments on this PR
 	UserFeedbackComments []string // User-authored comments on this PR (authoritative)
+	// WorkerNoOpVerdicts contains the bodies of structured verdict
+	// comments posted by fix workers on the batch PR in previous cycles.
+	// Each entry is one full verdict comment body (header + reasoning).
+	// The reviewer treats these as authoritative — a worker has read the
+	// issue body and verified the code, and concluded no change was
+	// needed. Re-flagging the same finding requires NEW concrete evidence.
+	WorkerNoOpVerdicts []string
 }
 
 type ReviewResult struct {
