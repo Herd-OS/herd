@@ -1,6 +1,7 @@
 package issues
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,8 +17,8 @@ func TestRenderBody_Basic(t *testing.T) {
 			Scope:               []string{"src/auth.go"},
 			EstimatedComplexity: "medium",
 		},
-		Task:     "Build the auth module",
-		Criteria: []string{"Login works", "Tests pass"},
+		Task:          "Build the auth module",
+		Criteria:      []string{"Login works", "Tests pass"},
 		FilesToModify: []string{"src/auth.go"},
 	}
 
@@ -163,4 +164,106 @@ func TestRenderBody_WithConversationHistory(t *testing.T) {
 func TestFormatIntSlice(t *testing.T) {
 	assert.Equal(t, "[1, 2, 3]", formatIntSlice([]int{1, 2, 3}))
 	assert.Equal(t, "[42]", formatIntSlice([]int{42}))
+}
+
+func TestRenderBody_TargetPRAndTargetBranch(t *testing.T) {
+	tests := []struct {
+		name             string
+		targetPR         int
+		targetBranch     string
+		wantPRRendered   bool
+		wantBranchRender bool
+	}{
+		{
+			name:             "both set",
+			targetPR:         123,
+			targetBranch:     "feature/foo",
+			wantPRRendered:   true,
+			wantBranchRender: true,
+		},
+		{
+			name:             "only target_pr set",
+			targetPR:         99,
+			targetBranch:     "",
+			wantPRRendered:   true,
+			wantBranchRender: false,
+		},
+		{
+			name:             "only target_branch set",
+			targetPR:         0,
+			targetBranch:     "main",
+			wantPRRendered:   false,
+			wantBranchRender: true,
+		},
+		{
+			name:             "neither set",
+			targetPR:         0,
+			targetBranch:     "",
+			wantPRRendered:   false,
+			wantBranchRender: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := IssueBody{
+				FrontMatter: FrontMatter{
+					Version:      1,
+					TargetPR:     tt.targetPR,
+					TargetBranch: tt.targetBranch,
+				},
+				Task: "Standalone fix task",
+			}
+
+			rendered := RenderBody(body)
+
+			if tt.wantPRRendered {
+				assert.Contains(t, rendered, fmt.Sprintf("target_pr: %d", tt.targetPR))
+			} else {
+				assert.NotContains(t, rendered, "target_pr:")
+			}
+			if tt.wantBranchRender {
+				assert.Contains(t, rendered, fmt.Sprintf("target_branch: %s", tt.targetBranch))
+			} else {
+				assert.NotContains(t, rendered, "target_branch:")
+			}
+		})
+	}
+}
+
+func TestParseBody_RoundTripTargetFields(t *testing.T) {
+	original := IssueBody{
+		FrontMatter: FrontMatter{
+			Version:      1,
+			Type:         TypeStandaloneFix,
+			TargetPR:     314,
+			TargetBranch: "feature/standalone-fix-branch",
+		},
+		Task: "Run a standalone fix on a non-batch PR",
+	}
+
+	rendered := RenderBody(original)
+	parsed, err := ParseBody(rendered)
+	require.NoError(t, err)
+
+	assert.Equal(t, original.FrontMatter.TargetPR, parsed.FrontMatter.TargetPR)
+	assert.Equal(t, original.FrontMatter.TargetBranch, parsed.FrontMatter.TargetBranch)
+	assert.Equal(t, original.FrontMatter.Type, parsed.FrontMatter.Type)
+}
+
+func TestTypeStandaloneFixLabel(t *testing.T) {
+	assert.Equal(t, "herd/type:standalone-fix", TypeStandaloneFix)
+	assert.Contains(t, AllTypeLabels(), TypeStandaloneFix)
+
+	labels := AllLabels()
+	var found *LabelDef
+	for i := range labels {
+		if labels[i].Name == TypeStandaloneFix {
+			found = &labels[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "AllLabels should include TypeStandaloneFix")
+	assert.Equal(t, "FBCA04", found.Color)
+	assert.Equal(t, "Standalone fix dispatched by /herd fix on a non-batch PR", found.Description)
 }

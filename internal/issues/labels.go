@@ -44,10 +44,11 @@ const (
 
 // Type labels
 const (
-	TypeFeature = "herd/type:feature"
-	TypeBugfix  = "herd/type:bugfix"
-	TypeFix     = "herd/type:fix"
-	TypeManual  = "herd/type:manual"
+	TypeFeature       = "herd/type:feature"
+	TypeBugfix        = "herd/type:bugfix"
+	TypeFix           = "herd/type:fix"
+	TypeStandaloneFix = "herd/type:standalone-fix"
+	TypeManual        = "herd/type:manual"
 )
 
 // AllStatusLabels returns all status labels.
@@ -57,7 +58,7 @@ func AllStatusLabels() []string {
 
 // AllTypeLabels returns all type labels.
 func AllTypeLabels() []string {
-	return []string{TypeFeature, TypeBugfix, TypeFix, TypeManual}
+	return []string{TypeFeature, TypeBugfix, TypeFix, TypeManual, TypeStandaloneFix}
 }
 
 // AllLabels returns all herd labels.
@@ -72,6 +73,7 @@ func AllLabels() []LabelDef {
 		{TypeFeature, "1D76DB", "New functionality"},
 		{TypeBugfix, "D93F0B", "Bug fix"},
 		{TypeFix, "E99695", "Auto-generated fix from agent review or conflict resolution"},
+		{TypeStandaloneFix, "FBCA04", "Standalone fix dispatched by /herd fix on a non-batch PR"},
 		{TypeManual, "BFD4F2", "Requires human action — not dispatched to workers"},
 		{CIFixPending, "E4E669", "CI fix cycle in progress for this batch PR"},
 		{RetryPending, "D4C5F9", "Monitor-posted retry pending processing"},
