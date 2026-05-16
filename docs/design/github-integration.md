@@ -45,6 +45,14 @@ The body sections serve distinct purposes:
 
 Workers parse the front matter for metadata and pass the human-readable sections directly to the agent as the prompt. Manual issues (created by users) are also supported -- YAML front matter is optional, and without it the full body becomes the prompt.
 
+#### Body Size Limit
+
+GitHub caps issue and comment bodies at 65,536 characters. When herd creates an issue whose body would exceed a 65,000-char safety margin (e.g. a `/herd fix` issue with a long conversation history, a Review fix-issue with many findings, a CI fix-issue with a large log excerpt, or a conflict-resolution issue), the body is truncated at the last clean newline boundary and ends with the marker:
+
+> ⚠️ Body truncated to fit GitHub's 65536-char limit. See follow-up comment on this issue for the rest.
+
+The remainder is posted as one or more follow-up comments on the same issue. When the overflow spans multiple comments, each is prefixed with a `Part N of M (continued from issue body)` header so readers and the worker agent can reassemble them in order. Workers read the full picture from the issue body plus its comments, so no content is lost.
+
 ### Lifecycle State Machine
 
 ```

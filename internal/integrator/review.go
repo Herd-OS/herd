@@ -347,11 +347,17 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	defaultBranchForDispatch, _ := p.Repository().GetDefaultBranch(ctx)
 
-	fixIssue, err := p.Issues().Create(ctx, fixTitle, fixBody,
+	truncatedBody, overflow := issues.TruncateIssueBody(fixBody)
+	fixIssue, err := p.Issues().Create(ctx, fixTitle, truncatedBody,
 		[]string{issues.TypeFix, issues.StatusInProgress}, &ms.Number)
 	if err != nil {
 		// Failed to create the fix issue
 		return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: len(actionableFindings)}, nil
+	}
+	for _, comment := range issues.SplitOverflowComments(overflow) {
+		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
+			fmt.Printf("Warning: failed to post overflow comment on fix issue #%d: %v\n", fixIssue.Number, cerr)
+		}
 	}
 
 	// Dispatch single fix worker

@@ -85,14 +85,20 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 	}
 
 	truncated := truncateRunes(cmd.Prompt, 60)
+	truncatedBody, overflow := issues.TruncateIssueBody(body)
 	fixIssue, err := hctx.Platform.Issues().Create(hctx.Ctx,
 		"Fix: "+truncated,
-		body,
+		truncatedBody,
 		[]string{issues.TypeFix, issues.StatusInProgress},
 		&ms.Number,
 	)
 	if err != nil {
 		return Result{Error: fmt.Errorf("creating fix issue: %w", err)}
+	}
+	for _, comment := range issues.SplitOverflowComments(overflow) {
+		if cerr := hctx.Platform.Issues().AddComment(hctx.Ctx, fixIssue.Number, comment); cerr != nil {
+			fmt.Printf("Warning: failed to post overflow comment on fix issue #%d: %v\n", fixIssue.Number, cerr)
+		}
 	}
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))

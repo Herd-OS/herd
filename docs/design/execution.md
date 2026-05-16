@@ -482,6 +482,12 @@ included as a `## Conversation History` section in the issue body. Each comment
 is formatted as `**@author:**` followed by the comment body, separated by `---`.
 This gives the fix worker full context of prior fix requests and review feedback.
 
+If the assembled body would exceed GitHub's 65,536-char limit, herd truncates
+it at the last clean boundary, appends a visible marker pointing at follow-up
+comments, and posts the remainder as one or more "Part N of M" comments on the
+same issue. The same handling applies to Review fix-issues, CI fix-issues, and
+conflict-resolution issues — see [github-integration.md → Body Size Limit](github-integration.md#body-size-limit).
+
 `/herd fix` also detects conflict-related keywords in the description (e.g.,
 "merge conflict", "rebase conflict", "conflict with main"). When detected, the
 handler automatically appends explicit git merge/rebase instructions to the fix
