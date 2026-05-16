@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: ''
+      mode:
+        description: 'Execution mode: batch (default) or standalone'
+        required: false
+        type: string
+        default: 'batch'
       timeout_minutes:
         description: 'Max execution time'
         required: false
@@ -50,5 +55,6 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
+          HERD_WORKER_MODE: ${{ inputs.mode }}
         run: |
           herd worker exec "$ISSUE_NUMBER"

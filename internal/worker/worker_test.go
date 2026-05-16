@@ -1509,6 +1509,25 @@ func TestExec_SkipsAgentWhenProgressComplete(t *testing.T) {
 	assert.True(t, foundSkipReport, "worker should post a report even when agent is skipped")
 }
 
+func TestExec_StandaloneMode_NotImplemented(t *testing.T) {
+	// Mode="standalone" should return the stub error without attempting any
+	// platform calls beyond the deferred failure-handling path.
+	mock := &mockPlatform{
+		issues:    &mockIssueService{},
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	_, err := Exec(context.Background(), mock, &mockAgent{}, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    t.TempDir(),
+		Mode:        "standalone",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "standalone mode not yet implemented")
+}
+
 func TestExec_SkipAgent_SourceVerification(t *testing.T) {
 	// Verify that the resume path checks progress before invoking the agent.
 	source, err := os.ReadFile("worker.go")

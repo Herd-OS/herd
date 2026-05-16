@@ -26,6 +26,8 @@ type ExecParams struct {
 	IssueNumber int
 	RepoRoot    string
 	HTTPClient  *http.Client // nil means skip image downloading
+	// Mode selects the execution flow: "batch" (default) or "standalone".
+	Mode string
 }
 
 // ExecResult holds the result of a worker execution.
@@ -143,6 +145,14 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 			}
 		}
 	}()
+
+	mode := params.Mode
+	if mode == "" {
+		mode = "batch"
+	}
+	if mode == "standalone" {
+		return nil, fmt.Errorf("standalone mode not yet implemented")
+	}
 
 	// Get issue
 	issue, err := p.Issues().Get(ctx, params.IssueNumber)
