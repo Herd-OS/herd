@@ -9,7 +9,7 @@ import (
 
 func TestAllLabels(t *testing.T) {
 	labels := AllLabels()
-	assert.Len(t, labels, 15)
+	assert.Len(t, labels, 16)
 
 	var cascadeFailed *LabelDef
 	for i := range labels {
@@ -73,9 +73,9 @@ func TestRenderAndParseRoundTrip(t *testing.T) {
 			Scope:               []string{"src/components/ThemeToggle.tsx", "src/styles/theme.css"},
 			EstimatedComplexity: "medium",
 		},
-		Task:     "Create a theme toggle component.",
-		Criteria: []string{"Component renders a toggle button", "Current theme persisted to localStorage"},
-		Context:  "Part of dark mode feature.",
+		Task:          "Create a theme toggle component.",
+		Criteria:      []string{"Component renders a toggle button", "Current theme persisted to localStorage"},
+		Context:       "Part of dark mode feature.",
 		FilesToModify: []string{"src/components/ThemeToggle.tsx", "src/components/index.ts"},
 	}
 

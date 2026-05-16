@@ -16,6 +16,8 @@ type FrontMatter struct {
 	// Integrator-generated fields
 	Type                string   `yaml:"type,omitempty"`
 	FixCycle            int      `yaml:"fix_cycle,omitempty"`
+	TargetPR            int      `yaml:"target_pr,omitempty"`
+	TargetBranch        string   `yaml:"target_branch,omitempty"`
 	BatchPR             int      `yaml:"batch_pr,omitempty"`
 	CIFixCycle          int      `yaml:"ci_fix_cycle,omitempty"`
 	ConflictResolution  bool     `yaml:"conflict_resolution,omitempty"`
@@ -65,6 +67,12 @@ func RenderBody(body IssueBody) string {
 	}
 	if body.FrontMatter.FixCycle > 0 {
 		b.WriteString(fmt.Sprintf("  fix_cycle: %d\n", body.FrontMatter.FixCycle))
+	}
+	if body.FrontMatter.TargetPR > 0 {
+		b.WriteString(fmt.Sprintf("  target_pr: %d\n", body.FrontMatter.TargetPR))
+	}
+	if body.FrontMatter.TargetBranch != "" {
+		b.WriteString(fmt.Sprintf("  target_branch: %s\n", body.FrontMatter.TargetBranch))
 	}
 	if body.FrontMatter.BatchPR > 0 {
 		b.WriteString(fmt.Sprintf("  batch_pr: %d\n", body.FrontMatter.BatchPR))

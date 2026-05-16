@@ -26,6 +26,8 @@ type ExecParams struct {
 	IssueNumber int
 	RepoRoot    string
 	HTTPClient  *http.Client // nil means skip image downloading
+	// Mode selects the execution flow: "batch" (default) or "standalone".
+	Mode string
 }
 
 // ExecResult holds the result of a worker execution.
@@ -143,6 +145,14 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 			}
 		}
 	}()
+
+	mode := params.Mode
+	if mode == "" {
+		mode = "batch"
+	}
+	if mode == "standalone" {
+		return execStandalone(ctx, p, ag, cfg, params)
+	}
 
 	// Get issue
 	issue, err := p.Issues().Get(ctx, params.IssueNumber)
@@ -658,6 +668,302 @@ func renderWorkerPrompt(title, body string, issueNumber int, workerBranch string
 		return "", fmt.Errorf("executing worker prompt template: %w", err)
 	}
 	return buf.String(), nil
+}
+
+const workerStandalonePromptTemplate = `You are a HerdOS worker executing a task in **standalone mode**.
+
+In standalone mode you operate directly on the PR's head branch (` + "`{{.TargetBranch}}`" + `).
+Your commits are pushed directly to the target branch — there is no consolidation step.
+
+## Branch & PR Discipline (do not violate)
+
+- You are already on the PR head branch ` + "`{{.TargetBranch}}`" + `. STAY on it.
+- Do NOT create new branches, Do NOT open new pull requests.
+- Do NOT push to any branch other than ` + "`{{.TargetBranch}}`" + `.
+- If the task description says "create a new branch", "open a PR against ...", "submit a separate PR", or anything similar, IGNORE those instructions — they were written for a different workflow. Do the actual code change directly on this branch.
+
+## Task
+
+{{.Title}}
+
+{{.Body}}
+
+## Instructions
+
+- The issue body is your primary source of context. Start there.
+- If the issue includes Implementation Details, Conventions, or Context
+  from Dependencies sections, follow them closely — the Planner wrote
+  them specifically for you.
+- If the issue lacks information you need, explore the codebase to fill
+  the gaps. But prefer what the issue says over what you infer.
+- Check if the acceptance criteria are already satisfied by existing
+  code. If so, exit successfully without making any commits, BUT
+  before exiting you MUST emit a verdict report in your final output
+  in EXACTLY this format (the orchestrator parses it and forwards it
+  to the next review cycle):
+
+      Findings reviewed against the current code:
+
+      - **<finding 1 summary>**: <verdict — why no change is needed, with specific file:line references>
+      - **<finding 2 summary>**: <verdict>
+
+      Conclusion: <one-line summary, e.g., "All 3 findings describe behavior that already exists.">
+
+  This is non-negotiable. If you determine no code change is needed
+  you MUST include this block in your final output. Do not exit the
+  no-op path without it. Reference specific file:line locations in
+  the verdicts so the next reviewer can verify your reasoning.
+- If the task describes a merge or rebase conflict, follow the explicit
+  git commands in the task. Do not skip the git merge or rebase step and
+  try to manually rewrite files. You must resolve the actual conflict
+  markers produced by git.
+- Focus on files listed in the Scope or Files to Modify sections. You
+  may modify other files if necessary to satisfy acceptance criteria.
+- Commit your changes with clear messages referencing issue #{{.IssueNumber}}.
+- Do not add features, refactor code, or make improvements beyond
+  what is specified in the issue.
+- You are running in a fully automated CI environment with no human
+  present. Do not pause, ask questions, or wait for confirmation.
+  Figure it out. If something is broken, try to fix it. If a tool
+  fails, try a different approach. Only exit with a non-zero status
+  if the task is genuinely impossible (e.g., the issue references
+  code that doesn't exist and can't be inferred).
+- If you cannot complete the task after exhausting alternatives,
+  exit with a non-zero status and include the reason in your output.
+## Incremental Progress
+
+- Your branch is ` + "`{{.TargetBranch}}`" + `. After completing work on each file or
+  logical unit, run ` + "`git push origin {{.TargetBranch}}`" + ` to save your progress
+  remotely. Do not wait until all work is done to push.
+- Before your first push, ensure the directory exists (` + "`mkdir -p .herd/progress`" + `) then create a file called .herd/progress/{{.IssueNumber}}.md.
+  Update it before each push with a checklist of what you have completed
+  and what remains. Format: completed items checked (` + "`- [x]`" + `), remaining items
+  unchecked (` + "`- [ ]`" + `).
+- If .herd/progress/{{.IssueNumber}}.md already exists when you start (from a previous
+  timed-out attempt), read it to understand what was already done and continue
+  from where it left off. Do not redo completed work.
+{{if .CoAuthorTrailer}}- Add the following trailer to every commit message (on its own line after a blank line):
+  {{.CoAuthorTrailer}}
+{{end}}{{if .RoleInstructions}}
+## Project-Specific Instructions
+{{.RoleInstructions}}
+{{end}}`
+
+type standalonePromptData struct {
+	Title            string
+	Body             string
+	IssueNumber      int
+	TargetBranch     string
+	RoleInstructions string
+	CoAuthorTrailer  string
+}
+
+func renderStandalonePrompt(title, body string, issueNumber int, targetBranch, repoRoot string, cfg *config.Config) (string, error) {
+	tmpl, err := template.New("worker-standalone").Parse(workerStandalonePromptTemplate)
+	if err != nil {
+		return "", fmt.Errorf("parsing standalone prompt template: %w", err)
+	}
+
+	data := standalonePromptData{
+		Title:        title,
+		Body:         body,
+		IssueNumber:  issueNumber,
+		TargetBranch: targetBranch,
+	}
+
+	if cfg.PullRequests.CoAuthorEmail != "" {
+		data.CoAuthorTrailer = fmt.Sprintf("Co-authored-by: herd-os[bot] <%s>", cfg.PullRequests.CoAuthorEmail)
+	}
+
+	if ri, readErr := os.ReadFile(filepath.Join(repoRoot, ".herd", "worker.md")); readErr == nil {
+		data.RoleInstructions = string(ri)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("executing standalone prompt template: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// execStandalone runs the standalone worker flow: checks out the PR's head
+// branch directly, runs the agent with a standalone prompt, validates the
+// result, pushes back to the head branch with a non-force push, and posts
+// completion comments on the PR.
+func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.Config, params ExecParams) (*ExecResult, error) {
+	issue, err := p.Issues().Get(ctx, params.IssueNumber)
+	if err != nil {
+		return nil, fmt.Errorf("getting issue #%d: %w", params.IssueNumber, err)
+	}
+
+	parsed, perr := issues.ParseBody(issue.Body)
+	if perr != nil || parsed == nil || parsed.FrontMatter.TargetBranch == "" || parsed.FrontMatter.TargetPR == 0 {
+		return nil, fmt.Errorf("standalone issue #%d missing target_branch/target_pr in frontmatter", params.IssueNumber)
+	}
+	targetBranch := parsed.FrontMatter.TargetBranch
+	targetPR := parsed.FrontMatter.TargetPR
+
+	g := git.New(params.RepoRoot)
+	if err = g.Fetch("origin"); err != nil {
+		return nil, fmt.Errorf("fetching: %w", err)
+	}
+	if err = g.ConfigureIdentity("HerdOS Worker", "herd@herd-os.com"); err != nil {
+		return nil, fmt.Errorf("configuring git identity: %w", err)
+	}
+	if err = g.Checkout(targetBranch); err != nil {
+		return nil, fmt.Errorf("checking out target branch %q: %w", targetBranch, err)
+	}
+
+	startSHA, err := g.HeadSHA()
+	if err != nil {
+		return nil, fmt.Errorf("getting head SHA: %w", err)
+	}
+
+	issueBody := issue.Body
+	if params.HTTPClient != nil {
+		imgDir := filepath.Join(params.RepoRoot, ".herd", "tmp", "images")
+		processedBody, imgErr := images.DownloadAndReplace(ctx, params.HTTPClient, issue.Body, imgDir)
+		if imgErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: image download failed: %v\n", imgErr)
+		} else {
+			issueBody = processedBody
+		}
+	}
+
+	systemPrompt, err := renderStandalonePrompt(issue.Title, issueBody, params.IssueNumber, targetBranch, params.RepoRoot, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("rendering standalone prompt: %w", err)
+	}
+
+	progressDone := make(chan struct{})
+	go postProgressUpdates(ctx, p, params.IssueNumber, params.RepoRoot, cfg.Workers.ProgressIntervalSeconds, progressDone)
+
+	agentTimeout := time.Duration(cfg.Workers.TimeoutMinutes)*time.Minute - 5*time.Minute
+	if agentTimeout < 5*time.Minute {
+		agentTimeout = 5 * time.Minute
+	}
+	agentCtx, agentCancel := context.WithTimeout(ctx, agentTimeout)
+	taskSpec := agent.TaskSpec{IssueNumber: params.IssueNumber, Title: issue.Title, Body: issueBody}
+	execOpts := agent.ExecOptions{RepoRoot: params.RepoRoot, SystemPrompt: systemPrompt, MaxTurns: cfg.Agent.MaxTurns}
+	agentResult, agentErr := ag.Execute(agentCtx, taskSpec, execOpts)
+	agentCancel()
+	close(progressDone)
+
+	rawSummary := ""
+	if agentErr != nil {
+		timedOutWithWork := false
+		if agentCtx.Err() == context.DeadlineExceeded {
+			fmt.Printf("Agent execution timed out after %s, checking for completed work...\n", agentTimeout)
+			diff, diffErr := g.Diff("origin/"+targetBranch, "HEAD")
+			if diffErr == nil && diff != "" {
+				fmt.Println("Work detected despite timeout — proceeding to push.")
+				rawSummary = "Agent timed out but work was completed."
+				timedOutWithWork = true
+			}
+		}
+		if !timedOutWithWork {
+			_ = p.Issues().AddComment(ctx, params.IssueNumber,
+				fmt.Sprintf("**Worker failed:** agent returned an error.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
+					truncateOutput(agentErr.Error(), 2000)))
+			return nil, fmt.Errorf("agent execution failed: %w", agentErr)
+		}
+	}
+
+	if agentResult != nil && agentResult.Summary != "" {
+		rawSummary = agentResult.Summary
+	}
+
+	diff, diffErr := g.Diff("origin/"+targetBranch, "HEAD")
+	if diffErr != nil {
+		return nil, fmt.Errorf("checking for changes: %w", diffErr)
+	}
+
+	if diff == "" {
+		noOpComment := fmt.Sprintf("Worker #%d — no-op: no changes were needed. (Standalone fix completed without modifying any files.)", params.IssueNumber)
+		if rawSummary != "" {
+			noOpComment += fmt.Sprintf("\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
+		}
+		_ = p.PullRequests().AddComment(ctx, targetPR, noOpComment)
+
+		_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress, issues.StatusFailed})
+		_ = p.Issues().AddLabels(ctx, params.IssueNumber, []string{issues.StatusDone})
+		state := "closed"
+		_, _ = p.Issues().Update(ctx, params.IssueNumber, platform.IssueUpdate{State: &state})
+		return &ExecResult{NoOp: true}, nil
+	}
+
+	validation := runValidation(ctx, params.RepoRoot)
+	if !validation.allPassed() {
+		fmt.Printf("Validation failed, re-invoking agent to fix:\n%s\n", validation.Errors)
+
+		retryPrompt, rpErr := renderStandalonePrompt(issue.Title, issueBody, params.IssueNumber, targetBranch, params.RepoRoot, cfg)
+		if rpErr != nil {
+			return nil, fmt.Errorf("rendering standalone prompt for retry: %w", rpErr)
+		}
+		retryExecOpts := agent.ExecOptions{
+			RepoRoot:     params.RepoRoot,
+			SystemPrompt: retryPrompt,
+			MaxTurns:     cfg.Agent.MaxTurns,
+		}
+		retrySpec := agent.TaskSpec{
+			IssueNumber: params.IssueNumber,
+			Title:       "Fix validation failures",
+			Body:        fmt.Sprintf("The following validation commands failed after your changes. Please fix all errors:\n\n```\n%s\n```\n\nDo not add new features — only fix the validation errors.", validation.Errors),
+		}
+		retryResult, retryErr := ag.Execute(ctx, retrySpec, retryExecOpts)
+		if retryErr != nil {
+			_ = p.Issues().AddComment(ctx, params.IssueNumber,
+				fmt.Sprintf("**Worker failed:** agent returned an error during validation retry.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
+					truncateOutput(retryErr.Error(), 2000)))
+			return nil, fmt.Errorf("agent retry after validation failure: %w", retryErr)
+		}
+		if retryResult != nil && retryResult.Summary != "" {
+			rawSummary += "\n\n--- Retry output ---\n" + retryResult.Summary
+		}
+
+		validation = runValidation(ctx, params.RepoRoot)
+		if !validation.allPassed() {
+			report := buildWorkerReport(g, "origin/"+targetBranch, rawSummary, validation)
+			report += "\n\n⚠️ Validation failed after retry. Worker marked as failed."
+			if rawSummary != "" {
+				report += fmt.Sprintf("\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
+			}
+			_ = p.Issues().AddComment(ctx, params.IssueNumber, report)
+			return nil, fmt.Errorf("validation failed after retry: %s", validation.Errors)
+		}
+	}
+
+	if err = g.Push("origin", targetBranch); err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "non-fast-forward") ||
+			strings.Contains(errStr, "rejected") ||
+			strings.Contains(errStr, "updates were rejected") {
+			_ = p.Issues().AddComment(ctx, params.IssueNumber,
+				fmt.Sprintf("⚠️ Could not push to `%s` — the branch has new commits on the remote. Rebase your PR and re-run `/herd fix` to retry.", targetBranch))
+		}
+		return nil, fmt.Errorf("pushing to target branch: %w", err)
+	}
+
+	report := buildWorkerReport(g, "origin/"+targetBranch, rawSummary, validation)
+	if rawSummary != "" {
+		report += fmt.Sprintf("\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
+	}
+	_ = p.Issues().AddComment(ctx, params.IssueNumber, report)
+
+	var confirmComment string
+	if count, cerr := g.RevListCount(startSHA + "..HEAD"); cerr == nil && count > 0 {
+		confirmComment = fmt.Sprintf("✓ Standalone fix complete — pushed %d commit(s) to `%s`.", count, targetBranch)
+	} else {
+		confirmComment = fmt.Sprintf("✓ Standalone fix complete — pushed to `%s`.", targetBranch)
+	}
+	_ = p.PullRequests().AddComment(ctx, targetPR, confirmComment)
+
+	_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress, issues.StatusFailed})
+	_ = p.Issues().AddLabels(ctx, params.IssueNumber, []string{issues.StatusDone})
+	state := "closed"
+	_, _ = p.Issues().Update(ctx, params.IssueNumber, platform.IssueUpdate{State: &state})
+
+	return &ExecResult{}, nil
 }
 
 // NoOpVerdictMarker is the prefix every worker no-op verdict comment

@@ -37,6 +37,11 @@ func newWorkerExecCmd() *cobra.Command {
 				return fmt.Errorf("invalid issue number: %s", args[0])
 			}
 
+			mode := os.Getenv("HERD_WORKER_MODE")
+			if mode == "" {
+				mode = "batch"
+			}
+
 			cfg, err := config.Load(".")
 			if err != nil {
 				return err
@@ -58,6 +63,7 @@ func newWorkerExecCmd() *cobra.Command {
 				IssueNumber: issueNum,
 				RepoRoot:    cwd,
 				HTTPClient:  client.HTTPClient(),
+				Mode:        mode,
 			})
 			if err != nil {
 				return err

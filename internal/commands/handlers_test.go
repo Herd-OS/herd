@@ -46,6 +46,7 @@ type testIssueService struct {
 	addedLabels        map[int][]string
 	removedLabels      map[int][]string
 	createdIssues      []*platform.Issue
+	createdMilestones  []*int
 	nextIssueNum       int
 	addLabelsErr       error
 	createErr          error
@@ -68,6 +69,7 @@ func (m *testIssueService) Create(_ context.Context, title, body string, labels 
 	iss := &platform.Issue{Number: m.nextIssueNum, Title: title, Body: body, Labels: labels}
 	m.nextIssueNum++
 	m.createdIssues = append(m.createdIssues, iss)
+	m.createdMilestones = append(m.createdMilestones, milestone)
 	return iss, nil
 }
 func (m *testIssueService) Get(_ context.Context, number int) (*platform.Issue, error) {
@@ -1022,12 +1024,6 @@ func TestHandleFix(t *testing.T) {
 			prompt:  "",
 			prHead:  "herd/batch/1-batch",
 			wantMsg: "Usage: `/herd fix",
-		},
-		{
-			name:    "not batch PR",
-			prompt:  "fix something",
-			prHead:  "feature/foo",
-			wantMsg: "can only be used on batch PRs",
 		},
 	}
 
