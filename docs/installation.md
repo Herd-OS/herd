@@ -128,6 +128,8 @@ herd --version
 
 This section describes what happens when a maintainer cuts a release of `herd` itself. End users do not need to read it — it is for maintainers of the `Herd-OS/herd` repository.
 
+For day-to-day edits to workflow files between releases, see [`../CONTRIBUTING.md`](../CONTRIBUTING.md). Templates under `internal/cli/workflows/*.tmpl` are the source of truth; CI runs `herd init --check` and rejects PRs where the rendered `.github/workflows/herd-*.yml` files have drifted from their templates.
+
 ### Triggering a release
 
 Pushing a tag of the form `vX.Y.Z` triggers `.github/workflows/release.yml`:
