@@ -1052,6 +1052,27 @@ When the interactive `herd review <pr-number>` session reaches a concrete action
 
 `/herd review` works on any PR, not just batch PRs. When used on a non-batch PR, it runs the same agent review and posts a severity-classified findings comment, but skips all batch-specific logic: no fix issues are created, no workers are dispatched, and no fix cycles are tracked. This is useful for getting an AI review on regular PRs without the full Herd orchestration.
 
+#### Standalone /herd fix
+
+`/herd fix` works on any PR, not just batch PRs. The [comment-command handler](#available-commands) selects a flow based on the PR's head branch:
+
+- If the head branch starts with `herd/batch/`, the existing batch flow runs: a fix issue is created in the batch's milestone and consolidated through the integrator like any other fix worker.
+- Otherwise, the standalone flow runs.
+
+**Standalone flow.** The handler creates a tracking issue with no milestone, labeled `herd/type:standalone-fix` and `herd/status:in-progress`. The issue body frontmatter records `target_pr` and `target_branch`. A worker is dispatched with `mode=standalone`. That worker checks out the PR's head branch directly, runs the agent, runs [pre-push validation](#pre-push-validation), and pushes the result straight to the PR branch — there is no worker branch, no consolidation step, and no integrator pass.
+
+**Result.** On success, the worker posts a confirmation comment on the PR (`✓ Standalone fix complete — pushed N commit(s) to <branch>`) and the tracking issue is closed and labeled `herd/status:done`. If the agent makes no changes, a no-op comment is posted on the PR and the tracking issue is closed.
+
+**Out of scope.** Standalone fixes intentionally skip the automated recovery loops that batch fixes get:
+
+- No automated review cycle — the user owns review of standalone fixes.
+- No automated CI-fix loop.
+- No conflict-resolution agent for push failures.
+
+**Conflict on push.** If the target branch advanced on the remote between dispatch and push, the push is rejected. The tracking issue is labeled `herd/status:failed` and receives a comment asking the user to rebase the PR and re-run `/herd fix`.
+
+**Concurrency.** At most one in-progress standalone fix is allowed per PR. A second `/herd fix` posted while one is still in progress is refused with a comment naming the in-progress tracking issue.
+
 ### Monitor Integration
 
 The Monitor posts `/herd retry <N>` and `/herd fix-ci` comments instead of dispatching workflows directly. This ensures all command execution flows through the same handler, maintaining single responsibility.
