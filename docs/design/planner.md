@@ -41,9 +41,22 @@ The user can approve at either step. Only after explicit approval does the agent
 
 The `herd plan` command gathers repository context, generates a unique plan ID, and launches the configured agent as a subprocess with a planning system prompt. HerdOS does not implement its own chat loop -- it delegates to whatever agent is configured, preserving the agent's native interactive experience.
 
-When the plan is ready, the agent first presents a high-level overview table (task number, title, tier, complexity, dependencies, manual flag). The user can say "details" to see the full implementation plan, or "approve" to proceed. If the user asks for details, the agent presents the complete plan in readable markdown. The user can request changes at either step — the agent incorporates feedback and re-presents until the user approves. Only after explicit approval does the agent write the structured plan to `.herd/plans/<plan-id>.json`. After the agent process exits, `herd` reads and parses the plan file, then creates issues and dispatches.
+When the plan is ready, the agent first presents a high-level overview table (task number, title, tier, complexity, dependencies, manual flag). The user can say "details" to see the full implementation plan, or "approve" to proceed. If the user asks for details, the agent presents the complete plan in readable markdown. The user can request changes at either step — the agent incorporates feedback and re-presents until the user approves. Only after explicit approval does the agent write the structured plan to `.herd/plans/<plan-id>.json`. After writing, the agent self-verifies the file (Step 4 of the planning prompt): it reads the JSON back, confirms it parses, checks the schema, and rewrites the file if any issue is found, before telling the user the plan is saved. After the agent process exits, `herd` reads and parses the plan file, then creates issues and dispatches.
 
 The agent writes to a file rather than stdout because agent stdout is mixed with conversation output, formatting, and UI elements. Parsing structured data from that stream would be fragile. A known file path is reliable and works identically across all agents.
+
+### Plan File Validation
+
+`herd` re-validates the plan when it loads the file (both in the normal exit path and when invoked with `--from-file`). The structural rules enforced by `validatePlan` are:
+
+- `batch_name` is non-empty.
+- At least one task is present.
+- Each task has a non-empty `title` and at least one `acceptance_criteria` entry.
+- Each `depends_on` index is within `[0, len(tasks))` and does not reference its own task.
+- `complexity` is one of `low`, `medium`, `high`, or empty.
+- `type` is one of `feature`, `bugfix`, or empty.
+
+On failure, the error identifies the offending task by index and title and names the field that failed (e.g. `task 3 ("Add login route"): depends_on[1]=7 is out of range [0,5)`). Because the plan file is preserved, the user can edit it and re-run `herd plan --from-file <path>` to recover without restarting the interactive session.
 
 ## Planning Quality Principles
 
