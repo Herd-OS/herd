@@ -180,16 +180,27 @@ func (s *pullRequestService) Close(ctx context.Context, number int) error {
 }
 
 func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
+	if pr == nil {
+		return nil
+	}
+	labels := make([]string, 0, len(pr.Labels))
+	for _, l := range pr.Labels {
+		if l == nil {
+			continue
+		}
+		labels = append(labels, l.GetName())
+	}
 	return &platform.PullRequest{
-		Number:    pr.GetNumber(),
-		Title:     pr.GetTitle(),
-		Body:      pr.GetBody(),
-		State:     pr.GetState(),
-		Head:      pr.GetHead().GetRef(),
-		Base:      pr.GetBase().GetRef(),
+		Number:         pr.GetNumber(),
+		Title:          pr.GetTitle(),
+		Body:           pr.GetBody(),
+		State:          pr.GetState(),
+		Head:           pr.GetHead().GetRef(),
+		Base:           pr.GetBase().GetRef(),
+		Labels:         labels,
 		Mergeable:      pr.GetMergeable(),
 		MergeableKnown: pr.Mergeable != nil,
-		URL:       pr.GetHTMLURL(),
-		CreatedAt: pr.GetCreatedAt().Time,
+		URL:            pr.GetHTMLURL(),
+		CreatedAt:      pr.GetCreatedAt().Time,
 	}
 }

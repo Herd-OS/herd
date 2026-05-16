@@ -112,7 +112,11 @@ func (m Model) batchesPanel() string {
 			if review == "" {
 				review = "-"
 			}
-			b.WriteString(fmt.Sprintf("      PR #%d · CI %s · Review: %s\n", be.PRNumber, statusOr(be.CIStatus), review))
+			line := fmt.Sprintf("      PR #%d · CI %s · Review: %s", be.PRNumber, statusOr(be.CIStatus), review)
+			if be.CascadeFailed {
+				line += errStyle.Render(" ⚠ cascade failed")
+			}
+			b.WriteString(line + "\n")
 		} else {
 			b.WriteString("      PR not yet opened\n")
 		}

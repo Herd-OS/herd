@@ -26,6 +26,13 @@ const (
 	// worker. It is removed once the conflict is resolved (PR becomes mergeable
 	// again), preventing duplicate dispatches from concurrent patrol runs.
 	RebasePending = "herd/rebase-pending"
+
+	// CascadeFailed is added to a batch PR when a conflict-resolution cascade
+	// exhausts max_conflict_resolution_attempts. It is removed manually by a
+	// human after they handle the underlying problem, and acts as a circuit
+	// breaker preventing further conflict-resolution issues from being created
+	// for the batch.
+	CascadeFailed = "herd/cascade-failed"
 )
 
 // Type labels
@@ -62,6 +69,7 @@ func AllLabels() []LabelDef {
 		{CIFixPending, "E4E669", "CI fix cycle in progress for this batch PR"},
 		{RetryPending, "D4C5F9", "Monitor-posted retry pending processing"},
 		{RebasePending, "FBCA04", "Rebase conflict resolution in progress for this batch PR"},
+		{CascadeFailed, "B60205", "Conflict resolution cascade exhausted — manual intervention required"},
 	}
 }
 

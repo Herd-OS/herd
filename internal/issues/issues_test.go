@@ -9,7 +9,19 @@ import (
 
 func TestAllLabels(t *testing.T) {
 	labels := AllLabels()
-	assert.Len(t, labels, 13)
+	assert.Len(t, labels, 14)
+
+	var cascadeFailed *LabelDef
+	for i := range labels {
+		if labels[i].Name == CascadeFailed {
+			cascadeFailed = &labels[i]
+			break
+		}
+	}
+	require.NotNil(t, cascadeFailed, "AllLabels should include CascadeFailed")
+	assert.Equal(t, "herd/cascade-failed", cascadeFailed.Name)
+	assert.Equal(t, "B60205", cascadeFailed.Color)
+	assert.Equal(t, "Conflict resolution cascade exhausted — manual intervention required", cascadeFailed.Description)
 }
 
 func TestIsStatusLabel(t *testing.T) {
@@ -17,12 +29,15 @@ func TestIsStatusLabel(t *testing.T) {
 	assert.True(t, IsStatusLabel(StatusInProgress))
 	assert.False(t, IsStatusLabel(TypeFeature))
 	assert.False(t, IsStatusLabel("random"))
+	assert.False(t, IsStatusLabel(CascadeFailed))
 }
 
 func TestHasLabel(t *testing.T) {
 	labels := []string{StatusReady, TypeFeature}
 	assert.True(t, HasLabel(labels, StatusReady))
 	assert.False(t, HasLabel(labels, StatusDone))
+	assert.True(t, HasLabel([]string{"foo", CascadeFailed}, CascadeFailed))
+	assert.False(t, HasLabel([]string{"foo"}, CascadeFailed))
 }
 
 func TestStatusLabel(t *testing.T) {

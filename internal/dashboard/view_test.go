@@ -64,6 +64,70 @@ func TestRenderWorkers_ZeroIssueNumberFallback(t *testing.T) {
 	assert.Contains(t, out, "3s")
 }
 
+func TestDashboard_ShowsCascadeFailedMarker(t *testing.T) {
+	m := Model{
+		Owner:      "o",
+		Repo:       "r",
+		RefreshSec: 5,
+		state: State{
+			LastRefresh: time.Now(),
+			Batches: []BatchEntry{{
+				MilestoneNumber: 1,
+				MilestoneTitle:  "Test Batch",
+				PRNumber:        42,
+				CIStatus:        "failure",
+				CascadeFailed:   true,
+				HasAttention:    true,
+			}},
+		},
+	}
+	out := m.batchesPanel()
+	assert.Contains(t, out, "⚠ cascade failed")
+}
+
+func TestDashboard_CascadeFailedDoesNotMarkerWhenFalse(t *testing.T) {
+	m := Model{
+		Owner:      "o",
+		Repo:       "r",
+		RefreshSec: 5,
+		state: State{
+			LastRefresh: time.Now(),
+			Batches: []BatchEntry{{
+				MilestoneNumber: 1,
+				MilestoneTitle:  "Test Batch",
+				PRNumber:        42,
+				CIStatus:        "success",
+				CascadeFailed:   false,
+			}},
+		},
+	}
+	out := m.batchesPanel()
+	assert.NotContains(t, out, "cascade failed")
+}
+
+func TestDashboard_CascadeFailedNoPRCannotBeMarked(t *testing.T) {
+	// Edge case: a batch with no PR (PRNumber==0) should not render the
+	// cascade marker even if CascadeFailed somehow got set, because the
+	// marker is part of the PR status line.
+	m := Model{
+		Owner:      "o",
+		Repo:       "r",
+		RefreshSec: 5,
+		state: State{
+			LastRefresh: time.Now(),
+			Batches: []BatchEntry{{
+				MilestoneNumber: 1,
+				MilestoneTitle:  "No PR yet",
+				PRNumber:        0,
+				CascadeFailed:   false,
+			}},
+		},
+	}
+	out := m.batchesPanel()
+	assert.Contains(t, out, "PR not yet opened")
+	assert.NotContains(t, out, "cascade failed")
+}
+
 func TestFormatElapsed(t *testing.T) {
 	tests := []struct {
 		name string

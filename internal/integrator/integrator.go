@@ -803,6 +803,274 @@ func closeStaleConflictIssues(ctx context.Context, p platform.Platform, ms *plat
 	}
 }
 
+// findBatchPR returns the open batch PR for a milestone, or nil if none.
+func findBatchPR(ctx context.Context, p platform.Platform, ms *platform.Milestone) (*platform.PullRequest, error) {
+	if ms == nil {
+		return nil, nil
+	}
+	prSvc := p.PullRequests()
+	if prSvc == nil {
+		return nil, nil
+	}
+	branch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	prs, err := prSvc.List(ctx, platform.PRFilters{State: "open", Head: branch})
+	if err != nil {
+		return nil, fmt.Errorf("listing batch PRs for %s: %w", branch, err)
+	}
+	if len(prs) == 0 {
+		return nil, nil
+	}
+	return prs[0], nil
+}
+
+// parseWorkerBranchNumber extracts the numeric issue id from a worker branch
+// name of the form `herd/worker/<num>-<slug>`. Returns 0 if the branch does
+// not match this shape. Using exact-number parsing (instead of prefix
+// matching) avoids the ambiguous case where one issue's branch prefix
+// (e.g. `herd/worker/10-`) is itself a prefix of another's (`herd/worker/100-foo`).
+func parseWorkerBranchNumber(branch string) int {
+	const prefix = "herd/worker/"
+	if !strings.HasPrefix(branch, prefix) {
+		return 0
+	}
+	rest := branch[len(prefix):]
+	dash := strings.IndexByte(rest, '-')
+	if dash <= 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(rest[:dash])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// buildCascadeChain walks the chain of conflict-resolution issues in the
+// milestone, starting from the current failing issue and following
+// ConflictingBranches back to the original failing worker. Returns issue
+// numbers in chronological order (oldest first, current failing issue last).
+func buildCascadeChain(ctx context.Context, p platform.Platform, ms *platform.Milestone, currentIssue *platform.Issue) ([]int, error) {
+	if currentIssue == nil {
+		return nil, nil
+	}
+	if ms == nil {
+		return []int{currentIssue.Number}, nil
+	}
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{State: "all", Milestone: &ms.Number})
+	if err != nil {
+		return nil, fmt.Errorf("listing milestone issues: %w", err)
+	}
+	byNumber := map[int]*platform.Issue{}
+	for _, iss := range allIssues {
+		byNumber[iss.Number] = iss
+	}
+	findParent := func(parentWorkerBranch string) int {
+		num := parseWorkerBranchNumber(parentWorkerBranch)
+		if num == 0 {
+			return 0
+		}
+		if _, ok := byNumber[num]; !ok {
+			return 0
+		}
+		return num
+	}
+
+	chain := []int{currentIssue.Number}
+	visited := map[int]bool{currentIssue.Number: true}
+	cursor := currentIssue
+	for {
+		parsed, parseErr := issues.ParseBody(cursor.Body)
+		if parseErr != nil || !parsed.FrontMatter.ConflictResolution || len(parsed.FrontMatter.ConflictingBranches) == 0 {
+			break
+		}
+		parentNum := findParent(parsed.FrontMatter.ConflictingBranches[0])
+		if parentNum == 0 || visited[parentNum] {
+			break
+		}
+		visited[parentNum] = true
+		chain = append([]int{parentNum}, chain...)
+		parent, ok := byNumber[parentNum]
+		if !ok {
+			break
+		}
+		cursor = parent
+	}
+	return chain, nil
+}
+
+// cascadeKind distinguishes the two scenarios that can exhaust the conflict
+// resolution cap. It controls the wording of the recovery instructions in
+// markCascadeFailed — the merge path tells the user to fix a worker branch,
+// the rebase path tells them to fix the batch branch against the default.
+type cascadeKind int
+
+const (
+	cascadeKindMerge  cascadeKind = iota // worker → batch
+	cascadeKindRebase                    // batch → default
+)
+
+// markCascadeFailed performs all cascade-failure side effects: label the
+// failing issue as failed, label the batch PR with herd/cascade-failed,
+// and post a detailed notify comment on the batch PR. If the batch PR
+// cannot be found, falls back to a comment on the failing issue.
+//
+// failingBranch is the worker branch the user must inspect/fix. The design
+// forbids force-pushing the batch branch, so both cascade kinds instruct
+// the user to fix a worker branch and force-push that. targetBranch is what
+// failingBranch must merge cleanly into (batch branch for merge cascades,
+// default branch for rebase cascades).
+func markCascadeFailed(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, issue *platform.Issue, failingBranch, targetBranch string, kind cascadeKind) {
+	// Relabel the failing issue from done → failed.
+	if issue != nil {
+		_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
+		_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
+	}
+
+	pr, prErr := findBatchPR(ctx, p, ms)
+	if prErr != nil {
+		// Don't swallow lookup errors: a transient API failure must be
+		// visible in logs or the rich PR comment will be silently lost.
+		fmt.Printf("Warning: failed to look up batch PR for cascade-failed notification: %v\n", prErr)
+	}
+	if prErr != nil || pr == nil {
+		// Fall back to on-issue comment so cascade failure is not silent.
+		if issue != nil {
+			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
+				"⚠️ **HerdOS Integrator**\n\nMerge conflict cascade exhausted (%d attempts). Manual intervention required.",
+				cfg.Integrator.MaxConflictResolutionAttempts))
+		}
+		return
+	}
+
+	_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.CascadeFailed})
+
+	var chain []int
+	if issue != nil {
+		chain, _ = buildCascadeChain(ctx, p, ms, issue)
+	}
+
+	parts := make([]string, len(chain))
+	for i, n := range chain {
+		if i == len(chain)-1 {
+			parts[i] = fmt.Sprintf("#%d (failed)", n)
+		} else {
+			parts[i] = fmt.Sprintf("#%d", n)
+		}
+	}
+	chainStr := strings.Join(parts, " → ")
+
+	mentions := ""
+	if len(cfg.Monitor.NotifyUsers) > 0 {
+		us := make([]string, len(cfg.Monitor.NotifyUsers))
+		for i, u := range cfg.Monitor.NotifyUsers {
+			us[i] = "@" + u
+		}
+		mentions = "\n\n/cc " + strings.Join(us, " ")
+	}
+
+	origNum := 0
+	if len(chain) > 0 {
+		origNum = chain[0]
+	} else if issue != nil {
+		origNum = issue.Number
+	}
+	closeStep := ""
+	if origNum > 0 {
+		closeStep = fmt.Sprintf(
+			"\n3. Or close the original failing issue (#%d) if the work is no longer needed, then post `/herd integrate` to advance past it.",
+			origNum)
+	}
+
+	var recovery string
+	switch kind {
+	case cascadeKindRebase:
+		// Rebase-against-main path: instruct the user to fix the failing
+		// resolver's worker branch, not the batch branch. Force-pushing the
+		// batch branch is forbidden by the design.
+		recovery = fmt.Sprintf(
+			"1. Inspect the failing worker branch locally:\n"+
+				"   ```\n   git fetch origin && git checkout %s\n   ```\n"+
+				"2. Either merge the latest `%s` into the worker branch and resolve conflicts manually, then:\n"+
+				"   ```\n   git push --force origin %s\n   ```\n"+
+				"   and post `/herd integrate` on this PR.%s",
+			failingBranch, targetBranch, failingBranch, closeStep)
+	default:
+		recovery = fmt.Sprintf(
+			"1. Inspect the failing worker branch locally:\n"+
+				"   ```\n   git fetch origin && git checkout %s\n   ```\n"+
+				"2. Either rebase the worker branch onto the current batch branch and resolve conflicts manually, then:\n"+
+				"   ```\n   git push --force origin %s\n   ```\n"+
+				"   and post `/herd integrate` on this PR.%s",
+			failingBranch, failingBranch, closeStep)
+	}
+
+	body := fmt.Sprintf(
+		"⚠️ Conflict resolution cascade failed\n\n"+
+			"The integrator attempted %d times to resolve a merge conflict and could not produce a clean merge.\n\n"+
+			"**Cascade chain:** %s\n\n"+
+			"**Suggested next steps (in order):**\n\n"+
+			"%s\n\n"+
+			"Herd will not retry conflict resolution while the `herd/cascade-failed` label is present on this PR. Remove the label and post `/herd integrate` once you've handled the underlying issue.%s",
+		cfg.Integrator.MaxConflictResolutionAttempts, chainStr, recovery, mentions)
+
+	_ = p.Issues().AddComment(ctx, pr.Number, body)
+}
+
+// cascadePausedComment is the body posted on the batch PR when conflict
+// resolution is paused (i.e. the cascade-failed label is set). It is kept as
+// a package-level constant so the rate-limiter helper can detect prior
+// instances by exact prefix match instead of fragile substring guessing.
+const cascadePausedComment = "⚠️ Conflict resolution is paused — batch is in cascade-failed state. Resolve the existing failure manually, then remove the `herd/cascade-failed` label and post `/herd integrate` to resume."
+
+// cascadePausedMarker is a stable prefix used to detect an existing paused
+// comment in the PR's comment history.
+const cascadePausedMarker = "⚠️ Conflict resolution is paused"
+
+// cascadeFailedMarker is a stable prefix of the rich markCascadeFailed comment
+// body. We use it as a "cascade event" boundary when deciding whether the
+// paused notice has already been posted *for the current cascade event*.
+const cascadeFailedMarker = "⚠️ Conflict resolution cascade failed"
+
+// cascadeFailedPR returns the batch PR if it currently carries the
+// herd/cascade-failed label, signalling that the conflict-resolution cascade
+// is paused. Returns nil if the label is absent, the PR cannot be found, or
+// the lookup fails. Callers use this as the single circuit-breaker check
+// across handleConflictResolution, DispatchRebaseConflictWorker, and
+// handleRebaseConflictResolution.
+func cascadeFailedPR(ctx context.Context, p platform.Platform, ms *platform.Milestone) *platform.PullRequest {
+	pr, err := findBatchPR(ctx, p, ms)
+	if err != nil || pr == nil {
+		return nil
+	}
+	if !issues.HasLabel(pr.Labels, issues.CascadeFailed) {
+		return nil
+	}
+	return pr
+}
+
+// postCascadePausedNotice posts the paused-state notice on the batch PR, but
+// only if we haven't already posted one for the current cascade event. A
+// "cascade event" is anchored by the rich comment that markCascadeFailed
+// emits when the budget is exhausted; we walk comments newest-first and
+// suppress the notice if we encounter another paused notice before that
+// cascade-failed marker. Errors fetching comments are non-fatal — the worst
+// case is a duplicate comment, which is what we are trying to avoid but is
+// still safer than dropping the notice entirely.
+func postCascadePausedNotice(ctx context.Context, p platform.Platform, prNumber int) {
+	if comments, err := p.Issues().ListComments(ctx, prNumber); err == nil {
+		for i := len(comments) - 1; i >= 0; i-- {
+			body := comments[i].Body
+			if strings.HasPrefix(body, cascadeFailedMarker) {
+				break
+			}
+			if strings.HasPrefix(body, cascadePausedMarker) {
+				return
+			}
+		}
+	}
+	_ = p.Issues().AddComment(ctx, prNumber, cascadePausedComment)
+}
+
 func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, issue *platform.Issue, ms *platform.Milestone, workerBranch, batchBranch string) (*ConsolidateResult, error) {
 	// Count existing conflict-resolution issues in this milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
@@ -824,21 +1092,22 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 		}
 	}
 
-	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
-		mentions := ""
-		if len(cfg.Monitor.NotifyUsers) > 0 {
-			parts := make([]string, len(cfg.Monitor.NotifyUsers))
-			for i, u := range cfg.Monitor.NotifyUsers {
-				parts[i] = "@" + u
-			}
-			mentions = "\n\n/cc " + strings.Join(parts, " ")
-		}
-		_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
-			"⚠️ **HerdOS Integrator**\n\nMerge conflict detected but max resolution attempts (%d) reached. Manual intervention required.\n\nConflicting branches: `%s` ← `%s`%s",
-			cfg.Integrator.MaxConflictResolutionAttempts, batchBranch, workerBranch, mentions))
-		// Relabel from done → failed to block tier advancement
+	// Circuit breaker: if the batch PR is in cascade-failed state, refuse to
+	// create any new conflict-resolution issues. The label is removed manually
+	// by a human after they handle the underlying problem.
+	if pr := cascadeFailedPR(ctx, p, ms); pr != nil {
+		postCascadePausedNotice(ctx, p, pr.Number)
 		_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
 		_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
+		return &ConsolidateResult{
+			IssueNumber:      issue.Number,
+			WorkerBranch:     workerBranch,
+			ConflictDetected: true,
+		}, nil
+	}
+
+	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
+		markCascadeFailed(ctx, p, cfg, ms, issue, workerBranch, batchBranch, cascadeKindMerge)
 		return &ConsolidateResult{
 			IssueNumber:      issue.Number,
 			WorkerBranch:     workerBranch,
@@ -999,6 +1268,13 @@ func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers
 // max conflict resolution attempts cap. Returns the created issue number, or 0
 // if the cap was reached.
 func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) (int, error) {
+	// Circuit breaker: if the batch PR is in cascade-failed state, refuse to
+	// create any new conflict-resolution issues.
+	if pr := cascadeFailedPR(ctx, p, ms); pr != nil {
+		postCascadePausedNotice(ctx, p, pr.Number)
+		return 0, nil
+	}
+
 	// Count existing conflict-resolution issues in this milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
 		State:     "all",
@@ -1009,6 +1285,7 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 	}
 
 	conflictCount := 0
+	var lastConflictIssue *platform.Issue
 	for _, iss := range allIssues {
 		parsed, parseErr := issues.ParseBody(iss.Body)
 		if parseErr != nil {
@@ -1016,10 +1293,24 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 		}
 		if parsed.FrontMatter.ConflictResolution {
 			conflictCount++
+			lastConflictIssue = iss
 		}
 	}
 
 	if conflictCount >= cfg.Integrator.MaxConflictResolutionAttempts {
+		// The design forbids force-pushing the batch branch. When the
+		// rebase-against-main cascade exhausts its budget, point the user
+		// at the last resolver's worker branch so the recovery
+		// instructions tell them to fix and force-push that, not the
+		// batch branch. If lastConflictIssue is somehow nil (e.g. cap
+		// is 0), fall back to the batch branch — but emit a warning.
+		failingBranch := batchBranch
+		if lastConflictIssue != nil {
+			failingBranch = fmt.Sprintf("herd/worker/%d-%s", lastConflictIssue.Number, planner.Slugify(lastConflictIssue.Title))
+		} else {
+			fmt.Printf("Warning: cascade-failed (rebase) reached with no conflict-resolution issue to reference; recovery instructions will point at the batch branch\n")
+		}
+		markCascadeFailed(ctx, p, cfg, ms, lastConflictIssue, failingBranch, defaultBranch, cascadeKindRebase)
 		return 0, nil // At cap
 	}
 
@@ -1069,6 +1360,8 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 }
 
 func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) error {
+	// The cascade-failed circuit breaker is enforced inside
+	// DispatchRebaseConflictWorker so the two paths cannot diverge.
 	_, err := DispatchRebaseConflictWorker(ctx, p, cfg, ms, batchBranch, defaultBranch)
 	return err
 }

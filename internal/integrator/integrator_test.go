@@ -936,6 +936,12 @@ func TestConsolidate_ConflictMaxAttempts(t *testing.T) {
 		{Number: 81, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\nResolve\n"},
 	}
 
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+
 	wf := &mockWorkflowService{
 		runs: map[int64]*platform.Run{
 			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
@@ -946,6 +952,7 @@ func TestConsolidate_ConflictMaxAttempts(t *testing.T) {
 
 	mock := &mockPlatform{
 		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: wf,
 		repo: &mockRepoService{
 			defaultBranch: "main",
@@ -961,7 +968,11 @@ func TestConsolidate_ConflictMaxAttempts(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.ConflictDetected)
 	assert.Equal(t, 0, result.ConflictIssue) // No issue created
-	assert.Contains(t, issueSvc.comments[42][0], "max resolution attempts")
+	// New detailed cascade comment goes on the batch PR, not the issue. PR
+	// comments are posted via the Issues service (GitHub conflates them).
+	require.NotEmpty(t, issueSvc.comments[500])
+	assert.Contains(t, issueSvc.comments[500][0], "Conflict resolution cascade failed")
+	assert.Contains(t, issueSvc.addedLabels[500], issues.CascadeFailed)
 	assert.Len(t, wf.dispatched, 0) // No dispatch
 	// Should relabel from done → failed to block tier advancement
 	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
@@ -980,6 +991,12 @@ func TestConsolidate_ConflictMaxAttempts_MentionsUsers(t *testing.T) {
 		{Number: 81, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\nResolve\n"},
 	}
 
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+
 	wf := &mockWorkflowService{
 		runs: map[int64]*platform.Run{
 			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
@@ -990,6 +1007,7 @@ func TestConsolidate_ConflictMaxAttempts_MentionsUsers(t *testing.T) {
 
 	mock := &mockPlatform{
 		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: wf,
 		repo: &mockRepoService{
 			defaultBranch: "main",
@@ -1004,7 +1022,8 @@ func TestConsolidate_ConflictMaxAttempts_MentionsUsers(t *testing.T) {
 
 	_, err := Consolidate(context.Background(), mock, g, cfg, ConsolidateParams{RunID: 100})
 	require.NoError(t, err)
-	assert.Contains(t, issueSvc.comments[42][0], "@alice")
+	require.NotEmpty(t, issueSvc.comments[500])
+	assert.Contains(t, issueSvc.comments[500][0], "@alice")
 }
 
 func TestAdvance_AllComplete_RebaseFailure(t *testing.T) {
@@ -2702,6 +2721,252 @@ func TestDispatchRebaseConflictWorker_TaskBodyKeepsAgentOnWorkerBranch(t *testin
 	})
 }
 
+func TestHandleRebaseConflictResolution_BlockedByCascadeLabel(t *testing.T) {
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{issues.CascadeFailed}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 3}}
+
+	err := handleRebaseConflictResolution(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+
+	// Must not create a new issue and must not dispatch a worker.
+	assert.Empty(t, issueSvc.createdBody, "no rebase resolver issue must be created when batch PR is in cascade-failed state")
+	assert.Empty(t, wf.dispatched, "no workflow dispatch when blocked")
+	// Must post the paused-state comment on the batch PR.
+	require.NotEmpty(t, issueSvc.comments[500])
+	assert.Contains(t, issueSvc.comments[500][0], "Conflict resolution is paused")
+}
+
+func TestHandleRebaseConflictResolution_DispatchesWhenNotBlocked(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.createResult = &platform.Issue{Number: 777}
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+
+	err := handleRebaseConflictResolution(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+
+	// Dispatches when not blocked.
+	assert.NotEmpty(t, issueSvc.createdBody, "rebase resolver issue must be created when not blocked")
+	assert.Len(t, wf.dispatched, 1)
+}
+
+func TestMarkCascadeFailed_RebaseKindUsesResolverWorkerBranchWording(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 2}}
+	issue := &platform.Issue{Number: 200, Title: "Resolve rebase conflict", Milestone: ms, Labels: []string{issues.StatusDone}}
+
+	// Caller passes the last resolver's worker branch — not the batch
+	// branch — because force-pushing the batch branch is forbidden.
+	markCascadeFailed(context.Background(), mock, cfg, ms, issue, "herd/worker/200-resolve-rebase-conflict", "main", cascadeKindRebase)
+
+	require.NotEmpty(t, issueSvc.comments[500])
+	body := issueSvc.comments[500][0]
+	// Rebase-path wording: instructs the user to inspect/fix a worker
+	// branch against the default branch. Must NOT instruct the user to
+	// checkout or force-push the batch branch.
+	assert.Contains(t, body, "Inspect the failing worker branch")
+	assert.Contains(t, body, "git fetch origin && git checkout herd/worker/200-resolve-rebase-conflict")
+	assert.Contains(t, body, "git push --force origin herd/worker/200-resolve-rebase-conflict")
+	assert.Contains(t, body, "merge the latest `main` into the worker branch")
+	assert.NotContains(t, body, "git checkout herd/batch/1-batch")
+	assert.NotContains(t, body, "git push --force origin herd/batch/1-batch")
+	assert.NotContains(t, body, "Rebase the batch branch")
+	// Cascade-failed label still applied to PR.
+	assert.Contains(t, issueSvc.addedLabels[500], issues.CascadeFailed)
+}
+
+func TestDispatchRebaseConflictWorker_CascadeUsesResolverWorkerBranch(t *testing.T) {
+	// Two existing conflict-resolution issues (cap=2) — cascade triggers
+	// at the cap. The recovery message must point at the LAST resolver's
+	// worker branch, not the batch branch.
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 100, Title: "Resolve A", Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/batch/1-batch\n    - main\n---\n\n## Task\n"},
+		{Number: 101, Title: "Resolve B", Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/batch/1-batch\n    - main\n---\n\n## Task\n"},
+	}
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch 1"}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 2}}
+
+	num, err := DispatchRebaseConflictWorker(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+	assert.Equal(t, 0, num, "must return 0 at cap")
+	assert.Empty(t, wf.dispatched, "no dispatch at cap")
+
+	require.NotEmpty(t, issueSvc.comments[500])
+	body := issueSvc.comments[500][0]
+	// Points at the last resolver's worker branch (issue #101), not the batch.
+	assert.Contains(t, body, "herd/worker/101-resolve-b")
+	assert.Contains(t, body, "Inspect the failing worker branch")
+	assert.NotContains(t, body, "git push --force origin herd/batch/1-batch")
+	assert.NotContains(t, body, "Rebase the batch branch")
+}
+
+func TestMarkCascadeFailed_NilIssueOmitsCloseStep(t *testing.T) {
+	// When issue is nil but the batch PR exists, the comment must not
+	// include "close the original failing issue (#0)".
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 2}}
+
+	markCascadeFailed(context.Background(), mock, cfg, ms, nil, "herd/worker/42-test", "herd/batch/1-batch", cascadeKindMerge)
+
+	require.NotEmpty(t, issueSvc.comments[500])
+	body := issueSvc.comments[500][0]
+	assert.NotContains(t, body, "#0)", "nil issue must not produce `#0` in the close step")
+	assert.NotContains(t, body, "Or close the original failing issue", "step 3 must be omitted when no original issue is known")
+	// Cascade-failed label still applied to PR.
+	assert.Contains(t, issueSvc.addedLabels[500], issues.CascadeFailed)
+}
+
+// mockPRServiceWithErr returns a configurable error from List so we can
+// verify the cascade-failed comment path logs and falls back when the
+// batch-PR lookup transient-fails.
+type mockPRServiceWithErr struct {
+	mockPRService
+	listErr error
+}
+
+func (m *mockPRServiceWithErr) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	return m.listResult, nil
+}
+
+func TestMarkCascadeFailed_FindBatchPRErrorFallsBackToIssueComment(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRServiceWithErr{listErr: fmt.Errorf("simulated transient network failure")}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 2}}
+	issue := &platform.Issue{Number: 42, Title: "Test", Milestone: ms, Labels: []string{issues.StatusDone}}
+
+	markCascadeFailed(context.Background(), mock, cfg, ms, issue, "herd/worker/42-test", "herd/batch/1-batch", cascadeKindMerge)
+
+	// Falls back to issue comment on lookup error.
+	require.NotEmpty(t, issueSvc.comments[42])
+	assert.Contains(t, issueSvc.comments[42][0], "Manual intervention required")
+	// Issue still relabeled to failed.
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+}
+
+func TestParseWorkerBranchNumber(t *testing.T) {
+	tests := []struct {
+		name   string
+		branch string
+		want   int
+	}{
+		{name: "valid worker branch", branch: "herd/worker/42-some-slug", want: 42},
+		{name: "valid with multi-digit number", branch: "herd/worker/12345-foo", want: 12345},
+		{name: "valid with single-digit number", branch: "herd/worker/1-foo", want: 1},
+		{name: "no slug separator", branch: "herd/worker/42", want: 0},
+		{name: "non-numeric prefix", branch: "herd/worker/foo-bar", want: 0},
+		{name: "missing herd/worker prefix", branch: "feature/42-foo", want: 0},
+		{name: "empty branch", branch: "", want: 0},
+		{name: "batch branch", branch: "herd/batch/1-batch", want: 0},
+		{name: "prefix not preceded by dash", branch: "herd/worker/-foo", want: 0},
+		{name: "100 not matched by 10- prefix", branch: "herd/worker/100-foo", want: 100},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseWorkerBranchNumber(tc.branch))
+		})
+	}
+}
+
+func TestBuildCascadeChain_PrefixCollisionDoesNotMisidentifyParent(t *testing.T) {
+	// Issue #10 has branch herd/worker/10-foo. Issue #100 has branch
+	// herd/worker/100-foo. If we used `strings.HasPrefix` keyed on the
+	// branch prefix, "herd/worker/100-foo" could match the prefix
+	// "herd/worker/10-" depending on map iteration order. The exact-match
+	// parser must resolve unambiguously.
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Body: "---\nherd:\n  version: 1\n---\n\n## Task\n"},
+		{Number: 100, Body: "---\nherd:\n  version: 1\n---\n\n## Task\n"},
+		{Number: 101, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/100-foo\n    - herd/batch/1-batch\n---\n\n## Task\n"},
+	}
+	mock := &mockPlatform{issues: issueSvc}
+
+	current := &platform.Issue{Number: 101, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/100-foo\n    - herd/batch/1-batch\n---\n\n## Task\n"}
+	chain, err := buildCascadeChain(context.Background(), mock, ms, current)
+	require.NoError(t, err)
+	assert.Equal(t, []int{100, 101}, chain, "parent must be #100, not #10, despite shared numeric prefix")
+}
+
 func TestRetryConflictOriginIssues(t *testing.T) {
 	// Issue 50 is a conflict resolution issue referencing worker branch for issue 42
 	conflictIssue := &platform.Issue{
@@ -3314,4 +3579,495 @@ func TestDispatchReadyIssues_SkipsAlreadyInProgress(t *testing.T) {
 			assert.True(t, seenStatuses["queued"], "should query queued runs")
 		})
 	}
+}
+
+// --- Cascade-failure tests ---
+
+// cascadeFailureFixture wires a milestone, issue service, PR service, and
+// workflow service for cascade-failure scenarios. The caller fills in the
+// issue/PR list state before invoking handleConflictResolution.
+type cascadeFailureFixture struct {
+	ms       *platform.Milestone
+	issueSvc *mockIssueService
+	prSvc    *mockPRService
+	wf       *mockWorkflowService
+	mock     *mockPlatform
+	cfg      *config.Config
+	issue    *platform.Issue
+}
+
+func newCascadeFailureFixture(maxAttempts int, prLabels []string) *cascadeFailureFixture {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: prLabels},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: maxAttempts},
+		Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+	issue := &platform.Issue{
+		Number: 102, Title: "Failing worker",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+	}
+	return &cascadeFailureFixture{ms: ms, issueSvc: issueSvc, prSvc: prSvc, wf: wf, mock: mock, cfg: cfg, issue: issue}
+}
+
+func TestConflictCascadeFailure_AddsLabelToBatchPR(t *testing.T) {
+	fx := newCascadeFailureFixture(2, []string{})
+	// Two existing conflict-resolution issues — cap reached.
+	fx.issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+		{Number: 81, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+	}
+
+	_, err := handleConflictResolution(context.Background(), fx.mock, fx.cfg, fx.issue, fx.ms, "herd/worker/102-failing-worker", "herd/batch/1-batch")
+	require.NoError(t, err)
+
+	assert.Contains(t, fx.issueSvc.addedLabels[500], issues.CascadeFailed,
+		"batch PR must be labeled herd/cascade-failed")
+	assert.Contains(t, fx.issueSvc.removedLabels[102], issues.StatusDone)
+	assert.Contains(t, fx.issueSvc.addedLabels[102], issues.StatusFailed)
+}
+
+func TestConflictCascadeFailure_PostsBatchPRComment(t *testing.T) {
+	fx := newCascadeFailureFixture(2, []string{})
+	fx.issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+		{Number: 81, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+	}
+
+	_, err := handleConflictResolution(context.Background(), fx.mock, fx.cfg, fx.issue, fx.ms, "herd/worker/102-failing-worker", "herd/batch/1-batch")
+	require.NoError(t, err)
+
+	require.NotEmpty(t, fx.issueSvc.comments[500], "comment must be posted on PR #500, not on the issue")
+	body := fx.issueSvc.comments[500][0]
+	assert.Contains(t, body, "Conflict resolution cascade failed")
+	assert.Contains(t, body, "git fetch origin && git checkout")
+	assert.Contains(t, body, "herd/worker/102-failing-worker")
+	assert.Contains(t, body, "herd/cascade-failed")
+}
+
+func TestConflictCascadeFailure_BuildsChainCorrectly(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	// Three issues that form a cascade chain: #100 → #101 → #102.
+	original := &platform.Issue{
+		Number: 100, Title: "Foo",
+		Labels:    []string{issues.StatusFailed},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n---\n\n## Task\nDo foo\n",
+	}
+	resolver1 := &platform.Issue{
+		Number: 101, Title: "Bar",
+		Labels:    []string{issues.StatusFailed},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/100-foo\n    - herd/batch/1-batch\n---\n\n## Task\nResolve\n",
+	}
+	currentFailing := &platform.Issue{
+		Number: 102, Title: "Baz",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/101-bar\n    - herd/batch/1-batch\n---\n\n## Task\nResolve\n",
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{original, resolver1, currentFailing}
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 2},
+	}
+
+	_, err := handleConflictResolution(context.Background(), mock, cfg, currentFailing, ms, "herd/worker/102-baz", "herd/batch/1-batch")
+	require.NoError(t, err)
+
+	require.NotEmpty(t, issueSvc.comments[500])
+	assert.Contains(t, issueSvc.comments[500][0], "#100 → #101 → #102 (failed)")
+}
+
+func TestConflictCascadeFailure_TagsNotifyUsers(t *testing.T) {
+	fx := newCascadeFailureFixture(2, []string{})
+	fx.cfg.Monitor = config.Monitor{NotifyUsers: []string{"alice", "bob"}}
+	fx.issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+		{Number: 81, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+	}
+
+	_, err := handleConflictResolution(context.Background(), fx.mock, fx.cfg, fx.issue, fx.ms, "herd/worker/102-failing-worker", "herd/batch/1-batch")
+	require.NoError(t, err)
+
+	require.NotEmpty(t, fx.issueSvc.comments[500])
+	body := fx.issueSvc.comments[500][0]
+	// /cc must be at the end of the body and include both users.
+	assert.True(t, len(body) > len("/cc @alice @bob") &&
+		body[len(body)-len("/cc @alice @bob"):] == "/cc @alice @bob",
+		"PR comment must end with `/cc @alice @bob`, got tail: %q", body[max(0, len(body)-40):])
+}
+
+func TestHandleConflictResolution_BlockedByCascadeLabel(t *testing.T) {
+	fx := newCascadeFailureFixture(3, []string{issues.CascadeFailed})
+	// One existing conflict-resolution issue, so count is below the cap.
+	fx.issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+	}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: fx.issueSvc,
+		onCreate: func(string, string, []string, *int) (*platform.Issue, error) {
+			t.Fatal("Issues().Create must not be called when PR is in cascade-failed state")
+			return nil, nil
+		},
+	}
+	fx.mock.issues = mockCreate
+
+	result, err := handleConflictResolution(context.Background(), fx.mock, fx.cfg, fx.issue, fx.ms, "herd/worker/102-failing-worker", "herd/batch/1-batch")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.ConflictDetected)
+	// Callers key on WorkerBranch for follow-up logging/cleanup; the circuit-breaker
+	// path must populate it like the cap-exhaustion and success paths do.
+	assert.Equal(t, "herd/worker/102-failing-worker", result.WorkerBranch)
+
+	require.NotEmpty(t, fx.issueSvc.comments[500])
+	assert.Contains(t, fx.issueSvc.comments[500][0], "Conflict resolution is paused")
+	assert.Empty(t, fx.wf.dispatched, "no workflow dispatch must occur when blocked")
+	assert.Contains(t, fx.issueSvc.removedLabels[102], issues.StatusDone)
+	assert.Contains(t, fx.issueSvc.addedLabels[102], issues.StatusFailed)
+}
+
+func TestHandleConflictResolution_ResumesAfterLabelRemoved(t *testing.T) {
+	fx := newCascadeFailureFixture(3, []string{}) // no cascade-failed label
+	fx.issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+	}
+	createCalls := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: fx.issueSvc,
+		onCreate: func(title, _ string, _ []string, _ *int) (*platform.Issue, error) {
+			createCalls++
+			return &platform.Issue{Number: 999, Title: title}, nil
+		},
+	}
+	fx.mock.issues = mockCreate
+
+	_, err := handleConflictResolution(context.Background(), fx.mock, fx.cfg, fx.issue, fx.ms, "herd/worker/102-failing-worker", "herd/batch/1-batch")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, createCalls, "Issues().Create must be called when not blocked")
+	assert.Len(t, fx.wf.dispatched, 1, "Workflows().Dispatch must be called when not blocked")
+}
+
+func TestMarkCascadeFailed_NoPRFallsBackToIssueComment(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	issueSvc := newMockIssueService()
+	// PR service returns no PRs.
+	prSvc := &mockPRService{listResult: nil}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	cfg := &config.Config{
+		Integrator: config.Integrator{MaxConflictResolutionAttempts: 2},
+	}
+	issue := &platform.Issue{Number: 42, Title: "Test", Milestone: ms, Labels: []string{issues.StatusDone}}
+
+	// Must not panic and must fall back to a comment on the issue.
+	markCascadeFailed(context.Background(), mock, cfg, ms, issue, "herd/worker/42-test", "herd/batch/1-batch", cascadeKindMerge)
+
+	require.NotEmpty(t, issueSvc.comments[42])
+	assert.Contains(t, issueSvc.comments[42][0], "Manual intervention required")
+	// Issue still relabeled.
+	assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+}
+
+func TestBuildCascadeChain(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+
+	tests := []struct {
+		name         string
+		listResult   []*platform.Issue
+		currentIssue *platform.Issue
+		want         []int
+	}{
+		{
+			name:         "non-conflict issue returns only itself",
+			listResult:   []*platform.Issue{{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\n"}},
+			currentIssue: &platform.Issue{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\n"},
+			want:         []int{42},
+		},
+		{
+			name: "single resolver returns parent then current",
+			listResult: []*platform.Issue{
+				{Number: 100, Body: "---\nherd:\n  version: 1\n---\n\n## Task\n"},
+				{Number: 101, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/100-foo\n    - herd/batch/1-batch\n---\n\n## Task\n"},
+			},
+			currentIssue: &platform.Issue{Number: 101, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/100-foo\n    - herd/batch/1-batch\n---\n\n## Task\n"},
+			want:         []int{100, 101},
+		},
+		{
+			name: "cycle terminates without infinite loop",
+			listResult: []*platform.Issue{
+				{Number: 200, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/201-b\n    - herd/batch/1-batch\n---\n\n## Task\n"},
+				{Number: 201, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/200-a\n    - herd/batch/1-batch\n---\n\n## Task\n"},
+			},
+			currentIssue: &platform.Issue{Number: 200, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/201-b\n    - herd/batch/1-batch\n---\n\n## Task\n"},
+			want:         []int{201, 200},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.listResult = tc.listResult
+			mock := &mockPlatform{issues: issueSvc}
+
+			chain, err := buildCascadeChain(context.Background(), mock, ms, tc.currentIssue)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, chain)
+		})
+	}
+}
+
+func TestCascadeFailedPR(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+
+	tests := []struct {
+		name       string
+		listResult []*platform.PullRequest
+		wantPR     bool
+	}{
+		{
+			name:       "label present returns PR",
+			listResult: []*platform.PullRequest{{Number: 500, Head: "herd/batch/1-batch", Labels: []string{issues.CascadeFailed}}},
+			wantPR:     true,
+		},
+		{
+			name:       "label absent returns nil",
+			listResult: []*platform.PullRequest{{Number: 500, Head: "herd/batch/1-batch", Labels: []string{}}},
+			wantPR:     false,
+		},
+		{
+			name:       "no PR returns nil",
+			listResult: nil,
+			wantPR:     false,
+		},
+		{
+			name:       "unrelated labels returns nil",
+			listResult: []*platform.PullRequest{{Number: 500, Head: "herd/batch/1-batch", Labels: []string{"bug", "wontfix"}}},
+			wantPR:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prSvc := &mockPRService{listResult: tc.listResult}
+			mock := &mockPlatform{
+				issues: newMockIssueService(),
+				prs:    prSvc,
+			}
+			pr := cascadeFailedPR(context.Background(), mock, ms)
+			if tc.wantPR {
+				require.NotNil(t, pr)
+				assert.Equal(t, 500, pr.Number)
+			} else {
+				assert.Nil(t, pr)
+			}
+		})
+	}
+}
+
+func TestCascadeFailedPR_NilMilestone(t *testing.T) {
+	mock := &mockPlatform{issues: newMockIssueService(), prs: &mockPRService{}}
+	assert.Nil(t, cascadeFailedPR(context.Background(), mock, nil))
+}
+
+func TestPostCascadePausedNotice(t *testing.T) {
+	tests := []struct {
+		name          string
+		existing      []*platform.Comment
+		wantPostCount int
+	}{
+		{
+			name:          "no prior comments posts the notice",
+			existing:      nil,
+			wantPostCount: 1,
+		},
+		{
+			name: "unrelated prior comments still posts the notice",
+			existing: []*platform.Comment{
+				{Body: "Looks good to me"},
+				{Body: "Re-running CI"},
+			},
+			wantPostCount: 1,
+		},
+		{
+			name: "paused notice already present skips posting",
+			existing: []*platform.Comment{
+				{Body: cascadePausedComment},
+			},
+			wantPostCount: 0,
+		},
+		{
+			name: "paused notice after most recent cascade-failed marker skips posting",
+			existing: []*platform.Comment{
+				{Body: "⚠️ Conflict resolution cascade failed\n\nDetails about the cascade…"},
+				{Body: "Some unrelated comment"},
+				{Body: cascadePausedComment},
+			},
+			wantPostCount: 0,
+		},
+		{
+			name: "new cascade-failed marker after a paused notice re-enables posting",
+			existing: []*platform.Comment{
+				{Body: cascadePausedComment},
+				{Body: "Manual intervention happened"},
+				{Body: "⚠️ Conflict resolution cascade failed\n\nA fresh cascade occurred"},
+			},
+			wantPostCount: 1,
+		},
+		{
+			name: "only earliest comment is a paused notice and many comments after still skips",
+			existing: []*platform.Comment{
+				{Body: cascadePausedComment},
+				{Body: "ok"},
+				{Body: "still working"},
+			},
+			wantPostCount: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.listCommentsResult = tc.existing
+			mock := &mockPlatform{issues: issueSvc}
+
+			postCascadePausedNotice(context.Background(), mock, 500)
+
+			assert.Len(t, issueSvc.comments[500], tc.wantPostCount)
+			if tc.wantPostCount > 0 {
+				assert.Equal(t, cascadePausedComment, issueSvc.comments[500][0])
+			}
+		})
+	}
+}
+
+// listCommentsErrorIssueService overrides ListComments to return an error so
+// we can verify postCascadePausedNotice degrades to posting (rather than
+// silently swallowing the notice) when the comment-history lookup fails.
+type listCommentsErrorIssueService struct {
+	*mockIssueService
+}
+
+func (m *listCommentsErrorIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
+	return nil, fmt.Errorf("transient API failure")
+}
+
+func TestPostCascadePausedNotice_ListCommentsErrorStillPosts(t *testing.T) {
+	inner := newMockIssueService()
+	issueSvc := &listCommentsErrorIssueService{mockIssueService: inner}
+	mock := &mockPlatform{issues: issueSvc}
+
+	postCascadePausedNotice(context.Background(), mock, 500)
+
+	assert.Len(t, inner.comments[500], 1)
+	assert.Equal(t, cascadePausedComment, inner.comments[500][0])
+}
+
+func TestHandleConflictResolution_BlockedByCascadeLabelDoesNotDuplicateComment(t *testing.T) {
+	fx := newCascadeFailureFixture(3, []string{issues.CascadeFailed})
+	fx.issueSvc.listResult = []*platform.Issue{
+		{Number: 80, Body: "---\nherd:\n  version: 1\n  conflict_resolution: true\n---\n\n## Task\n"},
+	}
+	// Simulate a paused notice already on the PR from a prior workflow_run.
+	fx.issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: cascadePausedComment},
+	}
+
+	_, err := handleConflictResolution(context.Background(), fx.mock, fx.cfg, fx.issue, fx.ms, "herd/worker/102-failing-worker", "herd/batch/1-batch")
+	require.NoError(t, err)
+
+	assert.Empty(t, fx.issueSvc.comments[500], "must not post a duplicate paused notice when one already exists")
+	// Issue is still relabeled even when the notice is suppressed.
+	assert.Contains(t, fx.issueSvc.removedLabels[102], issues.StatusDone)
+	assert.Contains(t, fx.issueSvc.addedLabels[102], issues.StatusFailed)
+}
+
+func TestDispatchRebaseConflictWorker_BlockedByCascadeLabelDoesNotDuplicateComment(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: cascadePausedComment},
+	}
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{issues.CascadeFailed}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 3}}
+
+	num, err := DispatchRebaseConflictWorker(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+	assert.Equal(t, 0, num)
+	assert.Empty(t, issueSvc.comments[500], "must not post a duplicate paused notice when one already exists")
+	assert.Empty(t, wf.dispatched, "no workflow dispatch when blocked")
+}
+
+func TestHandleRebaseConflictResolution_DelegatesCircuitBreakerToDispatch(t *testing.T) {
+	// Single round-trip: handleRebaseConflictResolution must rely on
+	// DispatchRebaseConflictWorker for the cascade-failed check, not perform
+	// its own duplicate findBatchPR lookup.
+	issueSvc := newMockIssueService()
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 500, Head: "herd/batch/1-batch", Labels: []string{issues.CascadeFailed}},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: wf,
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	ms := &platform.Milestone{Number: 1, Title: "Batch"}
+	cfg := &config.Config{Integrator: config.Integrator{MaxConflictResolutionAttempts: 3}}
+
+	err := handleRebaseConflictResolution(context.Background(), mock, cfg, ms, "herd/batch/1-batch", "main")
+	require.NoError(t, err)
+
+	// Single notice posted (by Dispatch's circuit breaker), no duplicate
+	// from a separate check in handleRebaseConflictResolution.
+	require.Len(t, issueSvc.comments[500], 1)
+	assert.Contains(t, issueSvc.comments[500][0], "Conflict resolution is paused")
+	assert.Empty(t, wf.dispatched)
 }
