@@ -1148,14 +1148,20 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 		Context: fmt.Sprintf("Worker branch `%s` (from issue #%d) conflicts with the batch branch `%s`.", workerBranch, issue.Number, batchBranch),
 	})
 
+	truncatedBody, overflow := issues.TruncateIssueBody(body)
 	fixIssue, err := p.Issues().Create(ctx,
 		fmt.Sprintf("Resolve conflict: #%d (%s)", issue.Number, truncate(issue.Title, 40)),
-		body,
+		truncatedBody,
 		[]string{issues.TypeFix, issues.StatusInProgress},
 		&ms.Number,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating conflict-resolution issue: %w", err)
+	}
+	for _, comment := range issues.SplitOverflowComments(overflow) {
+		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
+			fmt.Printf("Warning: failed to post overflow comment on conflict-resolution issue #%d: %v\n", fixIssue.Number, cerr)
+		}
 	}
 
 	// Relabel original issue from done → failed to block tier advancement
@@ -1347,14 +1353,20 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 		Context: fmt.Sprintf("Automatic rebase of batch branch `%s` onto `%s` failed due to conflicts.", batchBranch, defaultBranch),
 	})
 
+	truncatedBody, overflow := issues.TruncateIssueBody(body)
 	fixIssue, err := p.Issues().Create(ctx,
 		fmt.Sprintf("Resolve rebase conflict: %s onto %s", batchBranch, defaultBranch),
-		body,
+		truncatedBody,
 		[]string{issues.TypeFix, issues.StatusInProgress},
 		&ms.Number,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("creating rebase conflict-resolution issue: %w", err)
+	}
+	for _, comment := range issues.SplitOverflowComments(overflow) {
+		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
+			fmt.Printf("Warning: failed to post overflow comment on rebase conflict-resolution issue #%d: %v\n", fixIssue.Number, cerr)
+		}
 	}
 
 	// Dispatch resolver worker
