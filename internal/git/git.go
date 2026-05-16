@@ -194,6 +194,20 @@ func (g *Git) MergeBase(a, b string) (string, error) {
 	return g.output("merge-base", a, b)
 }
 
+// RevListCount returns the number of commits in the given rev-list range
+// (e.g. "<from>..<to>" or "<from>..HEAD").
+func (g *Git) RevListCount(rangeSpec string) (int, error) {
+	out, err := g.output("rev-list", "--count", rangeSpec)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		return 0, fmt.Errorf("parsing rev-list count: %w", err)
+	}
+	return n, nil
+}
+
 // RevParse returns the SHA for a ref.
 func (g *Git) RevParse(ref string) (string, error) {
 	return g.output("rev-parse", ref)

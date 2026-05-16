@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -436,10 +438,12 @@ func TestWorkerSuccessLabeling_RemovesFailedAndInProgress(t *testing.T) {
 	assert.Contains(t, src, `[]string{issues.StatusInProgress, issues.StatusFailed}`,
 		"no-op and success paths should remove both in-progress and failed labels")
 
-	// Should appear exactly twice (no-op path + push success path)
+	// Should appear at least twice in the batch flow (no-op path + push success path).
+	// The standalone flow adds two more (no-op + push success). Allow ≥ 2 to remain
+	// flexible across both flows.
 	count := strings.Count(src, `[]string{issues.StatusInProgress, issues.StatusFailed}`)
-	assert.Equal(t, 2, count,
-		"both no-op and success paths should remove in-progress+failed (expected 2 occurrences)")
+	assert.GreaterOrEqual(t, count, 2,
+		"batch no-op and success paths must each remove in-progress+failed")
 }
 
 func TestReportPostedAfterPush(t *testing.T) {
@@ -1509,11 +1513,17 @@ func TestExec_SkipsAgentWhenProgressComplete(t *testing.T) {
 	assert.True(t, foundSkipReport, "worker should post a report even when agent is skipped")
 }
 
-func TestExec_StandaloneMode_NotImplemented(t *testing.T) {
-	// Mode="standalone" should return the stub error without attempting any
-	// platform calls beyond the deferred failure-handling path.
+func TestExec_StandaloneMode_DispatchesToExecStandalone(t *testing.T) {
+	// Mode="standalone" should dispatch to execStandalone (before any milestone
+	// check), so an issue without a milestone but with valid frontmatter must
+	// not return the batch-only "no milestone" error.
 	mock := &mockPlatform{
-		issues:    &mockIssueService{},
+		issues: &mockIssueService{
+			// issue.Body is empty → missing frontmatter → execStandalone returns
+			// the descriptive frontmatter error. This proves dispatch happened
+			// before the milestone check (no milestone present here).
+			getResult: &platform.Issue{Number: 42, Title: "Test", Milestone: nil},
+		},
 		prs:       &mockPRService{},
 		workflows: &mockWorkflowService{},
 		repo:      &mockRepoService{defaultBranch: "main"},
@@ -1525,7 +1535,9 @@ func TestExec_StandaloneMode_NotImplemented(t *testing.T) {
 		Mode:        "standalone",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "standalone mode not yet implemented")
+	assert.Contains(t, err.Error(), "missing target_branch/target_pr")
+	assert.NotContains(t, err.Error(), "no milestone",
+		"standalone dispatch must happen before the milestone check")
 }
 
 func TestExec_SkipAgent_SourceVerification(t *testing.T) {
@@ -1548,4 +1560,479 @@ func TestExec_SkipAgent_SourceVerification(t *testing.T) {
 	// skipAgent must gate the Execute call
 	assert.Contains(t, src, "if skipAgent",
 		"skipAgent flag must control whether agent is invoked")
+}
+
+// --- Standalone mode tests ---
+
+// commitAgent is a mock agent that runs commitFunc before returning execResult.
+// Used to simulate the agent making changes to the repo during Execute.
+type commitAgent struct {
+	commitFunc func()
+	execResult *agent.ExecResult
+	execErr    error
+}
+
+func (c *commitAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
+	return nil, nil
+}
+func (c *commitAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOptions) (*agent.ExecResult, error) {
+	if c.commitFunc != nil {
+		c.commitFunc()
+	}
+	return c.execResult, c.execErr
+}
+func (c *commitAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	return nil, nil
+}
+func (c *commitAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error { return nil }
+
+// initTestRepoWithTargetBranch creates a test repo and pushes targetBranch to
+// origin (with one commit on it). Returns (work, bare).
+func initTestRepoWithTargetBranch(t *testing.T, targetBranch string) (string, string) {
+	t.Helper()
+
+	bare := t.TempDir()
+	work := t.TempDir()
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+
+	run(bare, "git", "init", "--bare", bare)
+	run(work, "git", "init", work)
+	run(work, "git", "remote", "add", "origin", bare)
+	require.NoError(t, os.WriteFile(filepath.Join(work, "README"), []byte("init"), 0644))
+	run(work, "git", "add", "README")
+	run(work, "git", "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-m", "init")
+	run(work, "git", "push", "origin", "HEAD:refs/heads/main")
+
+	// Create target branch and push it
+	run(work, "git", "checkout", "-b", targetBranch)
+	require.NoError(t, os.WriteFile(filepath.Join(work, "target.txt"), []byte("target"), 0644))
+	run(work, "git", "add", "target.txt")
+	run(work, "git", "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-m", "target initial")
+	run(work, "git", "push", "origin", targetBranch)
+
+	// Go back to main so Exec's checkout switches branches naturally
+	run(work, "git", "checkout", "main")
+
+	return work, bare
+}
+
+// standaloneIssueBody renders a tracking-issue body with the given frontmatter target fields.
+func standaloneIssueBody(targetBranch string, targetPR int) string {
+	return issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:      1,
+			Type:         issues.TypeStandaloneFix,
+			TargetBranch: targetBranch,
+			TargetPR:     targetPR,
+		},
+		Task: "Fix the thing on the PR.",
+	})
+}
+
+func TestExecStandalone_PushesToTargetBranch(t *testing.T) {
+	targetBranch := "feature/standalone"
+	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+
+	prSvc := &mockPRService{}
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 590,
+			Title:  "Fix bug",
+			Body:   standaloneIssueBody(targetBranch, 123),
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	// Agent makes a commit on the target branch
+	ag := &commitAgent{
+		commitFunc: func() {
+			require.NoError(t, os.WriteFile(filepath.Join(work, "fix.txt"), []byte("fixed"), 0644))
+			run(work, "git", "add", "fix.txt")
+			run(work, "git", "-c", "user.email=h@h.com", "-c", "user.name=h", "commit", "-m", "fix: do the thing")
+		},
+		execResult: &agent.ExecResult{Summary: "Fixed the bug"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 590,
+		RepoRoot:    work,
+		Mode:        "standalone",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.NoOp)
+	assert.Empty(t, result.WorkerBranch, "standalone result must not set WorkerBranch")
+
+	// Verify the working tree was switched to the target branch
+	out, _ := exec.Command("git", "-C", work, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	assert.Equal(t, targetBranch, strings.TrimSpace(string(out)),
+		"worker should remain checked out on the target branch")
+
+	// Verify the commit landed on origin/<targetBranch>
+	originSHA, _ := exec.Command("git", "-C", work, "rev-parse", "origin/"+targetBranch).Output()
+	headSHA, _ := exec.Command("git", "-C", work, "rev-parse", "HEAD").Output()
+	assert.Equal(t, strings.TrimSpace(string(originSHA)), strings.TrimSpace(string(headSHA)),
+		"origin/<targetBranch> must match HEAD after push")
+
+	// Tracking issue closed
+	update, ok := issueSvc.updatedIssues[590]
+	require.True(t, ok, "issue should have been updated")
+	require.NotNil(t, update.State)
+	assert.Equal(t, "closed", *update.State)
+
+	// Done label added; in-progress removed
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.Contains(t, issueSvc.removedLabels, issues.StatusInProgress)
+
+	// Confirmation comment posted on the PR
+	require.NotEmpty(t, prSvc.comments, "must post a confirmation comment on the PR")
+	foundConfirm := false
+	for _, c := range prSvc.comments {
+		if strings.Contains(c, "Standalone fix complete") && strings.Contains(c, targetBranch) {
+			foundConfirm = true
+		}
+	}
+	assert.True(t, foundConfirm, "PR must receive a 'Standalone fix complete' comment naming the target branch")
+
+	// Failure handler must not have fired (no failure labels, no monitor dispatch)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusFailed)
+}
+
+func TestExecStandalone_NoOpPath(t *testing.T) {
+	targetBranch := "feature/noop"
+	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
+
+	prSvc := &mockPRService{}
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 591,
+			Title:  "No-op fix",
+			Body:   standaloneIssueBody(targetBranch, 124),
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	// Agent makes no changes
+	ag := &mockAgent{
+		execResult: &agent.ExecResult{Summary: "Already fixed"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 591,
+		RepoRoot:    work,
+		Mode:        "standalone",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.NoOp, "no-op result expected")
+
+	// PR should receive a no-op comment, not a push-success comment
+	require.NotEmpty(t, prSvc.comments, "PR should receive the no-op comment")
+	foundNoOp := false
+	for _, c := range prSvc.comments {
+		if strings.Contains(c, "Worker #591") && strings.Contains(c, "no-op") {
+			foundNoOp = true
+		}
+		assert.NotContains(t, c, "Standalone fix complete — pushed",
+			"no-op path must not post a push-success comment")
+	}
+	assert.True(t, foundNoOp, "PR must receive 'Worker #591 — no-op' comment")
+
+	// Issue is closed
+	update, ok := issueSvc.updatedIssues[591]
+	require.True(t, ok)
+	require.NotNil(t, update.State)
+	assert.Equal(t, "closed", *update.State)
+
+	// Done label added
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
+}
+
+func TestExecStandalone_PushConflict(t *testing.T) {
+	targetBranch := "feature/conflict"
+	work, bare := initTestRepoWithTargetBranch(t, targetBranch)
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+
+	// Create a sister clone of the bare repo and advance origin/<targetBranch>.
+	// `work` already has a local <targetBranch> at the original tip (from
+	// initTestRepoWithTargetBranch). When execStandalone fetches + checks
+	// out the branch, it switches to the local stale ref. Any commit + push
+	// from there will be rejected as non-fast-forward.
+	sister := t.TempDir()
+	run(sister, "git", "clone", bare, sister)
+	run(sister, "git", "-C", sister, "checkout", targetBranch)
+	require.NoError(t, os.WriteFile(filepath.Join(sister, "diverge.txt"), []byte("diverge"), 0644))
+	run(sister, "git", "-C", sister, "add", "diverge.txt")
+	run(sister, "git", "-C", sister, "-c", "user.email=s@s.com", "-c", "user.name=s", "commit", "-m", "diverge")
+	run(sister, "git", "-C", sister, "push", "origin", targetBranch)
+
+	prSvc := &mockPRService{}
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 592,
+			Title:  "Conflicting fix",
+			Body:   standaloneIssueBody(targetBranch, 125),
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	ag := &commitAgent{
+		commitFunc: func() {
+			require.NoError(t, os.WriteFile(filepath.Join(work, "worker.txt"), []byte("worker"), 0644))
+			run(work, "git", "-C", work, "add", "worker.txt")
+			run(work, "git", "-C", work, "-c", "user.email=h@h.com", "-c", "user.name=h", "commit", "-m", "worker change")
+		},
+		execResult: &agent.ExecResult{Summary: "Made change"},
+	}
+
+	_, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 592,
+		RepoRoot:    work,
+		Mode:        "standalone",
+	})
+	require.Error(t, err, "push to diverged remote must surface an error")
+	assert.Contains(t, err.Error(), "pushing to target branch",
+		"error must mention push failure")
+
+	// Rebase-and-retry comment posted on the tracking issue
+	foundRebase := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Could not push") && strings.Contains(c, "Rebase your PR") {
+			foundRebase = true
+		}
+	}
+	assert.True(t, foundRebase, "tracking issue must receive rebase-and-retry comment")
+
+	// Issue must NOT be closed
+	_, wasClosed := issueSvc.updatedIssues[592]
+	assert.False(t, wasClosed, "tracking issue must remain open on push conflict")
+
+	// Failure handler labeled it failed
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+}
+
+func TestExecStandalone_MissingFrontmatter(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"empty body", ""},
+		{"no frontmatter", "## Task\nFix it\n"},
+		{
+			"missing target_branch",
+			issues.RenderBody(issues.IssueBody{
+				FrontMatter: issues.FrontMatter{Version: 1, TargetPR: 99},
+				Task:        "Fix",
+			}),
+		},
+		{
+			"missing target_pr",
+			issues.RenderBody(issues.IssueBody{
+				FrontMatter: issues.FrontMatter{Version: 1, TargetBranch: "feature/x"},
+				Task:        "Fix",
+			}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockPlatform{
+				issues: &mockIssueService{
+					getResult: &platform.Issue{Number: 42, Title: "Test", Body: tt.body},
+				},
+				prs:       &mockPRService{},
+				workflows: &mockWorkflowService{},
+				repo:      &mockRepoService{defaultBranch: "main"},
+			}
+
+			// Agent should never run — track that by failing if it does.
+			ag := &commitAgent{
+				commitFunc: func() {
+					t.Fatal("agent must not be invoked when frontmatter is missing")
+				},
+			}
+
+			_, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+				IssueNumber: 42,
+				RepoRoot:    t.TempDir(),
+				Mode:        "standalone",
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "missing target_branch/target_pr",
+				"error must explain the missing frontmatter fields")
+		})
+	}
+}
+
+// recordingTransport is a minimal http.RoundTripper that records GET requests
+// to GitHub user-attachment URLs and returns a small fake PNG payload.
+type recordingTransport struct {
+	mu       sync.Mutex
+	requests []string
+}
+
+func (r *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	r.requests = append(r.requests, req.URL.String())
+	r.mu.Unlock()
+
+	// 1x1 PNG header bytes — enough to satisfy image-extension detection.
+	body := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	return &http.Response{
+		StatusCode: 200,
+		Header: http.Header{
+			"Content-Type": []string{"image/png"},
+		},
+		Body:    io.NopCloser(strings.NewReader(string(body))),
+		Request: req,
+	}, nil
+}
+
+func TestExecStandalone_ImagesAndProgress(t *testing.T) {
+	targetBranch := "feature/imgs"
+	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
+
+	issueBody := standaloneIssueBody(targetBranch, 126) +
+		"\n\nSee screenshot: ![shot](https://github.com/user-attachments/assets/abc-123)\n"
+
+	prSvc := &mockPRService{}
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 593,
+			Title:  "Img test",
+			Body:   issueBody,
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	transport := &recordingTransport{}
+	httpClient := &http.Client{Transport: transport}
+
+	// Agent makes no changes (no-op path), but we just want to confirm image
+	// preprocessing was attempted and progress poster started.
+	ag := &mockAgent{execResult: &agent.ExecResult{Summary: "ok"}}
+
+	cfg := &config.Config{
+		Workers: config.Workers{ProgressIntervalSeconds: 0}, // disable progress for test speed
+	}
+
+	_, err := Exec(context.Background(), mock, ag, cfg, ExecParams{
+		IssueNumber: 593,
+		RepoRoot:    work,
+		Mode:        "standalone",
+		HTTPClient:  httpClient,
+	})
+	require.NoError(t, err)
+
+	// Verify the HTTP client was used to fetch the image
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	require.NotEmpty(t, transport.requests, "HTTPClient must be used for image download")
+	foundGitHub := false
+	for _, r := range transport.requests {
+		if strings.Contains(r, "github.com/user-attachments/assets/abc-123") {
+			foundGitHub = true
+		}
+	}
+	assert.True(t, foundGitHub, "image download must request the GitHub attachment URL")
+
+	// Verify the source code wires the progress poster into execStandalone.
+	source, err := os.ReadFile("worker.go")
+	require.NoError(t, err)
+	src := string(source)
+	standaloneIdx := strings.Index(src, "func execStandalone(")
+	require.NotEqual(t, -1, standaloneIdx)
+	standaloneBlock := src[standaloneIdx:]
+	assert.Contains(t, standaloneBlock, "postProgressUpdates(",
+		"execStandalone must start the progress poster")
+}
+
+func TestRenderStandalonePrompt(t *testing.T) {
+	cfg := &config.Config{}
+	prompt, err := renderStandalonePrompt("Fix it", "## Task\nDo the thing", 590, "feature/headbranch", t.TempDir(), cfg)
+	require.NoError(t, err)
+
+	for _, want := range []string{
+		"standalone mode",
+		"feature/headbranch",
+		"STAY on it",
+		"Do NOT create new branches",
+		"Do NOT open new pull requests",
+		"Fix it",
+		"## Task\nDo the thing",
+		"issue #590",
+		".herd/progress/",
+		"git push origin feature/headbranch",
+	} {
+		assert.Contains(t, prompt, want, "missing: %s", want)
+	}
+
+	// Standalone prompt must omit batch-specific scaffolding
+	for _, unwanted := range []string{
+		"worker branch",
+		"Integrator",
+		"This is a fix issue created by the reviewer",
+	} {
+		assert.NotContains(t, prompt, unwanted, "standalone prompt must not include: %s", unwanted)
+	}
+}
+
+func TestRenderStandalonePrompt_WithRoleAndCoAuthor(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "worker.md"), []byte("Use table-driven tests"), 0644))
+
+	cfg := &config.Config{
+		PullRequests: config.PullRequests{CoAuthorEmail: "123+herd-os[bot]@users.noreply.github.com"},
+	}
+	prompt, err := renderStandalonePrompt("Fix", "Body", 1, "feature/x", dir, cfg)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "Use table-driven tests")
+	assert.Contains(t, prompt, "Project-Specific Instructions")
+	assert.Contains(t, prompt, "Co-authored-by: herd-os[bot]")
 }
