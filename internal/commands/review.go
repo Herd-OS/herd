@@ -28,10 +28,13 @@ func handleReview(hctx *HandlerContext, cmd Command) Result {
 		return Result{}
 	}
 
+	// Manual=true: /herd review is a user-initiated request and must bypass
+	// the herd/stable-disagreement circuit breaker.
 	result, err := integrator.Review(hctx.Ctx, hctx.Platform, hctx.Agent, hctx.Git, hctx.Config, integrator.ReviewParams{
 		PRNumber:          pr.Number,
 		RepoRoot:          hctx.RepoRoot,
 		ExtraInstructions: cmd.Prompt,
+		Manual:            true,
 	})
 	if err != nil {
 		return Result{Error: err}

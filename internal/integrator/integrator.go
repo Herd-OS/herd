@@ -54,6 +54,10 @@ type ReviewParams struct {
 	BatchNumber       int    // Alternative to RunID — used by advance-on-close
 	RepoRoot          string
 	ExtraInstructions string // Optional extra instructions appended to the review system prompt
+	// Manual is true when this review was triggered by a /herd review or
+	// /herd integrate slash command. Manual runs bypass the
+	// herd/stable-disagreement circuit breaker.
+	Manual bool
 }
 
 // ReviewResult holds the result of a batch PR review.
@@ -69,6 +73,12 @@ type ReviewResult struct {
 	// unparseable output on every attempt and the integrator gave up.
 	// The user has been told to re-run `/herd review` manually.
 	ManualInterventionNeeded bool
+	// StableDisagreement is true when the integrator detected that the
+	// reviewer is re-flagging findings that a previous fix worker already
+	// determined to be no-ops. The batch PR is labelled
+	// herd/stable-disagreement and a help-needed comment is posted; the
+	// cycle is halted so the user can decide how to proceed.
+	StableDisagreement bool
 }
 
 // ReviewStandaloneParams holds parameters for reviewing a non-batch PR.
