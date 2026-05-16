@@ -189,6 +189,10 @@ func buildBatchEntry(ctx context.Context, p platform.Platform, ms *platform.Mile
 			be.CascadeFailed = true
 			be.HasAttention = true
 		}
+		if issues.HasLabel(pr.Labels, issues.StableDisagreement) {
+			be.StableDisagreement = true
+			be.HasAttention = true
+		}
 		if status, err := p.Checks().GetCombinedStatus(ctx, pr.Head); err == nil {
 			be.CIStatus = status
 			if status == "failure" {

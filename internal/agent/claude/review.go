@@ -46,6 +46,20 @@ The following comments were left by users (repository owners/collaborators) on t
 ---
 {{end}}
 {{end}}
+{{if .WorkerNoOpVerdicts}}
+## Worker No-Op Verdicts
+
+The following comments were posted by fix workers in previous cycles. The worker read the issue body, verified the code matches what was described, and concluded NO code change was needed. Treat these verdicts as authoritative — they are the result of an agent reading the actual source files:
+
+- If a worker no-op verdict explains why a finding does not require a fix, do NOT re-flag the same finding.
+- If your new review would produce a finding that a worker already no-op'd, only re-flag it if you have NEW concrete evidence the worker was wrong (e.g., a specific file:line that contradicts the worker's verdict).
+
+{{range .WorkerNoOpVerdicts}}
+---
+{{.}}
+---
+{{end}}
+{{end}}
 ## Diff
 
 ` + "```diff" + `
@@ -100,6 +114,7 @@ type reviewPromptData struct {
 	MinFixSeverityDesc   string
 	PriorReviewComments  []string
 	UserFeedbackComments []string
+	WorkerNoOpVerdicts   []string
 }
 
 // Review runs the configured agent in headless mode to review a diff.
@@ -204,6 +219,7 @@ func renderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 		MinFixSeverityDesc:   sevDesc,
 		PriorReviewComments:  opts.PriorReviewComments,
 		UserFeedbackComments: opts.UserFeedbackComments,
+		WorkerNoOpVerdicts:   opts.WorkerNoOpVerdicts,
 	}
 
 	// Use role instructions passed by the caller (integrator loads .herd/integrator.md)

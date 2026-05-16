@@ -2834,3 +2834,425 @@ func TestReview_CtxCancelledDuringRetryWait(t *testing.T) {
 	assert.False(t, res.ManualInterventionNeeded)
 	assert.Equal(t, 1, ag.calls, "second Review call should not fire after ctx cancellation")
 }
+
+// --- Worker no-op verdict collection / stable disagreement tests (#577) ---
+
+const sampleWorkerVerdictA = "**Worker #42 — no-op verdict**\n\nFindings reviewed against the current code:\n\n- **Missing nil check**: src/foo.go:12 — the nil-check claim is wrong; the value is constructed three lines above and is never nil at this point.\n\nConclusion: code already handles this correctly."
+
+const sampleWorkerVerdictB = "**Worker #43 — no-op verdict**\n\nFindings reviewed against the current code:\n\n- **Race condition in worker pool**: src/pool.go:80 — the alleged race is impossible because the mutex held in submit() covers the read at line 95.\n\nConclusion: no race exists."
+
+func TestCollectWorkerNoOpVerdicts(t *testing.T) {
+	comments := []*platform.Comment{
+		{Body: sampleWorkerVerdictA},
+		{Body: "🔍 **HerdOS Agent Review** (cycle 1 of 3)\n\nFound 1 issue"},
+		{Body: "This finding is a false positive — please look at the test file"},
+		{Body: sampleWorkerVerdictB},
+		{Body: "/herd fix something"},
+		{Body: ""},
+	}
+
+	got := collectWorkerNoOpVerdicts(comments)
+	require.Len(t, got, 2)
+	assert.Equal(t, sampleWorkerVerdictA, got[0])
+	assert.Equal(t, sampleWorkerVerdictB, got[1])
+}
+
+func TestCollectWorkerNoOpVerdicts_NoVerdicts(t *testing.T) {
+	comments := []*platform.Comment{
+		{Body: "🔍 **HerdOS Agent Review**"},
+		{Body: "Plain user feedback"},
+		{Body: "/herd fix"},
+		{Body: ""},
+		// First line shape is close but missing the suffix
+		{Body: "**Worker #99 — some other note**\n\nbody"},
+		// First line shape is close but missing the prefix
+		{Body: "Worker #99 — no-op verdict\n\nbody"},
+	}
+	got := collectWorkerNoOpVerdicts(comments)
+	assert.Nil(t, got)
+}
+
+func TestCollectUserFeedbackComments_ExcludesWorkerVerdicts(t *testing.T) {
+	comments := []*platform.Comment{
+		{Body: sampleWorkerVerdictA},
+		{Body: "Real user feedback here"},
+		{Body: "🔍 **HerdOS Agent Review**\nFindings"},
+	}
+	got := collectUserFeedbackComments(comments)
+	assert.Equal(t, []string{"Real user feedback here"}, got)
+	for _, c := range got {
+		assert.NotContains(t, c, "Worker #", "worker verdicts must not be returned as user feedback")
+	}
+}
+
+func TestReview_PassesWorkerNoOpVerdicts(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: sampleWorkerVerdictA},
+		{Body: sampleWorkerVerdictB},
+	}
+
+	var capturedOpts agent.ReviewOptions
+	captureAgent := &capturingMockAgent{
+		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		capturedOpts: &capturedOpts,
+	}
+
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	dir, g := initTestRepo(t)
+	_, err := Review(context.Background(), mock, captureAgent, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.Len(t, capturedOpts.WorkerNoOpVerdicts, 2)
+	assert.Equal(t, sampleWorkerVerdictA, capturedOpts.WorkerNoOpVerdicts[0])
+	assert.Equal(t, sampleWorkerVerdictB, capturedOpts.WorkerNoOpVerdicts[1])
+}
+
+func TestReview_DetectsStableDisagreement(t *testing.T) {
+	// Previous-cycle worker verdicts cover findings A and B; the fake
+	// agent returns findings A, B, and C. A and B are blocked because they
+	// match prior verdicts; C is genuinely new but is dropped on the floor
+	// by design — when stable disagreement is detected the integrator halts
+	// the entire cycle so the user can decide.
+	findingA := "Missing nil check on FooBar value before dereference in src/foo.go"
+	findingB := "Race condition in worker pool submit/read in src/pool.go"
+	findingC := "Brand new finding the worker has never seen"
+
+	verdictA := "**Worker #42 — no-op verdict**\n\nFindings reviewed against the current code:\n\n- " + findingA + " — nil check is wrong; value is constructed three lines above.\n\nConclusion: already handled."
+	verdictB := "**Worker #43 — no-op verdict**\n\nFindings reviewed against the current code:\n\n- " + findingB + " — alleged race is impossible due to mutex coverage.\n\nConclusion: no race."
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: verdictA},
+		{Body: verdictB},
+	}
+
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 999, Title: title}, nil
+		},
+	}
+
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:     mockCreate,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: findingA},
+				{Severity: "HIGH", Description: findingB},
+				{Severity: "HIGH", Description: findingC},
+			},
+		},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.StableDisagreement, "StableDisagreement must be true")
+	assert.Equal(t, 2, result.FindingsCount, "FindingsCount should reflect blocked findings (A and B)")
+
+	// No fix issue created, no worker dispatched.
+	assert.Equal(t, 0, createdIssues, "stable-disagreement cycle must not create a fix issue")
+	assert.Empty(t, wf.dispatched, "stable-disagreement cycle must not dispatch a fix worker")
+
+	// herd/stable-disagreement label added to the batch PR.
+	assert.Contains(t, issueSvc.addedLabels[50], issues.StableDisagreement)
+
+	// Stable-disagreement comment posted with the expected header and content.
+	var stableComment string
+	for _, c := range prSvc.comments {
+		if strings.HasPrefix(c, "⚠️ **Stable disagreement detected**") {
+			stableComment = c
+			break
+		}
+	}
+	require.NotEmpty(t, stableComment, "expected a stable-disagreement comment")
+	assert.Contains(t, stableComment, findingA)
+	assert.Contains(t, stableComment, findingB)
+	assert.NotContains(t, stableComment, findingC, "genuinely-new finding C is dropped on the floor by design")
+}
+
+func TestReview_NoStableDisagreementWhenAllNew(t *testing.T) {
+	// Worker verdicts exist but no current finding matches any of them —
+	// normal fix-issue creation should proceed.
+	verdict := "**Worker #42 — no-op verdict**\n\nFindings reviewed against the current code:\n\n- Some completely unrelated topic that no current finding mentions whatsoever\n\nConclusion: prior fix not needed."
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{Body: verdict},
+	}
+
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 999, Title: title}, nil
+		},
+	}
+
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues: mockCreate,
+		prs: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
+		},
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Brand new finding A that's not in any verdict"},
+				{Severity: "HIGH", Description: "Brand new finding B that's not in any verdict"},
+			},
+		},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.False(t, result.StableDisagreement, "no verdict matches → no stable disagreement")
+	assert.NotContains(t, issueSvc.addedLabels[50], issues.StableDisagreement, "label must not be added")
+	assert.Equal(t, 1, createdIssues, "normal fix-issue creation must proceed")
+	assert.NotEmpty(t, wf.dispatched, "fix worker must be dispatched")
+}
+
+func TestReview_BlockedByStableDisagreementLabel(t *testing.T) {
+	// PR has the StableDisagreement label and params.Manual is false —
+	// Review must early-return without calling the agent.
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+
+	prSvc := &mockPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main", Labels: []string{issues.StableDisagreement}},
+		},
+	}
+	msSvc := &mockMilestoneService{
+		getResult: map[int]*platform.Milestone{
+			1: {Number: 1, Title: "Batch"},
+		},
+	}
+
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 999, Title: title}, nil
+		},
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{{Severity: "HIGH", Description: "Should never be evaluated"}},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:     mockCreate,
+		prs:        prSvc,
+		workflows:  &mockWorkflowService{},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: msSvc,
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.Equal(t, 0, ag.calls, "agent must NOT be called when StableDisagreement label blocks the review")
+	assert.Equal(t, 0, createdIssues, "no fix issue must be created when blocked by label")
+	assert.False(t, result.Approved)
+	assert.False(t, result.StableDisagreement, "blocked-by-label is a different state than detection")
+}
+
+func TestReview_ManualBypassesStableDisagreementLabel(t *testing.T) {
+	// Same setup as TestReview_BlockedByStableDisagreementLabel but
+	// params.Manual = true. The agent IS called and the rest of the flow
+	// proceeds.
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main", Labels: []string{issues.StableDisagreement}},
+			},
+		},
+	}
+	msSvc := &mockMilestoneService{
+		getResult: map[int]*platform.Milestone{
+			1: {Number: 1, Title: "Batch"},
+		},
+	}
+
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  &mockWorkflowService{},
+		repo:       &mockRepoService{defaultBranch: "main"},
+		milestones: msSvc,
+	}
+
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir, Manual: true})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, ag.calls, "agent MUST be called when Manual=true bypasses the label")
+	assert.True(t, result.Approved)
+}
+
+func TestSummarizeVerdict(t *testing.T) {
+	longBullet := strings.Repeat("a", 250)
+	tests := []struct {
+		name    string
+		verdict string
+		want    string
+	}{
+		{
+			name:    "first bullet returned",
+			verdict: "**Worker #42 — no-op verdict**\n\nFindings reviewed against the current code:\n\n- first bullet text\n- second bullet text",
+			want:    "first bullet text",
+		},
+		{
+			name:    "conclusion line fallback",
+			verdict: "**Worker #42 — no-op verdict**\n\nFindings reviewed against the current code:\n\nNo bullets but a conclusion.\n\nConclusion: nothing to fix here",
+			want:    "nothing to fix here",
+		},
+		{
+			name:    "neither bullet nor conclusion returns empty",
+			verdict: "**Worker #42 — no-op verdict**\n\nJust some prose with no recognizable structure",
+			want:    "",
+		},
+		{
+			name:    "long bullet truncated with ellipsis",
+			verdict: "**Worker #42 — no-op verdict**\n\n- " + longBullet,
+			want:    strings.Repeat("a", 200) + "…",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := summarizeVerdict(tt.verdict)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBuildStableDisagreementComment(t *testing.T) {
+	blocked := []agent.ReviewFinding{
+		{Severity: "HIGH", Description: "First blocked description"},
+		{Severity: "HIGH", Description: "Second blocked description"},
+	}
+	verdicts := []string{
+		"**Worker #42 — no-op verdict**\n\nFindings reviewed against the current code:\n\n- first verdict bullet",
+		"**Worker #43 — no-op verdict**\n\nFindings reviewed against the current code:\n\n- second verdict bullet",
+	}
+	verdictIdx := []int{0, 1}
+
+	got := buildStableDisagreementComment(blocked, verdictIdx, verdicts)
+
+	assert.Contains(t, got, "⚠️ **Stable disagreement detected**")
+	assert.Contains(t, got, "First blocked description")
+	assert.Contains(t, got, "Second blocked description")
+	assert.Contains(t, got, "first verdict bullet")
+	assert.Contains(t, got, "second verdict bullet")
+	assert.Contains(t, got, "herd/stable-disagreement")
+	// All three numbered resolution options must be present.
+	assert.Contains(t, got, "1. ")
+	assert.Contains(t, got, "2. ")
+	assert.Contains(t, got, "3. ")
+}

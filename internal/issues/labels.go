@@ -33,6 +33,13 @@ const (
 	// breaker preventing further conflict-resolution issues from being created
 	// for the batch.
 	CascadeFailed = "herd/cascade-failed"
+
+	// StableDisagreement is added to a batch PR when the integrator detects
+	// that the reviewer is re-flagging findings that a previous fix worker
+	// already determined to be no-ops. While present, automatic review is
+	// skipped — the user removes the label (or runs /herd review or
+	// /herd integrate manually) to resume.
+	StableDisagreement = "herd/stable-disagreement"
 )
 
 // Type labels
@@ -69,6 +76,7 @@ func AllLabels() []LabelDef {
 		{CIFixPending, "E4E669", "CI fix cycle in progress for this batch PR"},
 		{RetryPending, "D4C5F9", "Monitor-posted retry pending processing"},
 		{RebasePending, "FBCA04", "Rebase conflict resolution in progress for this batch PR"},
+		{StableDisagreement, "E11D48", "Reviewer and fix worker disagree — automatic review paused"},
 		{CascadeFailed, "B60205", "Conflict resolution cascade exhausted — manual intervention required"},
 	}
 }

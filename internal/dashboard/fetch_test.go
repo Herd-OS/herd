@@ -457,6 +457,44 @@ func TestBuildBatchEntry_SetsCascadeFailedFromPRLabel(t *testing.T) {
 	assert.True(t, be.HasAttention, "HasAttention should follow CascadeFailed")
 }
 
+func TestFetch_PopulatesStableDisagreement(t *testing.T) {
+	now := time.Now()
+	mile1 := 14
+	milestone := &platform.Milestone{Number: 14, Title: "Disagree", State: "open"}
+	issuesList := []*platform.Issue{
+		{Number: 140, Labels: []string{"herd/type:feature", issues.StatusDone}, UpdatedAt: now, Milestone: &platform.Milestone{Number: mile1}},
+	}
+	pr := &platform.PullRequest{
+		Number: 400,
+		URL:    "https://example/pr/400",
+		Head:   "herd/batch/14-disagree",
+		Labels: []string{issues.StableDisagreement},
+	}
+
+	issueSvc := &fakeIssueService{
+		listByFilter: func(filters platform.IssueFilters) ([]*platform.Issue, error) {
+			if filters.Milestone != nil && *filters.Milestone == 14 {
+				return issuesList, nil
+			}
+			return nil, nil
+		},
+	}
+	platformMock := &fakePlatform{
+		issues:     issueSvc,
+		prs:        &fakePRService{listResult: []*platform.PullRequest{pr}},
+		workflows:  &fakeWorkflowService{},
+		milestones: &fakeMilestoneService{listResult: []*platform.Milestone{milestone}},
+		checks:     &fakeCheckService{status: "success"},
+	}
+
+	state, errStr := Fetch(context.Background(), platformMock, "o", "r")
+	assert.Empty(t, errStr)
+	require.Len(t, state.Batches, 1)
+	be := state.Batches[0]
+	assert.True(t, be.StableDisagreement, "StableDisagreement should be set when PR carries the label")
+	assert.True(t, be.HasAttention, "HasAttention should follow StableDisagreement")
+}
+
 func TestBuildBatchEntry_NoPRCascadeFailedStaysFalse(t *testing.T) {
 	now := time.Now()
 	mile1 := 13

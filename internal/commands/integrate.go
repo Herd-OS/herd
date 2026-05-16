@@ -186,9 +186,12 @@ func handleIntegrate(hctx *HandlerContext, cmd Command) Result {
 	// Review: run if advance opened a PR or a batch PR already exists.
 	ranReview := false
 	if advResult != nil && advResult.AllComplete {
+		// Manual=true: /herd integrate is a user-initiated request and must
+		// bypass the herd/stable-disagreement circuit breaker.
 		_, reviewErr := integrator.Review(ctx, hctx.Platform, hctx.Agent, hctx.Git, hctx.Config, integrator.ReviewParams{
 			BatchNumber: batchNum,
 			RepoRoot:    hctx.RepoRoot,
+			Manual:      true,
 		})
 		if reviewErr != nil {
 			lines = append(lines, fmt.Sprintf("- Review: error (%v)", reviewErr))
@@ -205,9 +208,12 @@ func handleIntegrate(hctx *HandlerContext, cmd Command) Result {
 			Head:  batchBranch,
 		})
 		if err == nil && len(existingPRs) > 0 {
+			// Manual=true: /herd integrate is a user-initiated request and
+			// must bypass the herd/stable-disagreement circuit breaker.
 			_, reviewErr := integrator.Review(ctx, hctx.Platform, hctx.Agent, hctx.Git, hctx.Config, integrator.ReviewParams{
 				BatchNumber: batchNum,
 				RepoRoot:    hctx.RepoRoot,
+				Manual:      true,
 			})
 			if reviewErr != nil {
 				lines = append(lines, fmt.Sprintf("- Review: error (%v)", reviewErr))

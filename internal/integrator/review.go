@@ -103,6 +103,15 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
 
+	// Stable-disagreement circuit breaker: once the integrator has detected
+	// a reviewer↔worker stalemate, automatic review is suspended until the
+	// user removes the label (or runs /herd review or /herd integrate
+	// manually, which call into here regardless).
+	if issues.HasLabel(pr.Labels, issues.StableDisagreement) && !params.Manual {
+		fmt.Printf("Skipping review: PR #%d has %s label.\n", pr.Number, issues.StableDisagreement)
+		return &ReviewResult{BatchPRNumber: pr.Number}, nil
+	}
+
 	// Check if review is enabled
 	if !cfg.Integrator.Review {
 		// Skip review, just check auto-merge
@@ -171,6 +180,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 	priorReviewComments := collectPriorReviewComments(prComments)
 	userFeedback := collectUserFeedbackComments(prComments)
+	workerNoOpVerdicts := collectWorkerNoOpVerdicts(prComments)
 
 	// Run agent review
 	reviewOpts := agent.ReviewOptions{
@@ -180,6 +190,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		MinFixSeverity:       cfg.Integrator.ReviewFixSeverity,
 		PriorReviewComments:  priorReviewComments,
 		UserFeedbackComments: userFeedback,
+		WorkerNoOpVerdicts:   workerNoOpVerdicts,
 	}
 
 	// Load integrator role instructions
@@ -293,6 +304,24 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
+	// Stable-disagreement detection: if any of the actionable findings match a
+	// previous worker no-op verdict, halt the entire cycle. Any findings that
+	// are genuinely new (kept) are dropped on the floor by design — the user
+	// must intervene before further automated work happens.
+	if len(workerNoOpVerdicts) > 0 {
+		blocked, _, verdictIdx := stableDisagreementBlocked(actionableFindings, workerNoOpVerdicts)
+		if len(blocked) > 0 {
+			_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.StableDisagreement})
+			comment := buildStableDisagreementComment(blocked, verdictIdx, workerNoOpVerdicts)
+			_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+			return &ReviewResult{
+				BatchPRNumber:      pr.Number,
+				StableDisagreement: true,
+				FindingsCount:      len(blocked),
+			}, nil
+		}
+	}
+
 	// Create single batched fix issue with all actionable findings
 	nextCycle := currentCycle + 1
 
@@ -381,6 +410,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	if commentErr == nil {
 		reviewOpts.PriorReviewComments = collectPriorReviewComments(prComments)
 		reviewOpts.UserFeedbackComments = collectUserFeedbackComments(prComments)
+		reviewOpts.WorkerNoOpVerdicts = collectWorkerNoOpVerdicts(prComments)
 	}
 
 	reviewResult, err := ag.Review(ctx, diff, reviewOpts)
@@ -528,6 +558,7 @@ func collectUserFeedbackComments(comments []*platform.Comment) []string {
 		"🔧 ",
 		"🔄 **Integrator",
 		"📋 **Worker Progress",
+		"**Worker #",
 		"/herd ",
 	}
 	var feedback []string
@@ -548,6 +579,39 @@ func collectUserFeedbackComments(comments []*platform.Comment) []string {
 		}
 	}
 	return feedback
+}
+
+// workerNoOpVerdictPrefix matches the first line of a structured worker
+// no-op verdict posted on a batch PR by the worker package. Keep this in
+// sync with worker.noOpVerdictHeader: "**Worker #N — no-op verdict**".
+const workerNoOpVerdictPrefix = "**Worker #"
+const workerNoOpVerdictSuffix = "— no-op verdict**"
+
+// collectWorkerNoOpVerdicts returns the bodies of comments that are
+// structured worker no-op verdicts. A verdict is identified by a first
+// line of the form "**Worker #<digits> — no-op verdict**". Comments
+// that don't match are ignored. Order is preserved.
+func collectWorkerNoOpVerdicts(comments []*platform.Comment) []string {
+	var out []string
+	for _, c := range comments {
+		body := strings.TrimSpace(c.Body)
+		if body == "" {
+			continue
+		}
+		firstLine := body
+		if idx := strings.Index(body, "\n"); idx >= 0 {
+			firstLine = body[:idx]
+		}
+		firstLine = strings.TrimSpace(firstLine)
+		if !strings.HasPrefix(firstLine, workerNoOpVerdictPrefix) {
+			continue
+		}
+		if !strings.HasSuffix(firstLine, workerNoOpVerdictSuffix) {
+			continue
+		}
+		out = append(out, body)
+	}
+	return out
 }
 
 func findMaxFixCycle(allIssues []*platform.Issue) int {
@@ -878,4 +942,97 @@ func dedupFindings(findings []agent.ReviewFinding, openFixIssues []*platform.Iss
 		}
 	}
 	return deduped
+}
+
+// findingMatchesAnyVerdict returns the index of the first verdict in
+// verdicts that contains a substring of the finding's description (using
+// the same first-100-chars heuristic as dedupFindings). Returns -1 when
+// no verdict matches.
+func findingMatchesAnyVerdict(finding agent.ReviewFinding, verdicts []string) int {
+	descPrefix := finding.Description
+	if len(descPrefix) > 100 {
+		descPrefix = descPrefix[:100]
+	}
+	for i, v := range verdicts {
+		if descriptionMatch(v, descPrefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// stableDisagreementBlocked partitions findings into those that match a
+// previous worker no-op verdict (blocked) and those that are genuinely
+// new (kept). When blocked is non-empty, the integrator labels the PR
+// herd/stable-disagreement, posts a help-needed comment, and does NOT
+// dispatch a fix worker for the kept findings either — the entire cycle
+// halts so the user can decide.
+func stableDisagreementBlocked(findings []agent.ReviewFinding, verdicts []string) (blocked, kept []agent.ReviewFinding, verdictIdxByBlocked []int) {
+	for _, f := range findings {
+		if idx := findingMatchesAnyVerdict(f, verdicts); idx >= 0 {
+			blocked = append(blocked, f)
+			verdictIdxByBlocked = append(verdictIdxByBlocked, idx)
+		} else {
+			kept = append(kept, f)
+		}
+	}
+	return
+}
+
+// buildStableDisagreementComment renders the help-needed comment posted on
+// the batch PR when a reviewer↔worker stalemate is detected. It includes
+// each blocked finding alongside a short snippet of the worker verdict
+// that previously cleared it, plus three numbered resolution options that
+// guide the user out of the deadlock.
+func buildStableDisagreementComment(blocked []agent.ReviewFinding, verdictIdx []int, verdicts []string) string {
+	var b strings.Builder
+	b.WriteString("⚠️ **Stable disagreement detected**\n\n")
+	b.WriteString("The reviewer has flagged findings that a previous fix worker already determined to be no-ops. Continuing would loop indefinitely.\n\n")
+	b.WriteString("Findings flagged again this cycle:\n")
+	for i, f := range blocked {
+		var summary string
+		if i < len(verdictIdx) && verdictIdx[i] < len(verdicts) {
+			summary = summarizeVerdict(verdicts[verdictIdx[i]])
+		}
+		if summary != "" {
+			b.WriteString(fmt.Sprintf("- %s (worker no-op: %s)\n", f.Description, summary))
+		} else {
+			b.WriteString(fmt.Sprintf("- %s\n", f.Description))
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString("Resolution options:\n")
+	b.WriteString("1. If the workers were right and the code is correct as-is, post a `/herd fix` with explicit acceptance criteria that close out these findings, or close the PR review with `/herd integrate` to merge if you're satisfied.\n")
+	b.WriteString("2. If the reviewer is right and the workers missed something, post a `/herd fix` with concrete file:line evidence that contradicts the worker verdicts.\n")
+	b.WriteString("3. Remove the `herd/stable-disagreement` label and post `/herd integrate` to resume automatic reviews.\n")
+	return b.String()
+}
+
+// summarizeVerdict extracts the first non-empty bullet line from a
+// worker no-op verdict body, returning a short snippet (max 200 chars)
+// suitable for inline use in the stable-disagreement comment.
+func summarizeVerdict(verdict string) string {
+	for _, line := range strings.Split(verdict, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		text := strings.TrimSpace(strings.TrimPrefix(line, "- "))
+		if len(text) > 200 {
+			text = text[:200] + "…"
+		}
+		return text
+	}
+	// Fallback: take the line after "Conclusion:" if present.
+	for _, line := range strings.Split(verdict, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Conclusion:") {
+			text := strings.TrimSpace(strings.TrimPrefix(line, "Conclusion:"))
+			if len(text) > 200 {
+				text = text[:200] + "…"
+			}
+			return text
+		}
+	}
+	return ""
 }

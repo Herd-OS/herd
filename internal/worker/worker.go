@@ -59,8 +59,22 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
 - If the issue lacks information you need, explore the codebase to fill
   the gaps. But prefer what the issue says over what you infer.
 - Check if the acceptance criteria are already satisfied by existing
-  code. If so, report that no changes are needed and exit successfully
-  without making any commits.
+  code. If so, exit successfully without making any commits, BUT
+  before exiting you MUST emit a verdict report in your final output
+  in EXACTLY this format (the orchestrator parses it and forwards it
+  to the next review cycle):
+
+      Findings reviewed against the current code:
+
+      - **<finding 1 summary>**: <verdict — why no change is needed, with specific file:line references>
+      - **<finding 2 summary>**: <verdict>
+
+      Conclusion: <one-line summary, e.g., "All 3 findings describe behavior that already exists.">
+
+  This is non-negotiable. If you determine no code change is needed
+  you MUST include this block in your final output. Do not exit the
+  no-op path without it. Reference specific file:line locations in
+  the verdicts so the next reviewer can verify your reasoning.
 {{if .IsFixIssue}}- **This is a fix issue created by the reviewer.** Focus on the specific
   problem described in the Task section. The reviewer found an issue that
   may not be covered by the original acceptance criteria. Do not dismiss
@@ -307,14 +321,12 @@ pushWork:
 		}
 		_ = p.Issues().AddComment(ctx, params.IssueNumber, noOpReport)
 
-		// Best-effort: post a comment on the batch PR
+		// Post a structured verdict comment on the batch PR so the next
+		// review cycle can pick up the worker's reasoning.
 		prs, _ := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
 		if len(prs) > 0 {
-			prComment := fmt.Sprintf("**Worker #%d (no-op):** No changes needed.", params.IssueNumber)
-			if rawSummary != "" {
-				prComment = fmt.Sprintf("**Worker #%d (no-op):** No changes needed. %s", params.IssueNumber, truncateOutput(rawSummary, 2000))
-			}
-			_ = p.PullRequests().AddComment(ctx, prs[0].Number, prComment)
+			verdict := buildNoOpVerdictComment(params.IssueNumber, rawSummary)
+			_ = p.PullRequests().AddComment(ctx, prs[0].Number, verdict)
 		}
 
 		_ = p.Issues().RemoveLabels(ctx, params.IssueNumber, []string{issues.StatusInProgress, issues.StatusFailed})
@@ -646,4 +658,42 @@ func renderWorkerPrompt(title, body string, issueNumber int, workerBranch string
 		return "", fmt.Errorf("executing worker prompt template: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// NoOpVerdictMarker is the prefix every worker no-op verdict comment
+// posted to the batch PR begins with. The integrator uses this prefix
+// to identify worker verdicts when collecting prior-cycle context.
+const NoOpVerdictMarker = "**Worker #"
+
+// noOpVerdictHeader returns the exact first line for a worker N verdict.
+// Used by both the worker (to format the comment) and the integrator's
+// collector (to recognize and parse it).
+func noOpVerdictHeader(issueNumber int) string {
+	return fmt.Sprintf("**Worker #%d — no-op verdict**", issueNumber)
+}
+
+// buildNoOpVerdictComment renders the structured comment posted on the
+// batch PR when a worker concludes no code change is needed. The agent
+// is instructed (via the worker prompt) to write its findings-by-finding
+// reasoning into rawSummary in the exact bullet format described in the
+// prompt; this helper wraps that reasoning with the standard header.
+//
+// If rawSummary is empty (the agent produced no reasoning, e.g. the
+// progress file was empty in a true no-op), a degraded fallback body is
+// emitted so the comment is still posted and detectable.
+func buildNoOpVerdictComment(issueNumber int, rawSummary string) string {
+	var b strings.Builder
+	b.WriteString(noOpVerdictHeader(issueNumber))
+	b.WriteString("\n\n")
+	if strings.TrimSpace(rawSummary) == "" {
+		b.WriteString("Findings reviewed against the current code:\n\n")
+		b.WriteString("- No reasoning was captured by the agent for this no-op run.\n\n")
+		b.WriteString("Conclusion: Worker exited without making changes; see issue #")
+		b.WriteString(fmt.Sprintf("%d", issueNumber))
+		b.WriteString(" for details.\n")
+		return b.String()
+	}
+	b.WriteString(truncateOutput(strings.TrimSpace(rawSummary), 8000))
+	b.WriteString("\n")
+	return b.String()
 }

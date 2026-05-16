@@ -510,6 +510,41 @@ generating dozens of fix workers in one pass.
 | false | true | No agent review. PR auto-merges as soon as CI passes. |
 | false | false | No agent review. Human reviews the batch PR directly. |
 
+### Stable disagreement
+
+When the reviewer keeps flagging the same findings cycle after cycle and a fix
+worker keeps responding with "no change needed" (after reading the issue and
+verifying the code), HerdOS detects the loop and pauses automatic review.
+
+**Detection.** Each fix worker that exits in the no-op path posts a structured
+`**Worker #N — no-op verdict**` comment on the batch PR with finding-by-finding
+reasoning. On the next review cycle, the Integrator passes those verdicts to
+the reviewer as authoritative context **and** compares the new findings against
+them. If the reviewer flags a finding that substantially matches a verdict
+(same first-100-character substring heuristic used for [fix-issue dedup](#review-fix-issue-dedup)),
+the Integrator halts the cycle.
+
+**Halt behavior.** When stable disagreement is detected, the Integrator:
+
+- Does **not** create a new fix issue.
+- Does **not** dispatch a fix worker.
+- Adds the `herd/stable-disagreement` label to the batch PR.
+- Posts a comment on the PR listing the re-flagged findings, the worker
+  verdicts, and the resolution options.
+
+While the `herd/stable-disagreement` label is present, automatic review is
+suspended. Manual `/herd review` and `/herd integrate` slash commands still
+execute — they bypass the label.
+
+**Recovery.** The user has three options:
+
+1. **The workers were right** — post `/herd fix` with explicit acceptance
+   criteria that close out the findings, or `/herd integrate` to merge as-is.
+2. **The reviewer was right** — post `/herd fix` with concrete `file:line`
+   evidence that contradicts the worker verdicts.
+3. **Resume automatic review** — remove the `herd/stable-disagreement` label
+   and post `/herd integrate`.
+
 ---
 
 ## 6. Conflict Resolution

@@ -2,11 +2,15 @@ package dashboard
 
 import "sort"
 
-// SortBatches orders batches: cascade-failed first, then attention items,
-// then by LatestActivity desc, then by MilestoneNumber asc. Sorts in place.
+// SortBatches orders batches: stable-disagreement first, then cascade-failed,
+// then attention items, then by LatestActivity desc, then by MilestoneNumber
+// asc. Sorts in place.
 func SortBatches(batches []BatchEntry) {
 	sort.SliceStable(batches, func(i, j int) bool {
 		a, b := batches[i], batches[j]
+		if a.StableDisagreement != b.StableDisagreement {
+			return a.StableDisagreement
+		}
 		if a.CascadeFailed != b.CascadeFailed {
 			return a.CascadeFailed
 		}

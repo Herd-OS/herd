@@ -106,6 +106,9 @@ func (m Model) batchesPanel() string {
 			prefix = selStyle.Render("▶ ")
 		}
 		head := fmt.Sprintf("%s#%d %s", prefix, be.MilestoneNumber, be.MilestoneTitle)
+		if be.StableDisagreement {
+			head = fmt.Sprintf("%s  %s", head, errStyle.Render("⚠ stable-disagreement"))
+		}
 		b.WriteString(head + "\n")
 		if be.PRNumber > 0 {
 			review := be.ReviewState

@@ -9,7 +9,7 @@ import (
 
 func TestAllLabels(t *testing.T) {
 	labels := AllLabels()
-	assert.Len(t, labels, 14)
+	assert.Len(t, labels, 15)
 
 	var cascadeFailed *LabelDef
 	for i := range labels {
@@ -22,6 +22,25 @@ func TestAllLabels(t *testing.T) {
 	assert.Equal(t, "herd/cascade-failed", cascadeFailed.Name)
 	assert.Equal(t, "B60205", cascadeFailed.Color)
 	assert.Equal(t, "Conflict resolution cascade exhausted — manual intervention required", cascadeFailed.Description)
+}
+
+func TestStableDisagreementLabel(t *testing.T) {
+	assert.Equal(t, "herd/stable-disagreement", StableDisagreement)
+
+	labels := AllLabels()
+	var matches []LabelDef
+	for _, l := range labels {
+		if l.Name == StableDisagreement {
+			matches = append(matches, l)
+		}
+	}
+	require.Len(t, matches, 1, "AllLabels should contain exactly one entry for StableDisagreement")
+	assert.NotEmpty(t, matches[0].Color)
+	assert.NotEmpty(t, matches[0].Description)
+
+	assert.False(t, IsStatusLabel(StableDisagreement))
+	assert.NotContains(t, AllStatusLabels(), StableDisagreement)
+	assert.NotContains(t, AllTypeLabels(), StableDisagreement)
 }
 
 func TestIsStatusLabel(t *testing.T) {

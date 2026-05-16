@@ -1075,7 +1075,74 @@ func TestRenderWorkerPrompt_FixIssueWithMalformedFrontmatter(t *testing.T) {
 	assert.NotContains(t, prompt, "This is a fix issue")
 }
 
-func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
+func TestBuildNoOpVerdictComment(t *testing.T) {
+	tests := []struct {
+		name        string
+		issueNumber int
+		rawSummary  string
+		assertions  func(t *testing.T, result string)
+	}{
+		{
+			name:        "with_summary",
+			issueNumber: 42,
+			rawSummary:  "Findings reviewed against the current code:\n\n- **Foo**: foo is fine\n\nConclusion: All 1 findings already addressed.",
+			assertions: func(t *testing.T, result string) {
+				assert.True(t, strings.HasPrefix(result, "**Worker #42 — no-op verdict**\n\n"),
+					"verdict must start with the standard header")
+				assert.Contains(t, result, "Findings reviewed against the current code:")
+				assert.Contains(t, result, "- **Foo**: foo is fine")
+				assert.Contains(t, result, "Conclusion: All 1 findings already addressed.")
+			},
+		},
+		{
+			name:        "empty_summary",
+			issueNumber: 42,
+			rawSummary:  "",
+			assertions: func(t *testing.T, result string) {
+				assert.True(t, strings.HasPrefix(result, "**Worker #42 — no-op verdict**\n\n"),
+					"verdict must start with the standard header even with empty summary")
+				assert.Contains(t, result, "No reasoning was captured")
+				assert.Contains(t, result, "issue #42")
+			},
+		},
+		{
+			name:        "truncates",
+			issueNumber: 7,
+			rawSummary:  strings.Repeat("x", 20000),
+			assertions: func(t *testing.T, result string) {
+				assert.Contains(t, result, "... (truncated)",
+					"long summaries must be truncated via truncateOutput")
+				// Header (~33) + "\n\n" + 8000 + "\n\n... (truncated)" + "\n"
+				assert.Less(t, len(result), 8200,
+					"truncated output must be bounded near the 8000-byte cap")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildNoOpVerdictComment(tt.issueNumber, tt.rawSummary)
+			tt.assertions(t, result)
+		})
+	}
+}
+
+func TestNoOpVerdictHeader(t *testing.T) {
+	assert.Equal(t, "**Worker #7 — no-op verdict**", noOpVerdictHeader(7))
+}
+
+func TestWorkerPromptTemplate_RequiresVerdictFormat(t *testing.T) {
+	cfg := &config.Config{}
+	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, "herd/worker/42-add-auth", t.TempDir(), cfg)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "Findings reviewed against the current code:",
+		"prompt must require the Findings header")
+	assert.Contains(t, prompt, "non-negotiable",
+		"prompt must mark the verdict format as non-negotiable")
+	assert.Contains(t, prompt, "Conclusion:",
+		"prompt must require a Conclusion line")
+}
+
+func TestWorkerNoOpPath_PostsBatchPRVerdictComment(t *testing.T) {
 	repoDir := initTestRepoWithBatchBranch(t)
 
 	prSvc := &mockPRService{
@@ -1095,7 +1162,7 @@ func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
 	}
 
 	ag := &mockAgent{
-		execResult: &agent.ExecResult{Summary: "No changes needed"},
+		execResult: &agent.ExecResult{Summary: "Findings reviewed against the current code:\n\n- **Foo**: already implemented at foo.go:10\n\nConclusion: No changes needed."},
 	}
 
 	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
@@ -1106,12 +1173,20 @@ func TestWorkerNoOpPath_PostsBatchPRComment(t *testing.T) {
 	require.NotNil(t, result)
 	assert.True(t, result.NoOp, "result should be no-op")
 
-	// Should have posted a comment on the batch PR
-	require.NotEmpty(t, prSvc.comments, "no-op path must post a comment on the batch PR")
-	assert.Contains(t, prSvc.comments[0], "Worker #42",
-		"no-op PR comment must include Worker # prefix")
-	assert.Contains(t, prSvc.comments[0], "(no-op)",
-		"no-op PR comment must include (no-op) marker")
+	// Exactly one comment posted to the batch PR — the structured verdict.
+	require.Len(t, prSvc.comments, 1, "no-op path must post exactly one PR comment")
+	assert.True(t, strings.HasPrefix(prSvc.comments[0], "**Worker #42 — no-op verdict**"),
+		"PR comment must start with the structured verdict header, got: %q", prSvc.comments[0])
+
+	// The per-issue no-op report comment must still be posted on the issue.
+	foundIssueReport := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker Report") && strings.Contains(c, "No changes were needed") {
+			foundIssueReport = true
+			break
+		}
+	}
+	assert.True(t, foundIssueReport, "per-issue no-op report comment must still be posted")
 }
 
 func TestExec_ResumeMergeConflict_FallsBackToFreshBranch(t *testing.T) {
