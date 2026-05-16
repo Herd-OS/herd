@@ -127,6 +127,19 @@ If issue creation fails after planning, the plan file is preserved and the exact
 herd plan --from-file .herd/state/1234567890.json
 ```
 
+### Plan File Validation
+
+After writing the plan file, the agent self-verifies it (re-reads the file, confirms the JSON parses, and checks the schema before declaring success). When the file is loaded — either at the end of an interactive session or via `--from-file` — herd applies the same structural checks:
+
+- `batch_name` is non-empty.
+- At least one task is present.
+- Each task has a non-empty `title` and at least one `acceptance_criteria` entry.
+- Every `depends_on` index is in range and does not reference its own task.
+- `complexity` is one of `low`, `medium`, `high`, or empty.
+- `type` is one of `feature`, `bugfix`, or empty.
+
+If a check fails, herd fails fast and the error names the offending task index, title, and field — for example, `task 3 ("Add login route"): depends_on[1]=7 is out of range [0,5)`. Edit the plan JSON to fix the issue and re-run `herd plan --from-file <path>` to retry without restarting the agent session.
+
 ## Dispatching Workers
 
 After planning, Tier 0 tasks are dispatched automatically. To manually dispatch:
