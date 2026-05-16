@@ -128,6 +128,26 @@ func TestDashboard_CascadeFailedNoPRCannotBeMarked(t *testing.T) {
 	assert.NotContains(t, out, "cascade failed")
 }
 
+func TestBatchesPanel_RendersStableDisagreementFlag(t *testing.T) {
+	m := Model{
+		Owner:      "o",
+		Repo:       "r",
+		RefreshSec: 5,
+		state: State{
+			LastRefresh: time.Now(),
+			Batches: []BatchEntry{{
+				MilestoneNumber:    1,
+				MilestoneTitle:     "Test Batch",
+				PRNumber:           42,
+				StableDisagreement: true,
+				HasAttention:       true,
+			}},
+		},
+	}
+	out := m.batchesPanel()
+	assert.Contains(t, out, "stable-disagreement")
+}
+
 func TestFormatElapsed(t *testing.T) {
 	tests := []struct {
 		name string

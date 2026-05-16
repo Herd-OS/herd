@@ -74,6 +74,33 @@ func TestDashboard_CascadeFailedAmongMultipleAttention(t *testing.T) {
 	assert.Equal(t, 2, batches[2].MilestoneNumber, "plain attention batch last")
 }
 
+func TestSortBatches_StableDisagreementFirst(t *testing.T) {
+	older := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	batches := []BatchEntry{
+		{MilestoneNumber: 1, HasAttention: true, StableDisagreement: false, LatestActivity: newer},
+		{MilestoneNumber: 2, HasAttention: false, StableDisagreement: false, LatestActivity: newer},
+		{MilestoneNumber: 3, HasAttention: true, StableDisagreement: true, LatestActivity: older},
+	}
+	SortBatches(batches)
+	assert.Equal(t, 3, batches[0].MilestoneNumber, "stable-disagreement batch should sort first")
+	assert.Equal(t, 1, batches[1].MilestoneNumber, "plain attention batch second")
+	assert.Equal(t, 2, batches[2].MilestoneNumber, "neutral batch last")
+}
+
+func TestSortBatches_StableDisagreementImpliesAttention(t *testing.T) {
+	older := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	batches := []BatchEntry{
+		{MilestoneNumber: 1, HasAttention: false, StableDisagreement: false, LatestActivity: newer},
+		{MilestoneNumber: 2, HasAttention: true, StableDisagreement: true, LatestActivity: older},
+	}
+	SortBatches(batches)
+	assert.Equal(t, 2, batches[0].MilestoneNumber,
+		"stable-disagreement should sort above non-attention batches even with older activity")
+	assert.Equal(t, 1, batches[1].MilestoneNumber)
+}
+
 func TestDashboardSort_AttentionInternalOrdering(t *testing.T) {
 	older := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	newer := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)

@@ -49,6 +49,9 @@ type BatchEntry struct {
 	// label, indicating the conflict-resolution cascade exhausted and is
 	// awaiting manual intervention.
 	CascadeFailed bool
+	// StableDisagreement is true when the batch PR carries the
+	// herd/stable-disagreement label. Implies HasAttention.
+	StableDisagreement bool
 }
 
 // FailureEntry is one issue with herd/status:failed updated in the last 24h.
