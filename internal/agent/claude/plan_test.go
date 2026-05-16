@@ -29,7 +29,13 @@ func TestReadPlanFile_Valid(t *testing.T) {
 				ContextFromDependencies: []string{"bcrypt is available as import"},
 				Complexity:              "medium",
 				Type:                    "feature",
-				DependsOn:               []int{0},
+			},
+			{
+				Title:              "Add login route",
+				AcceptanceCriteria: []string{"Returns 200 on valid creds"},
+				Complexity:         "low",
+				Type:               "feature",
+				DependsOn:          []int{0},
 			},
 		},
 	}
@@ -38,12 +44,12 @@ func TestReadPlanFile_Valid(t *testing.T) {
 	got, err := readPlanFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "Add authentication", got.BatchName)
-	assert.Len(t, got.Tasks, 1)
+	assert.Len(t, got.Tasks, 2)
 	assert.Equal(t, "Create User model", got.Tasks[0].Title)
 	assert.Equal(t, "Use bcrypt with 12 salt rounds", got.Tasks[0].ImplementationDetails)
 	assert.Equal(t, []string{"Follow existing model pattern"}, got.Tasks[0].Conventions)
 	assert.Equal(t, []string{"bcrypt is available as import"}, got.Tasks[0].ContextFromDependencies)
-	assert.Equal(t, []int{0}, got.Tasks[0].DependsOn)
+	assert.Equal(t, []int{0}, got.Tasks[1].DependsOn)
 }
 
 func TestReadPlanFile_NotExist(t *testing.T) {
@@ -68,19 +74,61 @@ func TestReadPlanFile_EmptyFile(t *testing.T) {
 }
 
 func TestValidatePlan_EmptyBatchName(t *testing.T) {
-	plan := agent.Plan{BatchName: "", Tasks: []agent.PlannedTask{{Title: "x"}}}
-	path := writeTempPlan(t, plan)
-
-	_, err := readPlanFile(path)
-	assert.ErrorContains(t, err, "plan has empty batch_name")
+	p := &agent.Plan{BatchName: "", Tasks: []agent.PlannedTask{{Title: "x", AcceptanceCriteria: []string{"y"}}}}
+	err := validatePlan(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "batch_name")
 }
 
 func TestValidatePlan_NoTasks(t *testing.T) {
-	plan := agent.Plan{BatchName: "Test", Tasks: []agent.PlannedTask{}}
-	path := writeTempPlan(t, plan)
+	p := &agent.Plan{BatchName: "b", Tasks: nil}
+	err := validatePlan(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tasks")
+}
 
-	_, err := readPlanFile(path)
-	assert.ErrorContains(t, err, "plan has no tasks")
+func TestValidatePlan_TaskMissingTitle(t *testing.T) {
+	p := &agent.Plan{BatchName: "b", Tasks: []agent.PlannedTask{{Title: "", AcceptanceCriteria: []string{"y"}}}}
+	err := validatePlan(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "task 0")
+	assert.Contains(t, err.Error(), "title")
+}
+
+func TestValidatePlan_DependsOnOutOfRange(t *testing.T) {
+	p := &agent.Plan{BatchName: "b", Tasks: []agent.PlannedTask{
+		{Title: "a", AcceptanceCriteria: []string{"y"}},
+		{Title: "b", AcceptanceCriteria: []string{"y"}, DependsOn: []int{5}},
+	}}
+	err := validatePlan(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "task 1")
+	assert.Contains(t, err.Error(), "5")
+}
+
+func TestValidatePlan_InvalidComplexity(t *testing.T) {
+	p := &agent.Plan{BatchName: "b", Tasks: []agent.PlannedTask{
+		{Title: "a", AcceptanceCriteria: []string{"y"}, Complexity: "huge"},
+	}}
+	err := validatePlan(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "complexity")
+}
+
+func TestValidatePlan_AcceptsValidPlan(t *testing.T) {
+	p := &agent.Plan{BatchName: "b", Tasks: []agent.PlannedTask{
+		{Title: "a", AcceptanceCriteria: []string{"y"}, Complexity: "medium", Type: "feature"},
+		{Title: "b", AcceptanceCriteria: []string{"y"}, Complexity: "low", Type: "bugfix", DependsOn: []int{0}},
+	}}
+	err := validatePlan(p)
+	assert.NoError(t, err)
+}
+
+func TestValidatePlan_MissingAcceptanceCriteria(t *testing.T) {
+	p := &agent.Plan{BatchName: "b", Tasks: []agent.PlannedTask{{Title: "a"}}}
+	err := validatePlan(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "acceptance_criteria")
 }
 
 func TestRenderPrompt_Basic(t *testing.T) {
@@ -294,7 +342,7 @@ func TestPlan_LargeSystemPrompt(t *testing.T) {
 	repoRoot := t.TempDir()
 	outputPath := filepath.Join(repoRoot, "plan.json")
 
-	planJSON := `{"batch_name":"fake-batch","tasks":[{"title":"x","description":"y"}]}`
+	planJSON := `{"batch_name":"fake-batch","tasks":[{"title":"x","description":"y","acceptance_criteria":["z"]}]}`
 
 	tests := []struct {
 		name     string

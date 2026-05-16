@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"text/template"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -168,6 +169,28 @@ Set "manual": true for tasks that require human action outside the repository (e
 
 After writing the file, inform the user the plan is saved. Tell them to exit the session (Ctrl-C or /exit) to proceed — exiting will automatically move to issue creation and dispatch. Mention that if anything goes wrong, they can re-run with ` + "`" + `herd plan --from-file <path>` + "`" + ` as a fallback, but this is not normally needed.
 Do not accept further prompts after the plan is finalized.
+
+### Step 4: Verify the plan file
+
+After writing the plan file, you MUST verify it. Do all of the following:
+
+1. Read the file back using your Read tool — confirm it exists and contains the JSON you intended.
+2. Parse the contents mentally (or by re-reading) to confirm the JSON is well-formed:
+   - All braces and brackets are balanced
+   - All keys are quoted strings
+   - All string values are properly escaped (no unescaped quotes or newlines)
+   - No trailing commas
+   - No comments (JSON does not support them)
+3. Confirm the structure matches the schema:
+   - ` + "`" + `batch_name` + "`" + ` is a non-empty string
+   - ` + "`" + `tasks` + "`" + ` is an array with at least one entry
+   - Each task has the required fields: title, description, implementation_details, acceptance_criteria, scope, complexity, type, depends_on
+   - depends_on values are integers (indices into the tasks array), not strings
+4. If validation fails, IMMEDIATELY rewrite the file with corrections. Repeat until the file is valid.
+
+Only after the file passes all checks above should you inform the user "Plan saved" and tell them to exit.
+
+If you find yourself unable to produce valid JSON after 3 attempts, tell the user explicitly and ask them to copy/paste the intended plan into the file manually.
 {{if .RoleInstructions}}
 ## Project-Specific Instructions
 {{.RoleInstructions}}
@@ -294,6 +317,34 @@ func validatePlan(plan *agent.Plan) error {
 	}
 	if len(plan.Tasks) == 0 {
 		return fmt.Errorf("plan has no tasks")
+	}
+	for i, t := range plan.Tasks {
+		if strings.TrimSpace(t.Title) == "" {
+			return fmt.Errorf("task %d: title is empty", i)
+		}
+		if len(t.AcceptanceCriteria) == 0 {
+			return fmt.Errorf("task %d (%q): acceptance_criteria must have at least one entry", i, t.Title)
+		}
+		for j, dep := range t.DependsOn {
+			if dep < 0 || dep >= len(plan.Tasks) {
+				return fmt.Errorf("task %d (%q): depends_on[%d]=%d is out of range [0,%d)", i, t.Title, j, dep, len(plan.Tasks))
+			}
+			if dep == i {
+				return fmt.Errorf("task %d (%q): depends_on[%d] references itself", i, t.Title, j)
+			}
+		}
+		switch t.Complexity {
+		case "", "low", "medium", "high":
+			// ok
+		default:
+			return fmt.Errorf("task %d (%q): complexity %q is invalid (must be one of: low, medium, high, or empty)", i, t.Title, t.Complexity)
+		}
+		switch t.Type {
+		case "", "feature", "bugfix":
+			// ok
+		default:
+			return fmt.Errorf("task %d (%q): type %q is invalid (must be one of: feature, bugfix, or empty)", i, t.Title, t.Type)
+		}
 	}
 	return nil
 }
