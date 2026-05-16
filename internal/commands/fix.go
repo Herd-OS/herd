@@ -23,7 +23,7 @@ func handleFix(hctx *HandlerContext, cmd Command) Result {
 		return Result{Error: fmt.Errorf("getting PR #%d: %w", hctx.IssueNumber, err)}
 	}
 	if !strings.HasPrefix(pr.Head, "herd/batch/") {
-		return Result{Message: "⚠️ `/herd fix` can only be used on batch PRs."}
+		return handleStandaloneFix(hctx, cmd, pr)
 	}
 
 	batchNum, err := integrator.ParseBatchBranchMilestone(pr.Head)
@@ -171,4 +171,81 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "..."
+}
+
+// firstLine returns the substring of s up to the first newline, or all of s if none.
+func firstLine(s string) string {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		return s[:idx]
+	}
+	return s
+}
+
+// handleStandaloneFix handles /herd fix on a non-batch PR by creating a
+// tracking issue (no milestone) with target_pr / target_branch frontmatter
+// and dispatching a worker with mode=standalone.
+func handleStandaloneFix(hctx *HandlerContext, cmd Command, pr *platform.PullRequest) Result {
+	existing, err := hctx.Platform.Issues().List(hctx.Ctx, platform.IssueFilters{
+		State:  "open",
+		Labels: []string{issues.TypeStandaloneFix},
+	})
+	if err != nil {
+		return Result{Error: fmt.Errorf("listing standalone fix issues: %w", err)}
+	}
+	for _, iss := range existing {
+		parsed, parseErr := issues.ParseBody(iss.Body)
+		if parseErr != nil {
+			continue
+		}
+		if parsed.FrontMatter.TargetPR != pr.Number {
+			continue
+		}
+		if issues.HasLabel(iss.Labels, issues.StatusInProgress) || issues.HasLabel(iss.Labels, issues.StatusReady) {
+			return Result{Message: fmt.Sprintf("⚠️ A standalone fix is already in progress for this PR (#%d). Wait for it to complete before posting another `/herd fix`.", iss.Number)}
+		}
+	}
+
+	body := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:      1,
+			Type:         "standalone-fix",
+			TargetPR:     pr.Number,
+			TargetBranch: pr.Head,
+		},
+		Task:    cmd.Prompt,
+		Context: fmt.Sprintf("Requested by @%s via `/herd fix` on PR #%d.", hctx.AuthorLogin, pr.Number),
+	})
+
+	truncatedBody, overflow := issues.TruncateIssueBody(body)
+
+	title := "Standalone fix: " + truncateRunes(firstLine(cmd.Prompt), 70)
+	fixIssue, err := hctx.Platform.Issues().Create(hctx.Ctx,
+		title,
+		truncatedBody,
+		[]string{issues.TypeStandaloneFix, issues.StatusInProgress},
+		nil,
+	)
+	if err != nil {
+		return Result{Error: fmt.Errorf("creating standalone fix issue: %w", err)}
+	}
+	for _, comment := range issues.SplitOverflowComments(overflow) {
+		if cerr := hctx.Platform.Issues().AddComment(hctx.Ctx, fixIssue.Number, comment); cerr != nil {
+			fmt.Printf("Warning: failed to post overflow comment on fix issue #%d: %v\n", fixIssue.Number, cerr)
+		}
+	}
+
+	defaultBranch, err := hctx.Platform.Repository().GetDefaultBranch(hctx.Ctx)
+	if err != nil {
+		return Result{Error: fmt.Errorf("getting default branch: %w", err)}
+	}
+	if _, err := hctx.Platform.Workflows().Dispatch(hctx.Ctx, "herd-worker.yml", defaultBranch, map[string]string{
+		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
+		"mode":            "standalone",
+		"timeout_minutes": fmt.Sprintf("%d", hctx.Config.Workers.TimeoutMinutes),
+		"runner_label":    hctx.Config.Workers.RunnerLabel,
+	}); err != nil {
+		return Result{Error: fmt.Errorf("dispatching worker for standalone fix issue #%d: %w", fixIssue.Number, err)}
+	}
+
+	return Result{Message: fmt.Sprintf("🔧 Created standalone fix issue #%d and dispatched worker. The worker will push directly to this PR's branch when done.", fixIssue.Number)}
 }
