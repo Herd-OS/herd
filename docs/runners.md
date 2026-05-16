@@ -223,6 +223,8 @@ This makes it easy to wire into CI as a guard against forgetting to re-run `herd
   run: herd init --check
 ```
 
+The `Herd-OS/herd` repository itself wires this step into its own CI to catch drift between the embedded workflow templates and the rendered `.github/workflows/herd-*.yml` files — see [`../CONTRIBUTING.md`](../CONTRIBUTING.md) for the template-first edit workflow contributors follow.
+
 For day-to-day use, `herd plan` also prints a one-line warning when drift is detected, so you'll be nudged to re-run `herd init` without having to remember to check explicitly.
 
 Both `herd plan` and `herd init --check` additionally perform a best-effort lookup against `api.github.com` and warn when a newer herd release is published. The check is bounded by a 3-second timeout and never blocks; it is intentionally skipped for dev builds and pre-release tags. See [Installation → Upgrade notifications](installation.md#upgrade-notifications) for details.

@@ -25,6 +25,14 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Check workflow drift
+        run: |
+          go build -o ./herd ./cmd/herd
+          if ! ./herd init --check; then
+            echo "::error::Workflow files have drifted from the embedded templates in internal/cli/workflows/*.tmpl. Either (a) update the corresponding template, OR (b) revert your direct edits to .github/workflows/*. Templates are the source of truth — run './herd init' after editing a template to regenerate the workflow file."
+            exit 1
+          fi
+
   lint:
     runs-on: ubuntu-latest
     steps:
