@@ -297,15 +297,11 @@ type managedFile struct {
 	Mode    os.FileMode // 0644 for most, 0755 for entrypoint.herd.sh
 }
 
-// renderRunnerFiles returns the runner-infrastructure files (Dockerfile.herd_runner_base,
-// entrypoint.herd.sh, .env.herd.example, docker-compose.herd.yml) in stable order.
+// renderRunnerFiles returns the runner-infrastructure files (entrypoint.herd.sh,
+// .env.herd.example, docker-compose.herd.yml) in stable order.
 // The compose result reflects docker-compose.herd.override.yml if present in dir.
 // Dockerfile.herd_runner is intentionally NOT included — it is user-owned.
 func renderRunnerFiles(dir, owner, repo string) ([]managedFile, error) {
-	dockerfileBase, err := runner.FS.ReadFile("Dockerfile.herd_runner_base")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded Dockerfile.herd_runner_base: %w", err)
-	}
 	entrypoint, err := runner.FS.ReadFile("entrypoint.herd.sh")
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded entrypoint.herd.sh: %w", err)
@@ -324,7 +320,6 @@ func renderRunnerFiles(dir, owner, repo string) ([]managedFile, error) {
 	}
 
 	return []managedFile{
-		{Path: "Dockerfile.herd_runner_base", Content: dockerfileBase, Mode: 0644},
 		{Path: "entrypoint.herd.sh", Content: entrypoint, Mode: 0755},
 		{Path: ".env.herd.example", Content: envExample, Mode: 0644},
 		{Path: "docker-compose.herd.yml", Content: composeContent, Mode: 0644},
@@ -458,31 +453,63 @@ type runnerTemplateData struct {
 	Repo  string
 }
 
+// runnerBaseImage returns the fully-qualified, version-pinned GHCR image
+// reference for the given runner flavor ("base", "node", "ruby", "python", "go").
+func runnerBaseImage(flavor string) string {
+	return fmt.Sprintf("ghcr.io/herd-os/herd-runner-%s:%s", flavor, runnerImageTag(version))
+}
+
+type herdRunnerTemplateData struct {
+	BaseImage string
+}
+
+// renderHerdRunnerDockerfile renders the user-owned Dockerfile.herd_runner template
+// with the given base image reference injected into the FROM line.
+func renderHerdRunnerDockerfile(baseImage string) ([]byte, error) {
+	data, err := runner.FS.ReadFile("Dockerfile.herd_runner.tmpl")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded Dockerfile.herd_runner.tmpl: %w", err)
+	}
+	tmpl, err := template.New("herd_runner").Parse(string(data))
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, herdRunnerTemplateData{BaseImage: baseImage}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func createRunnerFiles(dir, owner, repo string) error {
 	// Runner infrastructure files are herd-managed — always overwrite to keep
 	// them in sync with the installed herd version.
 
-	// Dockerfile.herd_runner_base (herd-managed, always overwritten)
-	dockerfileBase, err := runner.FS.ReadFile("Dockerfile.herd_runner_base")
-	if err != nil {
-		return fmt.Errorf("reading embedded Dockerfile.herd_runner_base: %w", err)
+	// Dockerfile.herd_runner_base is no longer generated — base image is pulled
+	// from ghcr.io/herd-os/herd-runner-base. Remove any leftover from older inits.
+	basePath := filepath.Join(dir, "Dockerfile.herd_runner_base")
+	if _, err := os.Stat(basePath); err == nil {
+		if err := os.Remove(basePath); err != nil {
+			return fmt.Errorf("removing obsolete Dockerfile.herd_runner_base: %w", err)
+		}
+		fmt.Println(display.Success("Removed obsolete Dockerfile.herd_runner_base (base image now pulled from GHCR)"))
 	}
-	if err := os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner_base"), dockerfileBase, 0644); err != nil {
-		return fmt.Errorf("writing Dockerfile.herd_runner_base: %w", err)
-	}
-	fmt.Println(display.Success("Installed Dockerfile.herd_runner_base"))
 
 	// Dockerfile.herd_runner (user-owned, only created if missing)
 	herdRunnerPath := filepath.Join(dir, "Dockerfile.herd_runner")
 	if _, err := os.Stat(herdRunnerPath); os.IsNotExist(err) {
-		data, err := runner.FS.ReadFile("Dockerfile.herd_runner.tmpl")
+		baseImage := runnerBaseImage("base")
+		content, err := renderHerdRunnerDockerfile(baseImage)
 		if err != nil {
-			return fmt.Errorf("reading embedded Dockerfile.herd_runner.tmpl: %w", err)
+			return err
 		}
-		if err := os.WriteFile(herdRunnerPath, data, 0644); err != nil {
+		if err := os.WriteFile(herdRunnerPath, content, 0644); err != nil {
 			return fmt.Errorf("writing Dockerfile.herd_runner: %w", err)
 		}
-		fmt.Println(display.Success("Created Dockerfile.herd_runner"))
+		if runnerImageTag(version) == "latest" {
+			fmt.Println(display.Warning("herd dev build — pinning runner image to :latest. Re-run herd init from a released herd binary to pin a specific version."))
+		}
+		fmt.Println(display.Success("Created Dockerfile.herd_runner (base: " + baseImage + ")"))
 	} else {
 		fmt.Println(display.Success("Dockerfile.herd_runner already exists (not overwritten)"))
 	}
@@ -681,7 +708,6 @@ func commitInitFiles(dir, owner, repo string) error {
 		".gitignore",
 		".herd/",
 		".github/workflows/",
-		"Dockerfile.herd_runner_base",
 		"Dockerfile.herd_runner",
 		"entrypoint.herd.sh",
 		"docker-compose.herd.yml",
@@ -693,6 +719,13 @@ func commitInitFiles(dir, owner, repo string) error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add: %s: %s", err, strings.TrimSpace(string(out)))
 	}
+
+	// Stage removal of the obsolete Dockerfile.herd_runner_base when migrating an
+	// existing repo that still tracks it. Ignore errors (file may never have been
+	// tracked).
+	cmd = exec.Command("git", "rm", "--cached", "--ignore-unmatch", "Dockerfile.herd_runner_base")
+	cmd.Dir = dir
+	_, _ = cmd.CombinedOutput()
 
 	// Check if there's anything staged
 	cmd = exec.Command("git", "diff", "--cached", "--quiet")
