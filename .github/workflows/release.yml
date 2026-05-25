@@ -75,6 +75,36 @@ jobs:
             -t ghcr.io/herd-os/herd-runner-base:latest \
             --push .
 
+  publish-flavor-images:
+    needs: publish-base-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        flavor: [node, ruby, python, go]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push ${{ matrix.flavor }} flavor
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -f images/flavors/${{ matrix.flavor }}/Dockerfile \
+            --build-arg BASE_VERSION=${VERSION} \
+            -t ghcr.io/herd-os/herd-runner-${{ matrix.flavor }}:${VERSION} \
+            -t ghcr.io/herd-os/herd-runner-${{ matrix.flavor }}:latest \
+            --push .
+
   # self-init: regenerates herd-managed files (workflows, runner Dockerfile/base,
   # entrypoint, docker-compose, .env.example) on every release by running the
   # just-built `herd init --skip-labels` against this repo. If herd init produces
