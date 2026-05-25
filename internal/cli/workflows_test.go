@@ -117,7 +117,7 @@ func TestRenderWorkflow_UnknownSource(t *testing.T) {
 
 func TestWorkflowFiles_ContainsExpectedNames(t *testing.T) {
 	files := workflowFiles()
-	require.Len(t, files, 3)
+	require.Len(t, files, 4)
 
 	bySrc := map[string]workflowFile{}
 	for _, wf := range files {
@@ -128,6 +128,11 @@ func TestWorkflowFiles_ContainsExpectedNames(t *testing.T) {
 	require.True(t, ok, "worker template must be registered")
 	assert.True(t, worker.Template, "worker workflow must be marked as template")
 	assert.Equal(t, "herd-worker.yml", worker.DestName)
+
+	publish, ok := bySrc["herd-publish-runner.yml.tmpl"]
+	require.True(t, ok, "publish-runner template must be registered")
+	assert.True(t, publish.Template, "publish-runner workflow must be marked as template")
+	assert.Equal(t, "herd-publish-runner.yml", publish.DestName)
 
 	monitor, ok := bySrc["herd-monitor.yml"]
 	require.True(t, ok)

@@ -146,8 +146,9 @@ func TestCheckPrerequisitesNoGitDir(t *testing.T) {
 
 func TestWorkflowFiles(t *testing.T) {
 	files := WorkflowFiles()
-	assert.Len(t, files, 3)
+	assert.Len(t, files, 4)
 	assert.Contains(t, files, "herd-worker.yml")
+	assert.Contains(t, files, "herd-publish-runner.yml")
 	assert.Contains(t, files, "herd-monitor.yml")
 	assert.Contains(t, files, "herd-integrator.yml")
 }
