@@ -2,7 +2,7 @@
 
 HerdOS workers run as GitHub Actions on self-hosted runners. Self-hosted runners are required because workers need an AI agent (Claude Code) installed, and because GitHub-hosted runners don't support `workflow_dispatch` chaining with custom tools.
 
-`herd init` generates all the files you need: `Dockerfile.herd_runner_base`, `Dockerfile.herd_runner`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`.
+`herd init` generates all the files you need: `Dockerfile.herd_runner`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`.
 
 ## Quick Setup
 
@@ -130,17 +130,22 @@ Configure at **org level** (recommended for multi-repo) or **repo level**:
 
 ## 5. What's in the Docker Image
 
-The runner image uses a two-layer Dockerfile system:
+The base image is **published** at `ghcr.io/herd-os/herd-runner-base` — a public, multi-arch (linux/amd64, linux/arm64) image that provides the GitHub Actions runner and base tools (Node 22, git, gh, curl, jq). `herd init` no longer generates a local `Dockerfile.herd_runner_base`; the base is pulled from GHCR instead. (If a `Dockerfile.herd_runner_base` is left over from an older init, re-running `herd init` removes it — see [Migrating from the local base image](#migrating-from-the-local-base-image).)
 
-- **`Dockerfile.herd_runner_base`** — herd-managed, always overwritten by `herd init`. Provides the GitHub Actions runner and base tools (curl, jq, git, gh, Node.js). Both the Herd CLI and Claude Code are downloaded at container startup by `entrypoint.herd.sh` to avoid Docker layer caching stale versions.
-- **`Dockerfile.herd_runner`** — user-owned, created once by `herd init`, never overwritten. Extends the base with `FROM herd-runner-base` and adds project-specific tools (Go, Python, Rust, linters, etc.).
+`herd init` generates a single user-owned Dockerfile:
 
-Edit `Dockerfile.herd_runner` to add your project's toolchain. For example, a Go project might add:
+- **`Dockerfile.herd_runner`** — user-owned, created once by `herd init`, never overwritten. Its first line is `FROM ghcr.io/herd-os/herd-runner-<flavor>:<herd-version>`, where `<flavor>` is auto-detected from your project's manifests (see [Runner image flavors](#6-runner-image-flavors)). Add project-specific tools (extra languages, a database client, linters, etc.) below the `FROM` line.
+
+For example, to add a Postgres client on top of the auto-selected base:
 
 ```dockerfile
-FROM herd-runner-base
-RUN apt-get update && apt-get install -y golang-go && rm -rf /var/lib/apt/lists/*
+FROM ghcr.io/herd-os/herd-runner-go:v1.4.2
+USER root
+RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
+USER runner
 ```
+
+The base images run as the non-root `runner` user, so switch to `root` to install packages and switch back when done.
 
 The **Herd CLI** is not baked into the image — it's downloaded at container startup by `entrypoint.herd.sh`. This ensures runners always use the latest version without rebuilding. Set `HERD_VERSION` in `.env` to pin a specific version.
 
@@ -169,7 +174,79 @@ services:
 
 `herd init` automatically merges the override into `docker-compose.herd.yml`. The override file is never overwritten.
 
-## 6. Scaling
+## 6. Runner image flavors
+
+The base and flavor images are first-party, single-language runner images published to `ghcr.io/herd-os/` on every herd release. They are **public** (no `docker login` needed to pull) and **multi-arch** (linux/amd64, linux/arm64).
+
+| Image | Contents |
+|-------|----------|
+| `herd-runner-base` | OS + GitHub Actions runner + Node 22 + git/gh/curl/jq |
+| `herd-runner-node` | base + current Node LTS |
+| `herd-runner-ruby` | base + current stable Ruby + bundler |
+| `herd-runner-python` | base + current stable Python 3 + pip + venv |
+| `herd-runner-go` | base + current stable Go |
+
+### Manifest auto-detection
+
+`herd init` sniffs your repository root for language manifests and picks the matching flavor. Detection runs in a fixed priority order, and the **first match wins**:
+
+| Priority | Manifest file(s) | Flavor |
+|----------|------------------|--------|
+| 1 | `go.mod` | `go` |
+| 2 | `Gemfile` | `ruby` |
+| 3 | `package.json` | `node` |
+| 4 | `requirements.txt`, `pyproject.toml`, or `setup.py` | `python` |
+| — | (none of the above) | `base` |
+
+The chosen flavor is injected into the `FROM` line of `Dockerfile.herd_runner` as `ghcr.io/herd-os/herd-runner-<flavor>:<herd-version>`.
+
+### Overriding detection
+
+Pass `--runner-flavor` to `herd init` to force a specific flavor regardless of what's detected:
+
+```bash
+herd init --runner-flavor python
+```
+
+Valid values are `node`, `ruby`, `python`, `go`, and `base`. An unknown value is an error (e.g. `unknown runner flavor "rust" — valid values: node, ruby, python, go, base`).
+
+### Multiple manifests
+
+If more than one manifest is present (for example a `go.mod` *and* a `package.json`), the highest-priority single match is used and `herd init` prints an informational note listing the manifests it saw, nudging you to add the other toolchains in `Dockerfile.herd_runner`. There are **no combination images** — see below.
+
+### Single-language boundary
+
+Flavors are deliberately small, single-language starting points. HerdOS does not ship combination images (e.g. `ruby+node`). Multi-tool or multi-language setups are the user's responsibility: extend `Dockerfile.herd_runner` with additional `RUN apt-get install …` lines, or change the `FROM` flavor.
+
+Language **version pinning** (`.ruby-version`, `.nvmrc`, a specific Go toolchain, etc.) is likewise a user extension via `Dockerfile.herd_runner`. Each flavor tracks the *current stable* of its language and does not honor per-repo version files on its own.
+
+### Version pinning
+
+Flavor images are pinned to the herd version that generated `Dockerfile.herd_runner` (e.g. `:v1.4.2`). The pin is refreshed when you re-run `herd init` from a newer herd binary, which rewrites the `FROM` tag. Dev builds (an empty or `dev` version) pin to `:latest`, because a `:dev` tag does not exist in GHCR and would fail to pull.
+
+### Building and publishing your runner image
+
+Once you've customized `Dockerfile.herd_runner`, you can build and publish the resulting image to GHCR under your own repository:
+
+```bash
+herd image build      # docker build -f Dockerfile.herd_runner -t ghcr.io/<owner>/<repo>-herd-runner:<tag> .
+docker login ghcr.io  # required before publishing
+herd image publish    # docker push ghcr.io/<owner>/<repo>-herd-runner:<tag>
+```
+
+The owner and repo are detected from your git remote and lower-cased; the tag defaults to the herd version (`latest` for dev builds) and can be overridden with `--tag`.
+
+This is also automated. `herd init` installs `.github/workflows/herd-publish-runner.yml`, which builds and pushes the multi-arch consumer image (`ghcr.io/<owner>/<repo>-herd-runner:latest`) on every push to `main` that touches `Dockerfile.herd_runner`, or on manual `workflow_dispatch`. The job is gated on the `HERD_ENABLED` variable being `true` and requires `packages: write` permission (the default `GITHUB_TOKEN` is used to authenticate to GHCR).
+
+### Migrating from the local base image
+
+Older versions of `herd init` generated a local two-layer build: a herd-managed `Dockerfile.herd_runner_base` plus a `Dockerfile.herd_runner` that did `FROM herd-runner-base`, with a separate base service in `docker-compose.herd.yml`. The base image is now published to GHCR, so:
+
+- Re-running `herd init` **removes** the obsolete `Dockerfile.herd_runner_base` and drops the base service from `docker-compose.herd.yml` (the worker now builds directly from `Dockerfile.herd_runner`).
+- If you **customized** `Dockerfile.herd_runner`, update its `FROM` line from `FROM herd-runner-base` to `FROM ghcr.io/herd-os/herd-runner-<flavor>:<version>` (re-running `herd init` will not overwrite this user-owned file).
+- The base and flavor images are **public**, so no `docker login` is needed to pull them at build time.
+
+## 7. Scaling
 
 ### Docker Compose
 
@@ -192,7 +269,7 @@ docker compose -f docker-compose.herd.yml up -d --scale worker=5
 
 `workers.runner_label` in `.herdos.yml` must match the `RUNNER_LABELS` environment variable in `docker-compose.herd.yml`. Default is `herd-worker`. Use different labels to route heavy tasks to specific runners (e.g., `herd-gpu`).
 
-## 7. Cloud Runners
+## 8. Cloud Runners
 
 You can run on cloud VMs instead of Docker. Requirements:
 
@@ -204,9 +281,9 @@ You can run on cloud VMs instead of Docker. Requirements:
 
 See [GitHub's self-hosted runner docs](https://docs.github.com/en/actions/hosting-your-own-runners) for detailed setup.
 
-## 8. Checking for updates
+## 9. Checking for updates
 
-`herd init` lays down a set of managed files — workflow YAMLs in `.github/workflows/`, `Dockerfile.herd_runner_base`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`. Newer versions of the `herd` binary may render different content for those files, so a repository that was initialized against an older version can drift from the current templates over time.
+`herd init` lays down a set of managed files — workflow YAMLs in `.github/workflows/` (including `herd-publish-runner.yml`), `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`. Newer versions of the `herd` binary may render different content for those files, so a repository that was initialized against an older version can drift from the current templates over time.
 
 `herd init --check` (with `--dry-run` as an alias) re-renders every managed file, compares the result against what's on disk, and prints a per-file summary: `✓` for files that match and `✗ <path> (would change)` followed by up to 5 lines of diff preview for files that differ. After the per-file output, it prints a final line of the form `N files would be modified, M unchanged`. The command exits 0 when nothing would change and 1 when any drift is detected.
 

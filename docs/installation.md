@@ -158,7 +158,7 @@ The job:
 1. Checks out `main` with `fetch-depth: 0` (full history needed for the PR push).
 2. Downloads the just-built `herd-linux-amd64` artifact (avoiding a race against GitHub Release publication).
 3. Sets `HERD_VERSION=${{ github.ref_name }}` and runs `./herd init --skip-labels` against the herd repo itself.
-4. `herd init` regenerates the workflow files, runner Dockerfiles, entrypoint, `docker-compose.herd.yml`, and `.env.herd.example`. If anything changed, it commits to branch `herd/init-<tag>`, pushes, and opens a PR titled **`Update HerdOS to <tag>`**.
+4. `herd init` regenerates the workflow files, entrypoint, `docker-compose.herd.yml`, and `.env.herd.example` (the user-owned `Dockerfile.herd_runner` is created once and never overwritten). If anything changed, it commits to branch `herd/init-<tag>`, pushes, and opens a PR titled **`Update HerdOS to <tag>`**.
 5. If no herd-managed files changed in this release, no commit, no branch, and no PR are produced. The workflow logs:
 
    ```
