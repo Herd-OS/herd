@@ -22,6 +22,7 @@ import (
 
 func newInitCmd() *cobra.Command {
 	var skipLabels, skipWorkflows, checkOnly, dryRun bool
+	var runnerFlavor string
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -32,7 +33,7 @@ func newInitCmd() *cobra.Command {
 			if checkOnly || dryRun {
 				return runInitCheck()
 			}
-			return runInit(skipLabels, skipWorkflows)
+			return runInit(skipLabels, skipWorkflows, runnerFlavor)
 		},
 		SilenceUsage: true,
 	}
@@ -41,11 +42,12 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&skipWorkflows, "skip-workflows", false, "Don't install workflow files")
 	cmd.Flags().BoolVar(&checkOnly, "check", false, "Compare what `herd init` would write against on-disk files; exit 1 if any drift is detected. Writes nothing.")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Alias for --check")
+	cmd.Flags().StringVar(&runnerFlavor, "runner-flavor", "", "Override runner image flavor (node|ruby|python|go|base); default is auto-detected from manifest files")
 
 	return cmd
 }
 
-func runInit(skipLabels, skipWorkflows bool) error {
+func runInit(skipLabels, skipWorkflows bool, runnerFlavor string) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -118,7 +120,11 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	}
 
 	// 6. Create runner files
-	if err := createRunnerFiles(dir, owner, repo); err != nil {
+	flavor, err := resolveRunnerFlavor(dir, runnerFlavor)
+	if err != nil {
+		return err
+	}
+	if err := createRunnerFiles(dir, owner, repo, flavor); err != nil {
 		return err
 	}
 
@@ -481,7 +487,7 @@ func renderHerdRunnerDockerfile(baseImage string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func createRunnerFiles(dir, owner, repo string) error {
+func createRunnerFiles(dir, owner, repo, flavor string) error {
 	// Runner infrastructure files are herd-managed — always overwrite to keep
 	// them in sync with the installed herd version.
 
@@ -498,7 +504,7 @@ func createRunnerFiles(dir, owner, repo string) error {
 	// Dockerfile.herd_runner (user-owned, only created if missing)
 	herdRunnerPath := filepath.Join(dir, "Dockerfile.herd_runner")
 	if _, err := os.Stat(herdRunnerPath); os.IsNotExist(err) {
-		baseImage := runnerBaseImage("base")
+		baseImage := runnerBaseImage(flavor)
 		content, err := renderHerdRunnerDockerfile(baseImage)
 		if err != nil {
 			return err
