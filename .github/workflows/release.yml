@@ -50,7 +50,14 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/}
           ./scripts/update-homebrew.sh $VERSION bin/checksums.txt
 
+  # NOTE: The first time these packages are pushed, GHCR creates them as
+  # private. The herd-runner-{base,node,ruby,python,go} packages must be made
+  # public (one-time, manual) in the org's GHCR package settings
+  # (https://github.com/orgs/herd-os/packages → each package → Package settings →
+  # Change visibility → Public) so that `docker pull` works without auth. The
+  # workflow only pushes images; it cannot set package visibility.
   publish-base-image:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,6 +84,7 @@ jobs:
 
   publish-flavor-images:
     needs: publish-base-image
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: read

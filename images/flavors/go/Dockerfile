@@ -1,4 +1,5 @@
-ARG BASE_VERSION
+# BASE_VERSION defaults to `latest` for ad-hoc local builds; CI passes the release tag.
+ARG BASE_VERSION=latest
 FROM ghcr.io/herd-os/herd-runner-base:${BASE_VERSION}
 USER root
 ARG GO_VERSION=1.24.0

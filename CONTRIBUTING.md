@@ -17,3 +17,16 @@ TEMPLATE, not the rendered file:
 3. Commit both files together
 
 CI runs `herd init --check` and will reject PRs that have drifted files.
+
+## Releasing the runner images
+
+The `Release` workflow (`.github/workflows/release.yml`) builds and pushes the
+public runner images (`ghcr.io/herd-os/herd-runner-{base,node,ruby,python,go}`)
+on every `v*` tag. GHCR creates newly pushed packages as **private** by default,
+and the workflow has no permission to change package visibility. After the
+**first** release that publishes a given package, a maintainer must make it
+public once: go to https://github.com/orgs/herd-os/packages, open each
+`herd-runner-*` package → **Package settings** → **Change visibility** →
+**Public**. Until that is done, `docker pull ghcr.io/herd-os/herd-runner-base:latest`
+from an unauthenticated client will fail. Subsequent releases inherit the public
+setting, so this is a one-time step per package.
