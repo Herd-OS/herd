@@ -1,7 +1,7 @@
 # HerdOS Runner — project customization
 # This file is yours to customize — herd init will never overwrite it.
 
-FROM herd-runner-base
+FROM ghcr.io/herd-os/herd-runner-base:latest
 
 USER root
 
