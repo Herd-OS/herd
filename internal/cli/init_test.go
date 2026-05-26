@@ -225,18 +225,9 @@ func TestCreateRunnerFiles(t *testing.T) {
 	assert.Contains(t, string(hr), "FROM ghcr.io/herd-os/herd-runner-base:")
 	assert.Contains(t, string(hr), runnerImageTag(version))
 
-	// entrypoint.herd.sh
-	ep, err := os.ReadFile(filepath.Join(dir, "entrypoint.herd.sh"))
-	require.NoError(t, err)
-	assert.Contains(t, string(ep), "#!/bin/bash")
-	assert.Contains(t, string(ep), "--ephemeral")
-	assert.Contains(t, string(ep), "trap cleanup SIGTERM SIGINT")
-	assert.Contains(t, string(ep), "exec ./run.sh")
-	assert.Contains(t, string(ep), "Herd-OS/herd/releases")
-	assert.Contains(t, string(ep), "HERD_VERSION")
-	info, err := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0755), info.Mode().Perm(), "entrypoint.herd.sh should be executable")
+	// entrypoint.herd.sh is no longer generated — baked into the published base image.
+	_, statErr := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
+	assert.True(t, os.IsNotExist(statErr), "entrypoint.herd.sh should not be created")
 
 	// docker-compose.herd.yml
 	dc, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
@@ -268,7 +259,7 @@ func TestCreateRunnerFiles_OverwritesHerdManaged(t *testing.T) {
 	require.NoError(t, createRunnerFiles(dir, "org", "repo"))
 
 	// Herd-managed files should be overwritten
-	for _, name := range []string{"entrypoint.herd.sh", "docker-compose.herd.yml", ".env.herd.example"} {
+	for _, name := range []string{"docker-compose.herd.yml", ".env.herd.example"} {
 		content, err := os.ReadFile(filepath.Join(dir, name))
 		require.NoError(t, err)
 		assert.NotEqual(t, stale, content, "%s should be overwritten", name)
@@ -278,6 +269,34 @@ func TestCreateRunnerFiles_OverwritesHerdManaged(t *testing.T) {
 	// An obsolete Dockerfile.herd_runner_base should be removed.
 	_, err := os.Stat(filepath.Join(dir, "Dockerfile.herd_runner_base"))
 	assert.True(t, os.IsNotExist(err), "stale Dockerfile.herd_runner_base should be removed")
+
+	// A leftover entrypoint.herd.sh should be removed (now baked into the base image).
+	_, err = os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
+	assert.True(t, os.IsNotExist(err), "stale entrypoint.herd.sh should be removed")
+}
+
+// TestInit_DoesNotGenerateEntrypoint verifies a fresh init does not create
+// entrypoint.herd.sh — it is baked into the published base image.
+func TestInit_DoesNotGenerateEntrypoint(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, createRunnerFiles(dir, "org", "repo"))
+
+	_, err := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
+	assert.True(t, os.IsNotExist(err), "entrypoint.herd.sh should not be created on fresh init")
+}
+
+// TestInit_RemovesLegacyEntrypoint verifies a leftover entrypoint.herd.sh from
+// an older init is removed when re-running init.
+func TestInit_RemovesLegacyEntrypoint(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), []byte("#!/bin/bash\nlegacy"), 0755))
+
+	require.NoError(t, createRunnerFiles(dir, "org", "repo"))
+
+	_, err := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
+	assert.True(t, os.IsNotExist(err), "legacy entrypoint.herd.sh should be removed on re-init")
 }
 
 func TestCreateRunnerFiles_DoesNotOverwriteUserDockerfile(t *testing.T) {
@@ -736,7 +755,6 @@ func setupTestGitRepoWithInitFilesAndRemote(t *testing.T) string {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".github", "workflows", "herd-monitor.yml"), []byte("name: monitor"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".github", "workflows", "herd-integrator.yml"), []byte("name: integrator"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), []byte("FROM ghcr.io/herd-os/herd-runner-base:latest"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), []byte("#!/bin/bash"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), []byte("services:"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.herd.example"), []byte("GITHUB_TOKEN="), 0644))
 
@@ -773,7 +791,6 @@ func setupTestGitRepoWithInitFiles(t *testing.T) string {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".github", "workflows", "herd-monitor.yml"), []byte("name: monitor"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".github", "workflows", "herd-integrator.yml"), []byte("name: integrator"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), []byte("FROM ghcr.io/herd-os/herd-runner-base:latest"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), []byte("#!/bin/bash"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), []byte("services:"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.herd.example"), []byte("GITHUB_TOKEN="), 0644))
 
@@ -913,12 +930,8 @@ func TestRunInitSkipLabelsEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(dfRunner), "FROM ghcr.io/herd-os/herd-runner-base:")
 
-	ep, err := os.ReadFile(filepath.Join(dir, "entrypoint.herd.sh"))
-	require.NoError(t, err)
-	assert.Contains(t, string(ep), "#!/bin/bash")
-	epInfo, err := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0755), epInfo.Mode().Perm(), "entrypoint.herd.sh should be executable")
+	_, epErr := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
+	assert.True(t, os.IsNotExist(epErr), "entrypoint.herd.sh should not be created")
 
 	dc, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
 	require.NoError(t, err)
@@ -966,7 +979,6 @@ func TestRunInitSkipLabelsIdempotent(t *testing.T) {
 
 	runnerFiles := []string{
 		"Dockerfile.herd_runner",
-		"entrypoint.herd.sh",
 		"docker-compose.herd.yml",
 		".env.herd.example",
 	}

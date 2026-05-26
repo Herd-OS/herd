@@ -294,18 +294,14 @@ func createLabelViaCLI(owner, repo string, def issues.LabelDef) error {
 type managedFile struct {
 	Path    string // relative path, e.g. ".github/workflows/herd-worker.yml"
 	Content []byte
-	Mode    os.FileMode // 0644 for most, 0755 for entrypoint.herd.sh
+	Mode    os.FileMode // 0644 for most files
 }
 
-// renderRunnerFiles returns the runner-infrastructure files (entrypoint.herd.sh,
-// .env.herd.example, docker-compose.herd.yml) in stable order.
+// renderRunnerFiles returns the runner-infrastructure files
+// (.env.herd.example, docker-compose.herd.yml) in stable order.
 // The compose result reflects docker-compose.herd.override.yml if present in dir.
 // Dockerfile.herd_runner is intentionally NOT included — it is user-owned.
 func renderRunnerFiles(dir, owner, repo string) ([]managedFile, error) {
-	entrypoint, err := runner.FS.ReadFile("entrypoint.herd.sh")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded entrypoint.herd.sh: %w", err)
-	}
 	envExample, err := runner.FS.ReadFile(".env.herd.example")
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded .env.herd.example: %w", err)
@@ -320,7 +316,6 @@ func renderRunnerFiles(dir, owner, repo string) ([]managedFile, error) {
 	}
 
 	return []managedFile{
-		{Path: "entrypoint.herd.sh", Content: entrypoint, Mode: 0755},
 		{Path: ".env.herd.example", Content: envExample, Mode: 0644},
 		{Path: "docker-compose.herd.yml", Content: composeContent, Mode: 0644},
 	}, nil
@@ -495,6 +490,15 @@ func createRunnerFiles(dir, owner, repo string) error {
 		fmt.Println(display.Success("Removed obsolete Dockerfile.herd_runner_base (base image now pulled from GHCR)"))
 	}
 
+	// entrypoint.herd.sh is no longer generated — it is baked into the published base image.
+	entrypointPath := filepath.Join(dir, "entrypoint.herd.sh")
+	if _, err := os.Stat(entrypointPath); err == nil {
+		if err := os.Remove(entrypointPath); err != nil {
+			return fmt.Errorf("removing obsolete entrypoint.herd.sh: %w", err)
+		}
+		fmt.Println(display.Success("Removed obsolete entrypoint.herd.sh — now baked into the published base image"))
+	}
+
 	// Dockerfile.herd_runner (user-owned, only created if missing)
 	herdRunnerPath := filepath.Join(dir, "Dockerfile.herd_runner")
 	if _, err := os.Stat(herdRunnerPath); os.IsNotExist(err) {
@@ -513,16 +517,6 @@ func createRunnerFiles(dir, owner, repo string) error {
 	} else {
 		fmt.Println(display.Success("Dockerfile.herd_runner already exists (not overwritten)"))
 	}
-
-	// entrypoint.herd.sh (static, executable)
-	entrypoint, err := runner.FS.ReadFile("entrypoint.herd.sh")
-	if err != nil {
-		return fmt.Errorf("reading embedded entrypoint.herd.sh: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), entrypoint, 0755); err != nil {
-		return fmt.Errorf("writing entrypoint.herd.sh: %w", err)
-	}
-	fmt.Println(display.Success("Installed entrypoint.herd.sh"))
 
 	// docker-compose.herd.yml (templated with owner/repo, merged with override if present)
 	composeContent, mergedOK, mergeErr := renderMergedCompose(dir, owner, repo)
@@ -709,7 +703,6 @@ func commitInitFiles(dir, owner, repo string) error {
 		".herd/",
 		".github/workflows/",
 		"Dockerfile.herd_runner",
-		"entrypoint.herd.sh",
 		"docker-compose.herd.yml",
 		".env.herd.example",
 	}
@@ -724,6 +717,10 @@ func commitInitFiles(dir, owner, repo string) error {
 	// existing repo that still tracks it. Ignore errors (file may never have been
 	// tracked).
 	cmd = exec.Command("git", "rm", "--cached", "--ignore-unmatch", "Dockerfile.herd_runner_base")
+	cmd.Dir = dir
+	_, _ = cmd.CombinedOutput()
+
+	cmd = exec.Command("git", "rm", "--cached", "--ignore-unmatch", "entrypoint.herd.sh")
 	cmd.Dir = dir
 	_, _ = cmd.CombinedOutput()
 

@@ -2,7 +2,7 @@
 
 HerdOS workers run as GitHub Actions on self-hosted runners. Self-hosted runners are required because workers need an AI agent (Claude Code) installed, and because GitHub-hosted runners don't support `workflow_dispatch` chaining with custom tools.
 
-`herd init` generates all the files you need: `Dockerfile.herd_runner`, `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`.
+`herd init` generates all the files you need: `Dockerfile.herd_runner`, `docker-compose.herd.yml`, and `.env.herd.example`.
 
 ## Quick Setup
 
@@ -147,9 +147,9 @@ USER runner
 
 The base image runs as the non-root `runner` user, so switch to `root` to install packages and switch back when done.
 
-The **Herd CLI** is not baked into the image — it's downloaded at container startup by `entrypoint.herd.sh`. This ensures runners always use the latest version without rebuilding. Set `HERD_VERSION` in `.env` to pin a specific version.
+The **Herd CLI** is not baked into the image — the entrypoint script that ships inside the published base image (`ghcr.io/herd-os/herd-runner-base`) downloads it at container startup. This ensures runners always use the latest version without rebuilding. Set `HERD_VERSION` in `.env` to pin a specific version.
 
-The `entrypoint.herd.sh` script handles runner lifecycle:
+The base image's entrypoint script handles runner lifecycle:
 1. Downloads the herd binary (latest or pinned version)
 2. Removes stale config from previous runs (ephemeral runners leave `.runner` behind on restart)
 3. Registers with GitHub using a short-lived registration token
@@ -247,7 +247,7 @@ See [GitHub's self-hosted runner docs](https://docs.github.com/en/actions/hostin
 
 ## 9. Checking for updates
 
-`herd init` lays down a set of managed files — workflow YAMLs in `.github/workflows/` (including `herd-publish-runner.yml`), `entrypoint.herd.sh`, `docker-compose.herd.yml`, and `.env.herd.example`. Newer versions of the `herd` binary may render different content for those files, so a repository that was initialized against an older version can drift from the current templates over time.
+`herd init` lays down a set of managed files — workflow YAMLs in `.github/workflows/` (including `herd-publish-runner.yml`), `docker-compose.herd.yml`, and `.env.herd.example`. Newer versions of the `herd` binary may render different content for those files, so a repository that was initialized against an older version can drift from the current templates over time.
 
 `herd init --check` (with `--dry-run` as an alias) re-renders every managed file, compares the result against what's on disk, and prints a per-file summary: `✓` for files that match and `✗ <path> (would change)` followed by up to 5 lines of diff preview for files that differ. After the per-file output, it prints a final line of the form `N files would be modified, M unchanged`. The command exits 0 when nothing would change and 1 when any drift is detected.
 

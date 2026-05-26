@@ -425,14 +425,14 @@ func TestWarnIfHerdFilesDrifted_MultipleDriftedFilesListed(t *testing.T) {
 		filepath.Join(dir, ".github", "workflows", "herd-monitor.yml"),
 		[]byte("# tampered\n"), 0644))
 	require.NoError(t, os.WriteFile(
-		filepath.Join(dir, "entrypoint.herd.sh"),
-		[]byte("#!/bin/bash\n# tampered\n"), 0755))
+		filepath.Join(dir, ".env.herd.example"),
+		[]byte("# tampered\n"), 0644))
 
 	stdout, _ := captureStdio(t, func() {
 		warnIfHerdFilesDrifted(dir)
 	})
 
 	assert.Contains(t, stdout, ".github/workflows/herd-monitor.yml")
-	assert.Contains(t, stdout, "entrypoint.herd.sh")
+	assert.Contains(t, stdout, ".env.herd.example")
 	assert.Contains(t, stdout, ", ", "drifted paths should be comma-separated")
 }
