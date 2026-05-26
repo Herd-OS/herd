@@ -1,11 +1,17 @@
 # HerdOS Runner — project customization
 # This file is yours to customize — herd init will never overwrite it.
-# Add project-specific tools, languages, and dependencies below.
 #
-# The base image provides: GitHub Actions runner, Claude Code, Herd CLI,
-# curl, jq, git, gh, and Node.js.
+# Base image: {{.BaseImage}}
+# The base image is ghcr.io/herd-os/herd-runner-base (minimal — OS + runner only).
+#
+# To add tools on top of the base image (e.g., a Postgres client, ImageMagick,
+# a language toolchain), add RUN apt-get install lines below.
+#
+# To use a different base, edit the FROM line below.
+#
+# DO NOT COPY source code (checked out at job time) or bake in secrets.
 
-FROM herd-runner-base
+FROM {{.BaseImage}}
 
 # The base image runs as the 'runner' user. Switch to root to install
 # packages, then switch back when done.
@@ -13,13 +19,6 @@ USER root
 
 # Examples — uncomment what your project needs:
 #
-# Go
-# RUN apt-get update && apt-get install -y golang-go && rm -rf /var/lib/apt/lists/*
-#
-# Python
-# RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
-#
-# Rust
-# RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
 
 USER runner

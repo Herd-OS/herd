@@ -16,22 +16,14 @@ RUN ARCH=$(echo "$TARGETARCH" | sed 's/amd64/x64/' | sed 's/arm64/arm64/') \
     && curl -sL "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${ARCH}-${RUNNER_VERSION}.tar.gz" \
     | tar xz
 
-# Herd CLI is installed at startup by entrypoint.herd.sh
-# Set HERD_VERSION in .env to pin a version, otherwise latest is used.
 RUN mkdir -p /opt/herd/bin /home/runner/.npm-global
 ENV PATH="/home/runner/.npm-global/bin:/opt/herd/bin:${PATH}"
 
-# Agent CLI is installed at startup by entrypoint.herd.sh
-# (same as Herd CLI — avoids Docker layer caching stale versions)
-
-# Project-specific tools go in Dockerfile.herd_runner (not here).
-
-# Runner must not run as root
 RUN useradd -m -d /home/runner runner \
     && chown -R runner:runner /runner /opt/herd /home/runner
 
 WORKDIR /runner
-COPY entrypoint.herd.sh .
+COPY internal/cli/runner/entrypoint.herd.sh ./entrypoint.herd.sh
 RUN chmod +x entrypoint.herd.sh
 
 USER runner

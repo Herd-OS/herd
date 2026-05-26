@@ -21,6 +21,7 @@ type workflowFile struct {
 func workflowFiles() []workflowFile {
 	return []workflowFile{
 		{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true},
+		{SrcName: "herd-publish-runner.yml.tmpl", DestName: "herd-publish-runner.yml", Template: true},
 		{SrcName: "herd-monitor.yml", DestName: "herd-monitor.yml"},
 		{SrcName: "herd-integrator.yml", DestName: "herd-integrator.yml"},
 	}

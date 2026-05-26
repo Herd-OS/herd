@@ -11,20 +11,9 @@
 # this file automatically. The override file is never overwritten.
 
 services:
-  herd-runner-base:
-    build:
-      dockerfile: Dockerfile.herd_runner_base
-    image: herd-runner-base
-    entrypoint: ["true"]
-    restart: "no"
   worker:
     build:
       dockerfile: Dockerfile.herd_runner
-      additional_contexts:
-        herd-runner-base: service:herd-runner-base
-    depends_on:
-      herd-runner-base:
-        condition: service_completed_successfully
     restart: always
     environment:
       - GITHUB_TOKEN=${GITHUB_TOKEN}

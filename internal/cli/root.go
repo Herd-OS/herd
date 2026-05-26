@@ -43,6 +43,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newBatchCmd())
 	root.AddCommand(newReviewCmd())
 	root.AddCommand(newRunnerCmd())
+	root.AddCommand(newImageCmd())
 
 	// Internal commands (hidden, used by GitHub Actions workflows)
 	root.AddCommand(newWorkerCmd())
