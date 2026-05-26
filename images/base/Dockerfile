@@ -23,7 +23,7 @@ RUN useradd -m -d /home/runner runner \
     && chown -R runner:runner /runner /opt/herd /home/runner
 
 WORKDIR /runner
-COPY internal/cli/runner/entrypoint.herd.sh ./entrypoint.herd.sh
+COPY images/base/entrypoint.herd.sh ./entrypoint.herd.sh
 RUN chmod +x entrypoint.herd.sh
 
 USER runner
