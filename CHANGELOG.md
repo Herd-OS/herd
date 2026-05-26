@@ -16,3 +16,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `herd init` no longer generates `Dockerfile.herd_runner_base`; an existing one is removed and the base service is dropped from `docker-compose.herd.yml`.
 - `Dockerfile.herd_runner` now uses `FROM ghcr.io/herd-os/herd-runner-base:<version>` (pulled from GHCR) instead of the locally built `herd-runner-base`.
+- `herd init` no longer generates `entrypoint.herd.sh` in consumer repos — the entrypoint is now baked into the published base image `ghcr.io/herd-os/herd-runner-base`. A leftover copy from an older init is removed automatically on the next `herd init`.
