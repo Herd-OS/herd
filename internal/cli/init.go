@@ -22,7 +22,6 @@ import (
 
 func newInitCmd() *cobra.Command {
 	var skipLabels, skipWorkflows, checkOnly, dryRun bool
-	var runnerFlavor string
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -33,7 +32,7 @@ func newInitCmd() *cobra.Command {
 			if checkOnly || dryRun {
 				return runInitCheck()
 			}
-			return runInit(skipLabels, skipWorkflows, runnerFlavor)
+			return runInit(skipLabels, skipWorkflows)
 		},
 		SilenceUsage: true,
 	}
@@ -42,12 +41,11 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&skipWorkflows, "skip-workflows", false, "Don't install workflow files")
 	cmd.Flags().BoolVar(&checkOnly, "check", false, "Compare what `herd init` would write against on-disk files; exit 1 if any drift is detected. Writes nothing.")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Alias for --check")
-	cmd.Flags().StringVar(&runnerFlavor, "runner-flavor", "", "Override runner image flavor (node|ruby|python|go|base); default is auto-detected from manifest files")
 
 	return cmd
 }
 
-func runInit(skipLabels, skipWorkflows bool, runnerFlavor string) error {
+func runInit(skipLabels, skipWorkflows bool) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -120,11 +118,7 @@ func runInit(skipLabels, skipWorkflows bool, runnerFlavor string) error {
 	}
 
 	// 6. Create runner files
-	flavor, err := resolveRunnerFlavor(dir, runnerFlavor)
-	if err != nil {
-		return err
-	}
-	if err := createRunnerFiles(dir, owner, repo, flavor); err != nil {
+	if err := createRunnerFiles(dir, owner, repo); err != nil {
 		return err
 	}
 
@@ -459,10 +453,10 @@ type runnerTemplateData struct {
 	Repo  string
 }
 
-// runnerBaseImage returns the fully-qualified, version-pinned GHCR image
-// reference for the given runner flavor ("base", "node", "ruby", "python", "go").
-func runnerBaseImage(flavor string) string {
-	return fmt.Sprintf("ghcr.io/herd-os/herd-runner-%s:%s", flavor, runnerImageTag(version))
+// runnerBaseImage returns the fully-qualified, version-pinned GHCR reference for
+// the minimal herd-runner-base image.
+func runnerBaseImage() string {
+	return fmt.Sprintf("ghcr.io/herd-os/herd-runner-base:%s", runnerImageTag(version))
 }
 
 type herdRunnerTemplateData struct {
@@ -487,7 +481,7 @@ func renderHerdRunnerDockerfile(baseImage string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func createRunnerFiles(dir, owner, repo, flavor string) error {
+func createRunnerFiles(dir, owner, repo string) error {
 	// Runner infrastructure files are herd-managed — always overwrite to keep
 	// them in sync with the installed herd version.
 
@@ -504,7 +498,7 @@ func createRunnerFiles(dir, owner, repo, flavor string) error {
 	// Dockerfile.herd_runner (user-owned, only created if missing)
 	herdRunnerPath := filepath.Join(dir, "Dockerfile.herd_runner")
 	if _, err := os.Stat(herdRunnerPath); os.IsNotExist(err) {
-		baseImage := runnerBaseImage(flavor)
+		baseImage := runnerBaseImage()
 		content, err := renderHerdRunnerDockerfile(baseImage)
 		if err != nil {
 			return err

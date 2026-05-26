@@ -2,14 +2,12 @@
 # This file is yours to customize — herd init will never overwrite it.
 #
 # Base image: {{.BaseImage}}
-# This was auto-selected based on your project's manifest files.
+# The base image is ghcr.io/herd-os/herd-runner-base (minimal — OS + runner only).
 #
-# To add tools beyond the base flavor (e.g., a Postgres client, ImageMagick,
-# a second language toolchain), add RUN apt-get install lines below.
+# To add tools on top of the base image (e.g., a Postgres client, ImageMagick,
+# a language toolchain), add RUN apt-get install lines below.
 #
-# To change the base flavor, edit the FROM line above. Available flavors:
-#   herd-runner-base    (minimal — OS + runner only)
-#   herd-runner-node, herd-runner-ruby, herd-runner-python, herd-runner-go
+# To use a different base, edit the FROM line below.
 #
 # DO NOT COPY source code (checked out at job time) or bake in secrets.
 

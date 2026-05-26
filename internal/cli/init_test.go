@@ -213,7 +213,7 @@ func TestRoleInstructionFiles(t *testing.T) {
 func TestCreateRunnerFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	require.NoError(t, createRunnerFiles(dir, "my-org", "my-project", "base"))
+	require.NoError(t, createRunnerFiles(dir, "my-org", "my-project"))
 
 	// Dockerfile.herd_runner_base is no longer generated.
 	_, err := os.Stat(filepath.Join(dir, "Dockerfile.herd_runner_base"))
@@ -265,7 +265,7 @@ func TestCreateRunnerFiles_OverwritesHerdManaged(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), stale, 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.herd.example"), stale, 0644))
 
-	require.NoError(t, createRunnerFiles(dir, "org", "repo", "base"))
+	require.NoError(t, createRunnerFiles(dir, "org", "repo"))
 
 	// Herd-managed files should be overwritten
 	for _, name := range []string{"entrypoint.herd.sh", "docker-compose.herd.yml", ".env.herd.example"} {
@@ -287,7 +287,7 @@ func TestCreateRunnerFiles_DoesNotOverwriteUserDockerfile(t *testing.T) {
 	custom := []byte("FROM herd-runner-base\nRUN apt-get install -y golang-go")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), custom, 0644))
 
-	require.NoError(t, createRunnerFiles(dir, "org", "repo", "base"))
+	require.NoError(t, createRunnerFiles(dir, "org", "repo"))
 
 	// User Dockerfile should NOT be overwritten
 	content, err := os.ReadFile(filepath.Join(dir, "Dockerfile.herd_runner"))
@@ -310,7 +310,7 @@ func TestCreateRunnerFiles_OwnerRepoSubstitution(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			require.NoError(t, createRunnerFiles(dir, tt.owner, tt.repo, "base"))
+			require.NoError(t, createRunnerFiles(dir, tt.owner, tt.repo))
 
 			dc, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
 			require.NoError(t, err)
@@ -377,7 +377,7 @@ func TestRunnerDockerfileTemplate_BaseFromLine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			version = tt.version
-			content, err := renderHerdRunnerDockerfile(runnerBaseImage("base"))
+			content, err := renderHerdRunnerDockerfile(runnerBaseImage())
 			require.NoError(t, err)
 			out := string(content)
 
@@ -385,7 +385,7 @@ func TestRunnerDockerfileTemplate_BaseFromLine(t *testing.T) {
 			assert.Contains(t, out, "FROM ghcr.io/herd-os/herd-runner-base:"+runnerImageTag(tt.version))
 			// New header comment block.
 			assert.Contains(t, out, "# Base image:")
-			assert.Contains(t, out, "Available flavors:")
+			assert.Contains(t, out, "ghcr.io/herd-os/herd-runner-base")
 			assert.NotContains(t, out, "{{.BaseImage}}", "template must be fully rendered")
 		})
 	}
@@ -879,7 +879,7 @@ func TestRunInitSkipLabelsEndToEnd(t *testing.T) {
 	defer func() { _ = os.Chdir(oldWd) }()
 	require.NoError(t, os.Chdir(dir))
 
-	require.NoError(t, runInit(true, false, ""))
+	require.NoError(t, runInit(true, false))
 
 	herdosYml := filepath.Join(dir, ".herdos.yml")
 	info, err := os.Stat(herdosYml)
@@ -949,7 +949,7 @@ func TestRunInitSkipLabelsIdempotent(t *testing.T) {
 	defer func() { _ = os.Chdir(oldWd) }()
 	require.NoError(t, os.Chdir(dir))
 
-	require.NoError(t, runInit(true, false, ""), "first runInit")
+	require.NoError(t, runInit(true, false), "first runInit")
 
 	herdosFirst, err := os.ReadFile(filepath.Join(dir, ".herdos.yml"))
 	require.NoError(t, err)
@@ -977,7 +977,7 @@ func TestRunInitSkipLabelsIdempotent(t *testing.T) {
 		runnerFirst[name] = data
 	}
 
-	require.NoError(t, runInit(true, false, ""), "second runInit")
+	require.NoError(t, runInit(true, false), "second runInit")
 
 	herdosSecond, err := os.ReadFile(filepath.Join(dir, ".herdos.yml"))
 	require.NoError(t, err)
@@ -1036,7 +1036,7 @@ func setupCleanInitRepo(t *testing.T) string {
 
 	require.NoError(t, installManagedFilesOnly(dir, "acme", "widgets", cfg))
 
-	herdRunner, err := renderHerdRunnerDockerfile(runnerBaseImage("base"))
+	herdRunner, err := renderHerdRunnerDockerfile(runnerBaseImage())
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), herdRunner, 0644))
 
