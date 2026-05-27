@@ -3,7 +3,7 @@ FROM ubuntu:24.04
 ARG RUNNER_VERSION=2.333.1
 ARG TARGETARCH
 
-# Dependencies (Node 22 LTS required by Claude Code, libicu for GitHub Actions runner)
+# Dependencies (Node 22 LTS required by Claude Code and OpenCode, libicu for GitHub Actions runner)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl jq ca-certificates git gh libicu-dev \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \

@@ -34,6 +34,11 @@ export PATH="/home/runner/.npm-global/bin:$PATH"
 npm install -g --no-audit --no-fund @anthropic-ai/claude-code
 echo "Installed claude $(claude --version 2>/dev/null || echo 'unknown')"
 
+# Install or update OpenCode
+echo "Installing OpenCode..."
+npm install -g --no-audit --no-fund opencode-ai
+echo "Installed opencode $(opencode --version 2>/dev/null || echo 'unknown')"
+
 REPO_OWNER=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\1|')
 REPO_NAME=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\2|')
 
