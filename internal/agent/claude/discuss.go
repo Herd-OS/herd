@@ -7,6 +7,7 @@ import (
 	"os/exec"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/prompt"
 )
 
 // Discuss launches Claude Code in interactive mode with a caller-supplied
@@ -18,7 +19,7 @@ func (c *ClaudeAgent) Discuss(ctx context.Context, opts agent.DiscussOptions) er
 		return fmt.Errorf("discuss: system prompt is required")
 	}
 
-	promptFile, err := writeSystemPromptFile(opts.SystemPrompt)
+	promptFile, err := prompt.WriteSystemPromptFile(opts.SystemPrompt)
 	if err != nil {
 		return fmt.Errorf("discuss: writing system prompt file: %w", err)
 	}

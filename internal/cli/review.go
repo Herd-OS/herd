@@ -10,7 +10,7 @@ import (
 	"text/template"
 
 	"github.com/herd-os/herd/internal/agent"
-	"github.com/herd-os/herd/internal/agent/claude"
+	"github.com/herd-os/herd/internal/agent/factory"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/spf13/cobra"
 )
@@ -77,7 +77,10 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 		return err
 	}
 
-	ag := claude.New(cfg.Agent.Binary, cfg.Agent.Model)
+	ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model)
+	if err != nil {
+		return err
+	}
 	return ag.Discuss(ctx, agent.DiscussOptions{
 		RepoRoot:      dir,
 		SystemPrompt:  systemPrompt,

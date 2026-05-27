@@ -17,7 +17,7 @@ A user can:
 
 - Single-repo only (no cross-repo batches)
 - GitHub only (Platform interface exists but only GitHub is implemented)
-- Claude Code only (Agent interface exists but only Claude Code is implemented)
+- Claude Code and OpenCode supported (Agent interface; Codex, Cursor, and Gemini CLI still planned)
 
 ## v2 -- GitHub App and Multi-Agent
 
@@ -30,7 +30,7 @@ A user can:
 
 ### Multi-Agent
 
-Additional agent implementations (Codex, Cursor, Gemini CLI, OpenCode). Users can choose their preferred agent.
+OpenCode is implemented — set `agent.provider: opencode` in `.herdos.yml` (see [configuration.md](../configuration.md#agent-providers)). Remaining agent implementations (Codex, Cursor, Gemini CLI) are still planned so users can choose their preferred agent.
 
 ## v3 -- Multi-Platform
 

@@ -1,6 +1,6 @@
 # Runner Setup
 
-HerdOS workers run as GitHub Actions on self-hosted runners. Self-hosted runners are required because workers need an AI agent (Claude Code) installed, and because GitHub-hosted runners don't support `workflow_dispatch` chaining with custom tools.
+HerdOS workers run as GitHub Actions on self-hosted runners. Self-hosted runners are required because workers need an AI agent (Claude Code or OpenCode) installed, and because GitHub-hosted runners don't support `workflow_dispatch` chaining with custom tools.
 
 `herd init` generates all the files you need: `Dockerfile.herd_runner`, `docker-compose.herd.yml`, and `.env.herd.example`.
 
@@ -60,9 +60,13 @@ The same token works for both. `HERD_GITHUB_TOKEN` is needed because GitHub's au
 
 ## 2. Agent Authentication
 
+Authentication depends on which `agent.provider` is configured in `.herdos.yml` (see [configuration.md](configuration.md#agent-providers)).
+
+### Claude provider (`agent.provider: claude`)
+
 Choose one:
 
-### Option 1: OAuth token (recommended)
+#### Option 1: OAuth token (recommended)
 
 Uses your Claude Pro/Max subscription — no per-token cost.
 
@@ -78,7 +82,7 @@ CLAUDE_CODE_OAUTH_TOKEN=your-token-here
 
 Also add as an org or repo secret named `CLAUDE_CODE_OAUTH_TOKEN`.
 
-### Option 2: API key
+#### Option 2: API key
 
 Pay-per-token via https://console.anthropic.com/.
 
@@ -88,6 +92,24 @@ ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Also add as an org or repo secret named `ANTHROPIC_API_KEY`.
+
+### OpenCode provider (`agent.provider: opencode`)
+
+OpenCode authenticates against whichever LLM provider the configured `agent.model` resolves to. Set the matching provider API key in the runner environment:
+
+| `agent.model` prefix | Required env var |
+|----------------------|------------------|
+| `anthropic/...` (e.g. `anthropic/claude-sonnet-4`) | `ANTHROPIC_API_KEY` |
+| `openai/...` (e.g. `openai/gpt-5`) | `OPENAI_API_KEY` |
+
+Add the relevant key to `.env`:
+```
+ANTHROPIC_API_KEY=sk-ant-...
+# or
+OPENAI_API_KEY=sk-...
+```
+
+Also add it as an org or repo secret with the same name so the GitHub Actions worker workflow can surface it. OpenCode does not use `CLAUDE_CODE_OAUTH_TOKEN`.
 
 > `.env` is auto-gitignored by `herd init` — credentials won't be committed.
 
@@ -119,8 +141,9 @@ Configure at **org level** (recommended for multi-repo) or **repo level**:
 | Secret/Variable | Type | Required | Purpose |
 |----------------|------|----------|---------|
 | `HERD_GITHUB_TOKEN` | Secret | Yes | PAT for workflow dispatch, releases, cross-repo ops |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Secret | One of these | Agent auth — Pro/Max subscription |
-| `ANTHROPIC_API_KEY` | Secret | One of these | Agent auth — pay-per-token |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Secret | Claude only — one of these | Claude provider auth — Pro/Max subscription |
+| `ANTHROPIC_API_KEY` | Secret | Claude or OpenCode (anthropic models) — one of these | Agent auth — pay-per-token Anthropic API key |
+| `OPENAI_API_KEY` | Secret | OpenCode with `openai/...` model | OpenCode provider auth for OpenAI models |
 | `HERD_ENABLED` | Variable | Yes | Activates workflows — set to `true` after runners are online |
 | `HERD_RUNNER_LABEL` | Variable | No | Override default runner label (default: `herd-worker`) |
 
@@ -151,10 +174,11 @@ The **Herd CLI** is not baked into the image — the entrypoint script that ship
 
 The base image's entrypoint script handles runner lifecycle:
 1. Downloads the herd binary (latest or pinned version)
-2. Removes stale config from previous runs (ephemeral runners leave `.runner` behind on restart)
-3. Registers with GitHub using a short-lived registration token
-4. Starts the runner in ephemeral mode (picks up one job, then deregisters)
-5. On SIGTERM/SIGINT, deregisters cleanly
+2. Installs both supported agent CLIs via npm at container startup: Claude Code (`@anthropic-ai/claude-code`) and OpenCode (`opencode-ai`). Both are present in every runner regardless of which `agent.provider` the repo selects, so switching providers does not require rebuilding the image.
+3. Removes stale config from previous runs (ephemeral runners leave `.runner` behind on restart)
+4. Registers with GitHub using a short-lived registration token
+5. Starts the runner in ephemeral mode (picks up one job, then deregisters)
+6. On SIGTERM/SIGINT, deregisters cleanly
 
 The `docker-compose.herd.yml` runs the worker service with `restart: always`, so after each job completes the container restarts and re-registers for the next job.
 
@@ -247,10 +271,14 @@ docker compose -f docker-compose.herd.yml up -d --scale worker=5
 You can run on cloud VMs instead of Docker. Requirements:
 
 1. Install the [GitHub Actions runner](https://github.com/actions/runner)
-2. Install Claude Code: `npm install -g @anthropic-ai/claude-code`
+2. Install both agent CLIs (matches the Docker base image, so either `agent.provider` works):
+   - Claude Code: `npm install -g @anthropic-ai/claude-code`
+   - OpenCode: `npm install -g opencode-ai`
 3. Install Herd CLI: `go install github.com/herd-os/herd/cmd/herd@latest`
 4. Register the runner with the `herd-worker` label
-5. Set `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` in the runner's environment
+5. Set the agent credentials in the runner's environment:
+   - For `agent.provider: claude` — `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
+   - For `agent.provider: opencode` — the provider API key for the configured model (e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models)
 
 See [GitHub's self-hosted runner docs](https://docs.github.com/en/actions/hosting-your-own-runners) for detailed setup.
 
@@ -313,10 +341,10 @@ See [configuration.md](configuration.md) for the full field reference.
 | Runner not picking up jobs | Label mismatch | Ensure `RUNNER_LABELS` matches `workers.runner_label` in `.herdos.yml` |
 | Runner exits after one job | Expected | Ephemeral mode — `docker-compose` restarts it automatically |
 | "Must not run with sudo" | Running as root | The Dockerfile creates a non-root `runner` user — don't override `USER` |
-| Agent not found | Not installed | Ensure Claude Code is in the Docker image (`npm install -g @anthropic-ai/claude-code`) |
+| Agent not found | Not installed | Ensure the configured agent CLI is in the Docker image — the base image installs both (`npm install -g @anthropic-ai/claude-code` and `npm install -g opencode-ai`) |
 | 403 on PR creation | Org setting | Enable "Allow GitHub Actions to create and approve pull requests" in org settings |
 | 403 on listing PRs | Missing permission | Ensure `pull-requests: write` is in workflow permissions |
 | Dispatch succeeds but no run appears | Missing secret | Add `HERD_GITHUB_TOKEN` as org/repo secret (see section 1) |
 | Token permission errors | Insufficient scope | Fine-grained: needs Administration read/write. Classic: needs `repo` scope |
 | Integrator crashes checking CI | Missing Statuses permission | Add **Statuses: Read** to fine-grained PAT, or set `require_ci: false` in `.herdos.yml` |
-| Auth errors in worker | Missing credentials | Verify `.env` has `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` |
+| Auth errors in worker | Missing credentials | Verify `.env` has the right key for the configured provider — Claude: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenCode: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` matching `agent.model` |

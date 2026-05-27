@@ -1,4 +1,4 @@
-package claude
+package prompt
 
 import (
 	"os"
@@ -47,7 +47,6 @@ func TestGatherDirTree_ExcludesAllDirs(t *testing.T) {
 func TestGatherDirTree_ExcludesNestedDirs(t *testing.T) {
 	tmp := t.TempDir()
 
-	// Create a top-level dir with an excluded child dir
 	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "cmd", ".git"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "cmd", "node_modules"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "cmd", "vendor"), 0o755))

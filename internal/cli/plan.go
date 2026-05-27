@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
-	"github.com/herd-os/herd/internal/agent/claude"
+	"github.com/herd-os/herd/internal/agent/factory"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/display"
 	"github.com/herd-os/herd/internal/platform"
@@ -206,7 +206,10 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 	}
 
 	// Create agent and launch planning session
-	agentInstance := claude.New(cfg.Agent.Binary, cfg.Agent.Model)
+	agentInstance, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model)
+	if err != nil {
+		return err
+	}
 	plan, err := agentInstance.Plan(ctx, initialPrompt, opts)
 	if err != nil {
 		return err

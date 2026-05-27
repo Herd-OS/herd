@@ -33,9 +33,9 @@ func Validate(cfg *Config) *ValidationError {
 
 	// Agent
 	switch cfg.Agent.Provider {
-	case "claude":
+	case "claude", "opencode":
 	default:
-		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.provider must be one of: claude — got %q", cfg.Agent.Provider))
+		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.provider must be one of: claude, opencode — got %q", cfg.Agent.Provider))
 	}
 
 	// Workers

@@ -56,9 +56,9 @@ graph TD
     I --> J[Non-done issues cancelled, cleanup]
 ```
 
-Workers run your configured agent (Claude Code, Codex, Cursor) in
-headless mode. If one fails, the Monitor detects it and retries
-automatically. The system is self-healing.
+Workers run your configured agent (Claude Code, OpenCode, Codex,
+Cursor) in headless mode. If one fails, the Monitor detects it and
+retries automatically. The system is self-healing.
 
 ## Quick start
 

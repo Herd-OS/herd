@@ -12,36 +12,8 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/prompt"
 )
-
-const (
-	// minValidOutputLen is the minimum stdout length for agent output to be
-	// considered valid. Shorter single-line output is treated as suspicious
-	// (e.g., "Execution error" from API failures).
-	minValidOutputLen = 20
-
-	// retryDelay is the wait time before retrying after suspicious output.
-	retryDelay = 5 * time.Second
-)
-
-// isSuspiciousOutput returns true if the agent's stdout looks like an error
-// rather than real work output. This catches cases where Claude's API returns
-// exit code 0 with just "Execution error" or similar short error messages.
-func isSuspiciousOutput(stdout string) bool {
-	trimmed := strings.TrimSpace(stdout)
-	if trimmed == "" {
-		return true
-	}
-	if strings.EqualFold(trimmed, "Execution error") {
-		return true
-	}
-	// Short single-line output is suspicious — real agent work produces
-	// multi-line summaries or at least a substantive single line.
-	if len(trimmed) < minValidOutputLen && !strings.Contains(trimmed, "\n") {
-		return true
-	}
-	return false
-}
 
 // Execute runs the configured agent in headless mode to complete a task.
 // The task body is passed as the prompt (-p), and the system prompt provides
@@ -49,9 +21,9 @@ func isSuspiciousOutput(stdout string) bool {
 // If the agent returns suspicious output (empty, "Execution error", or very
 // short), Execute retries once after a 5s delay before returning an error.
 func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
-	prompt := task.Body
+	taskPrompt := task.Body
 	if opts.SystemPrompt != "" {
-		prompt = opts.SystemPrompt
+		taskPrompt = opts.SystemPrompt
 	}
 
 	args := []string{"--dangerously-skip-permissions"}
@@ -71,7 +43,7 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 	runOnce := func() (string, string, error) {
 		cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
 		cmd.Dir = opts.RepoRoot
-		cmd.Stdin = strings.NewReader(prompt)
+		cmd.Stdin = strings.NewReader(taskPrompt)
 
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
@@ -88,7 +60,7 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 		return nil, err
 	}
 
-	if isSuspiciousOutput(stdout) {
+	if prompt.IsSuspiciousOutput(stdout) {
 		// Dump debug log if available
 		if debugFile != "" {
 			if debugData, readErr := os.ReadFile(debugFile); readErr == nil && len(debugData) > 0 {
@@ -96,17 +68,17 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 			}
 		}
 		fmt.Printf("Agent returned suspicious output (len=%d), retrying in %s...\nstdout: %s\nstderr: %s\n",
-			len(strings.TrimSpace(stdout)), retryDelay, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+			len(strings.TrimSpace(stdout)), prompt.RetryDelay, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
 		if debugFile != "" {
 			_ = os.Remove(debugFile) // clear for retry
 		}
-		time.Sleep(retryDelay)
+		time.Sleep(prompt.RetryDelay)
 
 		stdout, stderr, err = runOnce()
 		if err != nil {
 			return nil, err
 		}
-		if isSuspiciousOutput(stdout) {
+		if prompt.IsSuspiciousOutput(stdout) {
 			// Dump debug log for retry attempt
 			if debugFile != "" {
 				if debugData, readErr := os.ReadFile(debugFile); readErr == nil && len(debugData) > 0 {

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/herd-os/herd/internal/agent/claude"
+	"github.com/herd-os/herd/internal/agent/factory"
 	"github.com/herd-os/herd/internal/commands"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
@@ -211,7 +211,10 @@ func newIntegratorReviewCmd() *cobra.Command {
 				}
 			}
 
-			ag := claude.New(cfg.Agent.Binary, cfg.Agent.Model)
+			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model)
+			if err != nil {
+				return err
+			}
 			cwd, err := os.Getwd()
 			if err != nil {
 				return fmt.Errorf("getting current directory: %w", err)
@@ -404,7 +407,10 @@ func newHandleCommentCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("getting current directory: %w", err)
 			}
-			ag := claude.New(cfg.Agent.Binary, cfg.Agent.Model)
+			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model)
+			if err != nil {
+				return err
+			}
 			g := git.New(cwd)
 
 			reg := commands.DefaultRegistry()

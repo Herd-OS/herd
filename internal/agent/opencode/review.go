@@ -1,4 +1,4 @@
-package claude
+package opencode
 
 import (
 	"bytes"
@@ -14,32 +14,30 @@ import (
 	"github.com/herd-os/herd/internal/agent/prompt"
 )
 
-// Review runs the configured agent in headless mode to review a diff.
-// The agent checks acceptance criteria and looks for issues.
-// Returns a structured review result parsed from the agent's JSON output.
-func (c *ClaudeAgent) Review(ctx context.Context, diff string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
+// Review runs the OpenCode CLI in headless mode to review a diff. Because
+// OpenCode has no --system-prompt flag, the review system prompt is
+// prepended to the rendered review message; the combined message is piped
+// via stdin so large diffs do not trip the OS ARG_MAX limit.
+//
+// Returns a structured review result parsed from the agent's JSON output;
+// unparseable output yields ReviewResult{Approved:false, IsUnparseable:true}
+// with a Summary beginning "Failed to parse".
+func (o *OpenCodeAgent) Review(ctx context.Context, diff string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
 	reviewPrompt, err := prompt.RenderReviewPrompt(diff, opts)
 	if err != nil {
 		return nil, fmt.Errorf("rendering review prompt: %w", err)
 	}
 
-	// Pass prompt via stdin to avoid "argument list too long" on large diffs.
-	// NOTE: Claude Code's headless `-p` mode does not currently accept a
-	// --disallowed-tools flag. Until it does, we rely on the strict output
-	// contract in prompt.ReviewSystemPrompt and the self-check section in
-	// the user prompt to prevent the agent from taking action during review.
-	// If a future Claude Code version exposes such a flag, pass it here
-	// (e.g. --disallowed-tools=Bash,gh,Write,Edit) for defense in depth.
-	args := []string{"--dangerously-skip-permissions", "--system-prompt", prompt.ReviewSystemPrompt}
-	if c.Model != "" {
-		args = append(args, "--model", c.Model)
-	}
-	args = append(args, "-p")
+	message := prompt.ReviewSystemPrompt + "\n\n" + reviewPrompt
+	args := buildRunArgs(o.Model)
 
 	runOnce := func() (string, string, error) {
-		cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
+		cmd := exec.CommandContext(ctx, o.BinaryPath, args...)
 		cmd.Dir = opts.RepoRoot
-		cmd.Stdin = strings.NewReader(reviewPrompt)
+		// Pipe the combined message via stdin to avoid "argument list too
+		// long" on large diffs. OpenCode `run` reads stdin when it is not
+		// a TTY.
+		cmd.Stdin = strings.NewReader(message)
 
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
@@ -73,7 +71,6 @@ func (c *ClaudeAgent) Review(ctx context.Context, diff string, opts agent.Review
 
 	result, err := prompt.ParseReviewOutput(stdout)
 	if err != nil {
-		// If JSON parsing fails, treat as non-approved with raw output
 		return &agent.ReviewResult{
 			Approved:      false,
 			IsUnparseable: true,
