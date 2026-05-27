@@ -4,15 +4,31 @@
 // the claude provider.
 //
 // Key differences from the claude provider:
-//   - OpenCode's `run` subcommand takes the prompt as a positional argument
-//     (not stdin) and has no --system-prompt flag, so the system prompt is
-//     folded into the message.
+//   - OpenCode's `run` subcommand reads the prompt from stdin when stdin is
+//     not a TTY (and concatenates a positional message + stdin when both are
+//     present). Execute and Review pipe the prompt via stdin to avoid the
+//     OS ARG_MAX limit for large prompts (e.g. PR diffs in Review).
+//   - There is no headless --system-prompt flag, so the review system prompt
+//     is prepended to the user message before being piped to stdin.
+//   - The TUI (`opencode --prompt`) used by Plan and Discuss cannot accept
+//     a piped prompt (its stdin is reserved for interactive input), so the
+//     prompt is passed via the --prompt flag. To prevent an opaque
+//     "argument list too long" failure, both Plan and Discuss guard against
+//     prompts larger than maxArgvPromptBytes with a clear error.
 //   - The model flag is --model with provider/model form
 //     (e.g. anthropic/claude-sonnet-4).
 //   - Permissions are auto-approved with --dangerously-skip-permissions.
 package opencode
 
 import "github.com/herd-os/herd/internal/agent"
+
+// maxArgvPromptBytes is the safe upper bound for prompts passed via argv to
+// the OpenCode TUI (`opencode --prompt`). Linux ARG_MAX is at least 128 KiB
+// on most systems and macOS sets it to 256 KiB; 100 KiB leaves generous
+// headroom for the rest of the argv (env, flags) before the kernel rejects
+// the exec. This guard only applies to Plan and Discuss; Execute and Review
+// pipe their prompts via stdin and have no such limit.
+const maxArgvPromptBytes = 100 * 1024
 
 // OpenCodeAgent implements agent.Agent using the OpenCode CLI.
 type OpenCodeAgent struct {
@@ -36,20 +52,20 @@ func New(binaryPath, model string) *OpenCodeAgent {
 }
 
 // buildRunArgs constructs the argv for a headless `opencode run` invocation.
-// The message is appended as the final positional argument because OpenCode's
-// run subcommand accepts the prompt only as a positional, not via a flag.
-func buildRunArgs(model, message string) []string {
+// The prompt is NOT included in argv — callers must pipe it via the child
+// process's stdin to avoid the OS ARG_MAX limit on large prompts.
+func buildRunArgs(model string) []string {
 	args := []string{"run", "--dangerously-skip-permissions"}
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	args = append(args, message)
 	return args
 }
 
 // buildInteractiveArgs constructs the argv for an interactive `opencode` TUI
 // invocation. There is no `run` subcommand; the combined system+initial
-// prompt is passed via --prompt.
+// prompt is passed via --prompt. Callers should guard combinedPrompt against
+// maxArgvPromptBytes before calling this helper.
 func buildInteractiveArgs(model, combinedPrompt string) []string {
 	args := []string{}
 	if model != "" {

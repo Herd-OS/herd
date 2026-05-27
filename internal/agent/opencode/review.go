@@ -16,7 +16,8 @@ import (
 
 // Review runs the OpenCode CLI in headless mode to review a diff. Because
 // OpenCode has no --system-prompt flag, the review system prompt is
-// prepended to the rendered review message.
+// prepended to the rendered review message; the combined message is piped
+// via stdin so large diffs do not trip the OS ARG_MAX limit.
 //
 // Returns a structured review result parsed from the agent's JSON output;
 // unparseable output yields ReviewResult{Approved:false, IsUnparseable:true}
@@ -28,12 +29,15 @@ func (o *OpenCodeAgent) Review(ctx context.Context, diff string, opts agent.Revi
 	}
 
 	message := prompt.ReviewSystemPrompt + "\n\n" + reviewPrompt
-	args := buildRunArgs(o.Model, message)
+	args := buildRunArgs(o.Model)
 
 	runOnce := func() (string, string, error) {
 		cmd := exec.CommandContext(ctx, o.BinaryPath, args...)
 		cmd.Dir = opts.RepoRoot
-		// Do not set cmd.Stdin — message is in argv.
+		// Pipe the combined message via stdin to avoid "argument list too
+		// long" on large diffs. OpenCode `run` reads stdin when it is not
+		// a TTY.
+		cmd.Stdin = strings.NewReader(message)
 
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)

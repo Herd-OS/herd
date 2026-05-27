@@ -15,8 +15,9 @@ import (
 )
 
 // Execute runs the OpenCode CLI in headless mode to complete a task. The
-// task body (or opts.SystemPrompt, if set) is passed as the final positional
-// argument to `opencode run`. The agent commits as it works in the repo.
+// task body (or opts.SystemPrompt, if set) is piped to the child process's
+// stdin so that arbitrarily large prompts do not trip the OS ARG_MAX limit.
+// The agent commits as it works in the repo.
 //
 // If the agent returns suspicious output (empty, "Execution error", or very
 // short), Execute retries once after prompt.RetryDelay before returning an
@@ -30,13 +31,14 @@ func (o *OpenCodeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts a
 		taskPrompt = opts.SystemPrompt
 	}
 
-	args := buildRunArgs(o.Model, taskPrompt)
+	args := buildRunArgs(o.Model)
 
 	runOnce := func() (string, string, error) {
 		cmd := exec.CommandContext(ctx, o.BinaryPath, args...)
 		cmd.Dir = opts.RepoRoot
-		// Do not set cmd.Stdin — OpenCode `run` takes the prompt as a
-		// positional argument, not on stdin.
+		// Pipe the prompt via stdin to avoid "argument list too long" on
+		// large prompts. OpenCode `run` reads stdin when it is not a TTY.
+		cmd.Stdin = strings.NewReader(taskPrompt)
 
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)

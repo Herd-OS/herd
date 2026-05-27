@@ -147,6 +147,27 @@ func TestPlan_PassesModel(t *testing.T) {
 	assert.Contains(t, argv, "anthropic/claude-sonnet-4")
 }
 
+// TestPlan_RejectsOversizedPrompt verifies that Plan returns a clear,
+// guarded error when the combined system+initial prompt exceeds the safe
+// argv limit, rather than letting the kernel fail the exec with the opaque
+// "argument list too long".
+func TestPlan_RejectsOversizedPrompt(t *testing.T) {
+	repoRoot := t.TempDir()
+	outputPath := filepath.Join(repoRoot, "plan.json")
+	huge := strings.Repeat("x", maxArgvPromptBytes+1)
+	o := New("/bin/true", "")
+
+	plan, err := o.Plan(context.Background(), huge, agent.PlanOptions{
+		RepoRoot:   repoRoot,
+		OutputPath: outputPath,
+		Context:    map[string]string{},
+	})
+	require.Error(t, err)
+	assert.Nil(t, plan)
+	assert.Contains(t, err.Error(), "exceeds the safe argv limit",
+		"expected a clear ARG_MAX-style error message")
+}
+
 func TestDiscuss_RequiresSystemPrompt(t *testing.T) {
 	o := New("", "")
 	err := o.Discuss(context.Background(), agent.DiscussOptions{})
@@ -161,6 +182,22 @@ func TestDiscuss_PropagatesAgentExitError(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "opencode exited with error")
+}
+
+// TestDiscuss_RejectsOversizedPrompt verifies that Discuss returns a clear,
+// guarded error when the combined system+initial prompt exceeds the safe
+// argv limit, rather than letting the kernel fail the exec with the opaque
+// "argument list too long".
+func TestDiscuss_RejectsOversizedPrompt(t *testing.T) {
+	o := New("/bin/true", "")
+	huge := strings.Repeat("y", maxArgvPromptBytes+1)
+
+	err := o.Discuss(context.Background(), agent.DiscussOptions{
+		SystemPrompt: huge,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds the safe argv limit",
+		"expected a clear ARG_MAX-style error message")
 }
 
 func TestDiscuss_FoldsSystemAndInitialIntoPrompt(t *testing.T) {

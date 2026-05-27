@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -18,13 +19,13 @@ func TestExecute_CommandArgs(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		model          string
-		systemPrompt   string
-		body           string
-		wantPrompt     string   // the prompt that should appear as the final positional
-		wantArgs       []string // additional flags expected in argv
-		wantNotInArgs  []string // flags that must NOT appear in argv
+		name          string
+		model         string
+		systemPrompt  string
+		body          string
+		wantPrompt    string   // the prompt that should arrive on stdin
+		wantArgs      []string // flags expected in argv
+		wantNotInArgs []string // flags that must NOT appear in argv
 	}{
 		{
 			name:          "system prompt overrides body",
@@ -55,13 +56,15 @@ func TestExecute_CommandArgs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			// Fake binary emits >20 chars of multi-line output so it passes
-			// the suspicious-output filter, and records its argv to a file.
+			// Fake binary captures argv and stdin separately, then emits
+			// >20 chars of multi-line output so it passes the
+			// suspicious-output filter.
 			argvDump := dir + "/argv.bin"
+			stdinDump := dir + "/stdin.txt"
 			script := dir + "/opencode.sh"
 			content := fmt.Sprintf(
-				"#!/bin/sh\nprintf '%%s\\0' \"$@\" > '%s'\necho 'task completed successfully with detail'\n",
-				argvDump,
+				"#!/bin/sh\nprintf '%%s\\0' \"$@\" > '%s'\ncat > '%s'\necho 'task completed successfully with detail'\n",
+				argvDump, stdinDump,
 			)
 			require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
 
@@ -89,16 +92,26 @@ func TestExecute_CommandArgs(t *testing.T) {
 			// `run` MUST be the first argv element.
 			assert.Equal(t, "run", argv[0], "run subcommand must be first")
 
-			// Prompt must be the final positional argument.
-			assert.Equal(t, tc.wantPrompt, argv[len(argv)-1],
-				"prompt must be the final positional argument")
+			// The prompt must NOT appear in argv at all — it goes via stdin
+			// to avoid OS ARG_MAX limits.
+			for _, a := range argv {
+				assert.NotEqual(t, tc.wantPrompt, a,
+					"prompt must not appear in argv; got argv element %q", a)
+			}
+
+			// The prompt MUST appear on stdin.
+			stdinBytes, err := os.ReadFile(stdinDump)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPrompt, string(stdinBytes),
+				"prompt must be piped via stdin")
 		})
 	}
 }
 
-// TestExecute_DoesNotConsumeStdin verifies that Execute does NOT write to
-// the child process's stdin (unlike the claude provider).
-func TestExecute_DoesNotConsumeStdin(t *testing.T) {
+// TestExecute_PassesPromptViaStdin verifies that Execute pipes the prompt
+// via the child process's stdin instead of argv — matching the claude
+// provider and avoiding OS ARG_MAX limits on large prompts.
+func TestExecute_PassesPromptViaStdin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary not supported on Windows")
 	}
@@ -106,15 +119,8 @@ func TestExecute_DoesNotConsumeStdin(t *testing.T) {
 	dir := t.TempDir()
 	stdinDump := dir + "/stdin.txt"
 	script := dir + "/opencode.sh"
-	// Script captures whatever (if anything) it reads from stdin, but
-	// only with a short timeout — if Execute does not write stdin and we
-	// try to `cat` it the script will block forever, so we use head -c with
-	// a non-blocking approach: read from /dev/stdin with a redirect that
-	// returns immediately if the pipe is closed.
 	content := fmt.Sprintf(
-		"#!/bin/sh\n# If stdin is a pipe and producer doesn't write, read returns EOF.\n"+
-			"cat > '%s' 2>/dev/null || true\n"+
-			"echo 'execution succeeded with multiline output\\nmore content here'\n",
+		"#!/bin/sh\ncat > '%s'\necho 'execution succeeded with multiline output\\nmore content here'\n",
 		stdinDump,
 	)
 	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
@@ -129,8 +135,45 @@ func TestExecute_DoesNotConsumeStdin(t *testing.T) {
 
 	data, err := os.ReadFile(stdinDump)
 	require.NoError(t, err)
-	assert.Empty(t, string(data),
-		"Execute must NOT write to stdin; cat should have read EOF immediately")
+	assert.Equal(t, "do the thing", string(data),
+		"Execute must pipe the prompt to the child's stdin")
+}
+
+// TestExecute_LargePromptDoesNotExceedArgMax verifies that a ~200KB prompt
+// does not produce an "argument list too long" exec error — the prompt is
+// piped via stdin, so argv stays small regardless of prompt size.
+func TestExecute_LargePromptDoesNotExceedArgMax(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	stdinDump := dir + "/stdin.txt"
+	script := dir + "/opencode.sh"
+	content := fmt.Sprintf(
+		"#!/bin/sh\ncat > '%s'\necho 'task completed successfully with detailed output'\n",
+		stdinDump,
+	)
+	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+
+	// ~200KB prompt — well above typical ARG_MAX limits when passed via argv.
+	largePrompt := strings.Repeat("This is one long line of prompt content. ", 5000)
+	require.Greater(t, len(largePrompt), 200_000,
+		"sanity check: large prompt must exceed 200KB to exercise the ARG_MAX guard")
+
+	a := New(script, "")
+	task := agent.TaskSpec{Body: largePrompt}
+	opts := agent.ExecOptions{RepoRoot: dir}
+
+	result, err := a.Execute(context.Background(), task, opts)
+	require.NoError(t, err, "Execute must succeed with a 200KB+ prompt")
+	require.NotNil(t, result)
+
+	// Stub received the full prompt via stdin.
+	data, err := os.ReadFile(stdinDump)
+	require.NoError(t, err)
+	assert.Equal(t, largePrompt, string(data),
+		"stub must have received the full prompt via stdin")
 }
 
 func TestExecute_MaxTurnsIsIgnored(t *testing.T) {
@@ -142,7 +185,7 @@ func TestExecute_MaxTurnsIsIgnored(t *testing.T) {
 	argvDump := dir + "/argv.bin"
 	script := dir + "/opencode.sh"
 	content := fmt.Sprintf(
-		"#!/bin/sh\nprintf '%%s\\0' \"$@\" > '%s'\necho 'done with enough output here'\n",
+		"#!/bin/sh\nprintf '%%s\\0' \"$@\" > '%s'\ncat > /dev/null\necho 'done with enough output here'\n",
 		argvDump,
 	)
 	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
@@ -193,7 +236,7 @@ func TestExecute_CapturesOutput(t *testing.T) {
 
 	dir := t.TempDir()
 	script := dir + "/opencode.sh"
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\necho 'task completed successfully'\n"), 0o755))
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\ncat > /dev/null\necho 'task completed successfully'\n"), 0o755))
 
 	a := New(script, "")
 	task := agent.TaskSpec{Body: "do work"}
@@ -211,7 +254,7 @@ func TestExecute_SuspiciousOutputReturnsError(t *testing.T) {
 
 	dir := t.TempDir()
 	script := dir + "/opencode.sh"
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\necho 'Execution error'\n"), 0o755))
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\ncat > /dev/null\necho 'Execution error'\n"), 0o755))
 
 	a := New(script, "")
 	task := agent.TaskSpec{Body: "do work"}
@@ -229,7 +272,7 @@ func TestExecute_EmptyOutputReturnsError(t *testing.T) {
 
 	dir := t.TempDir()
 	script := dir + "/opencode.sh"
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\ncat > /dev/null\nexit 0\n"), 0o755))
 
 	a := New(script, "")
 	task := agent.TaskSpec{Body: "do work"}
@@ -249,6 +292,7 @@ func TestExecute_RetrySucceedsOnSecondAttempt(t *testing.T) {
 	script := dir + "/opencode.sh"
 	marker := dir + "/attempt"
 	content := fmt.Sprintf(`#!/bin/sh
+cat > /dev/null
 if [ -f "%s" ]; then
   echo "Task completed successfully with detailed output"
 else

@@ -23,43 +23,36 @@ func TestNew(t *testing.T) {
 
 func TestBuildRunArgs(t *testing.T) {
 	tests := []struct {
-		name    string
-		model   string
-		message string
-		want    []string
+		name  string
+		model string
+		want  []string
 	}{
 		{
-			name:    "no model",
-			model:   "",
-			message: "do the thing",
-			want:    []string{"run", "--dangerously-skip-permissions", "do the thing"},
+			name:  "no model",
+			model: "",
+			want:  []string{"run", "--dangerously-skip-permissions"},
 		},
 		{
-			name:    "with model",
-			model:   "anthropic/claude-sonnet-4",
-			message: "do the thing",
-			want:    []string{"run", "--dangerously-skip-permissions", "--model", "anthropic/claude-sonnet-4", "do the thing"},
+			name:  "with model",
+			model: "anthropic/claude-sonnet-4",
+			want:  []string{"run", "--dangerously-skip-permissions", "--model", "anthropic/claude-sonnet-4"},
 		},
 		{
-			name:    "openai model",
-			model:   "openai/gpt-5",
-			message: "task body",
-			want:    []string{"run", "--dangerously-skip-permissions", "--model", "openai/gpt-5", "task body"},
-		},
-		{
-			name:    "empty message",
-			model:   "",
-			message: "",
-			want:    []string{"run", "--dangerously-skip-permissions", ""},
+			name:  "openai model",
+			model: "openai/gpt-5",
+			want:  []string{"run", "--dangerously-skip-permissions", "--model", "openai/gpt-5"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildRunArgs(tc.model, tc.message)
+			got := buildRunArgs(tc.model)
 			assert.Equal(t, tc.want, got)
-			// Prompt is always the final positional argument.
-			assert.Equal(t, tc.message, got[len(got)-1])
+			// The prompt must NEVER appear in argv — it is piped via stdin
+			// to avoid OS ARG_MAX limits on large prompts.
+			for _, a := range got {
+				assert.NotEqual(t, "do the thing", a, "prompt must not appear in argv")
+			}
 		})
 	}
 }
