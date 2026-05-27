@@ -5,7 +5,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/herd-os/herd/internal/agent/claude"
+	"github.com/herd-os/herd/internal/agent/factory"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/herd-os/herd/internal/worker"
@@ -52,7 +52,10 @@ func newWorkerExecCmd() *cobra.Command {
 				return fmt.Errorf("creating GitHub client: %w", err)
 			}
 
-			ag := claude.New(cfg.Agent.Binary, cfg.Agent.Model)
+			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model)
+			if err != nil {
+				return err
+			}
 
 			cwd, err := os.Getwd()
 			if err != nil {
