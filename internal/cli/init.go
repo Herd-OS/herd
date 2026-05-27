@@ -462,8 +462,10 @@ type herdRunnerTemplateData struct {
 // line in a user-owned Dockerfile.herd_runner to the version-pinned GHCR
 // reference. Only the matched FROM line is changed; all other bytes are
 // preserved. Lines that already reference ghcr.io, or use a custom base, are
-// left untouched. Returns the (possibly unchanged) content and whether a
-// rewrite occurred.
+// left untouched. Any trailing tokens on the FROM line (e.g. a multi-stage
+// `AS <stage>` alias or a trailing comment) are preserved after the new image
+// reference. Returns the (possibly unchanged) content and whether a rewrite
+// occurred.
 func migrateRunnerDockerfileFrom(content []byte, baseImage string) (newContent []byte, changed bool) {
 	lines := strings.Split(string(content), "\n")
 	for i, line := range lines {
@@ -486,7 +488,11 @@ func migrateRunnerDockerfileFrom(content []byte, baseImage string) (newContent [
 		if repo != "herd-runner-base" {
 			continue
 		}
-		lines[i] = "FROM " + baseImage
+		rewritten := "FROM " + baseImage
+		if len(fields) > 2 {
+			rewritten += " " + strings.Join(fields[2:], " ")
+		}
+		lines[i] = rewritten
 		return []byte(strings.Join(lines, "\n")), true
 	}
 	return content, false
@@ -556,7 +562,13 @@ func createRunnerFiles(dir, owner, repo string) error {
 		}
 		migrated, changed := migrateRunnerDockerfileFrom(existing, baseImage)
 		if changed {
-			if err := os.WriteFile(herdRunnerPath, migrated, 0644); err != nil {
+			// Preserve the existing file's permissions — this is a user-owned
+			// file and the user may have set non-default modes on it.
+			mode := os.FileMode(0644)
+			if info, statErr := os.Stat(herdRunnerPath); statErr == nil {
+				mode = info.Mode().Perm()
+			}
+			if err := os.WriteFile(herdRunnerPath, migrated, mode); err != nil {
 				return fmt.Errorf("writing migrated Dockerfile.herd_runner: %w", err)
 			}
 			fmt.Println(display.Success("Migrated Dockerfile.herd_runner FROM line to " + baseImage))

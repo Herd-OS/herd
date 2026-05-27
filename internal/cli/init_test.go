@@ -361,6 +361,58 @@ func TestMigrateRunnerDockerfileFrom_LeadingWhitespace(t *testing.T) {
 	assert.Equal(t, "FROM "+base+"\nRUN echo hi\n", string(out))
 }
 
+func TestMigrateRunnerDockerfileFrom_PreservesTrailingTokens(t *testing.T) {
+	base := runnerBaseImage()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "multi-stage AS alias",
+			in:   "FROM herd-runner-base AS builder\nRUN echo hi\n",
+			want: "FROM " + base + " AS builder\nRUN echo hi\n",
+		},
+		{
+			name: "multi-stage AS alias with tag",
+			in:   "FROM herd-runner-base:latest AS builder\n",
+			want: "FROM " + base + " AS builder\n",
+		},
+		{
+			name: "lowercase as alias",
+			in:   "FROM herd-runner-base as builder\n",
+			want: "FROM " + base + " as builder\n",
+		},
+		{
+			name: "trailing comment",
+			in:   "FROM herd-runner-base # legacy local base\n",
+			want: "FROM " + base + " # legacy local base\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, changed := migrateRunnerDockerfileFrom([]byte(tt.in), base)
+			require.True(t, changed)
+			assert.Equal(t, tt.want, string(out))
+		})
+	}
+}
+
+func TestCreateRunnerFiles_MigrationPreservesFileMode(t *testing.T) {
+	dir := t.TempDir()
+	dockerfilePath := filepath.Join(dir, "Dockerfile.herd_runner")
+	legacy := "FROM herd-runner-base\nRUN apt-get update\n"
+	require.NoError(t, os.WriteFile(dockerfilePath, []byte(legacy), 0600))
+	require.NoError(t, os.Chmod(dockerfilePath, 0600))
+
+	require.NoError(t, createRunnerFiles(dir, "acme", "widget"))
+
+	info, err := os.Stat(dockerfilePath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(),
+		"migrated Dockerfile.herd_runner should retain its pre-migration permissions")
+}
+
 func TestCreateRunnerFiles_MigratesExistingDockerfile(t *testing.T) {
 	dir := t.TempDir()
 	dockerfilePath := filepath.Join(dir, "Dockerfile.herd_runner")
