@@ -14,10 +14,10 @@ platform:
   repo: "my-project"             # repo name — auto-detected from git remote
 
 agent:
-  provider: "claude"             # claude (codex, cursor, gemini, opencode coming soon)
+  provider: "claude"             # claude | opencode (codex, cursor, gemini coming soon)
   binary: ""                     # path to agent binary (auto-detect if empty)
   model: ""                      # model override (optional, agent-specific)
-  max_turns: 0                   # max agentic turns in headless mode (0 = agent default)
+  max_turns: 0                   # max agentic turns in headless mode (0 = agent default; ignored by opencode)
 
 workers:
   max_concurrent: 3              # max simultaneous worker Actions
@@ -51,6 +51,29 @@ pull_requests:
   auto_merge: false              # auto-merge batch PRs after review passes
   co_author_email: ""            # Co-authored-by email (set after installing the GitHub App)
 ```
+
+## Agent Providers
+
+`agent.provider` selects which AI coding agent the worker shells out to. Valid values are `claude` (Anthropic Claude Code, default) and `opencode` ([OpenCode](https://opencode.ai)).
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `agent.provider` | string | `claude` | `claude` or `opencode` |
+| `agent.binary` | string | `claude` for the `claude` provider, `opencode` for the `opencode` provider | Path to the agent CLI binary. Empty falls back to the provider default and resolves via `PATH`. |
+| `agent.model` | string | `""` (provider default) | Model override. For `opencode`, use the provider/model form, e.g. `anthropic/claude-sonnet-4` or `openai/gpt-5`. |
+| `agent.max_turns` | int | `0` (agent default) | Maximum agentic turns in headless mode. **Ignored by the `opencode` provider** — OpenCode's `run` subcommand has no max-turns flag. |
+
+### Example: OpenCode
+
+```yaml
+agent:
+  provider: "opencode"
+  binary: ""                       # defaults to "opencode"
+  model: "anthropic/claude-sonnet-4"
+  max_turns: 0                     # ignored by opencode
+```
+
+The runner environment must have an API key for whichever provider the model resolves to (e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models). See [runners.md](runners.md#2-agent-authentication) for the authentication setup.
 
 ## Review Strictness
 
