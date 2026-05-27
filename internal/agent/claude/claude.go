@@ -1,9 +1,6 @@
 package claude
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/herd-os/herd/internal/agent"
 )
 
@@ -27,24 +24,3 @@ func New(binaryPath, model string) *ClaudeAgent {
 		Model:      model,
 	}
 }
-
-// writeSystemPromptFile writes prompt to a temp file and returns its path.
-// The caller is responsible for removing the file (use defer os.Remove).
-func writeSystemPromptFile(prompt string) (string, error) {
-	f, err := os.CreateTemp("", "herd-system-prompt-*.txt")
-	if err != nil {
-		return "", fmt.Errorf("creating temp file: %w", err)
-	}
-	if _, err := f.WriteString(prompt); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("writing temp file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		return "", fmt.Errorf("closing temp file: %w", err)
-	}
-	return f.Name(), nil
-}
-
-// Execute and Review are implemented in execute.go and review.go respectively.

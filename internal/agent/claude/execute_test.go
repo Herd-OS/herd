@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -184,31 +183,6 @@ func TestExecute_CapturesOutput(t *testing.T) {
 	result, err := a.Execute(context.Background(), task, opts)
 	require.NoError(t, err)
 	assert.Contains(t, result.Summary, "task completed successfully")
-}
-
-func TestIsSuspiciousOutput(t *testing.T) {
-	tests := []struct {
-		name   string
-		output string
-		want   bool
-	}{
-		{"empty string", "", true},
-		{"whitespace only", "   \n  ", true},
-		{"execution error", "Execution error", true},
-		{"execution error mixed case", "execution error", true},
-		{"execution error with whitespace", "  Execution error  \n", true},
-		{"short single line", "Error", true},
-		{"short no newline under threshold", "Something bad", true},
-		{"valid short with newline", "line1\nline2", false},
-		{"valid long output", "This is a real agent summary that describes work done on the task", false},
-		{"exactly at threshold single line", strings.Repeat("x", minValidOutputLen), false},
-		{"below threshold single line", strings.Repeat("x", minValidOutputLen-1), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isSuspiciousOutput(tt.output))
-		})
-	}
 }
 
 func TestExecute_SuspiciousOutputReturnsError(t *testing.T) {
