@@ -37,6 +37,11 @@ echo "Installed claude $(claude --version 2>/dev/null || echo 'unknown')"
 # Install or update OpenCode
 echo "Installing OpenCode..."
 npm install -g --no-audit --no-fund opencode-ai
+# Install OpenCode OpenAI subscription auth plugin (kept on the same lifecycle
+# as opencode to avoid version skew).
+# TODO(verify): confirm plugin package name `opencode-openai-codex-auth` and that
+# version 4.4.0 is correct; confirm npm-global install is the right mechanism.
+npm install -g --no-audit --no-fund opencode-openai-codex-auth@4.4.0
 echo "Installed opencode $(opencode --version 2>/dev/null || echo 'unknown')"
 
 REPO_OWNER=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\1|')
