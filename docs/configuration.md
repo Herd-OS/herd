@@ -73,7 +73,7 @@ agent:
   max_turns: 0                     # ignored by opencode
 ```
 
-The runner environment must have an API key for whichever provider the model resolves to (e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models). See [runners.md](runners.md#2-agent-authentication) for the authentication setup.
+The runner environment must have an API key for whichever provider the model resolves to (default, recommended) — e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models. Alternatively, for ChatGPT subscription auth (opt-in, via a community plugin), set the `OPENCODE_AUTH_JSON` env var to a base64-encoded OpenCode `auth.json`. API key is the default; the subscription path is opt-in. See [runners.md](runners.md#2-agent-authentication) for the authentication setup.
 
 ## Review Strictness
 
