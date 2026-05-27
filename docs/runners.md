@@ -186,7 +186,7 @@ The base image is a first-party runner image published to `ghcr.io/herd-os/` on 
 
 ### Version pinning
 
-The base image is pinned to the herd version that generated `Dockerfile.herd_runner` (e.g. `:v1.4.2`). The pin is refreshed when you re-run `herd init` from a newer herd binary, which rewrites the `FROM` tag. Dev builds (an empty or `dev` version) pin to `:latest`, because a `:dev` tag does not exist in GHCR and would fail to pull.
+The base image is pinned to the herd version that generated `Dockerfile.herd_runner` (e.g. `:v1.4.2`). The pin is refreshed when you re-run `herd init` from a newer herd binary: if the existing `FROM` line still references the legacy local base (`FROM herd-runner-base[:tag]`), it is auto-migrated to the version-pinned `ghcr.io/herd-os/herd-runner-base:<herd-version>` reference (see [Migrating from the local base image](#migrating-from-the-local-base-image)). `FROM` lines that already point at `ghcr.io` or use a custom base are left untouched, so re-running `herd init` will not bump an already-published `ghcr.io` reference for you — refresh those by editing `Dockerfile.herd_runner` yourself. Dev builds (an empty or `dev` version) pin to `:latest`, because a `:dev` tag does not exist in GHCR and would fail to pull.
 
 ### Building and publishing your runner image
 
@@ -207,8 +207,17 @@ This is also automated. `herd init` installs `.github/workflows/herd-publish-run
 Older versions of `herd init` generated a local two-layer build: a herd-managed `Dockerfile.herd_runner_base` plus a `Dockerfile.herd_runner` that did `FROM herd-runner-base`, with a separate base service in `docker-compose.herd.yml`. The base image is now published to GHCR, so:
 
 - Re-running `herd init` **removes** the obsolete `Dockerfile.herd_runner_base` and drops the base service from `docker-compose.herd.yml` (the worker now builds directly from `Dockerfile.herd_runner`).
-- If you **customized** `Dockerfile.herd_runner`, update its `FROM` line from `FROM herd-runner-base` to `FROM ghcr.io/herd-os/herd-runner-base:<version>` (re-running `herd init` will not overwrite this user-owned file).
+- `herd init` **auto-migrates** the `FROM` line in an existing `Dockerfile.herd_runner`. If a `FROM` line references the legacy local base (`FROM herd-runner-base` or `FROM herd-runner-base:<tag>`), that single line is rewritten to `FROM ghcr.io/herd-os/herd-runner-base:<herd-version>` and the rest of the file is left byte-identical (your customizations below the `FROM` line are preserved). Any trailing tokens on the matched `FROM` line — a multi-stage `AS <stage>` alias or a trailing `# comment` — are kept. Note that the matched `FROM` line itself is normalized: leading whitespace is dropped and internal whitespace between the tokens collapses to single spaces. `FROM` lines that already point at `ghcr.io` or use a custom base are left untouched. On migration, `herd init` prints `Migrated Dockerfile.herd_runner FROM line to <base-image>`; otherwise it prints `Dockerfile.herd_runner already exists (not overwritten)`.
 - The base image is **public**, so no `docker login` is needed to pull it at build time.
+
+This means the per-project upgrade from the old local-base model collapses to:
+
+1. Upgrade the `herd` binary (`brew upgrade herd-os/tap/herd`, or replace the binary — see [installation.md](installation.md)).
+2. Re-run `herd init` in the repository — the legacy `FROM` line is rewritten automatically.
+3. Merge the PR that `herd init` opens.
+4. Redeploy the runner containers (`docker compose -f docker-compose.herd.yml up -d --build`).
+
+No manual edit of `Dockerfile.herd_runner` is required.
 
 ## 7. Scaling
 

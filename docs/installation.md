@@ -96,6 +96,8 @@ You can preview what would change first with `herd init --check`, which re-rende
 
 `herd init` creates a `herd/init-<version>` branch, commits the updated files, pushes, and opens a PR. Review and merge the PR to apply the changes. Configuration (`.herdos.yml`) and role instructions (`.herd/*.md`) are never overwritten.
 
+`Dockerfile.herd_runner` is also user-owned and not overwritten, but `herd init` will auto-migrate its `FROM` line if it still references the pre-GHCR local base — `FROM herd-runner-base[:tag]` is rewritten to `FROM ghcr.io/herd-os/herd-runner-base:<herd-version>` while everything else in the file is left byte-identical. So the per-project upgrade flow is: upgrade the binary → `herd init` → merge the PR → redeploy runner containers, with no manual Dockerfile edit required. See [Runner Setup → Migrating from the local base image](runners.md#migrating-from-the-local-base-image) for the full migration behavior.
+
 ### Update runner containers
 
 Runner containers automatically download the latest herd binary on startup. Just restart them:

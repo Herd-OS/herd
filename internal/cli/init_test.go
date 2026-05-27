@@ -302,8 +302,8 @@ func TestInit_RemovesLegacyEntrypoint(t *testing.T) {
 func TestCreateRunnerFiles_DoesNotOverwriteUserDockerfile(t *testing.T) {
 	dir := t.TempDir()
 
-	// Pre-create user-owned Dockerfile with custom content
-	custom := []byte("FROM herd-runner-base\nRUN apt-get install -y golang-go")
+	// Pre-create user-owned Dockerfile with a non-legacy FROM line and custom content
+	custom := []byte("FROM ghcr.io/herd-os/herd-runner-base:v1.2.3\nRUN apt-get install -y golang-go")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), custom, 0644))
 
 	require.NoError(t, createRunnerFiles(dir, "org", "repo"))
@@ -312,6 +312,120 @@ func TestCreateRunnerFiles_DoesNotOverwriteUserDockerfile(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(dir, "Dockerfile.herd_runner"))
 	require.NoError(t, err)
 	assert.Equal(t, custom, content, "Dockerfile.herd_runner should not be overwritten")
+}
+
+func TestMigrateRunnerDockerfileFrom_BareLegacy(t *testing.T) {
+	base := runnerBaseImage()
+	in := []byte("FROM herd-runner-base\nRUN echo hi\n")
+	out, changed := migrateRunnerDockerfileFrom(in, base)
+	require.True(t, changed)
+	assert.Equal(t, "FROM "+base+"\nRUN echo hi\n", string(out))
+}
+
+func TestMigrateRunnerDockerfileFrom_LegacyWithTag(t *testing.T) {
+	base := runnerBaseImage()
+	in := []byte("FROM herd-runner-base:latest\n")
+	out, changed := migrateRunnerDockerfileFrom(in, base)
+	require.True(t, changed)
+	assert.Equal(t, "FROM "+base+"\n", string(out))
+}
+
+func TestMigrateRunnerDockerfileFrom_AlreadyGhcr(t *testing.T) {
+	in := []byte("FROM ghcr.io/herd-os/herd-runner-base:v1.2.3\n")
+	out, changed := migrateRunnerDockerfileFrom(in, runnerBaseImage())
+	assert.False(t, changed)
+	assert.Equal(t, in, out)
+}
+
+func TestMigrateRunnerDockerfileFrom_CustomBase(t *testing.T) {
+	in := []byte("FROM ubuntu:24.04\n")
+	out, changed := migrateRunnerDockerfileFrom(in, runnerBaseImage())
+	assert.False(t, changed)
+	assert.Equal(t, in, out)
+}
+
+func TestMigrateRunnerDockerfileFrom_PreservesCustomizations(t *testing.T) {
+	base := runnerBaseImage()
+	in := []byte("FROM herd-runner-base\nUSER root\nRUN apt-get update && apt-get install -y jq\nCOPY foo /foo\nUSER runner\n")
+	out, changed := migrateRunnerDockerfileFrom(in, base)
+	require.True(t, changed)
+	expected := "FROM " + base + "\nUSER root\nRUN apt-get update && apt-get install -y jq\nCOPY foo /foo\nUSER runner\n"
+	assert.Equal(t, expected, string(out))
+}
+
+func TestMigrateRunnerDockerfileFrom_LeadingWhitespace(t *testing.T) {
+	base := runnerBaseImage()
+	in := []byte("   FROM herd-runner-base\nRUN echo hi\n")
+	out, changed := migrateRunnerDockerfileFrom(in, base)
+	require.True(t, changed)
+	assert.Equal(t, "FROM "+base+"\nRUN echo hi\n", string(out))
+}
+
+func TestMigrateRunnerDockerfileFrom_PreservesTrailingTokens(t *testing.T) {
+	base := runnerBaseImage()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "multi-stage AS alias",
+			in:   "FROM herd-runner-base AS builder\nRUN echo hi\n",
+			want: "FROM " + base + " AS builder\nRUN echo hi\n",
+		},
+		{
+			name: "multi-stage AS alias with tag",
+			in:   "FROM herd-runner-base:latest AS builder\n",
+			want: "FROM " + base + " AS builder\n",
+		},
+		{
+			name: "lowercase as alias",
+			in:   "FROM herd-runner-base as builder\n",
+			want: "FROM " + base + " as builder\n",
+		},
+		{
+			name: "trailing comment",
+			in:   "FROM herd-runner-base # legacy local base\n",
+			want: "FROM " + base + " # legacy local base\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, changed := migrateRunnerDockerfileFrom([]byte(tt.in), base)
+			require.True(t, changed)
+			assert.Equal(t, tt.want, string(out))
+		})
+	}
+}
+
+func TestCreateRunnerFiles_MigrationPreservesFileMode(t *testing.T) {
+	dir := t.TempDir()
+	dockerfilePath := filepath.Join(dir, "Dockerfile.herd_runner")
+	legacy := "FROM herd-runner-base\nRUN apt-get update\n"
+	require.NoError(t, os.WriteFile(dockerfilePath, []byte(legacy), 0600))
+	require.NoError(t, os.Chmod(dockerfilePath, 0600))
+
+	require.NoError(t, createRunnerFiles(dir, "acme", "widget"))
+
+	info, err := os.Stat(dockerfilePath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(),
+		"migrated Dockerfile.herd_runner should retain its pre-migration permissions")
+}
+
+func TestCreateRunnerFiles_MigratesExistingDockerfile(t *testing.T) {
+	dir := t.TempDir()
+	dockerfilePath := filepath.Join(dir, "Dockerfile.herd_runner")
+	legacy := "FROM herd-runner-base\nRUN apt-get update && apt-get install -y jq\n"
+	require.NoError(t, os.WriteFile(dockerfilePath, []byte(legacy), 0644))
+
+	require.NoError(t, createRunnerFiles(dir, "acme", "widget"))
+
+	got, err := os.ReadFile(dockerfilePath)
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "FROM ghcr.io/herd-os/herd-runner-base:")
+	assert.NotContains(t, string(got), "FROM herd-runner-base\n")
+	assert.Contains(t, string(got), "RUN apt-get update && apt-get install -y jq")
 }
 
 func TestCreateRunnerFiles_OwnerRepoSubstitution(t *testing.T) {

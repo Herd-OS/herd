@@ -458,6 +458,46 @@ type herdRunnerTemplateData struct {
 	BaseImage string
 }
 
+// migrateRunnerDockerfileFrom rewrites a legacy `FROM herd-runner-base[:tag]`
+// line in a user-owned Dockerfile.herd_runner to the version-pinned GHCR
+// reference. Only the matched FROM line is changed; all other bytes are
+// preserved. Lines that already reference ghcr.io, or use a custom base, are
+// left untouched. Any trailing tokens on the FROM line (e.g. a multi-stage
+// `AS <stage>` alias or a trailing comment) are preserved after the new image
+// reference. Returns the (possibly unchanged) content and whether a rewrite
+// occurred.
+func migrateRunnerDockerfileFrom(content []byte, baseImage string) (newContent []byte, changed bool) {
+	lines := strings.Split(string(content), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 {
+			continue
+		}
+		if !strings.EqualFold(fields[0], "FROM") {
+			continue
+		}
+		image := fields[1]
+		if strings.Contains(image, "ghcr.io") {
+			continue
+		}
+		repo := image
+		if idx := strings.IndexByte(image, ':'); idx >= 0 {
+			repo = image[:idx]
+		}
+		if repo != "herd-runner-base" {
+			continue
+		}
+		rewritten := "FROM " + baseImage
+		if len(fields) > 2 {
+			rewritten += " " + strings.Join(fields[2:], " ")
+		}
+		lines[i] = rewritten
+		return []byte(strings.Join(lines, "\n")), true
+	}
+	return content, false
+}
+
 // renderHerdRunnerDockerfile renders the user-owned Dockerfile.herd_runner template
 // with the given base image reference injected into the FROM line.
 func renderHerdRunnerDockerfile(baseImage string) ([]byte, error) {
@@ -515,7 +555,26 @@ func createRunnerFiles(dir, owner, repo string) error {
 		}
 		fmt.Println(display.Success("Created Dockerfile.herd_runner (base: " + baseImage + ")"))
 	} else {
-		fmt.Println(display.Success("Dockerfile.herd_runner already exists (not overwritten)"))
+		baseImage := runnerBaseImage()
+		existing, readErr := os.ReadFile(herdRunnerPath)
+		if readErr != nil {
+			return fmt.Errorf("reading existing Dockerfile.herd_runner: %w", readErr)
+		}
+		migrated, changed := migrateRunnerDockerfileFrom(existing, baseImage)
+		if changed {
+			// Preserve the existing file's permissions — this is a user-owned
+			// file and the user may have set non-default modes on it.
+			mode := os.FileMode(0644)
+			if info, statErr := os.Stat(herdRunnerPath); statErr == nil {
+				mode = info.Mode().Perm()
+			}
+			if err := os.WriteFile(herdRunnerPath, migrated, mode); err != nil {
+				return fmt.Errorf("writing migrated Dockerfile.herd_runner: %w", err)
+			}
+			fmt.Println(display.Success("Migrated Dockerfile.herd_runner FROM line to " + baseImage))
+		} else {
+			fmt.Println(display.Success("Dockerfile.herd_runner already exists (not overwritten)"))
+		}
 	}
 
 	// docker-compose.herd.yml (templated with owner/repo, merged with override if present)
