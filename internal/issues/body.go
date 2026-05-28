@@ -10,6 +10,11 @@ import (
 // and any UTF-8 boundary slack.
 const githubIssueBodyMaxChars = 65000
 
+// MaxIssueBodyChars is the safety-margin limit (under GitHub's 65536 hard cap)
+// that TruncateIssueBody enforces. Exported for callers that need to guard a
+// body size before calling Issues().Update.
+const MaxIssueBodyChars = githubIssueBodyMaxChars
+
 // truncationMarker is appended to the truncated body. It points readers at
 // the follow-up comment(s) where the rest of the content lives.
 const truncationMarker = "\n\n---\n_⚠️ Body truncated to fit GitHub's 65536-char limit. See follow-up comment on this issue for the rest._\n"

@@ -31,6 +31,15 @@ A group of tasks within a batch that can execute in parallel. Tasks with no depe
 ### Agent Review
 An automated review step where the Integrator dispatches an agent to review the consolidated batch PR. The agent checks acceptance criteria, looks for bugs and security issues, and posts a review. If issues are found, the Integrator dispatches fix workers and re-reviews (up to a configured limit, then escalates to human).
 
+### Findings Forwarding (Injected Findings)
+The mechanism by which a closed/done manual task's findings — its issue body
+(minus YAML front matter) and human-authored comments — are injected into the
+body of each dependent automated issue at dispatch time, so the downstream
+worker (which reads only its own issue body) sees them. The injected block is
+keyed by source issue number via herd-internal `<!-- herd:injected-findings:<N> -->`
+markers, making injection idempotent across retries. See
+[execution.md → Manual-task findings forwarding](execution.md#manual-task-findings-forwarding).
+
 ## Label Namespace
 
 All HerdOS labels use the `herd/` prefix to avoid collisions with existing repo labels.

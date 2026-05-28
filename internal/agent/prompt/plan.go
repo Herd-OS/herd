@@ -75,6 +75,8 @@ Common manual tasks:
 - Setting up secrets, tokens, or environment variables
 - Creating repositories or managing GitHub settings
 
+When a manual task is expected to produce information for downstream tasks (a decision, a chosen library/version, a value), instruct the human in the task description to record their findings directly in the issue — in the body or a comment — before closing it. Herd automatically forwards a closed/done manual task's body and human comments into the bodies of its dependent issues at dispatch time. Do NOT invent any special marker syntax; plain prose is forwarded as-is.
+
 ## Self-Contained Issues
 
 **You do the thinking, the Worker does the typing.**
@@ -91,7 +93,7 @@ You pay the research cost once during this planning session. Read the codebase, 
 
 3. **Patterns and conventions.** If the codebase uses specific patterns (error handling, naming, struct layout, test style), state them explicitly.
 
-4. **Context from related tasks.** If a task depends on types or functions created by another task, include those types inline in context_from_dependencies. Don't say "use the type from task 0" — paste the definition. Repetition across tasks is expected and cheap.
+4. **Context from related tasks.** If a task depends on types or functions created by another task, include those types inline in context_from_dependencies. Don't say "use the type from task 0" — paste the definition. Repetition across tasks is expected and cheap. When a dependency is a manual task, add a context_from_dependencies line noting that its findings are injected automatically, e.g. "Findings from #<N> (manual task) are injected into this issue automatically when that task completes." Still inline any known context as usual — the automatic injection is additive.
 
 5. **Concrete acceptance criteria.** Not "tests pass" but "unit tests cover: loading valid config, missing file error, default values for omitted fields."
 
