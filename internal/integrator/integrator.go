@@ -542,6 +542,10 @@ func dispatchReadyIssues(ctx context.Context, p platform.Platform, cfg *config.C
 			continue
 		}
 
+		// Forward any manual-task dependency findings into this issue's body so
+		// the worker (which reads only its own issue body) sees them.
+		injectManualDepFindings(ctx, p, issue, allIssues)
+
 		// Dispatch: remove ready if present, add in-progress
 		if status == issues.StatusReady {
 			_ = p.Issues().RemoveLabels(ctx, num, []string{issues.StatusReady})
@@ -562,6 +566,70 @@ func dispatchReadyIssues(ctx context.Context, p platform.Platform, cfg *config.C
 		dispatched++
 	}
 	return dispatched, nil
+}
+
+// injectManualDepFindings fetches the manual-task dependencies of the given
+// issue, extracts each complete (closed or done) manual dep's findings, and
+// idempotently injects them into the issue body. It persists the updated body
+// via Issues().Update only if at least one new block was added. Body-size is
+// guarded against issues.MaxIssueBodyChars: an injection that would push the
+// body over the limit is skipped with a warning rather than failing dispatch.
+// Failures are logged and non-fatal (dispatch proceeds).
+func injectManualDepFindings(ctx context.Context, p platform.Platform, issue *platform.Issue, allIssues []*platform.Issue) {
+	parsed, err := issues.ParseBody(issue.Body)
+	if err != nil || len(parsed.FrontMatter.DependsOn) == 0 {
+		return
+	}
+	body := issue.Body
+	changedAny := false
+	for _, depNum := range parsed.FrontMatter.DependsOn {
+		dep := findIssue(allIssues, depNum)
+		if dep == nil {
+			d, gerr := p.Issues().Get(ctx, depNum)
+			if gerr != nil || d == nil {
+				continue
+			}
+			dep = d
+		}
+		if !issues.HasLabel(dep.Labels, issues.TypeManual) {
+			continue
+		}
+		if !isIssueComplete(dep) {
+			continue
+		}
+		if strings.Contains(body, injectedFindingsMarker(dep.Number)) {
+			continue
+		}
+		full, gerr := p.Issues().Get(ctx, dep.Number)
+		if gerr != nil || full == nil {
+			continue
+		}
+		comments, cerr := p.Issues().ListComments(ctx, dep.Number)
+		if cerr != nil {
+			comments = nil
+		}
+		findings, ok := extractFindings(dep.Number, full.Body, comments)
+		if !ok {
+			continue
+		}
+		newBody, changed := injectFindings(body, dep.Number, findings)
+		if !changed {
+			continue
+		}
+		if len(newBody) > issues.MaxIssueBodyChars {
+			fmt.Printf("warning: skipping findings injection from manual #%d into #%d — would exceed issue body size limit\n", dep.Number, issue.Number)
+			continue
+		}
+		body = newBody
+		changedAny = true
+	}
+	if changedAny {
+		if _, uerr := p.Issues().Update(ctx, issue.Number, platform.IssueUpdate{Body: &body}); uerr != nil {
+			fmt.Printf("warning: failed to update issue #%d with injected manual-task findings: %v\n", issue.Number, uerr)
+			return
+		}
+		issue.Body = body
+	}
 }
 
 // buildTiersFromIssues parses issue front matter to build a DAG and compute tiers.
