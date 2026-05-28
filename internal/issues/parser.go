@@ -52,6 +52,13 @@ func ParseBody(raw string) (*IssueBody, error) {
 	return body, nil
 }
 
+// StripFrontMatter returns the issue body with any leading YAML front matter
+// block removed. If there is no front matter, the input is returned trimmed.
+func StripFrontMatter(raw string) string {
+	_, markdown := splitFrontMatter(raw)
+	return markdown
+}
+
 func splitFrontMatter(raw string) (frontMatter, markdown string) {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(raw, "---") {

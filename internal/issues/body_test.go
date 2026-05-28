@@ -129,6 +129,44 @@ func TestSplitOverflowComments_Empty(t *testing.T) {
 	assert.Nil(t, SplitOverflowComments(""))
 }
 
+func TestStripFrontMatter(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "with frontmatter",
+			in:   "---\nherd:\n  version: 1\n---\n\n# Heading\n\nBody text.",
+			want: "# Heading\n\nBody text.",
+		},
+		{
+			name: "without frontmatter trims whitespace",
+			in:   "\n\n# Heading\n\nBody text.\n\n",
+			want: "# Heading\n\nBody text.",
+		},
+		{
+			name: "empty input",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "only frontmatter",
+			in:   "---\nherd:\n  version: 1\n---\n",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, StripFrontMatter(tc.in))
+		})
+	}
+}
+
+func TestMaxIssueBodyChars_MatchesInternal(t *testing.T) {
+	assert.Equal(t, githubIssueBodyMaxChars, MaxIssueBodyChars)
+}
+
 func TestSplitOverflowComments_SingleChunk(t *testing.T) {
 	overflow := strings.Repeat("y", 1000)
 	result := SplitOverflowComments(overflow)
