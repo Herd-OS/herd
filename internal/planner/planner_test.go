@@ -242,6 +242,14 @@ func TestCreateFromPlan_ManualTaskNotifyUsers(t *testing.T) {
 	require.Len(t, mock.issues.comments, 1)
 	assert.Contains(t, mock.issues.comments[0], "@alice")
 	assert.Contains(t, mock.issues.comments[0], "@bob")
+
+	// Should retain the automated-comment prefix so the integrator's
+	// filter excludes it from forwarded findings.
+	assert.Contains(t, mock.issues.comments[0], "👋 **Manual task**")
+
+	// Should include the findings instruction so the human knows
+	// their notes will be forwarded to dependent issues.
+	assert.Contains(t, mock.issues.comments[0], "Herd forwards them into dependent issues automatically")
 }
 
 func TestBuildMentions(t *testing.T) {

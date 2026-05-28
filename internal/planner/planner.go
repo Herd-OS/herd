@@ -64,7 +64,7 @@ func CreateFromPlan(ctx context.Context, p platform.Platform, plan *agent.Plan, 
 		if task.Manual && cfg != nil && len(cfg.Monitor.NotifyUsers) > 0 {
 			mentions := buildMentions(cfg.Monitor.NotifyUsers)
 			_ = p.Issues().AddComment(ctx, issue.Number, fmt.Sprintf(
-				"👋 **Manual task** — this requires human action.\n\n%s", mentions))
+				"👋 **Manual task** — this requires human action.\n\nRecord any findings (decisions, chosen versions, values) that downstream tasks need directly in this issue — in the body or a comment — before closing it. Herd forwards them into dependent issues automatically when this task is closed.\n\n%s", mentions))
 		}
 	}
 
