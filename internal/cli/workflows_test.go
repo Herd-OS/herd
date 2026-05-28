@@ -115,6 +115,32 @@ func TestRenderWorkflow_UnknownSource(t *testing.T) {
 	assert.Error(t, err, "rendering nonexistent workflow source should error")
 }
 
+func TestWorkerWorkflowTemplate_IncludesOpencodeAuthEnv(t *testing.T) {
+	cfg := config.Default()
+
+	var wf workflowFile
+	found := false
+	for _, f := range workflowFiles() {
+		if f.SrcName == "herd-worker.yml.tmpl" {
+			wf = f
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "herd-worker.yml.tmpl must be registered in workflowFiles()")
+
+	out, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+	s := string(out)
+
+	assert.Contains(t, s, "OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}",
+		"rendered worker workflow must include OPENCODE_AUTH_JSON env")
+	assert.Contains(t, s, "OPENCODE_AUTH_FORCE_SEED: ${{ secrets.OPENCODE_AUTH_FORCE_SEED }}",
+		"rendered worker workflow must include OPENCODE_AUTH_FORCE_SEED env")
+	assert.Contains(t, s, "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}",
+		"rendered worker workflow must still include OPENAI_API_KEY env (regression guard)")
+}
+
 func TestWorkflowFiles_ContainsExpectedNames(t *testing.T) {
 	files := workflowFiles()
 	require.Len(t, files, 4)

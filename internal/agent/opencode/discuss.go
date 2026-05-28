@@ -20,6 +20,9 @@ import (
 // an opaque "argument list too long" exec failure, Discuss rejects combined
 // prompts larger than maxArgvPromptBytes with a clear error.
 func (o *OpenCodeAgent) Discuss(ctx context.Context, opts agent.DiscussOptions) error {
+	if err := ensureOpenCodeAuth(); err != nil {
+		return fmt.Errorf("provisioning opencode auth: %w", err)
+	}
 	if opts.SystemPrompt == "" {
 		return fmt.Errorf("discuss: system prompt is required")
 	}

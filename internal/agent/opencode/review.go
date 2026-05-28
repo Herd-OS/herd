@@ -23,6 +23,9 @@ import (
 // unparseable output yields ReviewResult{Approved:false, IsUnparseable:true}
 // with a Summary beginning "Failed to parse".
 func (o *OpenCodeAgent) Review(ctx context.Context, diff string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
+	if err := ensureOpenCodeAuth(); err != nil {
+		return nil, fmt.Errorf("provisioning opencode auth: %w", err)
+	}
 	reviewPrompt, err := prompt.RenderReviewPrompt(diff, opts)
 	if err != nil {
 		return nil, fmt.Errorf("rendering review prompt: %w", err)

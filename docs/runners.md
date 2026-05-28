@@ -95,6 +95,10 @@ Also add as an org or repo secret named `ANTHROPIC_API_KEY`.
 
 ### OpenCode provider (`agent.provider: opencode`)
 
+Choose one:
+
+#### Option 1: API key (default, recommended)
+
 OpenCode authenticates against whichever LLM provider the configured `agent.model` resolves to. Set the matching provider API key in the runner environment:
 
 | `agent.model` prefix | Required env var |
@@ -110,6 +114,35 @@ OPENAI_API_KEY=sk-...
 ```
 
 Also add it as an org or repo secret with the same name so the GitHub Actions worker workflow can surface it. OpenCode does not use `CLAUDE_CODE_OAUTH_TOKEN`.
+
+> API key is the recommended default for OpenCode because the subscription path (Option 2) relies on a community-maintained plugin.
+
+#### Option 2: ChatGPT subscription (opt-in)
+
+Use an existing ChatGPT (Codex) subscription instead of a pay-per-token API key. This path is opt-in because it relies on a community-maintained OpenCode plugin.
+
+1. Install opencode and the auth plugin locally:
+   ```bash
+   npm install -g opencode-ai opencode-openai-codex-auth
+   ```
+2. Run the device flow and authenticate at https://auth.openai.com/codex/device.
+3. Capture the resulting `auth.json` at `~/.local/share/opencode/auth.json` (or `$XDG_DATA_HOME/opencode/auth.json`).
+4. Base64-encode it:
+   ```bash
+   base64 -w0 ~/.local/share/opencode/auth.json
+   ```
+5. Store the encoded value as the `OPENCODE_AUTH_JSON` org/repo secret **and** in `.env` for Docker runners:
+   ```
+   OPENCODE_AUTH_JSON=<base64-encoded-auth.json>
+   ```
+
+> **Refresh-token caveat**: the refresh token MAY rotate over time. The runner seeds `auth.json` only when it is absent (or when `OPENCODE_AUTH_FORCE_SEED=1` is set), so to keep refreshed tokens across container restarts mount a volume over the OpenCode data dir (`~/.local/share/opencode`) as shown in `docker-compose.herd.yml`. Without persistence the seeded token is used until it expires.
+
+The plugins are community-maintained:
+- [numman-ali/opencode-openai-codex-auth](https://github.com/numman-ali/opencode-openai-codex-auth)
+- [tumf/opencode-openai-device-auth](https://github.com/tumf/opencode-openai-device-auth)
+
+> TODO(verify): the plugin name/version and the `opencode.json` registration requirement are pending maintainer verification on the PR.
 
 > `.env` is auto-gitignored by `herd init` — credentials won't be committed.
 
@@ -144,8 +177,11 @@ Configure at **org level** (recommended for multi-repo) or **repo level**:
 | `CLAUDE_CODE_OAUTH_TOKEN` | Secret | Claude only — one of these | Claude provider auth — Pro/Max subscription |
 | `ANTHROPIC_API_KEY` | Secret | Claude or OpenCode (anthropic models) — one of these | Agent auth — pay-per-token Anthropic API key |
 | `OPENAI_API_KEY` | Secret | OpenCode with `openai/...` model | OpenCode provider auth for OpenAI models |
+| `OPENCODE_AUTH_JSON` | Secret | OpenCode subscription auth (opt-in) | Base64-encoded OpenCode `auth.json` for ChatGPT subscription auth |
 | `HERD_ENABLED` | Variable | Yes | Activates workflows — set to `true` after runners are online |
 | `HERD_RUNNER_LABEL` | Variable | No | Override default runner label (default: `herd-worker`) |
+
+> `OPENCODE_AUTH_FORCE_SEED=1` is an env-only flag (not a secret) that forces the runner to overwrite an existing `auth.json` with the seeded value on every container start. Use it sparingly — it discards any refreshed token persisted in the OpenCode data dir.
 
 **Org secrets**: https://github.com/organizations/{org}/settings/secrets/actions — set visibility to "All repositories".
 
@@ -347,4 +383,4 @@ See [configuration.md](configuration.md) for the full field reference.
 | Dispatch succeeds but no run appears | Missing secret | Add `HERD_GITHUB_TOKEN` as org/repo secret (see section 1) |
 | Token permission errors | Insufficient scope | Fine-grained: needs Administration read/write. Classic: needs `repo` scope |
 | Integrator crashes checking CI | Missing Statuses permission | Add **Statuses: Read** to fine-grained PAT, or set `require_ci: false` in `.herdos.yml` |
-| Auth errors in worker | Missing credentials | Verify `.env` has the right key for the configured provider — Claude: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenCode: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` matching `agent.model` |
+| Auth errors in worker | Missing credentials | Verify `.env` has the right key for the configured provider — Claude: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenCode: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` matching `agent.model`, or `OPENCODE_AUTH_JSON` (base64-encoded `auth.json`) for the opt-in ChatGPT subscription path |
