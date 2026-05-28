@@ -83,6 +83,23 @@ Common manual tasks:
 - Setting up secrets, tokens, or environment variables
 - Creating repositories or managing GitHub settings
 
+### Recording Findings on Manual Tasks
+
+When a manual task produces information that downstream automated tasks need
+(a chosen library version, the location of a provisioned resource, a value),
+the human records that information directly in the issue — in the body or as
+comments — before closing it. No special syntax or marker is required;
+freeform markdown is treated as findings. The Integrator forwards those
+findings into each dependent issue's body automatically at dispatch time, so
+the downstream worker sees them without ever reading the manual issue.
+
+The Planner reflects this in two places: the manual task's notification
+comment instructs the human to record findings before closing, and each
+dependent task's `context_from_dependencies` notes that findings from the
+manual dep will be injected automatically. See
+[execution.md → Manual-task findings forwarding](execution.md#manual-task-findings-forwarding)
+for the injection mechanics, idempotency, and size caps.
+
 ## Self-Contained Issues
 
 **The Planner does the thinking, the Worker does the typing.**

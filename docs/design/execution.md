@@ -895,6 +895,84 @@ Manual tasks participate fully in the DAG:
 - **Notifications** -- when `notify_users` is configured, the Planner @mentions
   those users on manual task issues for visibility
 
+### Manual-task findings forwarding
+
+Manual tasks often produce information that downstream automated tasks need —
+a chosen library version, an API key location, a configuration decision, the
+shape of a value the human pasted into a secret. Workers, however, read only
+their **own** issue body at execution time (`worker.Exec` calls `Issues().Get`
+on its assigned issue; it never fetches dependency issues or their comments).
+Planner-inlined dependency context is frozen at plan time, so findings that a
+human records *after* planning would otherwise never reach the worker. The
+Integrator closes this gap by forwarding those findings into the dependent
+issue's body at dispatch time.
+
+**When and what.** Just before `dispatchReadyIssues` dispatches an automated
+issue, for each of that issue's `depends_on` entries that is a manual task
+(label `herd/type:manual`) **and** complete (state `closed` or label
+`herd/status:done`), the Integrator extracts the manual task's findings and
+injects them into the dependent issue's body. Findings are simply:
+
+- The manual task's issue body (with YAML front matter stripped via
+  `issues.StripFrontMatter`), kept verbatim.
+- Every human-authored comment on the manual issue, in chronological order.
+  Comments whose author login ends in `[bot]` and comments whose trimmed
+  body matches a known herd automated-comment prefix (e.g. `👋 **Manual
+  task**`, `🔍 **HerdOS Agent Review**`, `📋 **Worker Progress**`) are
+  excluded — those are not human findings.
+
+There is no special syntax the human must use. Anything they write in the
+issue body or as a non-bot comment is treated as findings.
+
+**Injected block format.** The forwarded text is wrapped in herd-internal
+HTML-comment markers keyed to the source manual issue:
+
+```
+<!-- herd:injected-findings:<N> -->
+## Context from #<N> (manual task)
+
+<extracted body + comments>
+
+<!-- /herd:injected-findings:<N> -->
+```
+
+Humans never author these markers — they exist solely so the Integrator can
+recognise an already-injected block.
+
+**Idempotency.** Because injection is keyed by the source issue number, a
+re-dispatch (or a second pass over the same dependent issue) detects the
+existing `<!-- herd:injected-findings:<N> -->` marker and skips re-injecting.
+The dependent issue's body therefore contains each manual dep's findings at
+most once, regardless of retry count.
+
+**Scope: manual deps only.** Only `herd/type:manual` dependencies forward
+findings. An automated dependency's "output" is the code it commits to the
+batch branch, which the worker already gets by checking out that branch —
+there is nothing to forward. Scanning the dependency list for manual deps is
+therefore the only extra work the Integrator does at dispatch time.
+
+**Size caps.** Two limits apply:
+
+- **Per dependency:** extracted findings are capped at 8 KB
+  (`perDepFindingsCap` = 8192 bytes). Content beyond the cap is truncated at
+  a UTF-8 rune boundary and replaced with a notice pointing at the source
+  issue: `_...truncated; see #<N> for full findings._`.
+- **Per dependent body:** if injecting a block would push the dependent
+  issue's body over `issues.MaxIssueBodyChars` (65000, GitHub's
+  safety-margin limit — see
+  [github-integration.md → Body Size Limit](github-integration.md#body-size-limit)),
+  that single injection is skipped with a warning. Dispatch still proceeds
+  with whatever findings did fit, so an oversize manual dep never blocks the
+  worker.
+
+**Out of scope.** Findings are read at dispatch time only — edits a human
+makes to the manual issue *after* its findings have been injected into a
+dependent are not re-forwarded automatically (the keyed marker means a
+subsequent injection pass treats that source as already done). Findings are
+also unstructured: there is no schema, no typed fields, no machine-readable
+contract — only freeform markdown that the downstream worker reads as part
+of its prompt.
+
 ---
 
 ## 10. Agent Error Resilience
