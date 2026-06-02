@@ -18,12 +18,20 @@ import (
 
 // authTestHome wires HOME + XDG_DATA_HOME at a fresh temp dir and returns it,
 // so provisionOpenCodeAuth's writes (auth.json and opencode.json) all stay
-// inside the test sandbox. Use t.TempDir() so cleanup is automatic.
+// inside the test sandbox. It also clears every env var provisionOpenCodeAuth
+// reads — the runner env (and many dev shells) export CLAUDE_CODE_OAUTH_TOKEN
+// for the claude provider, which would otherwise leak into tests that don't
+// explicitly set it and silently activate the Claude bridge path. Tests that
+// need a specific value override with their own t.Setenv after this call.
+// Use t.TempDir() so cleanup is automatic.
 func authTestHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, ".local", "share"))
+	t.Setenv("OPENCODE_AUTH_JSON", "")
+	t.Setenv("OPENCODE_AUTH_FORCE_SEED", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	return dir
 }
 
