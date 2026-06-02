@@ -99,6 +99,10 @@ if [[ ${EUID} -eq 0 ]]; then
 	if ! id -u builder >/dev/null 2>&1; then
 		useradd -m builder
 	fi
+	# mktemp -d creates the parent at 0700 root-owned, which blocks builder from
+	# traversing into the clone — makepkg's BUILDDIR writability check then fails
+	# with "Failed to create the directory $BUILDDIR" even though the dir exists.
+	chmod 755 "${TMPDIR}"
 	chown -R builder .
 	runuser -u builder -- makepkg --printsrcinfo > .SRCINFO
 	chown -R root:root .
