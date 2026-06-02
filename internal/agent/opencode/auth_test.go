@@ -18,12 +18,20 @@ import (
 
 // authTestHome wires HOME + XDG_DATA_HOME at a fresh temp dir and returns it,
 // so provisionOpenCodeAuth's writes (auth.json and opencode.json) all stay
-// inside the test sandbox. Use t.TempDir() so cleanup is automatic.
+// inside the test sandbox. It also clears every env var provisionOpenCodeAuth
+// reads — the runner env (and many dev shells) export CLAUDE_CODE_OAUTH_TOKEN
+// for the claude provider, which would otherwise leak into tests that don't
+// explicitly set it and silently activate the Claude bridge path. Tests that
+// need a specific value override with their own t.Setenv after this call.
+// Use t.TempDir() so cleanup is automatic.
 func authTestHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, ".local", "share"))
+	t.Setenv("OPENCODE_AUTH_JSON", "")
+	t.Setenv("OPENCODE_AUTH_FORCE_SEED", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	return dir
 }
 
@@ -125,7 +133,7 @@ func TestEnsureOpenCodeAuth_HonorsXdgDataHome(t *testing.T) {
 func TestEnsureOpenCodeAuth_RegistersPluginConfig(t *testing.T) {
 	t.Run("no existing config", func(t *testing.T) {
 		home := authTestHome(t)
-		require.NoError(t, ensurePluginRegistered())
+		require.NoError(t, ensurePluginRegistered([]string{openCodeAuthPluginName}))
 
 		cfgPath := filepath.Join(home, ".config", "opencode", "opencode.json")
 		data, err := os.ReadFile(cfgPath)
@@ -145,7 +153,7 @@ func TestEnsureOpenCodeAuth_RegistersPluginConfig(t *testing.T) {
 		initial := []byte(`{"plugin":["some-other"],"theme":"x"}`)
 		require.NoError(t, os.WriteFile(cfgPath, initial, 0o644))
 
-		require.NoError(t, ensurePluginRegistered())
+		require.NoError(t, ensurePluginRegistered([]string{openCodeAuthPluginName}))
 
 		data, err := os.ReadFile(cfgPath)
 		require.NoError(t, err)
@@ -169,7 +177,7 @@ func TestEnsureOpenCodeAuth_RegistersPluginConfig(t *testing.T) {
 		before, err := os.ReadFile(cfgPath)
 		require.NoError(t, err)
 
-		require.NoError(t, ensurePluginRegistered())
+		require.NoError(t, ensurePluginRegistered([]string{openCodeAuthPluginName}))
 
 		after, err := os.ReadFile(cfgPath)
 		require.NoError(t, err)
@@ -216,4 +224,121 @@ func TestEnsureOpenCodeAuth_CalledByAgentMethods(t *testing.T) {
 	got, err := os.ReadFile(authPath)
 	require.NoError(t, err, "Execute must trigger ensureOpenCodeAuth and write auth.json")
 	assert.Equal(t, payload, got)
+}
+
+func TestEnsurePluginRegistered_RegistersMultiplePlugins(t *testing.T) {
+	home := authTestHome(t)
+	require.NoError(t, ensurePluginRegistered([]string{openCodeAuthPluginName, openCodeClaudeAuthPluginName}))
+
+	cfgPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	data, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal(data, &cfg))
+	plugins, ok := cfg["plugin"].([]any)
+	require.True(t, ok)
+	assert.Contains(t, plugins, openCodeAuthPluginName)
+	assert.Contains(t, plugins, openCodeClaudeAuthPluginName)
+
+	// Idempotent on re-run: byte-identical file.
+	before, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.NoError(t, ensurePluginRegistered([]string{openCodeAuthPluginName, openCodeClaudeAuthPluginName}))
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "file must be byte-identical when all plugins already present")
+}
+
+func TestEnsurePluginRegistered_EmptyIsNoOp(t *testing.T) {
+	home := authTestHome(t)
+	require.NoError(t, ensurePluginRegistered(nil))
+	cfgPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	_, err := os.Stat(cfgPath)
+	assert.True(t, os.IsNotExist(err), "empty plugin list must not create opencode.json")
+}
+
+func TestProvisionOpenCodeAuth_GatesPluginsOnEnvVars(t *testing.T) {
+	payload := base64.StdEncoding.EncodeToString([]byte(`{"openai":{"type":"oauth","access":"tok"}}`))
+	cases := []struct {
+		name        string
+		openaiJSON  string
+		claudeToken string
+		wantPlugins []string
+		wantNoFile  bool // opencode.json should not exist
+	}{
+		{"only openai", payload, "", []string{openCodeAuthPluginName}, false},
+		{"only claude", "", "sk-ant-oat01-xyz", []string{openCodeClaudeAuthPluginName}, false},
+		{"both", payload, "sk-ant-oat01-xyz", []string{openCodeAuthPluginName, openCodeClaudeAuthPluginName}, false},
+		{"neither", "", "", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := authTestHome(t)
+			t.Setenv("OPENCODE_AUTH_JSON", tc.openaiJSON)
+			t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", tc.claudeToken)
+			t.Setenv("OPENCODE_AUTH_FORCE_SEED", "")
+
+			require.NoError(t, provisionOpenCodeAuth())
+
+			cfgPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+			if tc.wantNoFile {
+				_, err := os.Stat(cfgPath)
+				assert.True(t, os.IsNotExist(err), "opencode.json must not be written when no subscription env vars are set")
+				return
+			}
+			data, err := os.ReadFile(cfgPath)
+			require.NoError(t, err)
+			var cfg map[string]any
+			require.NoError(t, json.Unmarshal(data, &cfg))
+			plugins, _ := cfg["plugin"].([]any)
+			for _, want := range tc.wantPlugins {
+				assert.Contains(t, plugins, want)
+			}
+			// Exactly the expected plugins, nothing extra.
+			assert.Len(t, plugins, len(tc.wantPlugins))
+		})
+	}
+}
+
+func TestProvisionOpenCodeAuth_ClaudeOnlyNoOpenAIConfig(t *testing.T) {
+	home := authTestHome(t)
+	t.Setenv("OPENCODE_AUTH_JSON", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-xyz")
+	t.Setenv("OPENCODE_AUTH_FORCE_SEED", "")
+
+	require.NoError(t, provisionOpenCodeAuth())
+
+	// No auth.json must be written for the Claude (env-var-only) path.
+	authPath := filepath.Join(home, ".local", "share", "opencode", "auth.json")
+	_, err := os.Stat(authPath)
+	assert.True(t, os.IsNotExist(err), "Claude env-var-only path must not write auth.json")
+
+	// Only the claude plugin registered.
+	cfgPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	data, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal(data, &cfg))
+	plugins, _ := cfg["plugin"].([]any)
+	assert.Contains(t, plugins, openCodeClaudeAuthPluginName)
+	assert.NotContains(t, plugins, openCodeAuthPluginName)
+}
+
+func TestProvisionOpenCodeAuth_ClaudeDoesNotClobberExistingAuthJSON(t *testing.T) {
+	home := authTestHome(t)
+	authPath := filepath.Join(home, ".local", "share", "opencode", "auth.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o755))
+	sentinel := []byte(`{"openai":{"access":"PRE-EXISTING"}}`)
+	require.NoError(t, os.WriteFile(authPath, sentinel, 0o600))
+
+	// Only the Claude path active; auth.json must be left untouched.
+	t.Setenv("OPENCODE_AUTH_JSON", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-xyz")
+	t.Setenv("OPENCODE_AUTH_FORCE_SEED", "")
+
+	require.NoError(t, provisionOpenCodeAuth())
+
+	got, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	assert.Equal(t, sentinel, got, "Claude-only provisioning must not touch an existing auth.json")
 }

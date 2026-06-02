@@ -19,6 +19,7 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - REPO_URL=https://github.com/{{.Owner}}/{{.Repo}}
       - RUNNER_LABELS=herd-worker
+      # Claude provider auth AND OpenCode Anthropic subscription bridge (opencode-claude-auth)
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENCODE_AUTH_JSON=${OPENCODE_AUTH_JSON:-}
