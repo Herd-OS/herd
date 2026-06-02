@@ -6,6 +6,20 @@
 brew install herd-os/tap/herd
 ```
 
+## Arch Linux (AUR)
+
+```bash
+yay -S herd-bin   # or: paru -S herd-bin
+```
+
+`herd-bin` installs the pre-built linux-amd64 / linux-arm64 binary from the latest GitHub Release and tracks tagged releases automatically. Manual install (no AUR helper):
+
+```bash
+git clone https://aur.archlinux.org/herd-bin.git
+cd herd-bin
+makepkg -si
+```
+
 ## Binary Download
 
 Download the latest release for your platform from the [GitHub Releases page](https://github.com/Herd-OS/herd/releases/latest).
@@ -76,6 +90,9 @@ The check is skipped by design for development builds (`herd --version` reports 
 ```bash
 # Homebrew
 brew upgrade herd-os/tap/herd
+
+# AUR (Arch Linux)
+yay -Syu herd-bin
 
 # Binary download — same as installation, replace the existing binary
 
@@ -150,6 +167,7 @@ Builds binaries for all supported platforms, generates `checksums.txt`, and:
 - Uploads the linux-amd64 binary as a workflow artifact (`herd-linux-amd64`, retained for 1 day) so the follow-up `self-init` job can use the exact bits that were just built without racing the GitHub Release publish.
 - Publishes a GitHub Release via [`softprops/action-gh-release`](https://github.com/softprops/action-gh-release) with all platform binaries plus `checksums.txt` attached.
 - Updates the `herd-os/homebrew-tap` formula via `scripts/update-homebrew.sh` (only if `HERD_GITHUB_TOKEN` is set).
+- Updates the `herd-bin` AUR package via `scripts/update-aur.sh` (only if `AUR_SSH_PRIVATE_KEY` is set). The step runs inside an `archlinux:base-devel` container because `makepkg --printsrcinfo` is required to regenerate `.SRCINFO` and is not available on Ubuntu runners.
 
 ### `self-init` job
 
@@ -186,3 +204,46 @@ token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
 ```
 
 Prefer `HERD_GITHUB_TOKEN` (a PAT with `contents` and `pull-requests` write) when available — PRs created by the default `GITHUB_TOKEN` do not trigger downstream workflows, which can hide CI failures on the self-init PR. The fallback to `GITHUB_TOKEN` keeps the job functional in forks or environments where the secret is not configured.
+
+### AUR (herd-bin) setup
+
+The `Update AUR (herd-bin)` step in the release job pushes a new `PKGBUILD` + `.SRCINFO` to `ssh://aur@aur.archlinux.org/herd-bin.git` on every tag. It is gated on the `AUR_SSH_PRIVATE_KEY` secret being set; if the secret is absent, the step is skipped and the release completes normally without an AUR update.
+
+**One-time setup (only needed once per maintainer / per repo):**
+
+1. Create an AUR account at https://aur.archlinux.org/register.
+2. Generate a dedicated SSH key (no passphrase if it will be stored as a GitHub Actions secret):
+
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/aur_ed25519 -N "" -C "aur-herd-bin"
+   ```
+
+3. Add the **public** key (`~/.ssh/aur_ed25519.pub`) to your AUR account at https://aur.archlinux.org/account/ → "SSH Public Key".
+4. On a local Arch box, clone the empty AUR repo, copy in a valid PKGBUILD, regenerate `.SRCINFO`, validate, and do the **initial push** (the workflow can only update an existing AUR repo, not create one):
+
+   ```bash
+   # Optional but recommended SSH config entry — keeps your GitHub keys from being offered first
+   cat >> ~/.ssh/config << 'EOF'
+   Host aur.archlinux.org
+     HostName aur.archlinux.org
+     User aur
+     IdentityFile ~/.ssh/aur_ed25519
+     IdentitiesOnly yes
+   EOF
+
+   git clone ssh://aur@aur.archlinux.org/herd-bin.git
+   cd herd-bin
+   # Copy a known-good PKGBUILD in (e.g. from a tagged release of this repo).
+   # Then:
+   makepkg --printsrcinfo > .SRCINFO
+   makepkg -si          # local install — confirms the package works end-to-end
+   git add PKGBUILD .SRCINFO
+   git commit -m "Initial import (herd-bin v<X.Y.Z>)"
+   git push
+   ```
+
+5. Add the **private** key as a GitHub Actions secret named `AUR_SSH_PRIVATE_KEY` (the entire contents of `~/.ssh/aur_ed25519`, including the `-----BEGIN OPENSSH PRIVATE KEY-----` header). From then on, every tag push triggers the workflow to regenerate the PKGBUILD with the new version + checksums, regenerate `.SRCINFO` via `makepkg --printsrcinfo`, and push to AUR as `herd-os[bot]`.
+
+**Updating the PKGBUILD template:** the AUR PKGBUILD is generated inline by `scripts/update-aur.sh`. Edits to dependencies, optdepends, or the `package()` function go there. The script must remain runnable both inside the CI container and on a maintainer's local Arch box (it detects `EUID==0` and drops to a `builder` user for `makepkg`).
+
+**Skipping AUR on a release:** unset or rename the `AUR_SSH_PRIVATE_KEY` secret temporarily. The release will still publish binaries and update Homebrew.
