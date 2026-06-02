@@ -316,6 +316,8 @@ When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the
 /herd integrate
 ```
 
+`/herd retry` always re-runs the worker, and it is never a no-op just because a previous attempt's progress checklist looks complete. If the previous attempt finished its work but failed pre-push validation, the retry re-invokes the agent with the saved validation errors (the agent is told the progress file is stale) rather than skipping straight to reporting — the agent is skipped only when both the progress file is complete and the worker's validation marker is present. See [design/execution.md → Retry Resume](design/execution.md#retry-resume) for details.
+
 When the integrator fails during any step (consolidation, CI check, advancement, or review), it posts a comment on the relevant issue or batch PR with the error details and a reminder to retry with `/herd integrate`.
 
 Quotes around the prompt text are optional. You can paste error logs, JSON snippets, or any text directly after the command — everything after the command name (including subsequent lines) is treated as the prompt. The quoted format (`/herd fix "description"`) is also still supported.
