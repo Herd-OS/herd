@@ -15,6 +15,7 @@ import (
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -2305,6 +2306,38 @@ func TestExec_ValidationMarkerLifecycle(t *testing.T) {
 		"marker must be removed before the agent runs so a stale pass cannot carry over")
 	assert.True(t, checkValidationPassed(repoDir, 42),
 		"marker must be re-created after re-validation passes")
+}
+
+func TestCommitValidationStatus_StagesErrorsFileDeletion(t *testing.T) {
+	// Verify FAIL → PASS transition removes the errors file from the worker
+	// branch HEAD, not just from the worktree, so a future resume-after-failure
+	// path does not read stale errors.
+	repoDir := initTestRepoWithBatchBranch(t)
+	gitRunT(t, repoDir, "git", "checkout", "herd/batch/1-batch")
+	gitRunT(t, repoDir, "git", "checkout", "-b", "herd/worker/99-test")
+	g := git.New(repoDir)
+	gitRunT(t, repoDir, "git", "config", "user.name", "t")
+	gitRunT(t, repoDir, "git", "config", "user.email", "t@t.com")
+
+	// Phase 1 — simulate a failed validation: errors file written and committed.
+	require.NoError(t, writeValidationErrors(repoDir, 99, "initial failure"))
+	commitValidationStatus(g, repoDir, 99, "Update validation status for #99")
+	out, err := exec.Command("git", "-C", repoDir, "ls-files", ".herd/progress").CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "99.validation.errors",
+		"errors file must be tracked after the failure commit")
+
+	// Phase 2 — simulate the successful re-validation: marker written, errors removed.
+	require.NoError(t, writeValidationMarker(repoDir, 99))
+	require.NoError(t, removeValidationErrors(repoDir, 99))
+	commitValidationStatus(g, repoDir, 99, "Update validation status for #99")
+
+	out, err = exec.Command("git", "-C", repoDir, "ls-files", ".herd/progress").CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "99.validation",
+		"marker file must be tracked after the success commit")
+	assert.NotContains(t, string(out), "99.validation.errors",
+		"errors file must be removed from HEAD when validation passes, not just from the worktree")
 }
 
 func TestExecStandalone_RetryAgentDoesNotHonorProgressFile(t *testing.T) {

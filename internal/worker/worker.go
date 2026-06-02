@@ -761,10 +761,23 @@ func removeValidationErrors(repoRoot string, issueNumber int) error {
 // files so they survive across worker invocations. Best-effort: logs but does
 // not fail the worker if git operations error (e.g. nothing to commit).
 func commitValidationStatus(g *git.Git, repoRoot string, issueNumber int, message string) {
-	_ = g.Add(validationMarkerPath(repoRoot, issueNumber))
-	_ = g.Add(validationErrorsPath(repoRoot, issueNumber))
+	for _, p := range []string{
+		validationMarkerPath(repoRoot, issueNumber),
+		validationErrorsPath(repoRoot, issueNumber),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			_ = g.Add(p)
+		} else if os.IsNotExist(err) {
+			// Stage the deletion if the file used to be tracked; ignore "did not match" for never-tracked paths.
+			_ = g.Rm(p)
+		}
+	}
 	if err := g.Commit(message); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: committing validation status for #%d: %v\n", issueNumber, err)
+		// Empty commit (nothing to stage) is the common case after the very first marker write; do not log on that.
+		if !strings.Contains(err.Error(), "nothing to commit") &&
+			!strings.Contains(err.Error(), "no changes added") {
+			fmt.Fprintf(os.Stderr, "warning: committing validation status for #%d: %v\n", issueNumber, err)
+		}
 	}
 }
 
