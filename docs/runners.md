@@ -113,11 +113,11 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 ```
 
-Also add it as an org or repo secret with the same name so the GitHub Actions worker workflow can surface it. OpenCode does not use `CLAUDE_CODE_OAUTH_TOKEN`.
+Also add it as an org or repo secret with the same name so the GitHub Actions worker workflow can surface it. This API-key path does not use `CLAUDE_CODE_OAUTH_TOKEN` (that token only enables the opt-in Anthropic subscription bridge — see Option 3).
 
-> API key is the recommended default for OpenCode because the subscription path (Option 2) relies on a community-maintained plugin.
+> API key is the recommended default for OpenCode because the subscription paths (Options 2 and 3) rely on community-maintained plugins.
 
-#### Option 2: ChatGPT subscription (opt-in)
+#### Option 2: ChatGPT subscription (opt-in, openai/* models)
 
 Use an existing ChatGPT (Codex) subscription instead of a pay-per-token API key. This path is opt-in because it relies on a community-maintained OpenCode plugin.
 
@@ -143,6 +143,48 @@ The plugins are community-maintained:
 - [tumf/opencode-openai-device-auth](https://github.com/tumf/opencode-openai-device-auth)
 
 > TODO(verify): the plugin name/version and the `opencode.json` registration requirement are pending maintainer verification on the PR.
+
+#### Option 3: Claude subscription (opt-in, anthropic/* models)
+
+Use an existing Claude Pro/Max subscription with OpenCode instead of a
+pay-per-token Anthropic API key — the same OAuth token the `claude` provider
+uses. This path is opt-in because it relies on the community-maintained
+`opencode-claude-auth` bridge plugin.
+
+1. Install opencode and the bridge plugin locally:
+   ```bash
+   npm install -g opencode-ai opencode-claude-auth
+   ```
+2. Generate the OAuth token (same command the claude provider uses):
+   ```bash
+   claude setup-token
+   ```
+3. Set `CLAUDE_CODE_OAUTH_TOKEN` in the runner environment. If you have already
+   configured the `claude` provider it is likely present already.
+4. Configure the repo to use OpenCode with an Anthropic model:
+   ```yaml
+   agent:
+     provider: opencode
+     model: anthropic/claude-sonnet-4
+   ```
+
+The runner installs the bridge plugin at image build (entrypoint) and registers
+it in opencode.json only when `CLAUDE_CODE_OAUTH_TOKEN` is set, so the API-key
+path (Option 1) is unaffected when the token is absent. The plugin reads
+`CLAUDE_CODE_OAUTH_TOKEN` directly on each run (env-var-only), so there is no
+separate credential file to persist.
+
+> The bridge plugin is community-maintained — the same caveat as Option 2.
+> Routing a Claude Code OAuth token through a third-party tool may have
+> Anthropic Terms-of-Service implications; this is documented as a risk and is
+> not the recommended default (use Option 1 for the supported Anthropic path).
+
+Upstream: [griffinmartin/opencode-claude-auth](https://github.com/griffinmartin/opencode-claude-auth)
+
+> TODO(verify): plugin package name `opencode-claude-auth`, its pinned version,
+> whether opencode.json registration is required, and the exact credential
+> intake (env var vs. credential file) are pending maintainer verification on
+> the PR.
 
 > `.env` is auto-gitignored by `herd init` — credentials won't be committed.
 
@@ -174,7 +216,7 @@ Configure at **org level** (recommended for multi-repo) or **repo level**:
 | Secret/Variable | Type | Required | Purpose |
 |----------------|------|----------|---------|
 | `HERD_GITHUB_TOKEN` | Secret | Yes | PAT for workflow dispatch, releases, cross-repo ops |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Secret | Claude only — one of these | Claude provider auth — Pro/Max subscription |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Secret | Claude provider (one of these); OpenCode Anthropic subscription bridge (opt-in) | Claude provider auth — Pro/Max subscription; also enables the OpenCode Anthropic subscription bridge for `anthropic/...` models (opt-in, via `opencode-claude-auth`) |
 | `ANTHROPIC_API_KEY` | Secret | Claude or OpenCode (anthropic models) — one of these | Agent auth — pay-per-token Anthropic API key |
 | `OPENAI_API_KEY` | Secret | OpenCode with `openai/...` model | OpenCode provider auth for OpenAI models |
 | `OPENCODE_AUTH_JSON` | Secret | OpenCode subscription auth (opt-in) | Base64-encoded OpenCode `auth.json` for ChatGPT subscription auth |
@@ -314,7 +356,7 @@ You can run on cloud VMs instead of Docker. Requirements:
 4. Register the runner with the `herd-worker` label
 5. Set the agent credentials in the runner's environment:
    - For `agent.provider: claude` — `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
-   - For `agent.provider: opencode` — the provider API key for the configured model (e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models)
+   - For `agent.provider: opencode` — the provider API key for the configured model (e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models). Opt-in subscription paths: `OPENCODE_AUTH_JSON` for `openai/...` models (ChatGPT subscription), or `CLAUDE_CODE_OAUTH_TOKEN` for `anthropic/...` models (Anthropic subscription bridge via `opencode-claude-auth`)
 
 See [GitHub's self-hosted runner docs](https://docs.github.com/en/actions/hosting-your-own-runners) for detailed setup.
 
@@ -383,4 +425,4 @@ See [configuration.md](configuration.md) for the full field reference.
 | Dispatch succeeds but no run appears | Missing secret | Add `HERD_GITHUB_TOKEN` as org/repo secret (see section 1) |
 | Token permission errors | Insufficient scope | Fine-grained: needs Administration read/write. Classic: needs `repo` scope |
 | Integrator crashes checking CI | Missing Statuses permission | Add **Statuses: Read** to fine-grained PAT, or set `require_ci: false` in `.herdos.yml` |
-| Auth errors in worker | Missing credentials | Verify `.env` has the right key for the configured provider — Claude: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenCode: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` matching `agent.model`, or `OPENCODE_AUTH_JSON` (base64-encoded `auth.json`) for the opt-in ChatGPT subscription path |
+| Auth errors in worker | Missing credentials | Verify `.env` has the right key for the configured provider — Claude: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenCode: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` matching `agent.model`, or `OPENCODE_AUTH_JSON` (base64-encoded `auth.json`) for the opt-in ChatGPT subscription path, or `CLAUDE_CODE_OAUTH_TOKEN` for the opt-in Anthropic subscription bridge (`anthropic/...` models) |
