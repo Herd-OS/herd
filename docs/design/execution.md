@@ -96,6 +96,30 @@ Before pushing changes, workers run validation commands:
 
 If validation fails, the agent is re-invoked with the error output. If it fails again after retry, the worker is marked as failed.
 
+#### Validation Marker
+
+The worker code (not the agent) records the outcome of pre-push validation in two
+files under `.herd/progress/`, both keyed by issue number and both committed so
+they survive across worker invocations:
+
+- `.herd/progress/<N>.validation` — an empty marker file written **only** after
+  `runValidation` reports that every command passed. Its presence means
+  "validation actually passed for this issue." The marker is removed at the start
+  of every agent invocation and on any validation failure, so a stale marker from
+  a previous pass can never be carried over.
+- `.herd/progress/<N>.validation.errors` — the combined output of the failing
+  validation commands, written whenever validation fails (and removed once
+  validation passes). The output is truncated to ~16 KB, keeping the tail since
+  the most relevant errors appear last. On the next attempt the worker reads this
+  file and injects it into the agent prompt under a
+  `## Previous attempt's validation failed with:` heading.
+
+These files are written, removed, and committed by the worker framework. They are
+distinct from the agent-written `.herd/progress/<N>.md` checklist described under
+[Incremental Push and Progress Tracking](#incremental-push-and-progress-tracking):
+the progress file reflects only what the *agent* claims it finished, while the
+validation marker reflects whether validation *actually* passed.
+
 Validation is Go-specific — it only runs when a `go.mod` file exists in the repository root.
 
 ### Worker Reports
@@ -137,6 +161,13 @@ writes to `.herd/progress/17.md`), preventing merge conflicts between parallel
 workers. This file contains a checklist of completed and remaining items. On
 retry, the agent reads the existing file to understand what was already done.
 
+The `.herd/progress/<issue-number>.md` file is **agent-written** and means only
+"the agent claims its checklist is done." It is not proof that the work is
+correct — for that, the worker relies on the separate, worker-written
+`.herd/progress/<issue-number>.validation` marker (see
+[Validation Marker](#validation-marker)), which is present only when pre-push
+validation actually passed.
+
 Example `.herd/progress/17.md`:
 ```
 - [x] Create auth model in internal/auth/model.go
@@ -147,7 +178,10 @@ Example `.herd/progress/17.md`:
 
 The Integrator removes the `.herd/progress/` directory during consolidation
 (after merging the worker branch into the batch branch) so progress files
-do not appear in the final batch PR. For backward compatibility, legacy
+do not appear in the final batch PR. This removes everything under that
+directory, including the worker-written `.herd/progress/<issue-number>.validation`
+marker and `.herd/progress/<issue-number>.validation.errors` files, so none of
+them leak into the final batch PR either. For backward compatibility, legacy
 `WORKER_PROGRESS.md` files at the repo root are also removed.
 
 #### Live Progress Updates
@@ -173,15 +207,28 @@ the current batch branch. A warning is logged:
 branch." The previous partial work is lost, but this is preferable to crashing
 and leaving the issue stuck as failed.
 
-If the resumed worker branch's progress file (`.herd/progress/<issue-number>.md`
-or legacy `WORKER_PROGRESS.md`) shows all items checked off — every checkbox is
-`- [x]` and none are `- [ ]` — the worker skips agent invocation entirely. This
-handles the case where a previous attempt completed all work and pushed it, but
-timed out before finishing validation or posting the worker report. The worker
-still runs pre-push validation (build, test, vet, lint), posts the worker report,
-pushes the branch, and labels the issue as done. If the progress file shows
-incomplete work, the normal retry flow continues (the agent is launched with the
-progress file as context to continue where the previous attempt stopped).
+The skip-agent fast path requires **both** signals: the progress file
+(`.herd/progress/<issue-number>.md` or legacy `WORKER_PROGRESS.md`) must show all
+items checked off — every checkbox is `- [x]` and none are `- [ ]` — **and** the
+worker-written `.herd/progress/<issue-number>.validation` marker must be present.
+When both hold, the worker skips agent invocation entirely. This handles the case
+where a previous attempt completed all work, passed validation, and pushed it, but
+timed out before posting the worker report. The worker still runs pre-push
+validation (build, test, vet, lint), posts the worker report, pushes the branch,
+and labels the issue as done.
+
+When the progress file is complete but the validation marker is **absent** — the
+previous attempt's validation failed, so the marker was removed and never
+re-created — the worker does **not** take the fast path. Instead it re-invokes the
+agent and injects the saved `.herd/progress/<issue-number>.validation.errors` into
+the prompt under `## Previous attempt's validation failed with:`. In this case the
+worker uses a retry prompt variant that explicitly tells the agent the progress
+file is **stale** and must not be honored: the validation errors are the only task,
+and the agent must not skip work just because the checklist looks complete.
+
+If the progress file shows incomplete work, the normal retry flow continues (the
+agent is launched with the progress file as context to continue where the previous
+attempt stopped).
 
 ### Concurrency
 
@@ -193,7 +240,7 @@ GitHub Actions limits.
 
 | Failure | Response |
 |---------|----------|
-| Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md`; if the batch branch has diverged and merge conflicts, the worker falls back to a fresh branch (partial work is lost); if the progress file shows all work complete, the retry skips agent invocation and proceeds directly to validation and reporting |
+| Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md`; if the batch branch has diverged and merge conflicts, the worker falls back to a fresh branch (partial work is lost); the retry skips agent invocation and proceeds directly to validation and reporting only when the progress file shows all work complete **and** the `.herd/progress/<issue-number>.validation` marker is present — otherwise the agent is re-invoked with the saved validation errors |
 | Worker produces bad code | Integrator dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
 | Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |

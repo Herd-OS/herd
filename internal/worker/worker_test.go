@@ -15,6 +15,7 @@ import (
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -75,7 +76,7 @@ func (m *mockPRService) ListReviewComments(_ context.Context, _ int) ([]*platfor
 	return nil, nil
 }
 func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) { return "", nil }
-func (m *mockPRService) Close(_ context.Context, _ int) error              { return nil }
+func (m *mockPRService) Close(_ context.Context, _ int) error             { return nil }
 
 type mockPlatform struct {
 	issues     *mockIssueService
@@ -86,25 +87,25 @@ type mockPlatform struct {
 }
 
 func (m *mockPlatform) Issues() platform.IssueService             { return m.issues }
-func (m *mockPlatform) PullRequests() platform.PullRequestService  { return m.prs }
-func (m *mockPlatform) Workflows() platform.WorkflowService        { return m.workflows }
-func (m *mockPlatform) Labels() platform.LabelService              { return nil }
-func (m *mockPlatform) Milestones() platform.MilestoneService      { return m.milestones }
-func (m *mockPlatform) Runners() platform.RunnerService            { return nil }
-func (m *mockPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockPlatform) PullRequests() platform.PullRequestService { return m.prs }
+func (m *mockPlatform) Workflows() platform.WorkflowService       { return m.workflows }
+func (m *mockPlatform) Labels() platform.LabelService             { return nil }
+func (m *mockPlatform) Milestones() platform.MilestoneService     { return m.milestones }
+func (m *mockPlatform) Runners() platform.RunnerService           { return nil }
+func (m *mockPlatform) Repository() platform.RepositoryService    { return m.repo }
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 type mockIssueService struct {
-	mu                sync.Mutex
-	getResult         *platform.Issue
-	getErr            error
-	addedLabels       []string
-	removedLabels     []string
-	comments          []string
-	updatedIssues     map[int]platform.IssueUpdate
-	nextCommentID     int64
-	updatedComments   map[int64]string
-	deletedComments   []int64
+	mu              sync.Mutex
+	getResult       *platform.Issue
+	getErr          error
+	addedLabels     []string
+	removedLabels   []string
+	comments        []string
+	updatedIssues   map[int]platform.IssueUpdate
+	nextCommentID   int64
+	updatedComments map[int64]string
+	deletedComments []int64
 }
 
 func (m *mockIssueService) Create(_ context.Context, _, _ string, _ []string, _ *int) (*platform.Issue, error) {
@@ -190,7 +191,7 @@ func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error)
 func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, nil
 }
-func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error   { return nil }
+func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
 func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 	m.deletedBranches = append(m.deletedBranches, name)
 	return nil
@@ -221,7 +222,7 @@ func (m *mockMilestoneService) Update(_ context.Context, _ int, _ platform.Miles
 
 func TestRenderWorkerPrompt(t *testing.T) {
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, "herd/worker/42-add-auth", t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, "herd/worker/42-add-auth", t.TempDir(), cfg, false)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "Add auth")
 	assert.Contains(t, prompt, "## Task\nBuild it")
@@ -239,7 +240,7 @@ func TestRenderWorkerPromptWithRoleInstructions(t *testing.T) {
 	require.NoError(t, os.WriteFile(dir+"/.herd/worker.md", []byte("Use table-driven tests"), 0644))
 
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Task", "Body", 1, "herd/worker/1-task", dir, cfg)
+	prompt, err := renderWorkerPrompt("Task", "Body", 1, "herd/worker/1-task", dir, cfg, false)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "Use table-driven tests")
 	assert.Contains(t, prompt, "Project-Specific Instructions")
@@ -247,7 +248,7 @@ func TestRenderWorkerPromptWithRoleInstructions(t *testing.T) {
 
 func TestRenderWorkerPrompt_IncludesBranchDiscipline(t *testing.T) {
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, "herd/worker/42-add-auth", t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, "herd/worker/42-add-auth", t.TempDir(), cfg, false)
 	require.NoError(t, err)
 	for _, want := range []string{
 		"Branch & PR Discipline",
@@ -264,7 +265,7 @@ func TestRenderWorkerPrompt_IncludesBranchDiscipline(t *testing.T) {
 
 func TestRenderWorkerPrompt_BranchDisciplineBeforeTask(t *testing.T) {
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Add auth", "create a new branch BODY-MARKER-XYZ", 42, "herd/worker/42-add-auth", t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Add auth", "create a new branch BODY-MARKER-XYZ", 42, "herd/worker/42-add-auth", t.TempDir(), cfg, false)
 	require.NoError(t, err)
 	disciplineIdx := strings.Index(prompt, "Branch & PR Discipline")
 	taskIdx := strings.Index(prompt, "BODY-MARKER-XYZ")
@@ -337,7 +338,7 @@ func TestWorkerPrompt_CoAuthorTrailer(t *testing.T) {
 			cfg := &config.Config{
 				PullRequests: config.PullRequests{CoAuthorEmail: tt.coAuthorEmail},
 			}
-			prompt, err := renderWorkerPrompt("Task", "Body", 1, "herd/worker/1-task", t.TempDir(), cfg)
+			prompt, err := renderWorkerPrompt("Task", "Body", 1, "herd/worker/1-task", t.TempDir(), cfg, false)
 			require.NoError(t, err)
 
 			if tt.expectTrailer {
@@ -825,7 +826,7 @@ func TestExec_HTTPClientNil_SkipsImageDownload(t *testing.T) {
 func TestPromptTemplate_AllInstructions(t *testing.T) {
 	// Verify all 8 instruction bullets from the spec are present
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Title", "Body", 1, "herd/worker/1-title", t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Title", "Body", 1, "herd/worker/1-title", t.TempDir(), cfg, false)
 	require.NoError(t, err)
 
 	expectedPhrases := []string{
@@ -1045,7 +1046,7 @@ func TestExec_FreshBranchWhenNoRemote(t *testing.T) {
 func TestRenderWorkerPrompt_FixIssue(t *testing.T) {
 	body := "---\nherd:\n  version: 1\n  type: fix\n---\n\n## Task\nFix the bug"
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Fix bug", body, 10, "herd/worker/10-fix-bug", t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Fix bug", body, 10, "herd/worker/10-fix-bug", t.TempDir(), cfg, false)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "This is a fix issue created by the reviewer")
 	assert.Contains(t, prompt, "Do not dismiss")
@@ -1064,7 +1065,7 @@ func TestRenderWorkerPrompt_NonFixIssue(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &config.Config{}
-			prompt, err := renderWorkerPrompt("Task", tt.body, 1, "herd/worker/1-task", t.TempDir(), cfg)
+			prompt, err := renderWorkerPrompt("Task", tt.body, 1, "herd/worker/1-task", t.TempDir(), cfg, false)
 			require.NoError(t, err)
 			assert.NotContains(t, prompt, "This is a fix issue")
 		})
@@ -1074,7 +1075,7 @@ func TestRenderWorkerPrompt_NonFixIssue(t *testing.T) {
 func TestRenderWorkerPrompt_FixIssueWithMalformedFrontmatter(t *testing.T) {
 	body := "---\nherd:\n  version: [invalid yaml\n---\n\n## Task\nDo something"
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Task", body, 1, "herd/worker/1-task", t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Task", body, 1, "herd/worker/1-task", t.TempDir(), cfg, false)
 	require.NoError(t, err)
 	assert.NotContains(t, prompt, "This is a fix issue")
 }
@@ -1136,7 +1137,7 @@ func TestNoOpVerdictHeader(t *testing.T) {
 
 func TestWorkerPromptTemplate_RequiresVerdictFormat(t *testing.T) {
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, "herd/worker/42-add-auth", t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Add auth", "## Task\nBuild it", 42, "herd/worker/42-add-auth", t.TempDir(), cfg, false)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "Findings reviewed against the current code:",
 		"prompt must require the Findings header")
@@ -1385,7 +1386,7 @@ func TestExec_NonConflictNoOp_NotClosed(t *testing.T) {
 
 func TestRenderWorkerPrompt_ContainsConflictInstruction(t *testing.T) {
 	cfg := &config.Config{}
-	prompt, err := renderWorkerPrompt("Resolve conflict", "## Task\nFix it", 42, "herd/worker/42-resolve", t.TempDir(), cfg)
+	prompt, err := renderWorkerPrompt("Resolve conflict", "## Task\nFix it", 42, "herd/worker/42-resolve", t.TempDir(), cfg, false)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "merge or rebase conflict")
 	assert.Contains(t, prompt, "resolve the actual conflict")
@@ -1471,6 +1472,9 @@ func TestExec_SkipsAgentWhenProgressComplete(t *testing.T) {
 		[]byte("- [x] Create auth model\n- [x] Add validation\n- [x] Write tests\n"),
 		0o644,
 	))
+	// Write the validation marker too — the skip path now requires BOTH the
+	// completed progress file AND the worker-written validation marker.
+	require.NoError(t, writeValidationMarker(repoDir, 42))
 	// Commit the progress file so the branch has changes
 	run(repoDir, "git", "add", ".")
 	run(repoDir, "git", "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-m", "progress")
@@ -1994,7 +1998,7 @@ func TestExecStandalone_ImagesAndProgress(t *testing.T) {
 
 func TestRenderStandalonePrompt(t *testing.T) {
 	cfg := &config.Config{}
-	prompt, err := renderStandalonePrompt("Fix it", "## Task\nDo the thing", 590, "feature/headbranch", t.TempDir(), cfg)
+	prompt, err := renderStandalonePrompt("Fix it", "## Task\nDo the thing", 590, "feature/headbranch", t.TempDir(), cfg, false)
 	require.NoError(t, err)
 
 	for _, want := range []string{
@@ -2030,9 +2034,494 @@ func TestRenderStandalonePrompt_WithRoleAndCoAuthor(t *testing.T) {
 	cfg := &config.Config{
 		PullRequests: config.PullRequests{CoAuthorEmail: "123+herd-os[bot]@users.noreply.github.com"},
 	}
-	prompt, err := renderStandalonePrompt("Fix", "Body", 1, "feature/x", dir, cfg)
+	prompt, err := renderStandalonePrompt("Fix", "Body", 1, "feature/x", dir, cfg, false)
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "Use table-driven tests")
 	assert.Contains(t, prompt, "Project-Specific Instructions")
 	assert.Contains(t, prompt, "Co-authored-by: herd-os[bot]")
+}
+
+// --- Validation marker gating tests ---
+
+// scriptedAgent is a fake agent that captures the system prompt and task body
+// of each Execute call and runs a per-call side effect (e.g. making a commit).
+// It returns scripted results so a single test can drive multiple invocations
+// (e.g. an initial run followed by a validation-failure retry).
+type scriptedAgent struct {
+	prompts []string
+	bodies  []string
+	calls   int
+	steps   []func(call int) // per-call side effect; indexed by call number
+	results []*agent.ExecResult
+}
+
+func (s *scriptedAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
+	return nil, nil
+}
+func (s *scriptedAgent) Execute(_ context.Context, spec agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
+	idx := s.calls
+	s.prompts = append(s.prompts, opts.SystemPrompt)
+	s.bodies = append(s.bodies, spec.Body)
+	s.calls++
+	if idx < len(s.steps) && s.steps[idx] != nil {
+		s.steps[idx](idx)
+	}
+	if idx < len(s.results) && s.results[idx] != nil {
+		return s.results[idx], nil
+	}
+	return &agent.ExecResult{Summary: "done"}, nil
+}
+func (s *scriptedAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	return nil, nil
+}
+func (s *scriptedAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error { return nil }
+
+// gitRunT runs a git/other command in dir, failing the test on error.
+func gitRunT(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "command %v failed: %s", args, string(out))
+}
+
+// writeGoModule writes a minimal go.mod and a main.go (valid or broken) into dir.
+func writeGoModule(t *testing.T, dir string, broken bool) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module testmod\n\ngo 1.21\n"), 0o644))
+	body := "package main\n\nfunc main() {}\n"
+	if broken {
+		body = "package main\n\nfunc main() { undefinedSymbol() }\n"
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(body), 0o644))
+}
+
+func TestExec_ResumeSkipsAgentWhenValidationPassed(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	gitRunT(t, repoDir, "git", "checkout", "herd/batch/1-batch")
+	gitRunT(t, repoDir, "git", "checkout", "-b", "herd/worker/42-test")
+
+	// Complete progress file AND the validation marker → skip path is allowed.
+	progDir := filepath.Join(repoDir, ".herd", "progress")
+	require.NoError(t, os.MkdirAll(progDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(progDir, "42.md"), []byte("- [x] all done\n"), 0o644))
+	require.NoError(t, writeValidationMarker(repoDir, 42))
+
+	gitRunT(t, repoDir, "git", "add", ".")
+	gitRunT(t, repoDir, "git", "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-m", "progress")
+	gitRunT(t, repoDir, "git", "push", "origin", "herd/worker/42-test")
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: nil},
+	}
+
+	ag := &scriptedAgent{}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, 0, ag.calls, "agent must NOT be invoked when progress complete and validation passed")
+
+	foundSkip := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker Report") && strings.Contains(c, "Skipped") {
+			foundSkip = true
+		}
+	}
+	assert.True(t, foundSkip, "report should mention skipping")
+}
+
+func TestExec_ResumeInvokesAgentWhenValidationFailedLastTime(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	gitRunT(t, repoDir, "git", "checkout", "herd/batch/1-batch")
+	gitRunT(t, repoDir, "git", "checkout", "-b", "herd/worker/42-test")
+
+	// Progress complete, NO marker, but a saved errors file from the last attempt.
+	progDir := filepath.Join(repoDir, ".herd", "progress")
+	require.NoError(t, os.MkdirAll(progDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(progDir, "42.md"), []byte("- [x] all done\n"), 0o644))
+	const errText = "UNIQUE_VALIDATION_ERROR_MARKER_XYZ"
+	require.NoError(t, writeValidationErrors(repoDir, 42, errText))
+
+	gitRunT(t, repoDir, "git", "add", ".")
+	gitRunT(t, repoDir, "git", "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-m", "progress+errors")
+	gitRunT(t, repoDir, "git", "push", "origin", "herd/worker/42-test")
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: nil},
+	}
+
+	ag := &scriptedAgent{}
+
+	_, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, ag.calls, 1, "agent must be invoked when the marker is absent")
+	assert.Contains(t, ag.bodies[0], errText,
+		"the saved previous-attempt validation errors must be injected into the agent body")
+	require.GreaterOrEqual(t, len(ag.prompts), 1, "agent must be invoked with a rendered system prompt")
+	assert.NotContains(t, ag.prompts[0], "Do not redo completed work",
+		"the resume-after-validation-failure prompt must use the retry variant and NOT instruct the agent to honor the stale progress file")
+	assert.Contains(t, ag.prompts[0], "STALE",
+		"the resume-after-validation-failure prompt must tell the agent the progress file is stale")
+}
+
+func TestExec_RetryAgentDoesNotHonorProgressFile(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	ag := &scriptedAgent{
+		steps: []func(call int){
+			// First invocation: introduce broken code so validation fails.
+			func(_ int) {
+				writeGoModule(t, repoDir, true)
+				gitRunT(t, repoDir, "git", "add", ".")
+				gitRunT(t, repoDir, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "broken")
+			},
+			// Retry invocation: fix the code so validation passes.
+			func(_ int) {
+				writeGoModule(t, repoDir, false)
+				gitRunT(t, repoDir, "git", "add", ".")
+				gitRunT(t, repoDir, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "fixed")
+			},
+		},
+	}
+
+	_, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, len(ag.prompts), 2, "expected an initial run and a validation-failure retry")
+	assert.Contains(t, ag.prompts[0], "Do not redo completed work",
+		"the initial prompt should still carry the incremental-progress guidance")
+	assert.NotContains(t, ag.prompts[1], "Do not redo completed work",
+		"the retry prompt must NOT instruct the agent to honor the stale progress file")
+}
+
+func TestExec_ValidationMarkerLifecycle(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+
+	// Phase 1: fresh run; agent writes valid code and validation passes.
+	freshMock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+	freshAgent := &scriptedAgent{
+		steps: []func(call int){
+			func(_ int) {
+				writeGoModule(t, repoDir, false)
+				gitRunT(t, repoDir, "git", "add", ".")
+				gitRunT(t, repoDir, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "work")
+			},
+		},
+	}
+
+	_, err := Exec(context.Background(), freshMock, freshAgent, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+	assert.True(t, checkValidationPassed(repoDir, 42),
+		"marker must exist on disk after a successful validation")
+
+	// Phase 2: resume run; the marker must be removed at the start of the agent
+	// invocation, then re-created after re-validation passes.
+	var markerPresentAtInvocation bool
+	resumeMock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: nil},
+	}
+	resumeAgent := &scriptedAgent{
+		steps: []func(call int){
+			func(_ int) {
+				markerPresentAtInvocation = checkValidationPassed(repoDir, 42)
+				// Make a fresh change so the run is not a no-op.
+				require.NoError(t, os.WriteFile(filepath.Join(repoDir, "extra.txt"), []byte("more"), 0o644))
+				gitRunT(t, repoDir, "git", "add", ".")
+				gitRunT(t, repoDir, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "more work")
+			},
+		},
+	}
+
+	_, err = Exec(context.Background(), resumeMock, resumeAgent, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, resumeAgent.calls, "resume run must invoke the agent")
+	assert.False(t, markerPresentAtInvocation,
+		"marker must be removed before the agent runs so a stale pass cannot carry over")
+	assert.True(t, checkValidationPassed(repoDir, 42),
+		"marker must be re-created after re-validation passes")
+}
+
+func TestCommitValidationStatus_StagesErrorsFileDeletion(t *testing.T) {
+	// Verify FAIL → PASS transition removes the errors file from the worker
+	// branch HEAD, not just from the worktree, so a future resume-after-failure
+	// path does not read stale errors.
+	repoDir := initTestRepoWithBatchBranch(t)
+	gitRunT(t, repoDir, "git", "checkout", "herd/batch/1-batch")
+	gitRunT(t, repoDir, "git", "checkout", "-b", "herd/worker/99-test")
+	g := git.New(repoDir)
+	gitRunT(t, repoDir, "git", "config", "user.name", "t")
+	gitRunT(t, repoDir, "git", "config", "user.email", "t@t.com")
+
+	// Phase 1 — simulate a failed validation: errors file written and committed.
+	require.NoError(t, writeValidationErrors(repoDir, 99, "initial failure"))
+	commitValidationStatus(g, repoDir, 99, "Update validation status for #99")
+	out, err := exec.Command("git", "-C", repoDir, "ls-files", ".herd/progress").CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "99.validation.errors",
+		"errors file must be tracked after the failure commit")
+
+	// Phase 2 — simulate the successful re-validation: marker written, errors removed.
+	require.NoError(t, writeValidationMarker(repoDir, 99))
+	require.NoError(t, removeValidationErrors(repoDir, 99))
+	commitValidationStatus(g, repoDir, 99, "Update validation status for #99")
+
+	out, err = exec.Command("git", "-C", repoDir, "ls-files", ".herd/progress").CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "99.validation",
+		"marker file must be tracked after the success commit")
+	assert.NotContains(t, string(out), "99.validation.errors",
+		"errors file must be removed from HEAD when validation passes, not just from the worktree")
+}
+
+func TestExecStandalone_RetryAgentDoesNotHonorProgressFile(t *testing.T) {
+	targetBranch := "feature/standalone-retry"
+	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 700,
+			Title:  "Fix",
+			Body:   standaloneIssueBody(targetBranch, 321),
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	ag := &scriptedAgent{
+		steps: []func(call int){
+			func(_ int) {
+				writeGoModule(t, work, true)
+				gitRunT(t, work, "git", "add", ".")
+				gitRunT(t, work, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "broken")
+			},
+			func(_ int) {
+				writeGoModule(t, work, false)
+				gitRunT(t, work, "git", "add", ".")
+				gitRunT(t, work, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "fixed")
+			},
+		},
+	}
+
+	_, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 700,
+		RepoRoot:    work,
+		Mode:        "standalone",
+	})
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, len(ag.prompts), 2, "expected an initial run and a validation-failure retry")
+	assert.Contains(t, ag.prompts[0], "Do not redo completed work")
+	assert.NotContains(t, ag.prompts[1], "Do not redo completed work",
+		"the standalone retry prompt must NOT instruct the agent to honor the stale progress file")
+}
+
+func TestExecStandalone_ValidationMarkerLifecycle(t *testing.T) {
+	targetBranch := "feature/standalone-marker"
+	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 701,
+			Title:  "Fix",
+			Body:   standaloneIssueBody(targetBranch, 322),
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	// Phase 1: agent writes valid code, validation passes, marker created.
+	phase1 := &scriptedAgent{
+		steps: []func(call int){
+			func(_ int) {
+				writeGoModule(t, work, false)
+				gitRunT(t, work, "git", "add", ".")
+				gitRunT(t, work, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "work")
+			},
+		},
+	}
+	_, err := Exec(context.Background(), mock, phase1, &config.Config{}, ExecParams{
+		IssueNumber: 701,
+		RepoRoot:    work,
+		Mode:        "standalone",
+	})
+	require.NoError(t, err)
+	assert.True(t, checkValidationPassed(work, 701), "marker must exist after successful validation")
+
+	// Phase 2: re-run; marker removed at agent start, re-created after re-validation.
+	var markerPresentAtInvocation bool
+	phase2 := &scriptedAgent{
+		steps: []func(call int){
+			func(_ int) {
+				markerPresentAtInvocation = checkValidationPassed(work, 701)
+				require.NoError(t, os.WriteFile(filepath.Join(work, "extra.txt"), []byte("more"), 0o644))
+				gitRunT(t, work, "git", "add", ".")
+				gitRunT(t, work, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "more")
+			},
+		},
+	}
+	_, err = Exec(context.Background(), mock, phase2, &config.Config{}, ExecParams{
+		IssueNumber: 701,
+		RepoRoot:    work,
+		Mode:        "standalone",
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, phase2.calls, "re-run must invoke the agent")
+	assert.False(t, markerPresentAtInvocation,
+		"marker must be removed before the agent runs")
+	assert.True(t, checkValidationPassed(work, 701),
+		"marker must be re-created after re-validation passes")
+}
+
+func TestWriteValidationErrors_TruncatesLargeOutput(t *testing.T) {
+	dir := t.TempDir()
+	large := strings.Repeat("E", validationErrorsMaxBytes+5000)
+	require.NoError(t, writeValidationErrors(dir, 9, large))
+
+	got, ok := readValidationErrors(dir, 9)
+	require.True(t, ok)
+	assert.LessOrEqual(t, len(got), validationErrorsMaxBytes+len("...(truncated)...\n"),
+		"output must be truncated to within the documented bound")
+	assert.Contains(t, got, "...(truncated)...")
+	// The tail (most recent errors) must be preserved.
+	assert.True(t, strings.HasSuffix(got, "E"), "tail of the errors should be kept")
+}
+
+func TestWriteValidationErrors_SmallOutputNotTruncated(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, writeValidationErrors(dir, 9, "small error"))
+	got, ok := readValidationErrors(dir, 9)
+	require.True(t, ok)
+	assert.Equal(t, "small error", got)
+}
+
+func TestReadValidationErrors_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	got, ok := readValidationErrors(dir, 123)
+	assert.False(t, ok)
+	assert.Equal(t, "", got)
+}
+
+func TestValidationMarker_WriteCheckRemove(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name string
+		fn   func(t *testing.T)
+	}{
+		{"absent initially", func(t *testing.T) {
+			assert.False(t, checkValidationPassed(dir, 5))
+		}},
+		{"present after write", func(t *testing.T) {
+			require.NoError(t, writeValidationMarker(dir, 5))
+			assert.True(t, checkValidationPassed(dir, 5))
+		}},
+		{"absent after remove", func(t *testing.T) {
+			require.NoError(t, removeValidationMarker(dir, 5))
+			assert.False(t, checkValidationPassed(dir, 5))
+		}},
+		{"remove missing is not an error", func(t *testing.T) {
+			require.NoError(t, removeValidationMarker(dir, 5))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { tt.fn(t) })
+	}
+}
+
+func TestRemoveValidationErrors_MissingFileNoError(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, removeValidationErrors(dir, 1))
+	require.NoError(t, writeValidationErrors(dir, 1, "x"))
+	require.NoError(t, removeValidationErrors(dir, 1))
+	_, ok := readValidationErrors(dir, 1)
+	assert.False(t, ok)
+}
+
+func TestRenderWorkerRetryPrompt_OmitsProgressGuidance(t *testing.T) {
+	cfg := &config.Config{}
+	retry, err := renderWorkerPrompt("T", "B", 7, "herd/worker/7-t", t.TempDir(), cfg, true)
+	require.NoError(t, err)
+	assert.NotContains(t, retry, "Do not redo completed work")
+	assert.Contains(t, retry, "Stale Progress")
+
+	normal, err := renderWorkerPrompt("T", "B", 7, "herd/worker/7-t", t.TempDir(), cfg, false)
+	require.NoError(t, err)
+	assert.Contains(t, normal, "Do not redo completed work")
 }

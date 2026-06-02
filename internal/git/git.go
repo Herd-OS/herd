@@ -106,6 +106,9 @@ func (g *Git) DeleteLocalBranch(name string) error {
 	return g.run("branch", "-D", name)
 }
 
+// Add stages a file (or path) into the git index.
+func (g *Git) Add(path string) error { return g.run("add", "--", path) }
+
 // Rm removes a file from the git index and working tree.
 func (g *Git) Rm(path string) error {
 	return g.run("rm", path)

@@ -101,7 +101,12 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
   code that doesn't exist and can't be inferred).
 - If you cannot complete the task after exhausting alternatives,
   exit with a non-zero status and include the reason in your output.
-## Incremental Progress
+{{if .Retry}}## Validation Failed — Stale Progress
+
+- Pre-push validation FAILED on the code currently in the worktree. The validation errors are in the Task body above and are the ONLY thing you must fix.
+- A ` + "`.herd/progress/{{.IssueNumber}}.md`" + ` file may exist from the previous attempt. It is STALE — do NOT honor it, do NOT treat its checked items as proof the work is correct, and do NOT skip work because of it.
+- Make the minimal changes needed to make validation pass. Commit and push to ` + "`{{.WorkerBranch}}`" + `.
+{{else}}## Incremental Progress
 
 - Your branch is ` + "`{{.WorkerBranch}}`" + `. After completing work on each file or
   logical unit, run ` + "`git push origin {{.WorkerBranch}}`" + ` to save your progress
@@ -110,10 +115,13 @@ const workerPromptTemplate = `You are a HerdOS worker executing a task.
   Update it before each push with a checklist of what you have completed
   and what remains. Format: completed items checked (` + "`- [x]`" + `), remaining items
   unchecked (` + "`- [ ]`" + `).
+- The progress file alone no longer causes the worker to skip re-running the
+  agent: the worker now also requires that pre-push validation passed last time.
+  Keep writing it as before — it is still used to resume a timed-out attempt.
 - If .herd/progress/{{.IssueNumber}}.md already exists when you start (from a previous
   timed-out attempt), read it to understand what was already done and continue
   from where it left off. Do not redo completed work.
-{{if .CoAuthorTrailer}}- Add the following trailer to every commit message (on its own line after a blank line):
+{{end}}{{if .CoAuthorTrailer}}- Add the following trailer to every commit message (on its own line after a blank line):
   {{.CoAuthorTrailer}}
 {{end}}{{if .RoleInstructions}}
 ## Project-Specific Instructions
@@ -128,6 +136,7 @@ type promptData struct {
 	RoleInstructions string
 	CoAuthorTrailer  string
 	IsFixIssue       bool
+	Retry            bool
 }
 
 // Exec runs the full worker lifecycle: reads the issue, creates a worker branch,
@@ -221,10 +230,14 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 	}
 
-	// Check if previous attempt already completed all work
+	// Check if previous attempt already completed all work AND validation passed.
+	// Both the progress file and the worker-written validation marker are required:
+	// a completed progress file alone is no longer trusted as proof the work is
+	// correct, otherwise a broken-but-"complete" attempt would short-circuit every
+	// retry with the same failing code.
 	skipAgent := false
-	if remoteBranchErr == nil && checkProgressComplete(params.RepoRoot, params.IssueNumber) {
-		fmt.Printf("Progress file shows all work complete for issue #%d — skipping agent execution.\n", params.IssueNumber)
+	if remoteBranchErr == nil && checkProgressComplete(params.RepoRoot, params.IssueNumber) && checkValidationPassed(params.RepoRoot, params.IssueNumber) {
+		fmt.Printf("Progress file shows all work complete and validation passed for issue #%d — skipping agent execution.\n", params.IssueNumber)
 		skipAgent = true
 	}
 
@@ -242,10 +255,24 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 
 	rawSummary := ""
 	if skipAgent {
-		rawSummary = "Skipped — previous attempt completed all work (detected via progress file)."
+		rawSummary = "Skipped — previous attempt completed all work and validation passed (detected via progress file and validation marker)."
 	} else {
+		// If we are resuming a previous attempt whose validation failed (progress
+		// complete but no marker), inject the saved validation errors so the agent
+		// knows what was broken instead of re-validating the same failing code.
+		// In that case we also render the retry prompt variant so the agent is told
+		// the progress file is stale and must not be honored — otherwise the all-`[x]`
+		// checklist could lead it to conclude there is nothing left to do.
+		resumeAfterValidationFailure := false
+		if remoteBranchErr == nil {
+			if prevErrs, ok := readValidationErrors(params.RepoRoot, params.IssueNumber); ok && checkProgressComplete(params.RepoRoot, params.IssueNumber) {
+				issueBody += fmt.Sprintf("\n\n## Previous attempt's validation failed with:\n\n```\n%s\n```\n", prevErrs)
+				resumeAfterValidationFailure = true
+			}
+		}
+
 		// Build system prompt only when agent will actually run
-		systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg)
+		systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg, resumeAfterValidationFailure)
 		if err != nil {
 			return nil, fmt.Errorf("rendering worker prompt: %w", err)
 		}
@@ -274,6 +301,9 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		if agentTimeout < 5*time.Minute {
 			agentTimeout = 5 * time.Minute
 		}
+		// Remove any stale validation marker so a previous pass cannot carry over;
+		// the marker is re-created only after runValidation reports allPassed().
+		_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
 		agentCtx, agentCancel := context.WithTimeout(ctx, agentTimeout)
 		agentResult, err := ag.Execute(agentCtx, taskSpec, execOpts)
 		agentCancel()
@@ -350,8 +380,15 @@ pushWork:
 	if !validation.allPassed() {
 		fmt.Printf("Validation failed, re-invoking agent to fix:\n%s\n", validation.Errors)
 
-		// Build system prompt for the retry agent invocation
-		retryPrompt, rpErr := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg)
+		// Persist the failure so a subsequent outer retry has context, and clear
+		// the marker so the failing code cannot be treated as validated.
+		_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
+		_ = writeValidationErrors(params.RepoRoot, params.IssueNumber, validation.Errors)
+		commitValidationStatus(g, params.RepoRoot, params.IssueNumber, fmt.Sprintf("Update validation status for #%d", params.IssueNumber))
+
+		// Build system prompt for the retry agent invocation. Use the retry
+		// variant so the agent does NOT honor the stale progress file.
+		retryPrompt, rpErr := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg, true)
 		if rpErr != nil {
 			return nil, fmt.Errorf("rendering worker prompt for retry: %w", rpErr)
 		}
@@ -367,6 +404,8 @@ pushWork:
 			Title:       "Fix validation failures",
 			Body:        fmt.Sprintf("The following validation commands failed after your changes. Please fix all errors:\n\n```\n%s\n```\n\nDo not add new features — only fix the validation errors.", validation.Errors),
 		}
+		// Remove any stale marker right before the retry invocation too.
+		_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
 		retryResult, retryErr := ag.Execute(ctx, retrySpec, retryExecOpts)
 		if retryErr != nil {
 			_ = p.Issues().AddComment(ctx, params.IssueNumber,
@@ -381,6 +420,11 @@ pushWork:
 		// Re-run validation
 		validation = runValidation(ctx, params.RepoRoot)
 		if !validation.allPassed() {
+			// Persist the failure so the next outer attempt has context.
+			_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
+			_ = writeValidationErrors(params.RepoRoot, params.IssueNumber, validation.Errors)
+			commitValidationStatus(g, params.RepoRoot, params.IssueNumber, fmt.Sprintf("Update validation status for #%d", params.IssueNumber))
+
 			// Post report with failure info, then fail
 			report := buildWorkerReport(g, batchBranch, rawSummary, validation)
 			report += "\n\n⚠️ Validation failed after retry. Worker marked as failed."
@@ -391,6 +435,14 @@ pushWork:
 			return nil, fmt.Errorf("validation failed after retry: %s", validation.Errors)
 		}
 	}
+
+	// Validation passed — record the marker and clear any saved errors so the
+	// next worker invocation can safely skip the agent.
+	if err = writeValidationMarker(params.RepoRoot, params.IssueNumber); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: writing validation marker for #%d: %v\n", params.IssueNumber, err)
+	}
+	_ = removeValidationErrors(params.RepoRoot, params.IssueNumber)
+	commitValidationStatus(g, params.RepoRoot, params.IssueNumber, fmt.Sprintf("Update validation status for #%d", params.IssueNumber))
 
 	// Force push worker branch — previous failed attempts may have left
 	// stale commits on the remote branch that would cause a non-fast-forward rejection.
@@ -634,7 +686,102 @@ func isAllChecked(content string) bool {
 	return checked > 0
 }
 
-func renderWorkerPrompt(title, body string, issueNumber int, workerBranch string, repoRoot string, cfg *config.Config) (string, error) {
+// validationMarkerPath returns the path to the worker-written marker that
+// records that pre-push validation passed for this issue.
+func validationMarkerPath(repoRoot string, issueNumber int) string {
+	return filepath.Join(repoRoot, ".herd", "progress", fmt.Sprintf("%d.validation", issueNumber))
+}
+
+// validationErrorsPath returns the path to the saved validation error output
+// from the previous failed attempt.
+func validationErrorsPath(repoRoot string, issueNumber int) string {
+	return filepath.Join(repoRoot, ".herd", "progress", fmt.Sprintf("%d.validation.errors", issueNumber))
+}
+
+// writeValidationMarker writes an empty marker file recording that validation
+// passed. Creates the .herd/progress directory if missing.
+func writeValidationMarker(repoRoot string, issueNumber int) error {
+	path := validationMarkerPath(repoRoot, issueNumber)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte{}, 0o644)
+}
+
+// removeValidationMarker removes the validation marker. Missing file is not an error.
+func removeValidationMarker(repoRoot string, issueNumber int) error {
+	err := os.Remove(validationMarkerPath(repoRoot, issueNumber))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// checkValidationPassed reports whether the validation marker exists.
+func checkValidationPassed(repoRoot string, issueNumber int) bool {
+	_, err := os.Stat(validationMarkerPath(repoRoot, issueNumber))
+	return err == nil
+}
+
+const validationErrorsMaxBytes = 16 * 1024
+
+// writeValidationErrors saves the failing validation output (truncated to
+// validationErrorsMaxBytes, keeping the TAIL since the most relevant errors are
+// usually last) so the next attempt can pass it into the agent prompt.
+func writeValidationErrors(repoRoot string, issueNumber int, errs string) error {
+	path := validationErrorsPath(repoRoot, issueNumber)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if len(errs) > validationErrorsMaxBytes {
+		errs = "...(truncated)...\n" + errs[len(errs)-validationErrorsMaxBytes:]
+	}
+	return os.WriteFile(path, []byte(errs), 0o644)
+}
+
+// readValidationErrors returns the saved validation errors and true if present.
+func readValidationErrors(repoRoot string, issueNumber int) (string, bool) {
+	data, err := os.ReadFile(validationErrorsPath(repoRoot, issueNumber))
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
+}
+
+// removeValidationErrors removes the saved validation errors file. Missing file is not an error.
+func removeValidationErrors(repoRoot string, issueNumber int) error {
+	err := os.Remove(validationErrorsPath(repoRoot, issueNumber))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// commitValidationStatus stages and commits the validation marker / errors
+// files so they survive across worker invocations. Best-effort: logs but does
+// not fail the worker if git operations error (e.g. nothing to commit).
+func commitValidationStatus(g *git.Git, repoRoot string, issueNumber int, message string) {
+	for _, p := range []string{
+		validationMarkerPath(repoRoot, issueNumber),
+		validationErrorsPath(repoRoot, issueNumber),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			_ = g.Add(p)
+		} else if os.IsNotExist(err) {
+			// Stage the deletion if the file used to be tracked; ignore "did not match" for never-tracked paths.
+			_ = g.Rm(p)
+		}
+	}
+	if err := g.Commit(message); err != nil {
+		// Empty commit (nothing to stage) is the common case after the very first marker write; do not log on that.
+		if !strings.Contains(err.Error(), "nothing to commit") &&
+			!strings.Contains(err.Error(), "no changes added") {
+			fmt.Fprintf(os.Stderr, "warning: committing validation status for #%d: %v\n", issueNumber, err)
+		}
+	}
+}
+
+func renderWorkerPrompt(title, body string, issueNumber int, workerBranch string, repoRoot string, cfg *config.Config, retry bool) (string, error) {
 	tmpl, err := template.New("worker").Parse(workerPromptTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parsing worker prompt template: %w", err)
@@ -651,6 +798,7 @@ func renderWorkerPrompt(title, body string, issueNumber int, workerBranch string
 		IssueNumber:  issueNumber,
 		WorkerBranch: workerBranch,
 		IsFixIssue:   isFixIssue,
+		Retry:        retry,
 	}
 
 	if cfg.PullRequests.CoAuthorEmail != "" {
@@ -730,7 +878,12 @@ Your commits are pushed directly to the target branch — there is no consolidat
   code that doesn't exist and can't be inferred).
 - If you cannot complete the task after exhausting alternatives,
   exit with a non-zero status and include the reason in your output.
-## Incremental Progress
+{{if .Retry}}## Validation Failed — Stale Progress
+
+- Pre-push validation FAILED on the code currently in the worktree. The validation errors are in the Task body above and are the ONLY thing you must fix.
+- A ` + "`.herd/progress/{{.IssueNumber}}.md`" + ` file may exist from the previous attempt. It is STALE — do NOT honor it, do NOT treat its checked items as proof the work is correct, and do NOT skip work because of it.
+- Make the minimal changes needed to make validation pass. Commit and push to ` + "`{{.TargetBranch}}`" + `.
+{{else}}## Incremental Progress
 
 - Your branch is ` + "`{{.TargetBranch}}`" + `. After completing work on each file or
   logical unit, run ` + "`git push origin {{.TargetBranch}}`" + ` to save your progress
@@ -739,10 +892,13 @@ Your commits are pushed directly to the target branch — there is no consolidat
   Update it before each push with a checklist of what you have completed
   and what remains. Format: completed items checked (` + "`- [x]`" + `), remaining items
   unchecked (` + "`- [ ]`" + `).
+- The progress file alone no longer causes the worker to skip re-running the
+  agent: the worker now also requires that pre-push validation passed last time.
+  Keep writing it as before — it is still used to resume a timed-out attempt.
 - If .herd/progress/{{.IssueNumber}}.md already exists when you start (from a previous
   timed-out attempt), read it to understand what was already done and continue
   from where it left off. Do not redo completed work.
-{{if .CoAuthorTrailer}}- Add the following trailer to every commit message (on its own line after a blank line):
+{{end}}{{if .CoAuthorTrailer}}- Add the following trailer to every commit message (on its own line after a blank line):
   {{.CoAuthorTrailer}}
 {{end}}{{if .RoleInstructions}}
 ## Project-Specific Instructions
@@ -756,9 +912,10 @@ type standalonePromptData struct {
 	TargetBranch     string
 	RoleInstructions string
 	CoAuthorTrailer  string
+	Retry            bool
 }
 
-func renderStandalonePrompt(title, body string, issueNumber int, targetBranch, repoRoot string, cfg *config.Config) (string, error) {
+func renderStandalonePrompt(title, body string, issueNumber int, targetBranch, repoRoot string, cfg *config.Config, retry bool) (string, error) {
 	tmpl, err := template.New("worker-standalone").Parse(workerStandalonePromptTemplate)
 	if err != nil {
 		return "", fmt.Errorf("parsing standalone prompt template: %w", err)
@@ -769,6 +926,7 @@ func renderStandalonePrompt(title, body string, issueNumber int, targetBranch, r
 		Body:         body,
 		IssueNumber:  issueNumber,
 		TargetBranch: targetBranch,
+		Retry:        retry,
 	}
 
 	if cfg.PullRequests.CoAuthorEmail != "" {
@@ -830,7 +988,7 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 		}
 	}
 
-	systemPrompt, err := renderStandalonePrompt(issue.Title, issueBody, params.IssueNumber, targetBranch, params.RepoRoot, cfg)
+	systemPrompt, err := renderStandalonePrompt(issue.Title, issueBody, params.IssueNumber, targetBranch, params.RepoRoot, cfg, false)
 	if err != nil {
 		return nil, fmt.Errorf("rendering standalone prompt: %w", err)
 	}
@@ -842,6 +1000,9 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 	if agentTimeout < 5*time.Minute {
 		agentTimeout = 5 * time.Minute
 	}
+	// Remove any stale validation marker so a previous pass cannot carry over;
+	// the marker is re-created only after runValidation reports allPassed().
+	_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
 	agentCtx, agentCancel := context.WithTimeout(ctx, agentTimeout)
 	taskSpec := agent.TaskSpec{IssueNumber: params.IssueNumber, Title: issue.Title, Body: issueBody}
 	execOpts := agent.ExecOptions{RepoRoot: params.RepoRoot, SystemPrompt: systemPrompt, MaxTurns: cfg.Agent.MaxTurns}
@@ -896,7 +1057,14 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 	if !validation.allPassed() {
 		fmt.Printf("Validation failed, re-invoking agent to fix:\n%s\n", validation.Errors)
 
-		retryPrompt, rpErr := renderStandalonePrompt(issue.Title, issueBody, params.IssueNumber, targetBranch, params.RepoRoot, cfg)
+		// Persist the failure and clear the marker so the failing code cannot be
+		// treated as validated by a subsequent invocation.
+		_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
+		_ = writeValidationErrors(params.RepoRoot, params.IssueNumber, validation.Errors)
+		commitValidationStatus(g, params.RepoRoot, params.IssueNumber, fmt.Sprintf("Update validation status for #%d", params.IssueNumber))
+
+		// Use the retry variant so the agent does NOT honor the stale progress file.
+		retryPrompt, rpErr := renderStandalonePrompt(issue.Title, issueBody, params.IssueNumber, targetBranch, params.RepoRoot, cfg, true)
 		if rpErr != nil {
 			return nil, fmt.Errorf("rendering standalone prompt for retry: %w", rpErr)
 		}
@@ -910,6 +1078,8 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 			Title:       "Fix validation failures",
 			Body:        fmt.Sprintf("The following validation commands failed after your changes. Please fix all errors:\n\n```\n%s\n```\n\nDo not add new features — only fix the validation errors.", validation.Errors),
 		}
+		// Remove any stale marker right before the retry invocation too.
+		_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
 		retryResult, retryErr := ag.Execute(ctx, retrySpec, retryExecOpts)
 		if retryErr != nil {
 			_ = p.Issues().AddComment(ctx, params.IssueNumber,
@@ -923,6 +1093,10 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 
 		validation = runValidation(ctx, params.RepoRoot)
 		if !validation.allPassed() {
+			_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
+			_ = writeValidationErrors(params.RepoRoot, params.IssueNumber, validation.Errors)
+			commitValidationStatus(g, params.RepoRoot, params.IssueNumber, fmt.Sprintf("Update validation status for #%d", params.IssueNumber))
+
 			report := buildWorkerReport(g, "origin/"+targetBranch, rawSummary, validation)
 			report += "\n\n⚠️ Validation failed after retry. Worker marked as failed."
 			if rawSummary != "" {
@@ -932,6 +1106,13 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 			return nil, fmt.Errorf("validation failed after retry: %s", validation.Errors)
 		}
 	}
+
+	// Validation passed — record the marker and clear any saved errors.
+	if err = writeValidationMarker(params.RepoRoot, params.IssueNumber); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: writing validation marker for #%d: %v\n", params.IssueNumber, err)
+	}
+	_ = removeValidationErrors(params.RepoRoot, params.IssueNumber)
+	commitValidationStatus(g, params.RepoRoot, params.IssueNumber, fmt.Sprintf("Update validation status for #%d", params.IssueNumber))
 
 	if err = g.Push("origin", targetBranch); err != nil {
 		errStr := err.Error()
