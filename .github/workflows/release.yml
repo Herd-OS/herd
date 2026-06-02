@@ -50,6 +50,20 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/}
           ./scripts/update-homebrew.sh $VERSION bin/checksums.txt
 
+      # AUR push runs inside archlinux:base-devel because makepkg --printsrcinfo
+      # is required to generate .SRCINFO and is not available on Ubuntu runners.
+      - name: Update AUR (herd-bin)
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          docker run --rm \
+            -e AUR_SSH_PRIVATE_KEY \
+            -v "$PWD:/work" -w /work \
+            archlinux:base-devel \
+            bash -c "pacman -Sy --noconfirm --needed openssh && ./scripts/update-aur.sh $VERSION bin/checksums.txt"
+
   # NOTE: The first time this package is pushed, GHCR creates it as
   # private. The herd-runner-base package must be made
   # public (one-time, manual) in the org's GHCR package settings
