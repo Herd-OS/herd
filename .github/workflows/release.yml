@@ -62,7 +62,7 @@ jobs:
             -e AUR_SSH_PRIVATE_KEY \
             -v "$PWD:/work" -w /work \
             archlinux:base-devel \
-            bash -c "pacman -Sy --noconfirm --needed openssh && ./scripts/update-aur.sh $VERSION bin/checksums.txt"
+            bash -c "pacman -Sy --noconfirm --needed git openssh && ./scripts/update-aur.sh $VERSION bin/checksums.txt"
 
   # NOTE: The first time this package is pushed, GHCR creates it as
   # private. The herd-runner-base package must be made
