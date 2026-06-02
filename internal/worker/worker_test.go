@@ -2185,6 +2185,11 @@ func TestExec_ResumeInvokesAgentWhenValidationFailedLastTime(t *testing.T) {
 	require.GreaterOrEqual(t, ag.calls, 1, "agent must be invoked when the marker is absent")
 	assert.Contains(t, ag.bodies[0], errText,
 		"the saved previous-attempt validation errors must be injected into the agent body")
+	require.GreaterOrEqual(t, len(ag.prompts), 1, "agent must be invoked with a rendered system prompt")
+	assert.NotContains(t, ag.prompts[0], "Do not redo completed work",
+		"the resume-after-validation-failure prompt must use the retry variant and NOT instruct the agent to honor the stale progress file")
+	assert.Contains(t, ag.prompts[0], "STALE",
+		"the resume-after-validation-failure prompt must tell the agent the progress file is stale")
 }
 
 func TestExec_RetryAgentDoesNotHonorProgressFile(t *testing.T) {

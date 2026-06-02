@@ -260,14 +260,19 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		// If we are resuming a previous attempt whose validation failed (progress
 		// complete but no marker), inject the saved validation errors so the agent
 		// knows what was broken instead of re-validating the same failing code.
+		// In that case we also render the retry prompt variant so the agent is told
+		// the progress file is stale and must not be honored — otherwise the all-`[x]`
+		// checklist could lead it to conclude there is nothing left to do.
+		resumeAfterValidationFailure := false
 		if remoteBranchErr == nil {
 			if prevErrs, ok := readValidationErrors(params.RepoRoot, params.IssueNumber); ok && checkProgressComplete(params.RepoRoot, params.IssueNumber) {
 				issueBody += fmt.Sprintf("\n\n## Previous attempt's validation failed with:\n\n```\n%s\n```\n", prevErrs)
+				resumeAfterValidationFailure = true
 			}
 		}
 
 		// Build system prompt only when agent will actually run
-		systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg, false)
+		systemPrompt, err := renderWorkerPrompt(issue.Title, issueBody, params.IssueNumber, workerBranch, params.RepoRoot, cfg, resumeAfterValidationFailure)
 		if err != nil {
 			return nil, fmt.Errorf("rendering worker prompt: %w", err)
 		}
