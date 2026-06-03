@@ -125,6 +125,7 @@ Use an existing ChatGPT (Codex) subscription instead of a pay-per-token API key.
    ```bash
    npm install -g opencode-ai opencode-openai-codex-auth
    ```
+   > This local install is only needed for the **local** `herd plan` path. Setting `agent.exec: docker` in `.herdos.yml` runs `herd plan` inside the runner image — which already carries opencode and the auth plugins — eliminating the local-install requirement for plan-mode. See [Local vs Docker Agent Execution](configuration.md#local-vs-docker-agent-execution).
 2. Run the device flow and authenticate at https://auth.openai.com/codex/device.
 3. Capture the resulting `auth.json` at `~/.local/share/opencode/auth.json` (or `$XDG_DATA_HOME/opencode/auth.json`).
 4. Base64-encode it:
@@ -155,6 +156,7 @@ uses. This path is opt-in because it relies on the community-maintained
    ```bash
    npm install -g opencode-ai opencode-claude-auth
    ```
+   > This local install is only needed for the **local** `herd plan` path. Setting `agent.exec: docker` in `.herdos.yml` runs `herd plan` inside the runner image — which already carries opencode and the auth plugins — eliminating the local-install requirement for plan-mode. See [Local vs Docker Agent Execution](configuration.md#local-vs-docker-agent-execution).
 2. Generate the OAuth token (same command the claude provider uses):
    ```bash
    claude setup-token
@@ -168,7 +170,7 @@ uses. This path is opt-in because it relies on the community-maintained
      model: anthropic/claude-sonnet-4
    ```
 
-The runner installs the bridge plugin at image build (entrypoint) and registers
+The runner installs the bridge plugin at image build (Dockerfile) and registers
 it in opencode.json only when `CLAUDE_CODE_OAUTH_TOKEN` is set, so the API-key
 path (Option 1) is unaffected when the token is absent. The plugin reads
 `CLAUDE_CODE_OAUTH_TOKEN` directly on each run (env-var-only), so there is no

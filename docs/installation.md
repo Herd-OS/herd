@@ -138,6 +138,7 @@ herd --version
 ## Prerequisites
 
 - **Git** — Herd operates on git repositories
+- **Docker** — required only for `agent.exec: docker` (running `herd plan` inside the runner image). Not needed for the default `local` execution. Also used for self-hosted runners (see [Runner Setup](runners.md))
 - **GitHub CLI** (`gh`) — optional, used as fallback for label creation during `herd init`
 - **GitHub account** — with write access to the target repository
 - **Self-hosted runners** — for worker execution. See [Runner Setup](runners.md) for Docker-based runner configuration

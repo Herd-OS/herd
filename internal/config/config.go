@@ -27,10 +27,12 @@ type Platform struct {
 }
 
 type Agent struct {
-	Provider string `yaml:"provider"`
-	Binary   string `yaml:"binary"`
-	Model    string `yaml:"model"`
-	MaxTurns int    `yaml:"max_turns"` // Max agentic turns for headless mode (0 = agent default)
+	Provider  string `yaml:"provider"`
+	Binary    string `yaml:"binary"`
+	Model     string `yaml:"model"`
+	MaxTurns  int    `yaml:"max_turns"`  // Max agentic turns for headless mode (0 = agent default)
+	Exec      string `yaml:"exec"`       // local | docker (empty = local). Where `herd plan` runs the agent.
+	ExecImage string `yaml:"exec_image"` // Override image for exec=docker (empty = default ghcr.io/herd-os/herd-runner-base:<version>)
 }
 
 type Workers struct {

@@ -23,7 +23,7 @@ import (
 
 func newPlanCmd() *cobra.Command {
 	var noDispatch, dryRun, skipPreflight bool
-	var batchName, fromFile string
+	var batchName, fromFile, execFlag string
 
 	cmd := &cobra.Command{
 		Use:   "plan [description]",
@@ -38,7 +38,7 @@ func newPlanCmd() *cobra.Command {
 			if len(args) > 0 {
 				initialPrompt = args[0]
 			}
-			return runPlan(cmd.Context(), initialPrompt, batchName, noDispatch, dryRun, skipPreflight)
+			return runPlan(cmd.Context(), initialPrompt, batchName, noDispatch, dryRun, skipPreflight, execFlag)
 		},
 	}
 
@@ -47,6 +47,7 @@ func newPlanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&batchName, "batch", "", "Override batch name")
 	cmd.Flags().StringVar(&fromFile, "from-file", "", "Load plan from an existing JSON file (skip agent session)")
 	cmd.Flags().BoolVar(&skipPreflight, "skip-preflight", false, "Skip pre-flight git checks")
+	cmd.Flags().StringVar(&execFlag, "exec", "", "Override agent exec mode: local | docker (default from agent.exec config)")
 
 	return cmd
 }
@@ -138,10 +139,27 @@ func runPlanFromFile(ctx context.Context, filePath, batchNameOverride string, no
 	return nil
 }
 
-func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDispatch, dryRun, skipPreflight bool) error {
+func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDispatch, dryRun, skipPreflight bool, execMode string) error {
 	cfg, err := loadConfigOrExit()
 	if err != nil {
 		return err
+	}
+
+	// Decide local vs docker execution for the agent session.
+	decision := decideExecDispatch(execMode, cfg.Agent.Exec, os.Getenv("HERD_INSIDE_CONTAINER") == "1")
+	if decision.guardHit {
+		fmt.Fprintln(os.Stderr, display.Warning("agent.exec=docker requested but already inside a container; falling back to local"))
+		// fall through to local path
+	}
+	if decision.runDocker {
+		code, err := runDockerExec(ctx, cfg, os.Args[1:])
+		if err != nil {
+			return err
+		}
+		if code != 0 {
+			os.Exit(code)
+		}
+		return nil
 	}
 
 	// Run pre-flight git checks

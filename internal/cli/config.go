@@ -150,6 +150,8 @@ func flattenConfig(cfg *config.Config) []keyValue {
 	kvs = append(kvs, keyValue{"agent.provider", cfg.Agent.Provider})
 	kvs = append(kvs, keyValue{"agent.binary", displayValue(cfg.Agent.Binary)})
 	kvs = append(kvs, keyValue{"agent.model", displayValue(cfg.Agent.Model)})
+	kvs = append(kvs, keyValue{"agent.exec", displayValue(cfg.Agent.Exec)})
+	kvs = append(kvs, keyValue{"agent.exec_image", displayValue(cfg.Agent.ExecImage)})
 	kvs = append(kvs, keyValue{"workers.max_concurrent", itoa(cfg.Workers.MaxConcurrent)})
 	kvs = append(kvs, keyValue{"workers.runner_label", cfg.Workers.RunnerLabel})
 	kvs = append(kvs, keyValue{"workers.timeout_minutes", itoa(cfg.Workers.TimeoutMinutes)})

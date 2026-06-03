@@ -124,6 +124,42 @@ func TestFlattenConfig_CoAuthorEmail(t *testing.T) {
 	assert.True(t, found, "pull_requests.co_author_email should be in config list")
 }
 
+func TestFlattenConfig_AgentExec(t *testing.T) {
+	cfg := config.Default()
+	kvs := flattenConfig(cfg)
+
+	foundExec := false
+	foundExecImage := false
+	for _, kv := range kvs {
+		switch kv.key {
+		case "agent.exec":
+			foundExec = true
+			assert.Equal(t, "(not set)", kv.value)
+		case "agent.exec_image":
+			foundExecImage = true
+			assert.Equal(t, "(not set)", kv.value)
+		}
+	}
+	assert.True(t, foundExec, "agent.exec should be in config list")
+	assert.True(t, foundExecImage, "agent.exec_image should be in config list")
+}
+
+func TestSetGetConfigValue_AgentExecRoundTrip(t *testing.T) {
+	cfg := config.Default()
+
+	require.NoError(t, setConfigValue(cfg, "agent.exec", "docker"))
+	assert.Equal(t, "docker", cfg.Agent.Exec)
+
+	val, err := getConfigValue(cfg, "agent.exec")
+	require.NoError(t, err)
+	assert.Equal(t, "docker", val)
+
+	require.NoError(t, setConfigValue(cfg, "agent.exec_image", "example/foo:bar"))
+	val, err = getConfigValue(cfg, "agent.exec_image")
+	require.NoError(t, err)
+	assert.Equal(t, "example/foo:bar", val)
+}
+
 func TestDisplayValue(t *testing.T) {
 	assert.Equal(t, "(not set)", displayValue(""))
 	assert.Equal(t, "claude", displayValue("claude"))
