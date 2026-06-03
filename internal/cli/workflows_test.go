@@ -115,7 +115,7 @@ func TestRenderWorkflow_UnknownSource(t *testing.T) {
 	assert.Error(t, err, "rendering nonexistent workflow source should error")
 }
 
-func TestWorkerWorkflowTemplate_IncludesOpencodeAuthEnv(t *testing.T) {
+func TestWorkerWorkflowTemplate_ExcludesOpencodeAuthEnv(t *testing.T) {
 	cfg := config.Default()
 
 	var wf workflowFile
@@ -133,10 +133,10 @@ func TestWorkerWorkflowTemplate_IncludesOpencodeAuthEnv(t *testing.T) {
 	require.NoError(t, err)
 	s := string(out)
 
-	assert.Contains(t, s, "OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}",
-		"rendered worker workflow must include OPENCODE_AUTH_JSON env")
-	assert.Contains(t, s, "OPENCODE_AUTH_FORCE_SEED: ${{ secrets.OPENCODE_AUTH_FORCE_SEED }}",
-		"rendered worker workflow must include OPENCODE_AUTH_FORCE_SEED env")
+	assert.NotContains(t, s, "OPENCODE_AUTH_JSON",
+		"rendered worker workflow must not include OPENCODE_AUTH_JSON env")
+	assert.NotContains(t, s, "OPENCODE_AUTH_FORCE_SEED",
+		"rendered worker workflow must not include OPENCODE_AUTH_FORCE_SEED env")
 	assert.Contains(t, s, "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}",
 		"rendered worker workflow must still include OPENAI_API_KEY env (regression guard)")
 }
