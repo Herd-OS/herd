@@ -80,6 +80,26 @@ pull_requests:
 	assert.Equal(t, true, cfg.PullRequests.AutoMerge)
 }
 
+func TestLoadAgentExecFields(t *testing.T) {
+	dir := t.TempDir()
+	content := `version: 1
+platform:
+  provider: "github"
+  owner: "org"
+  repo: "repo"
+agent:
+  exec: docker
+  exec_image: example/foo:bar
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
+
+	cfg, err := Load(dir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "docker", cfg.Agent.Exec)
+	assert.Equal(t, "example/foo:bar", cfg.Agent.ExecImage)
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	_, err := Load(t.TempDir())
 	assert.ErrorContains(t, err, "no .herdos.yml found")

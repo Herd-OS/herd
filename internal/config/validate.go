@@ -37,6 +37,11 @@ func Validate(cfg *Config) *ValidationError {
 	default:
 		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.provider must be one of: claude, opencode — got %q", cfg.Agent.Provider))
 	}
+	switch cfg.Agent.Exec {
+	case "", "local", "docker":
+	default:
+		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.exec must be one of: local, docker (or empty) — got %q", cfg.Agent.Exec))
+	}
 
 	// Workers
 	if cfg.Workers.MaxConcurrent <= 0 {
