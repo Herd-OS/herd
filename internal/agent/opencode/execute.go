@@ -26,9 +26,6 @@ import (
 // Note: OpenCode has no --max-turns flag; opts.MaxTurns is ignored for this
 // provider.
 func (o *OpenCodeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
-	if err := ensureOpenCodeAuth(); err != nil {
-		return nil, fmt.Errorf("provisioning opencode auth: %w", err)
-	}
 	taskPrompt := task.Body
 	if opts.SystemPrompt != "" {
 		taskPrompt = opts.SystemPrompt

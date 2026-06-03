@@ -20,10 +20,10 @@ func TestPlan_ReadsPlanFile(t *testing.T) {
 	planJSON := `{"batch_name":"fake-batch","tasks":[{"title":"x","description":"y","acceptance_criteria":["z"]}]}`
 
 	tests := []struct {
-		name     string
-		exitCode int
+		name      string
+		exitCode  int
 		writeFile bool
-		wantErr  bool
+		wantErr   bool
 	}{
 		{name: "success path", exitCode: 0, writeFile: true, wantErr: false},
 		{name: "agent failure", exitCode: 1, writeFile: false, wantErr: true},

@@ -20,9 +20,6 @@ import (
 // an opaque "argument list too long" exec failure, Plan rejects combined
 // prompts larger than maxArgvPromptBytes with a clear error.
 func (o *OpenCodeAgent) Plan(ctx context.Context, initialPrompt string, opts agent.PlanOptions) (*agent.Plan, error) {
-	if err := ensureOpenCodeAuth(); err != nil {
-		return nil, fmt.Errorf("provisioning opencode auth: %w", err)
-	}
 	systemPrompt, err := prompt.RenderPlanningPrompt(opts)
 	if err != nil {
 		return nil, fmt.Errorf("rendering system prompt: %w", err)
