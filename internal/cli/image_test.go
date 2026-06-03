@@ -139,3 +139,50 @@ func TestImagePublish_InvokesDocker(t *testing.T) {
 	want := consumerRunnerImage("Herd-OS", "Herd", runnerImageTag(version))
 	assert.Equal(t, []string{"push", want}, rec.args)
 }
+
+// agentNpmPackages are the four agent CLI packages (with pinned versions where
+// applicable) that are baked into images/base/Dockerfile at build time.
+var agentNpmPackages = []string{
+	"@anthropic-ai/claude-code",
+	"opencode-ai",
+	"opencode-openai-codex-auth@4.4.0",
+	"opencode-claude-auth@1.5.4",
+}
+
+func TestEntrypoint_NoLongerInstallsNpmAgents(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "images", "base", "entrypoint.herd.sh"))
+	require.NoError(t, err)
+	entrypoint := string(data)
+
+	// The entrypoint must no longer install any npm agent CLI.
+	assert.NotContains(t, entrypoint, "npm install -g",
+		"entrypoint should not run npm install -g (agent CLIs are baked into the image)")
+	for _, pkg := range []string{
+		"@anthropic-ai/claude-code",
+		"opencode-ai",
+		"opencode-openai-codex-auth",
+		"opencode-claude-auth",
+	} {
+		assert.NotContains(t, entrypoint, pkg,
+			"entrypoint should not reference agent package %q", pkg)
+	}
+
+	// Regression guard: runner registration must remain intact.
+	assert.Contains(t, entrypoint, "config.sh",
+		"entrypoint must still register the runner via config.sh")
+	assert.Contains(t, entrypoint, "exec ./run.sh",
+		"entrypoint must still exec ./run.sh")
+}
+
+func TestDockerfile_BakesAgentNpmPackages(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "images", "base", "Dockerfile"))
+	require.NoError(t, err)
+	dockerfile := string(data)
+
+	for _, pkg := range agentNpmPackages {
+		assert.Contains(t, dockerfile, pkg,
+			"Dockerfile should bake agent package %q at its pinned version", pkg)
+	}
+	assert.Contains(t, dockerfile, "npm config set prefix /home/runner/.npm-global",
+		"Dockerfile should set the npm prefix before installing agents")
+}

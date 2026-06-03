@@ -19,6 +19,19 @@ RUN ARCH=$(echo "$TARGETARCH" | sed 's/amd64/x64/' | sed 's/arm64/arm64/') \
 RUN mkdir -p /opt/herd/bin /home/runner/.npm-global
 ENV PATH="/home/runner/.npm-global/bin:/opt/herd/bin:${PATH}"
 
+# Agent CLIs (baked at build time; previously installed in entrypoint.herd.sh).
+# Pinned versions preserved from the old entrypoint.
+# TODO(verify): confirm plugin package name `opencode-openai-codex-auth` and that
+# version 4.4.0 is correct; confirm npm-global install is the right mechanism.
+# TODO(verify): confirm plugin package name `opencode-claude-auth` (it may be
+# scoped) and that version 1.5.4 is correct; confirm npm-global install is the
+# right mechanism. Upstream: griffinmartin/opencode-claude-auth.
+RUN npm config set prefix /home/runner/.npm-global \
+    && npm install -g --no-audit --no-fund @anthropic-ai/claude-code \
+    && npm install -g --no-audit --no-fund opencode-ai \
+    && npm install -g --no-audit --no-fund opencode-openai-codex-auth@4.4.0 \
+    && npm install -g --no-audit --no-fund opencode-claude-auth@1.5.4
+
 RUN useradd -m -d /home/runner runner \
     && chown -R runner:runner /runner /opt/herd /home/runner
 

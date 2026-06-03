@@ -14,7 +14,7 @@ import (
 // opencode.json for ChatGPT subscription auth.
 // TODO(verify): confirm the correct plugin package name. Best-effort
 // default is the most-maintained community plugin per upstream READMEs.
-// The pinned npm version lives in images/base/entrypoint.herd.sh.
+// The pinned npm version lives in images/base/Dockerfile.
 const openCodeAuthPluginName = "opencode-openai-codex-auth"
 
 // openCodeClaudeAuthPluginName is the npm package / plugin id registered in
@@ -23,7 +23,7 @@ const openCodeAuthPluginName = "opencode-openai-codex-auth"
 // `claude` provider uses) instead of an Anthropic API key.
 // TODO(verify): confirm the exact npm package name `opencode-claude-auth`
 // (it may be scoped) against upstream griffinmartin/opencode-claude-auth.
-// The pinned npm version lives in images/base/entrypoint.herd.sh.
+// The pinned npm version lives in images/base/Dockerfile.
 const openCodeClaudeAuthPluginName = "opencode-claude-auth"
 
 var (
