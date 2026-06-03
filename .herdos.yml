@@ -4,9 +4,9 @@ platform:
     owner: Herd-OS
     repo: herd
 agent:
-    provider: opencode
+    provider: claude
     binary: ""
-    model: "claude-opus-4-8"
+    model: "opus"
 workers:
     max_concurrent: 3
     runner_label: herd-worker
