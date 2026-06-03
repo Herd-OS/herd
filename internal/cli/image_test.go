@@ -140,13 +140,11 @@ func TestImagePublish_InvokesDocker(t *testing.T) {
 	assert.Equal(t, []string{"push", want}, rec.args)
 }
 
-// agentNpmPackages are the four agent CLI packages (with pinned versions where
+// agentNpmPackages are the two agent CLI packages (with pinned versions where
 // applicable) that are baked into images/base/Dockerfile at build time.
 var agentNpmPackages = []string{
 	"@anthropic-ai/claude-code",
 	"opencode-ai",
-	"opencode-openai-codex-auth@4.4.0",
-	"opencode-claude-auth@1.5.4",
 }
 
 func TestEntrypoint_NoLongerInstallsNpmAgents(t *testing.T) {
@@ -160,8 +158,6 @@ func TestEntrypoint_NoLongerInstallsNpmAgents(t *testing.T) {
 	for _, pkg := range []string{
 		"@anthropic-ai/claude-code",
 		"opencode-ai",
-		"opencode-openai-codex-auth",
-		"opencode-claude-auth",
 	} {
 		assert.NotContains(t, entrypoint, pkg,
 			"entrypoint should not reference agent package %q", pkg)
