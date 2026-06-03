@@ -29,8 +29,7 @@ func clearAuthEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-		"OPENCODE_AUTH_JSON", "OPENCODE_AUTH_FORCE_SEED", "GITHUB_TOKEN",
-		"GH_TOKEN", "HERD_GITHUB_TOKEN",
+		"GITHUB_TOKEN", "GH_TOKEN", "HERD_GITHUB_TOKEN",
 	} {
 		t.Setenv(k, "")
 		require.NoError(t, os.Unsetenv(k))

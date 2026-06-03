@@ -19,17 +19,10 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - REPO_URL=https://github.com/Herd-OS/herd
       - RUNNER_LABELS=herd-worker
-      # Claude provider auth AND OpenCode Anthropic subscription bridge (opencode-claude-auth)
+      # Claude provider auth
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OPENCODE_AUTH_JSON=${OPENCODE_AUTH_JSON:-}
-      - OPENCODE_AUTH_FORCE_SEED=${OPENCODE_AUTH_FORCE_SEED:-}
       - HERD_VERSION=${HERD_VERSION:-}
       - HERD_AGENT_DEBUG=${HERD_AGENT_DEBUG:-}
-    # Persist OpenCode auth.json (refresh tokens may rotate) across restarts:
-    # volumes:
-    #   - opencode-auth:/home/runner/.local/share/opencode
-    # (declare `opencode-auth:` under a top-level `volumes:` key, and ensure
-    #  XDG_DATA_HOME is unset so OpenCode uses ~/.local/share)
     deploy:
       replicas: 3
