@@ -77,9 +77,7 @@ agent:
   max_turns: 0                     # ignored by opencode
 ```
 
-The runner environment must have an API key for whichever provider the model resolves to (default, recommended) — e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models. Alternatively, for `openai/...` models, ChatGPT subscription auth (opt-in, via a community plugin) is available by setting the `OPENCODE_AUTH_JSON` env var to a base64-encoded OpenCode `auth.json`. For `anthropic/...` models, an opt-in Anthropic subscription path exists via `CLAUDE_CODE_OAUTH_TOKEN` plus the community-maintained `opencode-claude-auth` bridge plugin — the same OAuth token the `claude` provider uses. API key is the default; the subscription paths are opt-in. See [runners.md](runners.md#2-agent-authentication) for the authentication setup.
-
-> `CLAUDE_CODE_OAUTH_TOKEN` serves **both** the `claude` provider (Pro/Max subscription auth) **and** the `opencode` provider's opt-in Anthropic subscription bridge (`anthropic/...` models, via `opencode-claude-auth`). The bridge is only registered when the token is set, so the OpenCode API-key path is unaffected when it is absent.
+The runner environment must have an API key for whichever provider the model resolves to — e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models. See [runners.md](runners.md#2-agent-authentication) for the authentication setup.
 
 ## Local vs Docker Agent Execution
 

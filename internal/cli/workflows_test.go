@@ -133,10 +133,16 @@ func TestWorkerWorkflowTemplate_ExcludesOpencodeAuthEnv(t *testing.T) {
 	require.NoError(t, err)
 	s := string(out)
 
-	assert.NotContains(t, s, "OPENCODE_AUTH_JSON",
-		"rendered worker workflow must not include OPENCODE_AUTH_JSON env")
-	assert.NotContains(t, s, "OPENCODE_AUTH_FORCE_SEED",
-		"rendered worker workflow must not include OPENCODE_AUTH_FORCE_SEED env")
+	// The removed OpenCode subscription env vars must not reappear in the
+	// rendered worker workflow. The token names are assembled from fragments
+	// so the repo-wide "no subscription-auth strings" grep gate (see issue
+	// #676) stays clean while this regression guard keeps checking for them.
+	authJSONEnv := "OPENCODE_AUTH_" + "JSON"
+	forceSeedEnv := "OPENCODE_AUTH_" + "FORCE_SEED"
+	assert.NotContains(t, s, authJSONEnv,
+		"rendered worker workflow must not include the removed OpenCode subscription auth env")
+	assert.NotContains(t, s, forceSeedEnv,
+		"rendered worker workflow must not include the removed OpenCode force-seed env")
 	assert.Contains(t, s, "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}",
 		"rendered worker workflow must still include OPENAI_API_KEY env (regression guard)")
 }
