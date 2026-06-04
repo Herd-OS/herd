@@ -24,7 +24,7 @@ ENV PATH="/home/runner/.npm-global/bin:/opt/herd/bin:${PATH}"
 RUN npm config set prefix /home/runner/.npm-global \
     && npm install -g --no-audit --no-fund @anthropic-ai/claude-code \
     && npm install -g --no-audit --no-fund opencode-ai \
-    && npm install -g --no-audit --no-fund @openai/codex@0.137.0  # TODO(verify): pinned version, confirm with `npm view @openai/codex version`
+    && npm install -g --no-audit --no-fund @openai/codex
 
 RUN useradd -m -d /home/runner runner \
     && chown -R runner:runner /runner /opt/herd /home/runner

@@ -145,7 +145,7 @@ func TestImagePublish_InvokesDocker(t *testing.T) {
 var agentNpmPackages = []string{
 	"@anthropic-ai/claude-code",
 	"opencode-ai",
-	"@openai/codex@0.137.0",
+	"@openai/codex",
 }
 
 func TestEntrypoint_NoLongerInstallsNpmAgents(t *testing.T) {
