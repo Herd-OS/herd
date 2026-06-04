@@ -52,7 +52,7 @@ func Validate(cfg *Config) *ValidationError {
 	}
 	// Subscription mode: when codex + any CODEX_AUTH_JSON* env var is set, each
 	// worker needs its own replica seed, so concurrency must not exceed replicas.
-	if cfg.Agent.Provider == "codex" && codexSubscriptionEnvSet() && cfg.Workers.MaxConcurrent > cfg.Agent.CodexReplicas {
+	if cfg.Agent.Provider == "codex" && CodexSubscriptionEnvSet() && cfg.Workers.MaxConcurrent > cfg.Agent.CodexReplicas {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("workers.max_concurrent (%d) must be <= agent.codex_replicas (%d) when using Codex subscription auth (CODEX_AUTH_JSON*) — otherwise multiple workers contend for one replica's seed", cfg.Workers.MaxConcurrent, cfg.Agent.CodexReplicas))
 	}
 
@@ -124,9 +124,12 @@ func Validate(cfg *Config) *ValidationError {
 	return nil
 }
 
-// codexSubscriptionEnvSet reports whether any CODEX_AUTH_JSON or
-// CODEX_AUTH_JSON_<n> env var is present (non-empty after trimming).
-func codexSubscriptionEnvSet() bool {
+// CodexSubscriptionEnvSet reports whether any CODEX_AUTH_JSON or
+// CODEX_AUTH_JSON_<n> env var is present (non-empty after trimming). A set
+// value signals ChatGPT-subscription auth, which requires one auth.json per
+// runner; an empty environment signals plain API-key auth, which has no
+// shared-auth.json constraint.
+func CodexSubscriptionEnvSet() bool {
 	for _, kv := range os.Environ() {
 		name, val, ok := strings.Cut(kv, "=")
 		if !ok {
