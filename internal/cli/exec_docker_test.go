@@ -154,10 +154,11 @@ func TestPassEnv_ContainsCodexSubscriptionVars(t *testing.T) {
 	for _, k := range want {
 		assert.Contains(t, passEnv, k, "passEnv must include %s", k)
 	}
-	// Every replica index CODEX_AUTH_JSON_1..16 must be present.
+	// The per-replica CODEX_AUTH_JSON_1..16 variants must NOT be forwarded:
+	// only bare CODEX_AUTH_JSON is read at the herd plan --exec docker path.
 	for i := 1; i <= 16; i++ {
 		k := fmt.Sprintf("CODEX_AUTH_JSON_%d", i)
-		assert.Contains(t, passEnv, k, "passEnv must include %s", k)
+		assert.NotContains(t, passEnv, k, "passEnv must not include %s", k)
 	}
 }
 

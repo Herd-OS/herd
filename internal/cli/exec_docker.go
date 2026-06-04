@@ -23,12 +23,10 @@ var passEnv = []string{
 	"GITHUB_TOKEN",
 	"GH_TOKEN",
 	"HERD_GITHUB_TOKEN",
-	// Codex subscription auth (opt-in)
+	// Codex subscription auth (opt-in). Only bare CODEX_AUTH_JSON is forwarded:
+	// provisionCodexAuth reads CODEX_AUTH_JSON via os.Getenv at the herd plan
+	// path, so the per-replica CODEX_AUTH_JSON_<n> variants are dead weight here.
 	"CODEX_AUTH_JSON",
-	"CODEX_AUTH_JSON_1", "CODEX_AUTH_JSON_2", "CODEX_AUTH_JSON_3", "CODEX_AUTH_JSON_4",
-	"CODEX_AUTH_JSON_5", "CODEX_AUTH_JSON_6", "CODEX_AUTH_JSON_7", "CODEX_AUTH_JSON_8",
-	"CODEX_AUTH_JSON_9", "CODEX_AUTH_JSON_10", "CODEX_AUTH_JSON_11", "CODEX_AUTH_JSON_12",
-	"CODEX_AUTH_JSON_13", "CODEX_AUTH_JSON_14", "CODEX_AUTH_JSON_15", "CODEX_AUTH_JSON_16",
 	"CODEX_ACCESS_TOKEN",
 	"CODEX_HOME",
 	"HERD_CODEX_KEEPALIVE_INTERVAL",

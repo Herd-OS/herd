@@ -55,6 +55,17 @@ func Validate(cfg *Config) *ValidationError {
 	if cfg.Agent.Provider == "codex" && CodexSubscriptionEnvSet() && cfg.Workers.MaxConcurrent > cfg.Agent.CodexReplicas {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("workers.max_concurrent (%d) must be <= agent.codex_replicas (%d) when using Codex subscription auth (CODEX_AUTH_JSON*) — otherwise multiple workers contend for one replica's seed", cfg.Workers.MaxConcurrent, cfg.Agent.CodexReplicas))
 	}
+	// Multi-replica subscription mode: each replica needs its own
+	// CODEX_AUTH_JSON_<i> seed (from an independent `codex login`). Surface any
+	// missing slots at `herd init` time rather than at worker-dispatch time.
+	if cfg.Agent.Provider == "codex" && CodexSubscriptionEnvSet() && cfg.Agent.CodexReplicas > 1 {
+		if missing := MissingCodexAuthJSONSlots(cfg.Agent.CodexReplicas); len(missing) > 0 {
+			ve.Errors = append(ve.Errors, fmt.Sprintf(
+				"agent.codex_replicas = %d requires CODEX_AUTH_JSON_1..%d to be set (each from an independent `codex login`); missing or empty: %s",
+				cfg.Agent.CodexReplicas, cfg.Agent.CodexReplicas, strings.Join(missing, ", "),
+			))
+		}
+	}
 
 	switch cfg.Agent.Exec {
 	case "", "local", "docker":
@@ -140,4 +151,20 @@ func CodexSubscriptionEnvSet() bool {
 		}
 	}
 	return false
+}
+
+// MissingCodexAuthJSONSlots returns the names of the CODEX_AUTH_JSON_<i> env
+// vars (for i in 1..n) that are unset or empty after trimming. Multi-replica
+// subscription mode requires one independent seed per replica, so a populated
+// result signals an incomplete configuration. The slice preserves index order;
+// an empty (non-nil) slice means all n slots are populated.
+func MissingCodexAuthJSONSlots(n int) []string {
+	missing := []string{}
+	for i := 1; i <= n; i++ {
+		name := fmt.Sprintf("CODEX_AUTH_JSON_%d", i)
+		if strings.TrimSpace(os.Getenv(name)) == "" {
+			missing = append(missing, name)
+		}
+	}
+	return missing
 }
