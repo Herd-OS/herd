@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["batch_name", "tasks"],
+  "properties": {
+    "batch_name": {
+      "type": "string"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "description",
+          "implementation_details",
+          "acceptance_criteria",
+          "scope",
+          "conventions",
+          "context_from_dependencies",
+          "complexity",
+          "type",
+          "runner_label",
+          "depends_on",
+          "manual"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "implementation_details": {
+            "type": "string"
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scope": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "conventions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "context_from_dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "complexity": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "runner_label": {
+            "type": "string"
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "manual": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}
