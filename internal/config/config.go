@@ -37,6 +37,10 @@ type Agent struct {
 	// One of minimal|low|medium|high (Codex provider only; default medium).
 	// Maps to `-c model_reasoning_effort=<value>` on every Codex invocation.
 	CodexReasoningEffort string `yaml:"codex_reasoning_effort"`
+	// CodexReplicas controls how many runner replicas are generated for the
+	// Codex subscription setup. default 1; >1 generates N runner replicas
+	// (Codex subscription mode).
+	CodexReplicas int `yaml:"codex_replicas"`
 }
 
 type Workers struct {

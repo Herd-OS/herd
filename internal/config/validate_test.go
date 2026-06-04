@@ -78,6 +78,77 @@ func TestValidate_AgentProvider(t *testing.T) {
 	}
 }
 
+func TestValidate_CodexReplicasMinimum(t *testing.T) {
+	tests := []struct {
+		name      string
+		replicas  int
+		wantError bool
+	}{
+		{"one is valid", 1, false},
+		{"two is valid", 2, false},
+		{"zero is invalid", 0, true},
+		{"negative is invalid", -3, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			cfg.Agent.CodexReplicas = tt.replicas
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), "agent.codex_replicas must be >= 1")
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
+func TestValidate_MaxConcurrentBoundByReplicas(t *testing.T) {
+	t.Run("error when subscription env set and max_concurrent > replicas", func(t *testing.T) {
+		t.Setenv("CODEX_AUTH_JSON", `{"token":"abc"}`)
+		cfg := Default()
+		cfg.Platform.Owner = "org"
+		cfg.Platform.Repo = "repo"
+		cfg.Agent.Provider = "codex"
+		cfg.Agent.CodexReplicas = 2
+		cfg.Workers.MaxConcurrent = 3
+
+		ve := Validate(cfg)
+		require.NotNil(t, ve)
+		assert.Contains(t, ve.Error(), "workers.max_concurrent")
+		assert.Contains(t, ve.Error(), "agent.codex_replicas")
+	})
+
+	t.Run("clean when subscription env unset", func(t *testing.T) {
+		// Ensure no CODEX_AUTH_JSON leaks in from the environment.
+		t.Setenv("CODEX_AUTH_JSON", "")
+		cfg := Default()
+		cfg.Platform.Owner = "org"
+		cfg.Platform.Repo = "repo"
+		cfg.Agent.Provider = "codex"
+		cfg.Agent.CodexReplicas = 2
+		cfg.Workers.MaxConcurrent = 3
+
+		assert.Nil(t, Validate(cfg))
+	})
+
+	t.Run("clean when max_concurrent <= replicas", func(t *testing.T) {
+		t.Setenv("CODEX_AUTH_JSON", `{"token":"abc"}`)
+		cfg := Default()
+		cfg.Platform.Owner = "org"
+		cfg.Platform.Repo = "repo"
+		cfg.Agent.Provider = "codex"
+		cfg.Agent.CodexReplicas = 3
+		cfg.Workers.MaxConcurrent = 3
+
+		assert.Nil(t, Validate(cfg))
+	})
+}
+
 func TestValidate_AgentCodexReasoningEffort(t *testing.T) {
 	tests := []struct {
 		name      string

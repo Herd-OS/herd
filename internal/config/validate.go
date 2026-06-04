@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -42,6 +43,19 @@ func Validate(cfg *Config) *ValidationError {
 	default:
 		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.codex_reasoning_effort must be one of: minimal, low, medium, high — got %q", cfg.Agent.CodexReasoningEffort))
 	}
+	// agent.codex_replicas
+	if cfg.Agent.CodexReplicas < 1 {
+		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.codex_replicas must be >= 1 — got %d", cfg.Agent.CodexReplicas))
+	}
+	if cfg.Agent.CodexReplicas > 1 && cfg.Agent.Provider != "codex" {
+		ve.Warnings = append(ve.Warnings, fmt.Sprintf("agent.codex_replicas > 1 only affects the codex provider; ignored for provider %q", cfg.Agent.Provider))
+	}
+	// Subscription mode: when codex + any CODEX_AUTH_JSON* env var is set, each
+	// worker needs its own replica seed, so concurrency must not exceed replicas.
+	if cfg.Agent.Provider == "codex" && codexSubscriptionEnvSet() && cfg.Workers.MaxConcurrent > cfg.Agent.CodexReplicas {
+		ve.Errors = append(ve.Errors, fmt.Sprintf("workers.max_concurrent (%d) must be <= agent.codex_replicas (%d) when using Codex subscription auth (CODEX_AUTH_JSON*) — otherwise multiple workers contend for one replica's seed", cfg.Workers.MaxConcurrent, cfg.Agent.CodexReplicas))
+	}
+
 	switch cfg.Agent.Exec {
 	case "", "local", "docker":
 	default:
@@ -108,4 +122,19 @@ func Validate(cfg *Config) *ValidationError {
 		return ve
 	}
 	return nil
+}
+
+// codexSubscriptionEnvSet reports whether any CODEX_AUTH_JSON or
+// CODEX_AUTH_JSON_<n> env var is present (non-empty after trimming).
+func codexSubscriptionEnvSet() bool {
+	for _, kv := range os.Environ() {
+		name, val, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if (name == "CODEX_AUTH_JSON" || strings.HasPrefix(name, "CODEX_AUTH_JSON_")) && strings.TrimSpace(val) != "" {
+			return true
+		}
+	}
+	return false
 }
