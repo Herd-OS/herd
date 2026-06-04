@@ -8,19 +8,24 @@ import (
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/claude"
+	"github.com/herd-os/herd/internal/agent/codex"
 	"github.com/herd-os/herd/internal/agent/opencode"
 )
 
 // New constructs an agent.Agent for the given provider. binary may be empty
 // (each provider falls back to its default binary name); model may be empty.
+// codexReasoningEffort is passed through to the codex provider, which applies
+// its own "medium" default when it is empty.
 // An empty provider maps to claude to preserve current default behavior.
-func New(provider, binary, model string) (agent.Agent, error) {
+func New(provider, binary, model, codexReasoningEffort string) (agent.Agent, error) {
 	switch provider {
 	case "claude", "":
 		return claude.New(binary, model), nil
 	case "opencode":
 		return opencode.New(binary, model), nil
+	case "codex":
+		return codex.NewAgent(binary, model, codexReasoningEffort), nil
 	default:
-		return nil, fmt.Errorf("unknown agent provider %q (supported: claude, opencode)", provider)
+		return nil, fmt.Errorf("unknown agent provider %q (supported: claude, opencode, codex)", provider)
 	}
 }

@@ -14,9 +14,10 @@ platform:
   repo: "my-project"             # repo name — auto-detected from git remote
 
 agent:
-  provider: "claude"             # claude | opencode (codex, cursor, gemini coming soon)
+  provider: "claude"             # claude | opencode | codex (cursor, gemini coming soon)
   binary: ""                     # path to agent binary (auto-detect if empty)
   model: ""                      # model override (optional, agent-specific)
+  codex_reasoning_effort: "medium" # minimal | low | medium | high (codex provider only)
   max_turns: 0                   # max agentic turns in headless mode (0 = agent default; ignored by opencode)
   exec: "local"                  # local | docker — where `herd plan` runs the agent (local default)
   exec_image: ""                 # override image for exec: docker (default ghcr.io/herd-os/herd-runner-base:<herd-version>)
@@ -56,13 +57,14 @@ pull_requests:
 
 ## Agent Providers
 
-`agent.provider` selects which AI coding agent the worker shells out to. Valid values are `claude` (Anthropic Claude Code, default) and `opencode` ([OpenCode](https://opencode.ai)).
+`agent.provider` selects which AI coding agent the worker shells out to. Valid values are `claude` (Anthropic Claude Code, default), `opencode` ([OpenCode](https://opencode.ai)), and `codex` (OpenAI Codex CLI, API-key auth).
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `agent.provider` | string | `claude` | `claude` or `opencode` |
-| `agent.binary` | string | `claude` for the `claude` provider, `opencode` for the `opencode` provider | Path to the agent CLI binary. Empty falls back to the provider default and resolves via `PATH`. |
-| `agent.model` | string | `""` (provider default) | Model override. For `opencode`, use the provider/model form, e.g. `anthropic/claude-sonnet-4` or `openai/gpt-5`. |
+| `agent.provider` | string | `claude` | `claude`, `opencode`, or `codex` |
+| `agent.binary` | string | `claude` for the `claude` provider, `opencode` for the `opencode` provider, `codex` for the `codex` provider | Path to the agent CLI binary. Empty falls back to the provider default and resolves via `PATH`. |
+| `agent.model` | string | `""` (provider default) | Model override. For `opencode`, use the provider/model form, e.g. `anthropic/claude-sonnet-4` or `openai/gpt-5`. For `codex`, use a **bare** model ID, e.g. `gpt-5-codex` or `gpt-5.2` (see [Codex model IDs](#codex-model-ids)). |
+| `agent.codex_reasoning_effort` | string | `medium` | Reasoning effort for the `codex` provider only: `minimal`, `low`, `medium`, or `high`. See [Codex reasoning effort](#codex-reasoning-effort). |
 | `agent.max_turns` | int | `0` (agent default) | Maximum agentic turns in headless mode. **Ignored by the `opencode` provider** — OpenCode's `run` subcommand has no max-turns flag. |
 | `agent.exec` | string | `local` | `local` runs the agent on your machine (requires the agent CLI installed locally). `docker` runs `herd plan` inside `ghcr.io/herd-os/herd-runner-base`, which already carries all agent CLIs — no local agent install needed beyond Docker + the herd binary. See [Local vs Docker Agent Execution](#local-vs-docker-agent-execution). |
 | `agent.exec_image` | string | `ghcr.io/herd-os/herd-runner-base:<herd-version>` | Override the image used by `exec: docker`. Empty defaults to the version-pinned base image (falls back to `:latest` on dev builds). |
@@ -78,6 +80,37 @@ agent:
 ```
 
 The runner environment must have an API key for whichever provider the model resolves to — e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models. See [runners.md](runners.md#2-agent-authentication) for the authentication setup.
+
+### Example: Codex
+
+```yaml
+agent:
+  provider: "codex"
+  binary: ""                       # defaults to "codex"
+  model: "gpt-5-codex"             # bare model ID, NOT openai/gpt-5
+  codex_reasoning_effort: "medium" # minimal | low | medium | high
+```
+
+The Codex provider uses API-key auth: set `OPENAI_API_KEY` (herd maps it to `CODEX_API_KEY` at invocation time when `CODEX_API_KEY` is unset) or set `CODEX_API_KEY` directly. See [runners.md](runners.md#codex-provider-agentprovider-codex) for the authentication setup.
+
+#### Codex model IDs
+
+Unlike the `opencode` provider, the `codex` provider expects a **bare** model ID in `agent.model` — e.g. `gpt-5-codex`, `gpt-5.2`, or `gpt-5.1` — **not** a provider-prefixed form like `openai/gpt-5`. The bare ID is passed straight through to the Codex CLI via `codex exec --model <id>`.
+
+The IDs referenced by the source fixtures — `gpt-5-codex`, `gpt-5.2`, `gpt-5.1`, and `gpt-5.1-codex-max` — are known-good. <!-- TODO(verify): the full accepted Codex model registry is not exhaustively documented here. Confirm a candidate ID by running `codex exec --model <candidate>` before relying on it. -->
+
+#### Codex reasoning effort
+
+`agent.codex_reasoning_effort` controls how much reasoning the Codex model applies. It applies to the `codex` provider only.
+
+| Value | Notes |
+|-------|-------|
+| `minimal` | Least reasoning. |
+| `low` | |
+| `medium` | **Default.** |
+| `high` | Most reasoning. |
+
+The configured value maps to `-c model_reasoning_effort=<value>` on every Codex invocation (`exec`, plan, and review). An invalid value is rejected by config validation.
 
 ## Local vs Docker Agent Execution
 

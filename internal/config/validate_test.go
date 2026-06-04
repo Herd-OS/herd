@@ -55,8 +55,10 @@ func TestValidate_AgentProvider(t *testing.T) {
 	}{
 		{"claude is valid", "claude", false, ""},
 		{"opencode is valid", "opencode", false, ""},
-		{"empty is invalid", "", true, "agent.provider must be one of: claude, opencode"},
-		{"unknown provider is invalid", "gpt", true, "agent.provider must be one of: claude, opencode"},
+		{"codex is valid", "codex", false, ""},
+		{"case mismatch is invalid", "codeX", true, "agent.provider must be one of: claude, opencode, codex"},
+		{"empty is invalid", "", true, "agent.provider must be one of: claude, opencode, codex"},
+		{"unknown provider is invalid", "gpt", true, "agent.provider must be one of: claude, opencode, codex"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -64,6 +66,38 @@ func TestValidate_AgentProvider(t *testing.T) {
 			cfg.Platform.Owner = "org"
 			cfg.Platform.Repo = "repo"
 			cfg.Agent.Provider = tt.provider
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
+func TestValidate_AgentCodexReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name      string
+		effort    string
+		wantError bool
+		errSubstr string
+	}{
+		{"empty is valid", "", false, ""},
+		{"minimal is valid", "minimal", false, ""},
+		{"low is valid", "low", false, ""},
+		{"medium is valid", "medium", false, ""},
+		{"high is valid", "high", false, ""},
+		{"unknown is invalid", "extreme", true, "agent.codex_reasoning_effort must be one of: minimal, low, medium, high"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			cfg.Agent.CodexReasoningEffort = tt.effort
 
 			ve := Validate(cfg)
 			if tt.wantError {

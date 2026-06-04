@@ -224,7 +224,7 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 	}
 
 	// Create agent and launch planning session
-	agentInstance, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model)
+	agentInstance, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort)
 	if err != nil {
 		return err
 	}

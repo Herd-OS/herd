@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Codex provider (`agent.provider: codex`) — shells out to the OpenAI Codex CLI with API-key auth. `OPENAI_API_KEY` is auto-mapped to `CODEX_API_KEY` at invocation time when `CODEX_API_KEY` is unset; an explicit `CODEX_API_KEY` always wins. The worker workflow and docker exec forward both secrets. `agent.model` takes a **bare** model ID (e.g. `gpt-5-codex`, `gpt-5.2`), not a provider-prefixed form. New `agent.codex_reasoning_effort` config field (`minimal` | `low` | `medium` | `high`, default `medium`) maps to `-c model_reasoning_effort=<value>` on every Codex invocation.
 - Published GHCR runner base image at `ghcr.io/herd-os/herd-runner-base` — public, multi-arch (linux/amd64, linux/arm64), version-pinned to the herd release.
 - `herd image build` and `herd image publish` commands to build and push a customized runner image to `ghcr.io/<owner>/<repo>-herd-runner`.
 - `.github/workflows/herd-publish-runner.yml` auto-publish workflow that builds and pushes the consumer runner image on changes to `Dockerfile.herd_runner` (gated on `HERD_ENABLED`, requires `packages: write`).

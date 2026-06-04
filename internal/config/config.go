@@ -33,6 +33,10 @@ type Agent struct {
 	MaxTurns  int    `yaml:"max_turns"`  // Max agentic turns for headless mode (0 = agent default)
 	Exec      string `yaml:"exec"`       // local | docker (empty = local). Where `herd plan` runs the agent.
 	ExecImage string `yaml:"exec_image"` // Override image for exec=docker (empty = default ghcr.io/herd-os/herd-runner-base:<version>)
+	// CodexReasoningEffort controls the Codex provider's reasoning depth.
+	// One of minimal|low|medium|high (Codex provider only; default medium).
+	// Maps to `-c model_reasoning_effort=<value>` on every Codex invocation.
+	CodexReasoningEffort string `yaml:"codex_reasoning_effort"`
 }
 
 type Workers struct {
@@ -44,15 +48,15 @@ type Workers struct {
 }
 
 type Integrator struct {
-	Strategy                       string `yaml:"strategy"`
-	OnConflict                     string `yaml:"on_conflict"`
-	MaxConflictResolutionAttempts  int    `yaml:"max_conflict_resolution_attempts"`
-	RequireCI                      bool   `yaml:"require_ci"`
-	Review                         bool   `yaml:"review"`
-	ReviewMaxFixCycles             int    `yaml:"review_max_fix_cycles"`
-	ReviewStrictness               string `yaml:"review_strictness"`    // "standard", "strict", "lenient"
-	ReviewFixSeverity              string `yaml:"review_fix_severity"`  // minimum severity to fix: "high", "medium", "low" (default: "medium")
-	CIMaxFixCycles                 int    `yaml:"ci_max_fix_cycles"`
+	Strategy                      string `yaml:"strategy"`
+	OnConflict                    string `yaml:"on_conflict"`
+	MaxConflictResolutionAttempts int    `yaml:"max_conflict_resolution_attempts"`
+	RequireCI                     bool   `yaml:"require_ci"`
+	Review                        bool   `yaml:"review"`
+	ReviewMaxFixCycles            int    `yaml:"review_max_fix_cycles"`
+	ReviewStrictness              string `yaml:"review_strictness"`   // "standard", "strict", "lenient"
+	ReviewFixSeverity             string `yaml:"review_fix_severity"` // minimum severity to fix: "high", "medium", "low" (default: "medium")
+	CIMaxFixCycles                int    `yaml:"ci_max_fix_cycles"`
 }
 
 type Monitor struct {

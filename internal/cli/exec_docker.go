@@ -122,6 +122,7 @@ func BuildDockerExecCmd(ctx context.Context, cfg *config.Config, args []string) 
 		"CLAUDE_CODE_OAUTH_TOKEN",
 		"ANTHROPIC_API_KEY",
 		"OPENAI_API_KEY",
+		"CODEX_API_KEY",
 		"GITHUB_TOKEN",
 		"GH_TOKEN",
 		"HERD_GITHUB_TOKEN",

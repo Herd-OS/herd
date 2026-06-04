@@ -14,6 +14,7 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, 1, cfg.Version)
 	assert.Equal(t, "github", cfg.Platform.Provider)
 	assert.Equal(t, "claude", cfg.Agent.Provider)
+	assert.Equal(t, "medium", cfg.Agent.CodexReasoningEffort)
 	assert.Equal(t, 3, cfg.Workers.MaxConcurrent)
 	assert.Equal(t, "herd-worker", cfg.Workers.RunnerLabel)
 	assert.Equal(t, 30, cfg.Workers.TimeoutMinutes)
