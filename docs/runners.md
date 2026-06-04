@@ -113,6 +113,26 @@ OPENAI_API_KEY=sk-...
 
 Also add it as an org or repo secret with the same name so the GitHub Actions worker workflow can surface it. This API-key path does not use `CLAUDE_CODE_OAUTH_TOKEN`.
 
+### Codex provider (`agent.provider: codex`)
+
+The Codex provider shells out to the OpenAI Codex CLI and authenticates with an API key. There is no OAuth/subscription path — only API-key auth is supported.
+
+#### API key
+
+Codex itself reads `CODEX_API_KEY`. herd supports two ways to provide it:
+
+- **Set `OPENAI_API_KEY`** — herd auto-maps it to `CODEX_API_KEY` at invocation time **when `CODEX_API_KEY` is unset**. This is convenient if you already have `OPENAI_API_KEY` in the environment (e.g. shared with the `opencode` provider).
+- **Set `CODEX_API_KEY` directly** — an explicit `CODEX_API_KEY` always wins; it is never overwritten by the `OPENAI_API_KEY` mapping.
+
+Add the key to `.env`:
+```
+OPENAI_API_KEY=sk-...
+# or, to set it explicitly:
+CODEX_API_KEY=sk-...
+```
+
+Also add the same secret name as an org or repo secret so the GitHub Actions worker workflow can surface it. The worker workflow forwards **both** `OPENAI_API_KEY` and `CODEX_API_KEY`, so configure whichever one you use as a secret.
+
 > `.env` is auto-gitignored by `herd init` — credentials won't be committed.
 
 > `.env` is for Docker runners (container registration and agent auth). Org/repo secrets are for GitHub Actions workflows. If you use Docker runners, you need both.
@@ -145,7 +165,8 @@ Configure at **org level** (recommended for multi-repo) or **repo level**:
 | `HERD_GITHUB_TOKEN` | Secret | Yes | PAT for workflow dispatch, releases, cross-repo ops |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Secret | Claude provider (one of these) | Claude provider auth — Pro/Max subscription |
 | `ANTHROPIC_API_KEY` | Secret | Claude or OpenCode (anthropic models) — one of these | Agent auth — pay-per-token Anthropic API key |
-| `OPENAI_API_KEY` | Secret | OpenCode with `openai/...` model | OpenCode provider auth for OpenAI models |
+| `OPENAI_API_KEY` | Secret | OpenCode with `openai/...` model, or Codex | OpenCode provider auth for OpenAI models; for Codex, auto-mapped to `CODEX_API_KEY` when that is unset |
+| `CODEX_API_KEY` | Secret | Codex (optional — explicit alternative to `OPENAI_API_KEY`) | Codex provider auth; an explicit value always wins over the `OPENAI_API_KEY` mapping |
 | `HERD_ENABLED` | Variable | Yes | Activates workflows — set to `true` after runners are online |
 | `HERD_RUNNER_LABEL` | Variable | No | Override default runner label (default: `herd-worker`) |
 
@@ -281,6 +302,7 @@ You can run on cloud VMs instead of Docker. Requirements:
 5. Set the agent credentials in the runner's environment:
    - For `agent.provider: claude` — `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
    - For `agent.provider: opencode` — the provider API key for the configured model (e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models)
+   - For `agent.provider: codex` — `OPENAI_API_KEY` (auto-mapped to `CODEX_API_KEY` when unset) or `CODEX_API_KEY` directly
 
 See [GitHub's self-hosted runner docs](https://docs.github.com/en/actions/hosting-your-own-runners) for detailed setup.
 
@@ -349,4 +371,4 @@ See [configuration.md](configuration.md) for the full field reference.
 | Dispatch succeeds but no run appears | Missing secret | Add `HERD_GITHUB_TOKEN` as org/repo secret (see section 1) |
 | Token permission errors | Insufficient scope | Fine-grained: needs Administration read/write. Classic: needs `repo` scope |
 | Integrator crashes checking CI | Missing Statuses permission | Add **Statuses: Read** to fine-grained PAT, or set `require_ci: false` in `.herdos.yml` |
-| Auth errors in worker | Missing credentials | Verify `.env` has the right key for the configured provider — Claude: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenCode: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` matching `agent.model` |
+| Auth errors in worker | Missing credentials | Verify `.env` has the right key for the configured provider — Claude: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenCode: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` matching `agent.model`; Codex: `OPENAI_API_KEY` or `CODEX_API_KEY` |
