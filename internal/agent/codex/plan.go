@@ -19,6 +19,10 @@ import (
 // The rendered planning system prompt and the optional initialPrompt are folded
 // together into the positional prompt (Codex exec has no --system-prompt flag).
 func (c *CodexAgent) Plan(ctx context.Context, initialPrompt string, opts agent.PlanOptions) (*agent.Plan, error) {
+	if err := ensureProvisioned(); err != nil {
+		return nil, fmt.Errorf("codex auth provisioning: %w", err)
+	}
+
 	systemPrompt, err := prompt.RenderPlanningPrompt(opts)
 	if err != nil {
 		return nil, fmt.Errorf("rendering system prompt: %w", err)
