@@ -31,12 +31,25 @@ services:
       - HERD_AGENT_DEBUG=${HERD_AGENT_DEBUG:-}
     volumes:
       - codex-auth:/home/runner/.codex
+{{- if eq .Provider "codex" }}
+    # Codex requires one auth.json per runner (OpenAI's CI/CD guarantee). The
+    # single `worker` service shares ONE codex-auth volume, so it must run
+    # exactly one container: with the ChatGPT-subscription path each replica
+    # spawns its own `herd codex keepalive-loop`, and concurrent loops on a
+    # shared auth.json would rotate the OAuth refresh_token out from under each
+    # other and break the chain. To run N parallel codex workers, set
+    # agent.codex_replicas > 1 — that renders per-replica services, each with
+    # its own seed and its own volume (Path C).
+    deploy:
+      replicas: 1
+{{- else }}
     # Default to 3 runner replicas so a stock install matches the
     # workers.max_concurrent default of 3 (one self-hosted runner processes one
     # job at a time). Scale with `--scale worker=N`. The per-replica Codex
     # subscription path (agent.codex_replicas > 1) uses named services instead.
     deploy:
       replicas: 3
+{{- end }}
 {{- else }}
 {{- range seq .Replicas }}
   herd-worker-{{.}}:

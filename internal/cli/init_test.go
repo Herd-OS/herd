@@ -213,7 +213,7 @@ func TestRoleInstructionFiles(t *testing.T) {
 func TestCreateRunnerFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	require.NoError(t, createRunnerFiles(dir, "my-org", "my-project", 1))
+	require.NoError(t, createRunnerFiles(dir, "my-org", "my-project", 1, "claude"))
 
 	// Dockerfile.herd_runner_base is no longer generated.
 	_, err := os.Stat(filepath.Join(dir, "Dockerfile.herd_runner_base"))
@@ -256,7 +256,7 @@ func TestCreateRunnerFiles_OverwritesHerdManaged(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-compose.herd.yml"), stale, 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env.herd.example"), stale, 0644))
 
-	require.NoError(t, createRunnerFiles(dir, "org", "repo", 1))
+	require.NoError(t, createRunnerFiles(dir, "org", "repo", 1, "claude"))
 
 	// Herd-managed files should be overwritten
 	for _, name := range []string{"docker-compose.herd.yml", ".env.herd.example"} {
@@ -280,7 +280,7 @@ func TestCreateRunnerFiles_OverwritesHerdManaged(t *testing.T) {
 func TestInit_DoesNotGenerateEntrypoint(t *testing.T) {
 	dir := t.TempDir()
 
-	require.NoError(t, createRunnerFiles(dir, "org", "repo", 1))
+	require.NoError(t, createRunnerFiles(dir, "org", "repo", 1, "claude"))
 
 	_, err := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
 	assert.True(t, os.IsNotExist(err), "entrypoint.herd.sh should not be created on fresh init")
@@ -293,7 +293,7 @@ func TestInit_RemovesLegacyEntrypoint(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "entrypoint.herd.sh"), []byte("#!/bin/bash\nlegacy"), 0755))
 
-	require.NoError(t, createRunnerFiles(dir, "org", "repo", 1))
+	require.NoError(t, createRunnerFiles(dir, "org", "repo", 1, "claude"))
 
 	_, err := os.Stat(filepath.Join(dir, "entrypoint.herd.sh"))
 	assert.True(t, os.IsNotExist(err), "legacy entrypoint.herd.sh should be removed on re-init")
@@ -306,7 +306,7 @@ func TestCreateRunnerFiles_DoesNotOverwriteUserDockerfile(t *testing.T) {
 	custom := []byte("FROM ghcr.io/herd-os/herd-runner-base:v1.2.3\nRUN apt-get install -y golang-go")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), custom, 0644))
 
-	require.NoError(t, createRunnerFiles(dir, "org", "repo", 1))
+	require.NoError(t, createRunnerFiles(dir, "org", "repo", 1, "claude"))
 
 	// User Dockerfile should NOT be overwritten
 	content, err := os.ReadFile(filepath.Join(dir, "Dockerfile.herd_runner"))
@@ -405,7 +405,7 @@ func TestCreateRunnerFiles_MigrationPreservesFileMode(t *testing.T) {
 	require.NoError(t, os.WriteFile(dockerfilePath, []byte(legacy), 0600))
 	require.NoError(t, os.Chmod(dockerfilePath, 0600))
 
-	require.NoError(t, createRunnerFiles(dir, "acme", "widget", 1))
+	require.NoError(t, createRunnerFiles(dir, "acme", "widget", 1, "claude"))
 
 	info, err := os.Stat(dockerfilePath)
 	require.NoError(t, err)
@@ -419,7 +419,7 @@ func TestCreateRunnerFiles_MigratesExistingDockerfile(t *testing.T) {
 	legacy := "FROM herd-runner-base\nRUN apt-get update && apt-get install -y jq\n"
 	require.NoError(t, os.WriteFile(dockerfilePath, []byte(legacy), 0644))
 
-	require.NoError(t, createRunnerFiles(dir, "acme", "widget", 1))
+	require.NoError(t, createRunnerFiles(dir, "acme", "widget", 1, "claude"))
 
 	got, err := os.ReadFile(dockerfilePath)
 	require.NoError(t, err)
@@ -443,7 +443,7 @@ func TestCreateRunnerFiles_OwnerRepoSubstitution(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			require.NoError(t, createRunnerFiles(dir, tt.owner, tt.repo, 1))
+			require.NoError(t, createRunnerFiles(dir, tt.owner, tt.repo, 1, "claude"))
 
 			dc, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
 			require.NoError(t, err)
@@ -484,7 +484,7 @@ func TestEnvFileGitignored(t *testing.T) {
 }
 
 func TestRenderDockerCompose(t *testing.T) {
-	rendered, err := renderDockerCompose("test-org", "test-repo", 1)
+	rendered, err := renderDockerCompose("test-org", "test-repo", 1, "claude")
 	require.NoError(t, err)
 	assert.Contains(t, rendered, "https://github.com/test-org/test-repo")
 	assert.Contains(t, rendered, "docker compose -f docker-compose.herd.yml")
@@ -494,7 +494,7 @@ func TestRenderDockerCompose(t *testing.T) {
 }
 
 func TestRenderDockerCompose_SingleReplica(t *testing.T) {
-	rendered, err := renderDockerCompose("test-org", "test-repo", 1)
+	rendered, err := renderDockerCompose("test-org", "test-repo", 1, "claude")
 	require.NoError(t, err)
 
 	// Exactly one worker service block.
@@ -508,14 +508,37 @@ func TestRenderDockerCompose_SingleReplica(t *testing.T) {
 	assert.NotContains(t, rendered, "herd-worker-1")
 	assert.NotContains(t, rendered, "codex-auth-1")
 	assert.NotContains(t, rendered, "RUNNER_NAME=")
-	// The single-service path keeps the default 3-replica scale so a stock
-	// (non-codex) install matches the workers.max_concurrent default of 3
-	// instead of silently dropping to a single runner container.
+	// For non-codex providers the single-service path keeps the default
+	// 3-replica scale so a stock install matches the workers.max_concurrent
+	// default of 3 instead of silently dropping to a single runner container.
 	assert.Contains(t, rendered, "deploy:\n      replicas: 3")
 }
 
+// TestRenderDockerCompose_SingleReplica_Codex covers the ChatGPT-subscription
+// single-replica path (Path B): the single `worker` service shares one
+// codex-auth volume, so it must run exactly one container to honor OpenAI's
+// one-auth.json-per-runner guarantee. It must NOT inherit the non-codex
+// 3-replica default, which would point 3 keepalive loops at one shared
+// auth.json.
+func TestRenderDockerCompose_SingleReplica_Codex(t *testing.T) {
+	rendered, err := renderDockerCompose("test-org", "test-repo", 1, "codex")
+	require.NoError(t, err)
+
+	// Still the single shared-volume `worker` service (Path B wiring).
+	assert.Equal(t, 1, strings.Count(rendered, "  worker:"))
+	assert.Contains(t, rendered, "CODEX_AUTH_JSON=${CODEX_AUTH_JSON:-}")
+	assert.Contains(t, rendered, "codex-auth:/home/runner/.codex")
+	assert.Contains(t, rendered, "volumes:\n  codex-auth:")
+	// Exactly one runner container — no shared auth.json across replicas.
+	assert.Contains(t, rendered, "deploy:\n      replicas: 1")
+	assert.NotContains(t, rendered, "replicas: 3")
+	// The multi-replica artifacts must be absent.
+	assert.NotContains(t, rendered, "herd-worker-1")
+	assert.NotContains(t, rendered, "codex-auth-1")
+}
+
 func TestRenderDockerCompose_MultiReplica(t *testing.T) {
-	rendered, err := renderDockerCompose("test-org", "test-repo", 3)
+	rendered, err := renderDockerCompose("test-org", "test-repo", 3, "codex")
 	require.NoError(t, err)
 
 	// One service block per replica, each with a distinct runner identity.
