@@ -11,6 +11,7 @@
 # this file automatically. The override file is never overwritten.
 
 services:
+{{- if eq .Replicas 1 }}
   worker:
     build:
       dockerfile: Dockerfile.herd_runner
@@ -22,7 +23,64 @@ services:
       # Claude provider auth
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Codex provider auth
+      - CODEX_AUTH_JSON=${CODEX_AUTH_JSON:-}
+      - CODEX_ACCESS_TOKEN=${CODEX_ACCESS_TOKEN:-}
+      - HERD_CODEX_KEEPALIVE_INTERVAL=${HERD_CODEX_KEEPALIVE_INTERVAL:-}
       - HERD_VERSION=${HERD_VERSION:-}
       - HERD_AGENT_DEBUG=${HERD_AGENT_DEBUG:-}
+    volumes:
+      - codex-auth:/home/runner/.codex
+{{- if and (eq .Provider "codex") .CodexSubscription }}
+    # Codex ChatGPT-subscription auth requires one auth.json per runner (OpenAI's
+    # CI/CD guarantee). The single `worker` service shares ONE codex-auth volume,
+    # so it must run exactly one container: with the subscription path each
+    # replica spawns its own `herd codex keepalive-loop`, and concurrent loops on
+    # a shared auth.json would rotate the OAuth refresh_token out from under each
+    # other and break the chain. To run N parallel codex workers, set
+    # agent.codex_replicas > 1 — that renders per-replica services, each with
+    # its own seed and its own volume (Path C). Plain API-key auth has no shared
+    # auth.json concern and keeps the 3-replica default below.
+    deploy:
+      replicas: 1
+{{- else }}
+    # Default to 3 runner replicas so a stock install matches the
+    # workers.max_concurrent default of 3 (one self-hosted runner processes one
+    # job at a time). Scale with `--scale worker=N`. The per-replica Codex
+    # subscription path (agent.codex_replicas > 1) uses named services instead.
     deploy:
       replicas: 3
+{{- end }}
+{{- else }}
+{{- range seq .Replicas }}
+  herd-worker-{{.}}:
+    build:
+      dockerfile: Dockerfile.herd_runner
+    restart: always
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - REPO_URL=https://github.com/{{$.Owner}}/{{$.Repo}}
+      - RUNNER_LABELS=herd-worker
+      - RUNNER_NAME=herd-worker-{{.}}
+      # Claude provider auth
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Codex provider auth (per-replica seed)
+      - CODEX_AUTH_JSON=${CODEX_AUTH_JSON_{{.}}:-}
+      - CODEX_ACCESS_TOKEN=${CODEX_ACCESS_TOKEN:-}
+      - HERD_CODEX_KEEPALIVE_INTERVAL=${HERD_CODEX_KEEPALIVE_INTERVAL:-}
+      - HERD_VERSION=${HERD_VERSION:-}
+      - HERD_AGENT_DEBUG=${HERD_AGENT_DEBUG:-}
+    volumes:
+      - codex-auth-{{.}}:/home/runner/.codex
+{{- end }}
+{{- end }}
+
+volumes:
+{{- if eq .Replicas 1 }}
+  codex-auth:
+{{- else }}
+{{- range seq .Replicas }}
+  codex-auth-{{.}}:
+{{- end }}
+{{- end }}

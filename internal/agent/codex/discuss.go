@@ -16,6 +16,10 @@ import (
 // does no output parsing. The system prompt is still required at the API level
 // for parity with the other providers.
 func (c *CodexAgent) Discuss(ctx context.Context, opts agent.DiscussOptions) error {
+	if err := ensureProvisioned(); err != nil {
+		return fmt.Errorf("codex auth provisioning: %w", err)
+	}
+
 	if opts.SystemPrompt == "" {
 		return fmt.Errorf("discuss: system prompt is required")
 	}

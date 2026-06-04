@@ -49,6 +49,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newWorkerCmd())
 	root.AddCommand(newIntegratorCmd())
 	root.AddCommand(newMonitorCmd())
+	root.AddCommand(newCodexCmd())
 
 	// Override the help function to support --help-all
 	defaultHelp := root.HelpFunc()
