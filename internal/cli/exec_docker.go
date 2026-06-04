@@ -12,6 +12,28 @@ import (
 	"golang.org/x/term"
 )
 
+// passEnv lists the host environment variables forwarded into the docker-exec
+// container. Each is emitted as `-e VAR` (name only, no value) and only when
+// os.LookupEnv reports it set, so unset entries are harmless.
+var passEnv = []string{
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	"ANTHROPIC_API_KEY",
+	"OPENAI_API_KEY",
+	"CODEX_API_KEY",
+	"GITHUB_TOKEN",
+	"GH_TOKEN",
+	"HERD_GITHUB_TOKEN",
+	// Codex subscription auth (opt-in)
+	"CODEX_AUTH_JSON",
+	"CODEX_AUTH_JSON_1", "CODEX_AUTH_JSON_2", "CODEX_AUTH_JSON_3", "CODEX_AUTH_JSON_4",
+	"CODEX_AUTH_JSON_5", "CODEX_AUTH_JSON_6", "CODEX_AUTH_JSON_7", "CODEX_AUTH_JSON_8",
+	"CODEX_AUTH_JSON_9", "CODEX_AUTH_JSON_10", "CODEX_AUTH_JSON_11", "CODEX_AUTH_JSON_12",
+	"CODEX_AUTH_JSON_13", "CODEX_AUTH_JSON_14", "CODEX_AUTH_JSON_15", "CODEX_AUTH_JSON_16",
+	"CODEX_ACCESS_TOKEN",
+	"CODEX_HOME",
+	"HERD_CODEX_KEEPALIVE_INTERVAL",
+}
+
 // resolveExecMode determines whether the agent session runs locally or inside
 // docker. Precedence: flag > HERD_EXEC env > cfg.Agent.Exec > "local".
 // Any empty or unrecognized value resolves to "local".
@@ -118,15 +140,6 @@ func BuildDockerExecCmd(ctx context.Context, cfg *config.Config, args []string) 
 	}
 
 	// auth/env passthrough: only -e VAR for vars actually set in host env.
-	passEnv := []string{
-		"CLAUDE_CODE_OAUTH_TOKEN",
-		"ANTHROPIC_API_KEY",
-		"OPENAI_API_KEY",
-		"CODEX_API_KEY",
-		"GITHUB_TOKEN",
-		"GH_TOKEN",
-		"HERD_GITHUB_TOKEN",
-	}
 	for _, k := range passEnv {
 		if _, ok := os.LookupEnv(k); ok {
 			dockerArgs = append(dockerArgs, "-e", k)

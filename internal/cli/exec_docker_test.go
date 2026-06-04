@@ -135,6 +135,32 @@ func TestBuildDockerExecCmd_CodexAPIKeyPassthrough(t *testing.T) {
 	})
 }
 
+func TestPassEnv_ContainsCodexSubscriptionVars(t *testing.T) {
+	// CODEX_API_KEY must appear exactly once (not duplicated by the new block).
+	codexAPIKeyCount := 0
+	for _, k := range passEnv {
+		if k == "CODEX_API_KEY" {
+			codexAPIKeyCount++
+		}
+	}
+	assert.Equal(t, 1, codexAPIKeyCount, "CODEX_API_KEY must appear exactly once: %v", passEnv)
+
+	want := []string{
+		"CODEX_AUTH_JSON",
+		"CODEX_ACCESS_TOKEN",
+		"CODEX_HOME",
+		"HERD_CODEX_KEEPALIVE_INTERVAL",
+	}
+	for _, k := range want {
+		assert.Contains(t, passEnv, k, "passEnv must include %s", k)
+	}
+	// Every replica index CODEX_AUTH_JSON_1..16 must be present.
+	for i := 1; i <= 16; i++ {
+		k := fmt.Sprintf("CODEX_AUTH_JSON_%d", i)
+		assert.Contains(t, passEnv, k, "passEnv must include %s", k)
+	}
+}
+
 func TestBuildDockerExecCmd_GHConfigMountSkippedWhenMissing(t *testing.T) {
 	clearAuthEnv(t)
 	cfg := &config.Config{}
