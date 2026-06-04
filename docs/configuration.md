@@ -65,6 +65,7 @@ pull_requests:
 | `agent.binary` | string | `claude` for the `claude` provider, `opencode` for the `opencode` provider, `codex` for the `codex` provider | Path to the agent CLI binary. Empty falls back to the provider default and resolves via `PATH`. |
 | `agent.model` | string | `""` (provider default) | Model override. For `opencode`, use the provider/model form, e.g. `anthropic/claude-sonnet-4` or `openai/gpt-5`. For `codex`, use a **bare** model ID, e.g. `gpt-5-codex` or `gpt-5.2` (see [Codex model IDs](#codex-model-ids)). |
 | `agent.codex_reasoning_effort` | string | `medium` | Reasoning effort for the `codex` provider only: `minimal`, `low`, `medium`, or `high`. See [Codex reasoning effort](#codex-reasoning-effort). |
+| `agent.codex_replicas` | integer | `1` | Number of Codex runner replicas to generate (`codex` provider only). Values `> 1` render per-replica services and volumes in `docker-compose.herd.yml`. See [Codex replicas](#codex-replicas). |
 | `agent.max_turns` | int | `0` (agent default) | Maximum agentic turns in headless mode. **Ignored by the `opencode` provider** — OpenCode's `run` subcommand has no max-turns flag. |
 | `agent.exec` | string | `local` | `local` runs the agent on your machine (requires the agent CLI installed locally). `docker` runs `herd plan` inside `ghcr.io/herd-os/herd-runner-base`, which already carries all agent CLIs — no local agent install needed beyond Docker + the herd binary. See [Local vs Docker Agent Execution](#local-vs-docker-agent-execution). |
 | `agent.exec_image` | string | `ghcr.io/herd-os/herd-runner-base:<herd-version>` | Override the image used by `exec: docker`. Empty defaults to the version-pinned base image (falls back to `:latest` on dev builds). |
@@ -89,6 +90,7 @@ agent:
   binary: ""                       # defaults to "codex"
   model: "gpt-5-codex"             # bare model ID, NOT openai/gpt-5
   codex_reasoning_effort: "medium" # minimal | low | medium | high
+  codex_replicas: 1                # >1 generates per-replica services + volumes
 ```
 
 The Codex provider uses API-key auth: set `OPENAI_API_KEY` (herd maps it to `CODEX_API_KEY` at invocation time when `CODEX_API_KEY` is unset) or set `CODEX_API_KEY` directly. See [runners.md](runners.md#codex-provider-agentprovider-codex) for the authentication setup.
@@ -111,6 +113,16 @@ The IDs referenced by the source fixtures — `gpt-5-codex`, `gpt-5.2`, `gpt-5.1
 | `high` | Most reasoning. |
 
 The configured value maps to `-c model_reasoning_effort=<value>` on every Codex invocation (`exec`, plan, and review). An invalid value is rejected by config validation.
+
+#### Codex replicas
+
+`agent.codex_replicas` (integer, default `1`) controls how many independent Codex runner replicas `herd init` generates. It applies to the `codex` provider only.
+
+When set to a value `> 1`, `herd init` renders per-replica worker services (`herd-worker-1` … `herd-worker-N`) and named volumes (`codex-auth-1` … `codex-auth-N`) into `docker-compose.herd.yml`. Each replica then requires its own `CODEX_AUTH_JSON_<i>` env var (`CODEX_AUTH_JSON_1` … `CODEX_AUTH_JSON_N`) — one ChatGPT-subscription login per replica.
+
+> **Validation rule**: when subscription auth is in use (any `CODEX_AUTH_JSON*` env var is set), `workers.max_concurrent` must be `<= agent.codex_replicas`. Otherwise multiple workers would contend for a single replica's seeded `auth.json`, and config validation rejects the configuration.
+
+See [runners.md → Subscription auth (opt-in)](runners.md#subscription-auth-opt-in) for the full multi-replica setup, including how to mint and base64-encode each login.
 
 ## Local vs Docker Agent Execution
 
