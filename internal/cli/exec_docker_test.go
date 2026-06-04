@@ -29,7 +29,7 @@ func clearAuthEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-		"GITHUB_TOKEN", "GH_TOKEN", "HERD_GITHUB_TOKEN",
+		"CODEX_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HERD_GITHUB_TOKEN",
 	} {
 		t.Setenv(k, "")
 		require.NoError(t, os.Unsetenv(k))
@@ -104,6 +104,35 @@ func TestBuildDockerExecCmd_AuthEnvPassthrough(t *testing.T) {
 	assert.False(t, containsPair(a, "-e", "OPENAI_API_KEY"), "unset var must not be passed: %v", a)
 	// -e entries carry the NAME only (no value) so docker reads it at runtime.
 	assert.NotContains(t, a, "ANTHROPIC_API_KEY=sk-secret")
+}
+
+func TestBuildDockerExecCmd_CodexAPIKeyPassthrough(t *testing.T) {
+	t.Run("set var is forwarded", func(t *testing.T) {
+		clearAuthEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("CODEX_API_KEY", "codex-secret")
+
+		cfg := &config.Config{}
+		cmd, err := BuildDockerExecCmd(context.Background(), cfg, []string{"plan"})
+		require.NoError(t, err)
+
+		a := cmd.Args
+		assert.True(t, containsPair(a, "-e", "CODEX_API_KEY"), "set var should be passed: %v", a)
+		// -e entries carry the NAME only (no value) so docker reads it at runtime.
+		assert.NotContains(t, a, "CODEX_API_KEY=codex-secret")
+	})
+
+	t.Run("unset var is not forwarded", func(t *testing.T) {
+		clearAuthEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		require.NoError(t, os.Unsetenv("CODEX_API_KEY"))
+
+		cfg := &config.Config{}
+		cmd, err := BuildDockerExecCmd(context.Background(), cfg, []string{"plan"})
+		require.NoError(t, err)
+
+		assert.False(t, containsPair(cmd.Args, "-e", "CODEX_API_KEY"), "unset var must not be passed: %v", cmd.Args)
+	})
 }
 
 func TestBuildDockerExecCmd_GHConfigMountSkippedWhenMissing(t *testing.T) {
