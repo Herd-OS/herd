@@ -31,6 +31,12 @@ services:
       - HERD_AGENT_DEBUG=${HERD_AGENT_DEBUG:-}
     volumes:
       - codex-auth:/home/runner/.codex
+    # Default to 3 runner replicas so a stock install matches the
+    # workers.max_concurrent default of 3 (one self-hosted runner processes one
+    # job at a time). Scale with `--scale worker=N`. The per-replica Codex
+    # subscription path (agent.codex_replicas > 1) uses named services instead.
+    deploy:
+      replicas: 3
 {{- else }}
 {{- range seq .Replicas }}
   herd-worker-{{.}}:

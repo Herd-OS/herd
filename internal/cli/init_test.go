@@ -508,8 +508,10 @@ func TestRenderDockerCompose_SingleReplica(t *testing.T) {
 	assert.NotContains(t, rendered, "herd-worker-1")
 	assert.NotContains(t, rendered, "codex-auth-1")
 	assert.NotContains(t, rendered, "RUNNER_NAME=")
-	// No leftover static replica count.
-	assert.NotContains(t, rendered, "replicas: 3")
+	// The single-service path keeps the default 3-replica scale so a stock
+	// (non-codex) install matches the workers.max_concurrent default of 3
+	// instead of silently dropping to a single runner container.
+	assert.Contains(t, rendered, "deploy:\n      replicas: 3")
 }
 
 func TestRenderDockerCompose_MultiReplica(t *testing.T) {
