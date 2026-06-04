@@ -33,9 +33,14 @@ func Validate(cfg *Config) *ValidationError {
 
 	// Agent
 	switch cfg.Agent.Provider {
-	case "claude", "opencode":
+	case "claude", "opencode", "codex":
 	default:
-		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.provider must be one of: claude, opencode — got %q", cfg.Agent.Provider))
+		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.provider must be one of: claude, opencode, codex — got %q", cfg.Agent.Provider))
+	}
+	switch cfg.Agent.CodexReasoningEffort {
+	case "", "minimal", "low", "medium", "high":
+	default:
+		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.codex_reasoning_effort must be one of: minimal, low, medium, high — got %q", cfg.Agent.CodexReasoningEffort))
 	}
 	switch cfg.Agent.Exec {
 	case "", "local", "docker":
