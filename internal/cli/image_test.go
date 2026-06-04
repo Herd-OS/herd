@@ -145,6 +145,7 @@ func TestImagePublish_InvokesDocker(t *testing.T) {
 var agentNpmPackages = []string{
 	"@anthropic-ai/claude-code",
 	"opencode-ai",
+	"@openai/codex@0.137.0",
 }
 
 func TestEntrypoint_NoLongerInstallsNpmAgents(t *testing.T) {
@@ -158,6 +159,7 @@ func TestEntrypoint_NoLongerInstallsNpmAgents(t *testing.T) {
 	for _, pkg := range []string{
 		"@anthropic-ai/claude-code",
 		"opencode-ai",
+		"@openai/codex",
 	} {
 		assert.NotContains(t, entrypoint, pkg,
 			"entrypoint should not reference agent package %q", pkg)
