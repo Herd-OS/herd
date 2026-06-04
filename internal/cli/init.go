@@ -118,7 +118,7 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	}
 
 	// 6. Create runner files
-	if err := createRunnerFiles(dir, owner, repo); err != nil {
+	if err := createRunnerFiles(dir, owner, repo, cfg.Agent.CodexReplicas); err != nil {
 		return err
 	}
 
@@ -301,13 +301,13 @@ type managedFile struct {
 // (.env.herd.example, docker-compose.herd.yml) in stable order.
 // The compose result reflects docker-compose.herd.override.yml if present in dir.
 // Dockerfile.herd_runner is intentionally NOT included — it is user-owned.
-func renderRunnerFiles(dir, owner, repo string) ([]managedFile, error) {
+func renderRunnerFiles(dir, owner, repo string, replicas int) ([]managedFile, error) {
 	envExample, err := runner.FS.ReadFile(".env.herd.example")
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded .env.herd.example: %w", err)
 	}
 
-	composeContent, _, mergeErr := renderMergedCompose(dir, owner, repo)
+	composeContent, _, mergeErr := renderMergedCompose(dir, owner, repo, replicas)
 	if composeContent == nil {
 		return nil, fmt.Errorf("rendering docker-compose.herd.yml: %w", mergeErr)
 	}
@@ -347,7 +347,7 @@ func renderWorkflowFiles(cfg *config.Config) ([]managedFile, error) {
 // Reads dir for docker-compose.herd.override.yml so the merged compose result is
 // included if an override is present.
 func renderManagedFiles(dir, owner, repo string, cfg *config.Config) ([]managedFile, error) {
-	runners, err := renderRunnerFiles(dir, owner, repo)
+	runners, err := renderRunnerFiles(dir, owner, repo, cfg.Agent.CodexReplicas)
 	if err != nil {
 		return nil, err
 	}
@@ -365,8 +365,8 @@ func renderManagedFiles(dir, owner, repo string, cfg *config.Config) ([]managedF
 // override file is missing or unreadable, returns the base render. If the override
 // exists but fails to merge, returns the base content and the merge error so the
 // caller can decide whether to surface a warning.
-func renderMergedCompose(dir, owner, repo string) ([]byte, bool, error) {
-	rendered, err := renderDockerCompose(owner, repo)
+func renderMergedCompose(dir, owner, repo string, replicas int) ([]byte, bool, error) {
+	rendered, err := renderDockerCompose(owner, repo, replicas)
 	if err != nil {
 		return nil, false, fmt.Errorf("rendering docker-compose.herd.yml: %w", err)
 	}
@@ -444,8 +444,9 @@ func createRoleInstructionFiles(herdDir string) error {
 }
 
 type runnerTemplateData struct {
-	Owner string
-	Repo  string
+	Owner    string
+	Repo     string
+	Replicas int // number of runner replicas to generate; >= 1
 }
 
 // runnerBaseImage returns the fully-qualified, version-pinned GHCR reference for
@@ -516,7 +517,7 @@ func renderHerdRunnerDockerfile(baseImage string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func createRunnerFiles(dir, owner, repo string) error {
+func createRunnerFiles(dir, owner, repo string, replicas int) error {
 	// Runner infrastructure files are herd-managed — always overwrite to keep
 	// them in sync with the installed herd version.
 
@@ -578,7 +579,7 @@ func createRunnerFiles(dir, owner, repo string) error {
 	}
 
 	// docker-compose.herd.yml (templated with owner/repo, merged with override if present)
-	composeContent, mergedOK, mergeErr := renderMergedCompose(dir, owner, repo)
+	composeContent, mergedOK, mergeErr := renderMergedCompose(dir, owner, repo, replicas)
 	if composeContent == nil {
 		return fmt.Errorf("rendering docker-compose.herd.yml: %w", mergeErr)
 	}
@@ -659,17 +660,31 @@ func extractYAMLHeader(s string) string {
 	return header
 }
 
-func renderDockerCompose(owner, repo string) (string, error) {
+func renderDockerCompose(owner, repo string, replicas int) (string, error) {
+	// Defensively clamp to at least one replica so a zero-value config still
+	// renders a valid single-replica compose. Config validation already
+	// guarantees codex_replicas >= 1, but callers may pass an unvalidated value.
+	if replicas < 1 {
+		replicas = 1
+	}
 	data, err := runner.FS.ReadFile("docker-compose.herd.yml.tmpl")
 	if err != nil {
 		return "", fmt.Errorf("reading embedded template: %w", err)
 	}
-	tmpl, err := template.New("compose").Parse(string(data))
+	tmpl, err := template.New("compose").Funcs(template.FuncMap{
+		"seq": func(n int) []int {
+			s := make([]int, n)
+			for i := range s {
+				s[i] = i + 1
+			}
+			return s
+		},
+	}).Parse(string(data))
 	if err != nil {
 		return "", err
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, runnerTemplateData{Owner: owner, Repo: repo}); err != nil {
+	if err := tmpl.Execute(&buf, runnerTemplateData{Owner: owner, Repo: repo, Replicas: replicas}); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

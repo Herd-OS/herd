@@ -11,6 +11,7 @@
 # this file automatically. The override file is never overwritten.
 
 services:
+{{- if eq .Replicas 1 }}
   worker:
     build:
       dockerfile: Dockerfile.herd_runner
@@ -22,7 +23,44 @@ services:
       # Claude provider auth
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Codex provider auth
+      - CODEX_AUTH_JSON=${CODEX_AUTH_JSON:-}
+      - CODEX_ACCESS_TOKEN=${CODEX_ACCESS_TOKEN:-}
+      - HERD_CODEX_KEEPALIVE_INTERVAL=${HERD_CODEX_KEEPALIVE_INTERVAL:-}
       - HERD_VERSION=${HERD_VERSION:-}
       - HERD_AGENT_DEBUG=${HERD_AGENT_DEBUG:-}
-    deploy:
-      replicas: 3
+    volumes:
+      - codex-auth:/home/runner/.codex
+{{- else }}
+{{- range seq .Replicas }}
+  herd-worker-{{.}}:
+    build:
+      dockerfile: Dockerfile.herd_runner
+    restart: always
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - REPO_URL=https://github.com/{{$.Owner}}/{{$.Repo}}
+      - RUNNER_LABELS=herd-worker
+      - RUNNER_NAME=herd-worker-{{.}}
+      # Claude provider auth
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Codex provider auth (per-replica seed)
+      - CODEX_AUTH_JSON=${CODEX_AUTH_JSON_{{.}}:-}
+      - CODEX_ACCESS_TOKEN=${CODEX_ACCESS_TOKEN:-}
+      - HERD_CODEX_KEEPALIVE_INTERVAL=${HERD_CODEX_KEEPALIVE_INTERVAL:-}
+      - HERD_VERSION=${HERD_VERSION:-}
+      - HERD_AGENT_DEBUG=${HERD_AGENT_DEBUG:-}
+    volumes:
+      - codex-auth-{{.}}:/home/runner/.codex
+{{- end }}
+{{- end }}
+
+volumes:
+{{- if eq .Replicas 1 }}
+  codex-auth:
+{{- else }}
+{{- range seq .Replicas }}
+  codex-auth-{{.}}:
+{{- end }}
+{{- end }}
