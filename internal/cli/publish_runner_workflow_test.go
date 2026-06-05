@@ -41,8 +41,17 @@ func TestPublishRunnerWorkflow_Rendered(t *testing.T) {
 	// The `release: types: [published]` trigger was removed because GitHub
 	// silently blocks events caused by the default GITHUB_TOKEN (which
 	// creates the release) from cascading into other workflows, so the
-	// trigger never fired in practice. The workflow now runs only on
-	// workflow_dispatch and on push to Dockerfile.herd_runner.
+	// trigger never fired in practice.
 	assert.NotContains(t, rendered, "types: [published]", "broken release trigger should not be present")
 	assert.NotContains(t, rendered, "release:", "broken release trigger should not be present")
+
+	// The `push` trigger on Dockerfile.herd_runner was also removed: it
+	// caused a duplicate wrapper-image build whenever a release tag
+	// followed a PR that touched Dockerfile.herd_runner (one build from
+	// the PR merge, one from the tag-driven publish-runner-image job in
+	// release.yml). Manual-only is intentional — see the template comment.
+	assert.NotContains(t, rendered, "push:", "workflow should be workflow_dispatch-only")
+	assert.NotContains(t, rendered, "paths:", "push paths filter should not be present")
+	assert.NotContains(t, rendered, "branches:", "branches filter should not be present")
+	assert.Contains(t, rendered, "workflow_dispatch:", "workflow_dispatch must remain the manual trigger")
 }
