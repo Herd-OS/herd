@@ -12,8 +12,9 @@ set -euo pipefail
 # script starts non-root and skips the remap path entirely, preserving the
 # previous behavior.
 if [ "$(id -u)" = "0" ]; then
-  target_uid="${RUNNER_UID:-1000}"
-  target_gid="${RUNNER_GID:-1000}"
+  # 1001 is the historical default — see images/base/Dockerfile for why.
+  target_uid="${RUNNER_UID:-1001}"
+  target_gid="${RUNNER_GID:-1001}"
   current_uid="$(id -u runner)"
   current_gid="$(id -g runner)"
 

@@ -343,7 +343,7 @@ services:
 
 ### Matching host UID/GID for bind mounts
 
-By default the in-container `runner` user is UID/GID **1000:1000**, baked into the base image at build time. If your host expects a different owner — for example, TrueNAS SCALE runs Custom Apps as the `apps` user (568:568), and the TrueNAS UI creates bind-mount directories owned by 568:568 — set `RUNNER_UID` and `RUNNER_GID` in `.env`:
+By default the in-container `runner` user is UID/GID **1001:1001**, baked into the base image at build time (the next free UID on `ubuntu:24.04`, which reserves 1000 for its default `ubuntu` user). If your host expects a different owner — for example, TrueNAS SCALE runs Custom Apps as the `apps` user (568:568), and the TrueNAS UI creates bind-mount directories owned by 568:568 — set `RUNNER_UID` and `RUNNER_GID` in `.env`:
 
 ```bash
 RUNNER_UID=568
