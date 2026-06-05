@@ -62,6 +62,8 @@ The same token works for both. `HERD_GITHUB_TOKEN` is needed because GitHub's au
 
 Authentication depends on which `agent.provider` is configured in `.herdos.yml` (see [configuration.md](configuration.md#agent-providers)).
 
+> **AI provider auth env vars (Claude, OpenCode, Codex, Gemini) belong only in the runner's `.env`, not in GitHub Actions secrets.** The worker workflow's `env:` block would override container env unconditionally — surfacing these from secrets either no-ops or shadow-overrides your `.env` value at the step level. The runner container reads them from `.env` via `docker-compose` at startup; the workflow inherits them from the runner process.
+
 ### Claude provider (`agent.provider: claude`)
 
 Choose one:
@@ -80,8 +82,6 @@ Add to `.env`:
 CLAUDE_CODE_OAUTH_TOKEN=your-token-here
 ```
 
-Also add as an org or repo secret named `CLAUDE_CODE_OAUTH_TOKEN`.
-
 #### Option 2: API key
 
 Pay-per-token via https://console.anthropic.com/.
@@ -90,8 +90,6 @@ Add to `.env`:
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 ```
-
-Also add as an org or repo secret named `ANTHROPIC_API_KEY`.
 
 ### OpenCode provider (`agent.provider: opencode`)
 
@@ -111,7 +109,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 ```
 
-Also add it as an org or repo secret with the same name so the GitHub Actions worker workflow can surface it. This API-key path does not use `CLAUDE_CODE_OAUTH_TOKEN`.
+This API-key path does not use `CLAUDE_CODE_OAUTH_TOKEN`.
 
 ### Codex provider (`agent.provider: codex`)
 
@@ -131,11 +129,9 @@ OPENAI_API_KEY=sk-...
 CODEX_API_KEY=sk-...
 ```
 
-Also add the same secret name as an org or repo secret so the GitHub Actions worker workflow can surface it. The worker workflow forwards **both** `OPENAI_API_KEY` and `CODEX_API_KEY`, so configure whichever one you use as a secret.
-
 > `.env` is auto-gitignored by `herd init` — credentials won't be committed.
 
-> `.env` is for Docker runners (container registration and agent auth). Org/repo secrets are for GitHub Actions workflows. If you use Docker runners, you need both.
+> `.env` holds the Docker runner's agent credentials and is read at container startup. The only GitHub Actions secret needed for auth is `HERD_GITHUB_TOKEN` (workflow dispatch); AI provider keys are not secrets — see the principle box above.
 
 #### Subscription auth (opt-in)
 
@@ -149,7 +145,7 @@ For ChatGPT Enterprise workspaces:
 
 1. A workspace admin enables Codex access tokens.
 2. A user mints an agent-identity JWT.
-3. Set that JWT as `CODEX_ACCESS_TOKEN` **both** in the runner environment (`.env`) **and** as a repo/org GitHub Actions secret.
+3. Set that JWT as `CODEX_ACCESS_TOKEN` in the runner environment (`.env`).
 
 This is the cleanest headless path: there is no refresh dance and no per-runner auth state to keep in sync, so it scales to any number of workers without coordination.
 
@@ -188,10 +184,6 @@ Sharing one `auth.json` across N workers has a small, self-healing race window:
 - This fails **at most one worker at a time**, and that worker self-heals on its next invocation: because the shared `auth.json` already holds the rotated tokens, it reads `refresh_token_v2` (or finds its cached `access_token` still fresh — refreshes fire ~5 minutes before expiry, so the cached token usually has slack — and skips the refresh entirely).
 - Net effect: occasional auth blips that auto-recover on the next worker. For typical batch herd usage this is rare and forgiving.
 - Keepalive with a shared volume: every container's entrypoint spawns its own `herd codex keepalive-loop`. They all observe the same on-disk `last_refresh` and most will skip — so N near-simultaneous keepalives in practice means at most one refresh per cadence. If you want to be strict you can set `HERD_CODEX_KEEPALIVE_INTERVAL=8760h` (1 year — effectively disable) on all but one worker.
-
-##### Secret-routing rule (important)
-
-`CODEX_AUTH_JSON` must be set in the **runner container environment** (via `docker-compose`), **NOT** as a GitHub Actions secret surfaced in the worker workflow. The worker workflow only surfaces `CODEX_ACCESS_TOKEN`, because an Actions `env:` block unconditionally overrides container env — surfacing `CODEX_AUTH_JSON` there would clobber the `auth.json` value that `docker-compose` injects. Only `CODEX_ACCESS_TOKEN` (Enterprise) and the API-key vars belong in GitHub secrets.
 
 ##### Recovery runbook
 
@@ -243,10 +235,6 @@ Configure at **org level** (recommended for multi-repo) or **repo level**:
 | Secret/Variable | Type | Required | Purpose |
 |----------------|------|----------|---------|
 | `HERD_GITHUB_TOKEN` | Secret | Yes | PAT for workflow dispatch, releases, cross-repo ops |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Secret | Claude provider (one of these) | Claude provider auth — Pro/Max subscription |
-| `ANTHROPIC_API_KEY` | Secret | Claude or OpenCode (anthropic models) — one of these | Agent auth — pay-per-token Anthropic API key |
-| `OPENAI_API_KEY` | Secret | OpenCode with `openai/...` model, or Codex | OpenCode provider auth for OpenAI models; for Codex, auto-mapped to `CODEX_API_KEY` when that is unset |
-| `CODEX_API_KEY` | Secret | Codex (optional — explicit alternative to `OPENAI_API_KEY`) | Codex provider auth; an explicit value always wins over the `OPENAI_API_KEY` mapping |
 | `HERD_ENABLED` | Variable | Yes | Activates workflows — set to `true` after runners are online |
 | `HERD_RUNNER_LABEL` | Variable | No | Override default runner label (default: `herd-worker`) |
 

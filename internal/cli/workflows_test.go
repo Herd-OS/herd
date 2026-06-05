@@ -45,12 +45,13 @@ func TestWorkersExtraEnv_RendersInWorkflow(t *testing.T) {
 				assert.Contains(t, s, line, "missing rendered env line for %s", name)
 			}
 
-			// Position: every extra env appears after GEMINI_API_KEY and before ISSUE_NUMBER.
-			geminiIdx := strings.Index(s, "GEMINI_API_KEY:")
+			// Position: every extra env appears after GITHUB_TOKEN (the line
+			// immediately before the ExtraEnv loop) and before ISSUE_NUMBER.
+			githubTokenIdx := strings.Index(s, "GITHUB_TOKEN:")
 			issueIdx := strings.Index(s, "ISSUE_NUMBER:")
-			require.True(t, geminiIdx >= 0 && issueIdx >= 0, "anchor lines must be present")
+			require.True(t, githubTokenIdx >= 0 && issueIdx >= 0, "anchor lines must be present")
 
-			prevIdx := geminiIdx
+			prevIdx := githubTokenIdx
 			for _, name := range tt.extra {
 				idx := strings.Index(s, name+":")
 				require.True(t, idx >= 0, "extra env %s should be in output", name)
@@ -74,9 +75,10 @@ func TestWorkersExtraEnv_EmptyOmitted(t *testing.T) {
 	assert.True(t, bytes.Equal(rendered, onDisk),
 		"rendered template with empty ExtraEnv must match committed workflow.\nrendered:\n%s\non-disk:\n%s", rendered, onDisk)
 
-	// Sanity: no double blank lines around the env block.
+	// Sanity: no double blank lines around the env block. With ExtraEnv empty,
+	// the loop collapses to nothing between GITHUB_TOKEN and ISSUE_NUMBER.
 	assert.NotContains(t, string(rendered),
-		"GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}\n\n          ISSUE_NUMBER:",
+		"GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}\n\n          ISSUE_NUMBER:",
 		"empty ExtraEnv produced a stray blank line in env block")
 }
 
@@ -115,7 +117,7 @@ func TestRenderWorkflow_UnknownSource(t *testing.T) {
 	assert.Error(t, err, "rendering nonexistent workflow source should error")
 }
 
-func TestWorkerWorkflowTemplate_ExcludesOpencodeAuthEnv(t *testing.T) {
+func TestWorkerWorkflowTemplate_ExcludesProviderAuthEnv(t *testing.T) {
 	cfg := config.Default()
 
 	var wf workflowFile
@@ -143,8 +145,30 @@ func TestWorkerWorkflowTemplate_ExcludesOpencodeAuthEnv(t *testing.T) {
 		"rendered worker workflow must not include the removed OpenCode subscription auth env")
 	assert.NotContains(t, s, forceSeedEnv,
 		"rendered worker workflow must not include the removed OpenCode force-seed env")
-	assert.Contains(t, s, "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}",
-		"rendered worker workflow must still include OPENAI_API_KEY env (regression guard)")
+
+	// The six AI-provider auth secrets must not be surfaced as GitHub Actions
+	// secrets-sourced env lines (issue #706). AI provider auth lives only in the
+	// runner's .env (injected by docker-compose), never duplicated into GitHub
+	// Actions secrets where an unset secret would clobber the real .env value.
+	// Names are assembled from fragments so any repo-wide grep gate banning these
+	// literal strings stays clean.
+	removed := []string{
+		"ANTHROPIC_API_" + "KEY",
+		"CLAUDE_CODE_OAUTH_" + "TOKEN",
+		"OPENAI_API_" + "KEY",
+		"CODEX_API_" + "KEY",
+		"CODEX_ACCESS_" + "TOKEN",
+		"GEMINI_API_" + "KEY",
+	}
+	for _, name := range removed {
+		assert.NotContains(t, s, "secrets."+name,
+			"rendered worker workflow must not surface %s from GitHub Actions secrets", name)
+	}
+
+	// The retained env keys must remain in the env block.
+	assert.Contains(t, s, "HERD_GITHUB_TOKEN", "HERD_GITHUB_TOKEN must remain in the env block")
+	assert.Contains(t, s, "ISSUE_NUMBER: ${{ inputs.issue_number }}", "ISSUE_NUMBER input must remain")
+	assert.Contains(t, s, "HERD_WORKER_MODE: ${{ inputs.mode }}", "HERD_WORKER_MODE input must remain")
 }
 
 func TestWorkflowFiles_ContainsExpectedNames(t *testing.T) {

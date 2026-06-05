@@ -181,7 +181,7 @@ CheckCI pauses dispatching a new CI fix worker if any fix-type worker — review
 
 ## Worker Extra Env
 
-`workers.extra_env` is a list of GitHub Actions secret names to surface as environment variables in the worker workflow's `Execute task` step, in addition to the built-in AI provider keys.
+`workers.extra_env` is a list of GitHub Actions secret names to surface as environment variables in the worker workflow's `Execute task` step.
 
 | Field | Type | Default |
 |-------|------|---------|
