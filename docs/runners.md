@@ -170,24 +170,61 @@ On the first worker run, herd seeds the docker-volume-backed `~/.codex` from `CO
 
 ##### Path C — Personal subscription, N parallel replicas
 
-To run N parallel workers off a personal subscription, give each replica its own login:
+Two flavors, based on your tolerance for OpenAI's "one `auth.json` per runner" warning. Pick one; don't mix them.
 
-1. Log in N times, each into a distinct `CODEX_HOME`:
+> **Rate-limit caveat (applies to both flavors)**: ChatGPT Pro/Team rate limits are **per account**, so N replicas do **not** multiply your LLM-call throughput. Extra replicas help only when tasks are wall-clock-bound on non-LLM work (builds, tests, I/O), not when they're bottlenecked on model calls.
 
+###### Path C-shared (recommended for personal use)
+
+One `codex login`, one `auth.json`, **all N replicas share the same docker volume**. Less setup, but OpenAI warns against it (the warning is about refresh-token races; in practice the failure is rare, automatic, and self-healing — see below).
+
+1. Log in **once**:
    ```bash
-   for i in 1 2 3; do CODEX_HOME=~/codex-replica-$i codex login; done
+   codex login
+   ```
+2. Encode and set a **single** env var (NOT `_1`/`_2`/…):
+   ```bash
+   echo "CODEX_AUTH_JSON=$(base64 -w0 ~/.codex/auth.json)" >> .env
+   ```
+3. Set `agent.codex_replicas: 1` in `.herdos.yml` so herd init generates a single worker service.
+4. Scale the worker at runtime via docker-compose:
+   ```bash
+   docker compose -f docker-compose.herd.yml up -d --scale worker=N
+   ```
+   All N containers mount the **same** `codex-auth` volume and share the same `auth.json`.
+
+> **Concurrency cap caveat**: with `agent.codex_replicas: 1`, herd's validation enforces `workers.max_concurrent <= 1`. To dispatch more than one worker at a time against the shared volume, override the validation by setting `workers.max_concurrent: N` after `herd init` (validation will reject the config; you'll need to invoke herd commands with the higher value via `.herdos.yml` edits that you re-apply after each `herd init`). A first-class `agent.codex_shared_volume: true` config field is a future enhancement.
+
+What can go wrong with sharing one `auth.json`:
+
+- Codex refreshes the OAuth bundle when the access token is within 5 minutes of expiry (access tokens last ~1 hour), or when `last_refresh` is older than ~8 days. If two replica containers hit OpenAI's token endpoint in the same 5-minute window with the same `refresh_token`, one wins (gets `refresh_token_v2`) and the other gets a "refresh token already used" error.
+- The losing worker is in a self-healing state: on its next invocation, it reads the updated `auth.json` and finds `refresh_token_v2`, or its `access_token` is still fresh (refreshes fire 5 minutes before expiry, so the cached token usually has slack) and no refresh is needed at all.
+- Net effect: occasional auth blips that auto-recover on the next worker. For typical batch herd usage this is rare and forgiving; for sustained 24/7 high-concurrency workloads, Path C-strict is safer.
+- Keepalive in shared-volume mode: every container's entrypoint spawns its own `herd codex keepalive-loop`. They all observe the same on-disk `last_refresh` and most will skip — so N near-simultaneous keepalives in practice means at most one refresh per cadence. Acceptable, but if you want to be strict you can set `HERD_CODEX_KEEPALIVE_INTERVAL=8760h` (1 year — effectively disable) on N-1 of the replicas.
+
+###### Path C-strict (OpenAI's recommendation)
+
+Each replica gets its own independent login → its own `auth.json` → its own docker volume. No race risk. Setup is more involved.
+
+1. Create a `CODEX_HOME` directory for each replica **before** logging in (Codex refuses to run if `CODEX_HOME` doesn't exist):
+   ```bash
+   for i in 1 2 3; do
+     mkdir -p ~/codex-replica-$i
+     CODEX_HOME=~/codex-replica-$i codex login
+   done
    ```
 
-2. Base64-encode each `auth.json` into `CODEX_AUTH_JSON_1` … `CODEX_AUTH_JSON_N`:
+   > **Browser-session caveat**: OpenAI's OAuth server deduplicates within a single browser session — running `codex login` N times against the same logged-in browser returns the **same** token each time. You must use a **fresh cookie jar per login**: either a separate incognito/private-window session per replica (close + reopen between each `codex login`), or N pre-created browser profiles (Chrome/Firefox profiles each have their own cookies). Without this you'll get N identical seeds and replicas 2..N will race on the same refresh token.
 
+2. Base64-encode each `auth.json` into `CODEX_AUTH_JSON_1` … `CODEX_AUTH_JSON_N`. Note: `CODEX_HOME` points at the codex config dir directly (no internal `.codex` subdir), so the file is at `~/codex-replica-$i/auth.json`:
    ```bash
-   for i in 1 2 3; do echo "CODEX_AUTH_JSON_$i=$(base64 -w0 ~/codex-replica-$i/.codex/auth.json)"; done >> .env
+   for i in 1 2 3; do
+     echo "CODEX_AUTH_JSON_$i=$(base64 -w0 ~/codex-replica-$i/auth.json)"
+   done >> .env
    ```
 
 3. Set `agent.codex_replicas: N` in `.herdos.yml`.
-4. Run `herd init` to regenerate `docker-compose.herd.yml` with N worker services and N named volumes.
-
-> **Rate-limit caveat**: ChatGPT Pro/Team rate limits are **per account**, so N replicas do **not** multiply your LLM-call throughput. Extra replicas help only when tasks are wall-clock-bound on non-LLM work (builds, tests, I/O), not when they're bottlenecked on model calls.
+4. Run `herd init` to regenerate `docker-compose.herd.yml` with N worker services (`herd-worker-1` … `herd-worker-N`) and N named volumes (`codex-auth-1` … `codex-auth-N`).
 
 ##### Secret-routing rule (important)
 
