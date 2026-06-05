@@ -3,9 +3,10 @@ FROM ubuntu:24.04
 ARG RUNNER_VERSION=2.333.1
 ARG TARGETARCH
 
-# Dependencies (Node 22 LTS required by Claude Code and OpenCode, libicu for GitHub Actions runner)
+# Dependencies (Node 22 LTS required by Claude Code and OpenCode, libicu for
+# GitHub Actions runner, gosu for the entrypoint's privilege drop).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl jq ca-certificates git gh libicu-dev \
+    curl jq ca-certificates git gh libicu-dev gosu \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -26,12 +27,20 @@ RUN npm config set prefix /home/runner/.npm-global \
     && npm install -g --no-audit --no-fund opencode-ai \
     && npm install -g --no-audit --no-fund @openai/codex
 
-RUN useradd -m -d /home/runner runner \
+# Pin the runner UID/GID at build time so the image's owned paths have a
+# deterministic owner. The entrypoint can remap to a different UID/GID at
+# container start via the RUNNER_UID / RUNNER_GID env vars — see
+# entrypoint.herd.sh and docs/runners.md ("Matching host UID/GID").
+RUN groupadd -g 1000 runner \
+    && useradd -m -d /home/runner -u 1000 -g 1000 runner \
     && chown -R runner:runner /runner /opt/herd /home/runner
 
 WORKDIR /runner
 COPY images/base/entrypoint.herd.sh ./entrypoint.herd.sh
 RUN chmod +x entrypoint.herd.sh
 
-USER runner
+# Intentionally NOT setting `USER runner` — the entrypoint starts as root so it
+# can optionally remap the runner UID/GID, then drops to runner via gosu before
+# invoking ./run.sh. Wrapper Dockerfiles (Dockerfile.herd_runner) should follow
+# the same pattern: do their installs as root and not end with `USER runner`.
 ENTRYPOINT ["./entrypoint.herd.sh"]

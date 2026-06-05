@@ -237,6 +237,10 @@ func TestCreateRunnerFiles(t *testing.T) {
 	assert.Contains(t, string(dc), "GITHUB_TOKEN=${GITHUB_TOKEN}")
 	assert.Contains(t, string(dc), "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}")
 	assert.Contains(t, string(dc), "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}")
+	// RUNNER_UID/GID are forwarded so users can remap the in-container runner
+	// user without rebuilding the image.
+	assert.Contains(t, string(dc), "RUNNER_UID=${RUNNER_UID:-}")
+	assert.Contains(t, string(dc), "RUNNER_GID=${RUNNER_GID:-}")
 
 	// .env.herd.example
 	env, err := os.ReadFile(filepath.Join(dir, ".env.herd.example"))
@@ -244,6 +248,10 @@ func TestCreateRunnerFiles(t *testing.T) {
 	assert.Contains(t, string(env), "GITHUB_TOKEN=")
 	assert.Contains(t, string(env), "CLAUDE_CODE_OAUTH_TOKEN=")
 	assert.Contains(t, string(env), "ANTHROPIC_API_KEY=")
+	// RUNNER_UID / RUNNER_GID must be documented (commented out by default so
+	// the build-time 1000:1000 stays the no-config behavior).
+	assert.Contains(t, string(env), "# RUNNER_UID=")
+	assert.Contains(t, string(env), "# RUNNER_GID=")
 }
 
 func TestCreateRunnerFiles_OverwritesHerdManaged(t *testing.T) {
@@ -543,6 +551,18 @@ func TestRunnerDockerfileTemplate_BaseFromLine(t *testing.T) {
 			assert.Contains(t, out, "# Base image:")
 			assert.Contains(t, out, "ghcr.io/herd-os/herd-runner-base")
 			assert.NotContains(t, out, "{{.BaseImage}}", "template must be fully rendered")
+			// The wrapper must NOT end with `USER runner` — that opts the
+			// container out of the entrypoint's RUNNER_UID remap (the
+			// entrypoint detects a non-root start and skips the remap path
+			// for backward compat). Use TrimSpace + HasSuffix instead of a
+			// substring check so a `USER runner` somewhere in a multi-line
+			// example comment wouldn't false-trigger.
+			trimmed := strings.TrimSpace(out)
+			assert.False(t,
+				strings.HasSuffix(trimmed, "USER runner"),
+				"rendered Dockerfile.herd_runner must not end with `USER runner`; "+
+					"that disables RUNNER_UID remap",
+			)
 		})
 	}
 }

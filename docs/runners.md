@@ -309,10 +309,9 @@ For example, to add a Postgres client on top of the base image:
 FROM ghcr.io/herd-os/herd-runner-base:v1.4.2
 USER root
 RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
-USER runner
 ```
 
-The base image runs as the non-root `runner` user, so switch to `root` to install packages and switch back when done.
+The base image's entrypoint starts as root, optionally remaps the runner UID/GID (see [Matching host UID/GID for bind mounts](#matching-host-uidgid-for-bind-mounts) below), then drops to the `runner` user via `gosu` before invoking the GitHub Actions runner. Do **not** end your `Dockerfile.herd_runner` with `USER runner` — that opts out of the remap path. The entrypoint detects whether the container started as root and falls back to the legacy non-root path if not, so existing wrappers continue to work, but they lose the `RUNNER_UID` override.
 
 The **Herd CLI** is not baked into the image — the entrypoint script that ships inside the published base image (`ghcr.io/herd-os/herd-runner-base`) downloads it at container startup. This ensures runners always use the latest version without rebuilding. Set `HERD_VERSION` in `.env` to pin a specific version.
 
@@ -341,6 +340,23 @@ services:
 ```
 
 `herd init` automatically merges the override into `docker-compose.herd.yml`. The override file is never overwritten.
+
+### Matching host UID/GID for bind mounts
+
+By default the in-container `runner` user is UID/GID **1000:1000**, baked into the base image at build time. If your host expects a different owner — for example, TrueNAS SCALE runs Custom Apps as the `apps` user (568:568), and the TrueNAS UI creates bind-mount directories owned by 568:568 — set `RUNNER_UID` and `RUNNER_GID` in `.env`:
+
+```bash
+RUNNER_UID=568
+RUNNER_GID=568
+```
+
+The entrypoint reads these on container start. If they differ from the build-time defaults, it `usermod`/`groupmod`s the `runner` user, recursively `chown`s `/home/runner`, `/runner`, and `/opt/herd`, then drops privileges via `gosu` before invoking the GitHub Actions runner. Same image, no rebuild, no per-host fork. The first-startup `chown -R` is one-time per UID change; restarts with the same UID skip it.
+
+Caveats:
+
+- **Do not set `RUNNER_UID=0` or `RUNNER_GID=0`.** The GitHub Actions runner refuses to run as root and the entrypoint rejects 0 to fail loudly.
+- **`Dockerfile.herd_runner` must end as root.** If your wrapper ends with `USER runner` (older `herd init` versions added this), the container starts non-root and the entrypoint skips the remap entirely. Remove the trailing `USER runner` line to opt in.
+- **Codex auth volume.** When you change `RUNNER_UID`, the existing `codex-auth` volume contents are chowned to the new UID on the next start. No re-seeding needed.
 
 ## 6. Runner images
 

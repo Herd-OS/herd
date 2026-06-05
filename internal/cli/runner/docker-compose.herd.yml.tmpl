@@ -19,6 +19,10 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - REPO_URL=https://github.com/{{.Owner}}/{{.Repo}}
       - RUNNER_LABELS=herd-worker
+      # Optional UID/GID remap — see .env.herd.example. Defaults to 1000/1000
+      # (the image's build-time UID/GID) when unset.
+      - RUNNER_UID=${RUNNER_UID:-}
+      - RUNNER_GID=${RUNNER_GID:-}
       # Claude provider auth
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
