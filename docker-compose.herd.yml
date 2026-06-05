@@ -28,14 +28,15 @@ services:
       - HERD_CODEX_KEEPALIVE_INTERVAL=${HERD_CODEX_KEEPALIVE_INTERVAL:-}
       - HERD_VERSION=${HERD_VERSION:-}
       - HERD_AGENT_DEBUG=${HERD_AGENT_DEBUG:-}
-    volumes:
-      - codex-auth:/home/runner/.codex
     # Default to 3 runner replicas so a stock install matches the
     # workers.max_concurrent default of 3 (one self-hosted runner processes one
-    # job at a time). Scale with `--scale worker=N`. The per-replica Codex
-    # subscription path (agent.codex_replicas > 1) uses named services instead.
+    # job at a time). To run N parallel Codex subscription workers, run
+    # `docker compose up -d --scale worker=N` — all containers share the single
+    # codex-auth volume below.
     deploy:
       replicas: 3
+    volumes:
+      - codex-auth:/home/runner/.codex
 
 volumes:
   codex-auth:

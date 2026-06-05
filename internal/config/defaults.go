@@ -10,7 +10,6 @@ func Default() *Config {
 		Agent: Agent{
 			Provider:             "claude",
 			CodexReasoningEffort: "medium",
-			CodexReplicas:        1,
 		},
 		Workers: Workers{
 			MaxConcurrent:           3,

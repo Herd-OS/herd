@@ -30,58 +30,6 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, false, cfg.PullRequests.AutoMerge)
 }
 
-func TestDefault_CodexReplicas(t *testing.T) {
-	cfg := Default()
-	assert.Equal(t, 1, cfg.Agent.CodexReplicas)
-}
-
-func TestLoadCodexReplicas(t *testing.T) {
-	dir := t.TempDir()
-	content := `version: 1
-platform:
-  provider: "github"
-  owner: "org"
-  repo: "repo"
-agent:
-  provider: "codex"
-  codex_replicas: 3
-`
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
-
-	cfg, err := Load(dir)
-	require.NoError(t, err)
-	assert.Equal(t, 3, cfg.Agent.CodexReplicas)
-}
-
-func TestLoadCodexReplicasDefaultsToOne(t *testing.T) {
-	dir := t.TempDir()
-	content := `version: 1
-platform:
-  provider: "github"
-  owner: "org"
-  repo: "repo"
-`
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
-
-	cfg, err := Load(dir)
-	require.NoError(t, err)
-	assert.Equal(t, 1, cfg.Agent.CodexReplicas)
-}
-
-func TestCodexReplicasYAMLRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	cfg := Default()
-	cfg.Platform.Owner = "org"
-	cfg.Platform.Repo = "repo"
-	cfg.Agent.CodexReplicas = 4
-
-	require.NoError(t, Save(dir, cfg))
-
-	loaded, err := Load(dir)
-	require.NoError(t, err)
-	assert.Equal(t, 4, loaded.Agent.CodexReplicas)
-}
-
 func TestLoad(t *testing.T) {
 	dir := t.TempDir()
 	content := `version: 1
