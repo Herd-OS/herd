@@ -107,7 +107,7 @@ func TestEntrypoint_SpawnsKeepaliveWhenSubscriptionEnvSet(t *testing.T) {
 	require.NoError(t, err)
 	script := string(data)
 
-	guard := `env | grep -qE '^CODEX_AUTH_JSON[^=]*=.'`
+	guard := `env | grep -qE '^CODEX_AUTH_JSON=.'`
 	assert.Contains(t, script, guard, "entrypoint must guard on a non-empty CODEX_AUTH_JSON env var")
 	assert.Contains(t, script, "herd codex keepalive-loop",
 		"entrypoint must spawn the keepalive loop")
@@ -150,13 +150,8 @@ func TestEntrypoint_KeepaliveGuardSemantics(t *testing.T) {
 			wantMatch: true,
 		},
 		{
-			name:      "per-replica seed populated",
-			env:       []string{"CODEX_AUTH_JSON_1=seed"},
-			wantMatch: true,
-		},
-		{
-			name:      "per-replica seed empty",
-			env:       []string{"CODEX_AUTH_JSON_1="},
+			name:      "non-bare var starting with CODEX_AUTH_JSON does not match",
+			env:       []string{"CODEX_AUTH_JSONX=seed"},
 			wantMatch: false,
 		},
 		{
