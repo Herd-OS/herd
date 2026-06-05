@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `herd init` no longer generates `Dockerfile.herd_runner_base`; an existing one is removed and the base service is dropped from `docker-compose.herd.yml`.
 - `Dockerfile.herd_runner` now uses `FROM ghcr.io/herd-os/herd-runner-base:<version>` (pulled from GHCR) instead of the locally built `herd-runner-base`.
 - `herd init` no longer generates `entrypoint.herd.sh` in consumer repos — the entrypoint is now baked into the published base image `ghcr.io/herd-os/herd-runner-base`. A leftover copy from an older init is removed automatically on the next `herd init`.
+- AI provider auth env vars (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `GEMINI_API_KEY`) are no longer surfaced from GitHub Actions secrets in the worker workflow template — they live only in the runner's `.env` (injected by `docker-compose`), matching the architecturally-recommended setup. A workflow `env:` block overrides container env unconditionally, so an unset secret would clobber the real `.env` value at the step level; removing the secrets path eliminates that footgun (generalizing the `CODEX_AUTH_JSON` protection from #694). **Migration:** users who previously configured these values **only** as GitHub Actions secrets (without `.env`) must add the same values to the runner's `.env` for workers to authenticate. `HERD_GITHUB_TOKEN` and `workers.extra_env` secrets are unaffected.
 
 ### Removed
 
