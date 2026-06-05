@@ -139,7 +139,7 @@ Also add the same secret name as an org or repo secret so the GitHub Actions wor
 
 #### Subscription auth (opt-in)
 
-API-key auth (above) remains the documented default. If you'd rather drive Codex from a ChatGPT subscription instead of paying per token, herd supports three opt-in subscription paths. The mechanics mirror OpenAI's own [CI/CD auth guide](https://developers.openai.com/codex/auth/ci-cd-auth).
+API-key auth (above) remains the documented default. If you'd rather drive Codex from a ChatGPT subscription instead of paying per token, herd supports two opt-in subscription paths. The mechanics mirror OpenAI's own [CI/CD auth guide](https://developers.openai.com/codex/auth/ci-cd-auth).
 
 In every subscription path, set `agent.provider: codex` and `agent.model: gpt-5-codex` in `.herdos.yml`.
 
@@ -151,11 +151,11 @@ For ChatGPT Enterprise workspaces:
 2. A user mints an agent-identity JWT.
 3. Set that JWT as `CODEX_ACCESS_TOKEN` **both** in the runner environment (`.env`) **and** as a repo/org GitHub Actions secret.
 
-This is the cleanest headless path: there is no refresh dance, and it is multi-replica safe because there is no per-replica state to keep in sync.
+This is the cleanest headless path: there is no refresh dance and no per-runner auth state to keep in sync, so it scales to any number of workers without coordination.
 
-##### Path B — Personal subscription (Plus/Pro/Team/Edu), single replica
+##### Path B — Personal subscription (Plus/Pro/Team/Edu)
 
-For a personal ChatGPT subscription on a single runner:
+For a personal ChatGPT subscription (Plus/Pro/Team/Edu):
 
 1. Run `codex login` on a trusted machine (or `codex login --device-auth` when the machine has no browser).
 2. Base64-encode the resulting credentials:
@@ -164,85 +164,48 @@ For a personal ChatGPT subscription on a single runner:
    base64 -w0 ~/.codex/auth.json
    ```
 
-3. Set the encoded value as `CODEX_AUTH_JSON` in the runner `.env`.
+3. Set the encoded value as a **single** `CODEX_AUTH_JSON` env var in the runner `.env` (the bare name — there are no `_1`/`_2`/… variants):
 
-On the first worker run, herd seeds the docker-volume-backed `~/.codex` from `CODEX_AUTH_JSON`; thereafter Codex refreshes the OAuth token in place inside that volume. A **docker volume on `~/.codex` is REQUIRED** — without it, rotated tokens are lost on every container restart and the chain breaks. The background keepalive (see below) keeps idle chains warm so they don't expire between batches.
-
-##### Path C — Personal subscription, N parallel replicas
-
-Two flavors, based on your tolerance for OpenAI's "one `auth.json` per runner" warning. Pick one; don't mix them.
-
-> **Rate-limit caveat (applies to both flavors)**: ChatGPT Pro/Team rate limits are **per account**, so N replicas do **not** multiply your LLM-call throughput. Extra replicas help only when tasks are wall-clock-bound on non-LLM work (builds, tests, I/O), not when they're bottlenecked on model calls.
-
-###### Path C-shared (recommended for personal use)
-
-One `codex login`, one `auth.json`, **all N replicas share the same docker volume**. Less setup, but OpenAI warns against it (the warning is about refresh-token races; in practice the failure is rare, automatic, and self-healing — see below).
-
-1. Log in **once**:
-   ```bash
-   codex login
-   ```
-2. Encode and set a **single** env var (NOT `_1`/`_2`/…):
    ```bash
    echo "CODEX_AUTH_JSON=$(base64 -w0 ~/.codex/auth.json)" >> .env
    ```
-3. Set `agent.codex_replicas: 1` in `.herdos.yml` so herd init generates a single worker service.
-4. Scale the worker at runtime via docker-compose:
-   ```bash
-   docker compose -f docker-compose.herd.yml up -d --scale worker=N
-   ```
-   All N containers mount the **same** `codex-auth` volume and share the same `auth.json`.
 
-> **Concurrency cap caveat**: with `agent.codex_replicas: 1`, herd's validation enforces `workers.max_concurrent <= 1`. To dispatch more than one worker at a time against the shared volume, override the validation by setting `workers.max_concurrent: N` after `herd init` (validation will reject the config; you'll need to invoke herd commands with the higher value via `.herdos.yml` edits that you re-apply after each `herd init`). A first-class `agent.codex_shared_volume: true` config field is a future enhancement.
+On the first worker run, herd seeds the docker-volume-backed `~/.codex` from `CODEX_AUTH_JSON`; thereafter Codex refreshes the OAuth token in place inside that volume. A **docker named volume on `~/.codex` is REQUIRED** — `herd init` renders a single `codex-auth` volume mounted at `/home/runner/.codex` for exactly this reason. Without it, rotated tokens are lost on every container restart and the chain breaks. The background keepalive (see [Keepalive](#keepalive) below) keeps idle chains warm so they don't expire between batches.
 
-What can go wrong with sharing one `auth.json`:
+###### Running N parallel workers
 
-- Codex refreshes the OAuth bundle when the access token is within 5 minutes of expiry (access tokens last ~1 hour), or when `last_refresh` is older than ~8 days. If two replica containers hit OpenAI's token endpoint in the same 5-minute window with the same `refresh_token`, one wins (gets `refresh_token_v2`) and the other gets a "refresh token already used" error.
-- The losing worker is in a self-healing state: on its next invocation, it reads the updated `auth.json` and finds `refresh_token_v2`, or its `access_token` is still fresh (refreshes fire 5 minutes before expiry, so the cached token usually has slack) and no refresh is needed at all.
-- Net effect: occasional auth blips that auto-recover on the next worker. For typical batch herd usage this is rare and forgiving; for sustained 24/7 high-concurrency workloads, Path C-strict is safer.
-- Keepalive in shared-volume mode: every container's entrypoint spawns its own `herd codex keepalive-loop`. They all observe the same on-disk `last_refresh` and most will skip — so N near-simultaneous keepalives in practice means at most one refresh per cadence. Acceptable, but if you want to be strict you can set `HERD_CODEX_KEEPALIVE_INTERVAL=8760h` (1 year — effectively disable) on N-1 of the replicas.
+To run more than one worker against your personal subscription, scale the single worker service — all N containers share the one `codex-auth` volume and therefore the one `auth.json`:
 
-###### Path C-strict (OpenAI's recommendation)
+```bash
+docker compose -f docker-compose.herd.yml up -d --scale worker=N
+```
 
-Each replica gets its own independent login → its own `auth.json` → its own docker volume. No race risk. Setup is more involved.
+> **Rate-limit caveat**: ChatGPT Plus/Pro/Team rate limits are **per account**, so N workers do **not** multiply your LLM-call throughput. Extra workers help only when tasks are wall-clock-bound on non-LLM work (builds, tests, I/O), not when they're bottlenecked on model calls.
 
-1. Create a `CODEX_HOME` directory for each replica **before** logging in (Codex refuses to run if `CODEX_HOME` doesn't exist):
-   ```bash
-   for i in 1 2 3; do
-     mkdir -p ~/codex-replica-$i
-     CODEX_HOME=~/codex-replica-$i codex login
-   done
-   ```
+Sharing one `auth.json` across N workers has a small, self-healing race window:
 
-   > **Browser-session caveat**: OpenAI's OAuth server deduplicates within a single browser session — running `codex login` N times against the same logged-in browser returns the **same** token each time. You must use a **fresh cookie jar per login**: either a separate incognito/private-window session per replica (close + reopen between each `codex login`), or N pre-created browser profiles (Chrome/Firefox profiles each have their own cookies). Without this you'll get N identical seeds and replicas 2..N will race on the same refresh token.
-
-2. Base64-encode each `auth.json` into `CODEX_AUTH_JSON_1` … `CODEX_AUTH_JSON_N`. Note: `CODEX_HOME` points at the codex config dir directly (no internal `.codex` subdir), so the file is at `~/codex-replica-$i/auth.json`:
-   ```bash
-   for i in 1 2 3; do
-     echo "CODEX_AUTH_JSON_$i=$(base64 -w0 ~/codex-replica-$i/auth.json)"
-   done >> .env
-   ```
-
-3. Set `agent.codex_replicas: N` in `.herdos.yml`.
-4. Run `herd init` to regenerate `docker-compose.herd.yml` with N worker services (`herd-worker-1` … `herd-worker-N`) and N named volumes (`codex-auth-1` … `codex-auth-N`).
+- Codex refreshes the OAuth bundle when the access token is within ~5 minutes of expiry (access tokens last ~1 hour). That ~5-minute vulnerable window sits inside each ~55-minute active period. If two containers hit OpenAI's token endpoint in that same window with the same `refresh_token`, one wins (gets `refresh_token_v2`) and the other gets a "refresh token already used" error.
+- This fails **at most one worker at a time**, and that worker self-heals on its next invocation: because the shared `auth.json` already holds the rotated tokens, it reads `refresh_token_v2` (or finds its cached `access_token` still fresh — refreshes fire ~5 minutes before expiry, so the cached token usually has slack — and skips the refresh entirely).
+- Net effect: occasional auth blips that auto-recover on the next worker. For typical batch herd usage this is rare and forgiving.
+- Keepalive with a shared volume: every container's entrypoint spawns its own `herd codex keepalive-loop`. They all observe the same on-disk `last_refresh` and most will skip — so N near-simultaneous keepalives in practice means at most one refresh per cadence. If you want to be strict you can set `HERD_CODEX_KEEPALIVE_INTERVAL=8760h` (1 year — effectively disable) on all but one worker.
 
 ##### Secret-routing rule (important)
 
-`CODEX_AUTH_JSON` / `CODEX_AUTH_JSON_N` must be set in the **runner container environment** (via the per-replica `docker-compose` service), **NOT** as GitHub Actions secrets surfaced in the worker workflow. The worker workflow only surfaces `CODEX_ACCESS_TOKEN`, because an Actions `env:` block unconditionally overrides container env — surfacing `CODEX_AUTH_JSON*` there would clobber the per-replica `auth.json` value that `docker-compose` injects. Only `CODEX_ACCESS_TOKEN` (Enterprise) and the API-key vars belong in GitHub secrets.
+`CODEX_AUTH_JSON` must be set in the **runner container environment** (via `docker-compose`), **NOT** as a GitHub Actions secret surfaced in the worker workflow. The worker workflow only surfaces `CODEX_ACCESS_TOKEN`, because an Actions `env:` block unconditionally overrides container env — surfacing `CODEX_AUTH_JSON` there would clobber the `auth.json` value that `docker-compose` injects. Only `CODEX_ACCESS_TOKEN` (Enterprise) and the API-key vars belong in GitHub secrets.
 
 ##### Recovery runbook
 
 The OAuth chain can break server-side — a password change, "log out everywhere", or an OpenAI session expiry will invalidate it. When that happens herd surfaces an auth error from the failing worker. To recover:
 
-1. Re-run `codex login` (N times if multi-replica).
-2. Update `CODEX_AUTH_JSON` / `CODEX_AUTH_JSON_N` with the new base64 value(s).
+1. Re-run `codex login`.
+2. Update `CODEX_AUTH_JSON` with the new base64 value.
 3. Restart the runner(s).
 
 Provisioning detects the `.herd-seed` mismatch on the next agent use and re-seeds the volume automatically — no force-seed flag exists or is needed.
 
 ##### Keepalive
 
-When any `CODEX_AUTH_JSON*` env var is set, the runner entrypoint spawns a `herd codex keepalive-loop` goroutine. It periodically triggers Codex's own refresh via a near-noop `codex exec`, keeping idle OAuth chains warm so they don't lapse between batches. The default cadence is **6 days** (a ~2-day buffer before Codex's ~8-day forced refresh) and is tunable via `HERD_CODEX_KEEPALIVE_INTERVAL`, a Go duration string (e.g. `144h`). Logs go to `/var/log/herd-codex-keepalive.log`. The keepalive is **not** spawned for API-key-only or Enterprise-only (`CODEX_ACCESS_TOKEN`) setups, which need no refresh.
+When `CODEX_AUTH_JSON` is set, the runner entrypoint spawns a `herd codex keepalive-loop` goroutine. It periodically triggers Codex's own refresh via a near-noop `codex exec`, keeping idle OAuth chains warm so they don't lapse between batches. The default cadence is **6 days** (a ~2-day buffer before Codex's ~8-day forced refresh) and is tunable via `HERD_CODEX_KEEPALIVE_INTERVAL`, a Go duration string (e.g. `144h`). Logs go to `/var/log/herd-codex-keepalive.log`. The keepalive is **not** spawned for API-key-only or Enterprise-only (`CODEX_ACCESS_TOKEN`) setups, which need no refresh.
 
 ##### OpenAI security warnings
 
@@ -252,7 +215,7 @@ OpenAI mandates both of these for subscription-auth CI/CD use:
 
 > Use one auth.json per runner or per serialized workflow stream. Do not share the same file across concurrent jobs or multiple machines.
 
-herd's multi-replica design satisfies the second: each replica has its own seed **and** its own docker volume, so no `auth.json` is shared across concurrent jobs.
+Running N workers against the single `codex-auth` volume shares one `auth.json`, which is what the second warning cautions against. herd makes this safe in practice through the self-healing refresh behavior described under [Running N parallel workers](#running-n-parallel-workers): a refresh-token race fails at most one worker at a time, and that worker recovers on its next invocation. For sustained 24/7 high-concurrency workloads where you want to honor the warning strictly, use ChatGPT Enterprise (`CODEX_ACCESS_TOKEN`, Path A), which has no shared per-runner auth state.
 
 ## 3. GitHub Actions Settings
 
