@@ -37,4 +37,12 @@ func TestPublishRunnerWorkflow_Rendered(t *testing.T) {
 	// GitHub expressions must be rendered as literal ${{ ... }}, not Go template actions.
 	assert.NotContains(t, rendered, "{{`", "template escaping should be fully resolved")
 	assert.Contains(t, rendered, "${{ github.repository_owner }}")
+
+	// The `release: types: [published]` trigger was removed because GitHub
+	// silently blocks events caused by the default GITHUB_TOKEN (which
+	// creates the release) from cascading into other workflows, so the
+	// trigger never fired in practice. The workflow now runs only on
+	// workflow_dispatch and on push to Dockerfile.herd_runner.
+	assert.NotContains(t, rendered, "types: [published]", "broken release trigger should not be present")
+	assert.NotContains(t, rendered, "release:", "broken release trigger should not be present")
 }

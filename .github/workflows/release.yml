@@ -96,6 +96,46 @@ jobs:
             -t ghcr.io/herd-os/herd-runner-base:latest \
             --push .
 
+  # Rebuilds this repo's own customized runner image (Dockerfile.herd_runner)
+  # on every tag, after publish-base-image has pushed the matching base. The
+  # `--pull` flag forces buildx to fetch the just-pushed base rather than reuse
+  # a cached layer, so the wrapper always picks up base-image changes that
+  # landed in the same release (e.g. a new agent CLI baked into images/base/).
+  # Previously this lived in herd-publish-runner.yml with a `release:
+  # types: [published]` trigger, which never fired because the GitHub Release
+  # is created by GITHUB_TOKEN and GitHub blocks GITHUB_TOKEN-triggered events
+  # from cascading into other workflows.
+  publish-runner-image:
+    needs: publish-base-image
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push runner image
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE=ghcr.io/${OWNER}/${REPO}-herd-runner
+          docker buildx build \
+            --pull \
+            --platform linux/amd64,linux/arm64 \
+            -f Dockerfile.herd_runner \
+            -t ${IMAGE}:${VERSION} \
+            -t ${IMAGE}:latest \
+            --push .
+
   # self-init: regenerates herd-managed files (workflows, runner Dockerfile/base,
   # entrypoint, docker-compose, .env.example) on every release by running the
   # just-built `herd init --skip-labels` against this repo. If herd init produces
