@@ -13,12 +13,13 @@
 
 FROM {{.BaseImage}}
 
-# The base image runs as the 'runner' user. Switch to root to install
-# packages, then switch back when done.
+# The base image starts as root so its entrypoint can optionally remap the
+# runner UID/GID via RUNNER_UID / RUNNER_GID env vars before dropping
+# privileges via gosu. Keep this Dockerfile root-ending — do NOT add a
+# trailing `USER runner` directive, or the entrypoint will skip the remap
+# path entirely (it preserves backward compat by detecting non-root start).
 USER root
 
 # Examples — uncomment what your project needs:
 #
 # RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
-
-USER runner

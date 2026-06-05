@@ -11,4 +11,5 @@ RUN apt-get update && apt-get install -y golang-go && rm -rf /var/lib/apt/lists/
 # golangci-lint
 RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 
-USER runner
+# Intentionally root-ending — see the base image's ENTRYPOINT comment. The
+# entrypoint will drop to runner (or RUNNER_UID/RUNNER_GID) via gosu.
