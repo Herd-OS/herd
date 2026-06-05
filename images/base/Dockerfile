@@ -28,11 +28,20 @@ RUN npm config set prefix /home/runner/.npm-global \
     && npm install -g --no-audit --no-fund @openai/codex
 
 # Pin the runner UID/GID at build time so the image's owned paths have a
-# deterministic owner. The entrypoint can remap to a different UID/GID at
-# container start via the RUNNER_UID / RUNNER_GID env vars — see
-# entrypoint.herd.sh and docs/runners.md ("Matching host UID/GID").
-RUN groupadd -g 1000 runner \
-    && useradd -m -d /home/runner -u 1000 -g 1000 runner \
+# deterministic owner that matches every previously-published version of
+# this image. The entrypoint can remap to a different UID/GID at container
+# start via the RUNNER_UID / RUNNER_GID env vars — see entrypoint.herd.sh
+# and docs/runners.md ("Matching host UID/GID").
+#
+# UID/GID 1001 (NOT 1000): ubuntu:24.04 ships with a default `ubuntu` user
+# already at UID/GID 1000, and the previous image used `useradd` without
+# `-u`, so runner has historically been 1001:1001 (the next free slot). We
+# keep 1001 here to preserve backward compatibility — bind mounts and
+# named volumes (notably codex-auth) created by older containers are
+# chowned to 1001 on the host, and changing the default would break those
+# without a manual chown step.
+RUN groupadd -g 1001 runner \
+    && useradd -m -d /home/runner -u 1001 -g 1001 runner \
     && chown -R runner:runner /runner /opt/herd /home/runner
 
 WORKDIR /runner

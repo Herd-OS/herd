@@ -1,10 +1,11 @@
 name: Herd Publish Runner Image
 on:
+  # Manual-only by design. Tag-driven rebuilds happen via the
+  # publish-runner-image job in release.yml (see #711). A push trigger on
+  # `Dockerfile.herd_runner` would cause a second wrapper-image build for
+  # any release that also touches the file — see #713 for the
+  # discussion.
   workflow_dispatch:
-  push:
-    paths:
-      - 'Dockerfile.herd_runner'
-    branches: [ main ]
 
 permissions:
   contents: read

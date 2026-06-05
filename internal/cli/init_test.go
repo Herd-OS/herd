@@ -249,7 +249,7 @@ func TestCreateRunnerFiles(t *testing.T) {
 	assert.Contains(t, string(env), "CLAUDE_CODE_OAUTH_TOKEN=")
 	assert.Contains(t, string(env), "ANTHROPIC_API_KEY=")
 	// RUNNER_UID / RUNNER_GID must be documented (commented out by default so
-	// the build-time 1000:1000 stays the no-config behavior).
+	// the build-time 1001:1001 stays the no-config behavior).
 	assert.Contains(t, string(env), "# RUNNER_UID=")
 	assert.Contains(t, string(env), "# RUNNER_GID=")
 }

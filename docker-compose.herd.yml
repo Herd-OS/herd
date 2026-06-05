@@ -19,7 +19,7 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - REPO_URL=https://github.com/Herd-OS/herd
       - RUNNER_LABELS=herd-worker
-      # Optional UID/GID remap — see .env.herd.example. Defaults to 1000/1000
+      # Optional UID/GID remap — see .env.herd.example. Defaults to 1001/1001
       # (the image's build-time UID/GID) when unset.
       - RUNNER_UID=${RUNNER_UID:-}
       - RUNNER_GID=${RUNNER_GID:-}
