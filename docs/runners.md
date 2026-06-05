@@ -4,6 +4,15 @@ HerdOS workers run as GitHub Actions on self-hosted runners. Self-hosted runners
 
 `herd init` generates all the files you need: `Dockerfile.herd_runner`, `docker-compose.herd.yml`, and `.env.herd.example`.
 
+## Deployment options
+
+There are two supported ways to run the runner containers. Both produce identical runners — same image, same env vars, same volume requirements — so pick by lifecycle and tooling preference:
+
+- **Docker Compose** (covered in [Quick Setup](#quick-setup) below) — the simplest path for getting started, local development, and most single-machine setups. `herd init` generates `docker-compose.herd.yml` for you.
+- **Direct `docker run`** (covered in [Running runners directly with `docker run`](#running-runners-directly-with-docker-run) below) — useful when you want to manage container lifecycle some other way (systemd, a NAS appliance's container runtime, a private orchestrator, etc.).
+
+Subsequent sections assume Docker Compose for command examples, but every step has a `docker run` equivalent — credentials in `.env`, named volume for `~/.codex`, restart policy on the container.
+
 ## Quick Setup
 
 ```bash
@@ -18,6 +27,50 @@ gh variable set HERD_ENABLED --body true --repo <owner>/<repo>
 ```
 
 Three runners start by default (configurable in `docker-compose.herd.yml`). Workflows are inactive until `HERD_ENABLED` is set — this prevents a workflow storm from queued events firing before runners are ready.
+
+Prefer `docker run` directly? See [Running runners directly with `docker run`](#running-runners-directly-with-docker-run) for the equivalent commands.
+
+## Running runners directly with `docker run`
+
+If you'd rather not use Docker Compose — common reason: you're running on a NAS appliance, behind systemd, or under a private orchestrator — the same `Dockerfile.herd_runner` runs identically with plain `docker run`. The image, env vars, and volume requirements are the same as the Compose path; you're just supplying them to the Docker CLI directly.
+
+```bash
+# 1. Build the customized runner image (equivalent to `docker compose build`):
+docker build -t herd-runner -f Dockerfile.herd_runner .
+
+# 2. Run one container (equivalent to one replica of the compose `worker` service):
+docker run -d \
+  --name herd-worker-1 \
+  --restart unless-stopped \
+  --env-file .env \
+  -v codex-auth:/home/runner/.codex \
+  herd-runner
+
+# 3. Run N parallel containers (equivalent to `up -d --scale worker=N`):
+for i in 1 2 3; do
+  docker run -d \
+    --name herd-worker-$i \
+    --restart unless-stopped \
+    --env-file .env \
+    -v codex-auth:/home/runner/.codex \
+    herd-runner
+done
+
+# 4. Stop / remove a container:
+docker stop herd-worker-1 && docker rm herd-worker-1
+
+# 5. Restart (e.g., to pick up a fresh herd binary after a release):
+docker restart herd-worker-1
+```
+
+Notes:
+
+- **`--env-file .env`** reads the same file Docker Compose does, so the credential setup is identical between the two paths. AI provider auth, `GITHUB_TOKEN`, and the Codex subscription vars all live in `.env` either way (see [Agent Authentication](#2-agent-authentication) below).
+- **`-v codex-auth:/home/runner/.codex`** uses a Docker named volume to persist Codex subscription state across container restarts. If you're not using the Codex subscription auth path, the volume is still harmless to mount and is created lazily by Docker on first use.
+- **`--restart unless-stopped`** mirrors the `restart: always` policy in the generated Compose file. After each ephemeral job, the runner exits and Docker restarts it; the entrypoint re-registers with GitHub for the next job.
+- **Container names matter** when scaling: each runner needs a unique name (which becomes its registered name on GitHub). The `--name herd-worker-$i` pattern above gives you stable, predictable names.
+
+`Dockerfile.herd_runner` is the same file `herd init` generated for Docker Compose — no separate "direct mode" Dockerfile to maintain. Updates to it (e.g., extra `RUN apt-get install` lines for project-specific tools) take effect on the next `docker build`.
 
 ## 1. GitHub Token
 
@@ -62,7 +115,7 @@ The same token works for both. `HERD_GITHUB_TOKEN` is needed because GitHub's au
 
 Authentication depends on which `agent.provider` is configured in `.herdos.yml` (see [configuration.md](configuration.md#agent-providers)).
 
-> **AI provider auth env vars (Claude, OpenCode, Codex, Gemini) belong only in the runner's `.env`, not in GitHub Actions secrets.** The worker workflow's `env:` block would override container env unconditionally — surfacing these from secrets either no-ops or shadow-overrides your `.env` value at the step level. The runner container reads them from `.env` via `docker-compose` at startup; the workflow inherits them from the runner process.
+> **AI provider auth env vars (Claude, OpenCode, Codex, Gemini) belong only in the runner's `.env`, not in GitHub Actions secrets.** The worker workflow's `env:` block would override container env unconditionally — surfacing these from secrets either no-ops or shadow-overrides your `.env` value at the step level. The runner container reads them from `.env` at startup (via `docker-compose`'s automatic `env_file` or `docker run --env-file .env`); the workflow inherits them from the runner process.
 
 ### Claude provider (`agent.provider: claude`)
 
@@ -271,7 +324,7 @@ The base image's entrypoint script handles runner lifecycle:
 5. Starts the runner in ephemeral mode (picks up one job, then deregisters)
 6. On SIGTERM/SIGINT, deregisters cleanly
 
-The `docker-compose.herd.yml` runs the worker service with `restart: always`, so after each job completes the container restarts and re-registers for the next job.
+The runner container is started with a restart-always policy (`restart: always` in `docker-compose.herd.yml`, or `--restart unless-stopped` if you're running with [direct `docker run`](#running-runners-directly-with-docker-run)) so after each job completes the container restarts and re-registers for the next job.
 
 ### Project-specific overrides
 
@@ -349,13 +402,30 @@ docker compose -f docker-compose.herd.yml up -d --scale worker=5
 #   replicas: 5
 ```
 
+### Direct `docker run`
+
+Start N containers with unique names — each becomes a separately registered runner:
+
+```bash
+for i in 1 2 3 4 5; do
+  docker run -d \
+    --name herd-worker-$i \
+    --restart unless-stopped \
+    --env-file .env \
+    -v codex-auth:/home/runner/.codex \
+    herd-runner
+done
+```
+
+See [Running runners directly with `docker run`](#running-runners-directly-with-docker-run) for the full command shape and notes.
+
 ### Concurrency control
 
 `workers.max_concurrent` in `.herdos.yml` controls how many workers HerdOS dispatches simultaneously. This is independent of how many runners you have — if you have 5 runners but `max_concurrent: 3`, only 3 will be active at once.
 
 ### Runner labels
 
-`workers.runner_label` in `.herdos.yml` must match the `RUNNER_LABELS` environment variable in `docker-compose.herd.yml`. Default is `herd-worker`. Use different labels to route heavy tasks to specific runners (e.g., `herd-gpu`).
+`workers.runner_label` in `.herdos.yml` must match the `RUNNER_LABELS` environment variable on the runner container (set in `docker-compose.herd.yml`, or via `-e RUNNER_LABELS=…` / `.env` for direct `docker run`). Default is `herd-worker`. Use different labels to route heavy tasks to specific runners (e.g., `herd-gpu`).
 
 ## 8. Cloud Runners
 
@@ -431,7 +501,7 @@ See [configuration.md](configuration.md) for the full field reference.
 | Problem | Cause | Fix |
 |---------|-------|-----|
 | Runner not picking up jobs | Label mismatch | Ensure `RUNNER_LABELS` matches `workers.runner_label` in `.herdos.yml` |
-| Runner exits after one job | Expected | Ephemeral mode — `docker-compose` restarts it automatically |
+| Runner exits after one job | Expected | Ephemeral mode — Docker's restart policy (`restart: always` in Compose, `--restart unless-stopped` for direct `docker run`) brings it back automatically |
 | "Must not run with sudo" | Running as root | The Dockerfile creates a non-root `runner` user — don't override `USER` |
 | Agent not found | Not installed | Ensure the configured agent CLI is in the Docker image — the base image installs both (`npm install -g @anthropic-ai/claude-code` and `npm install -g opencode-ai`) |
 | 403 on PR creation | Org setting | Enable "Allow GitHub Actions to create and approve pull requests" in org settings |

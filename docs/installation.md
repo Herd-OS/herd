@@ -117,10 +117,16 @@ You can preview what would change first with `herd init --check`, which re-rende
 
 ### Update runner containers
 
-Runner containers automatically download the latest herd binary on startup. Just restart them:
+Runner containers automatically download the latest herd binary on startup. Just restart them — for Docker Compose:
 
 ```bash
 docker compose -f docker-compose.herd.yml restart
+```
+
+Or, if you started the runners with [direct `docker run`](runners.md#running-runners-directly-with-docker-run):
+
+```bash
+docker restart herd-worker-1 herd-worker-2 herd-worker-3
 ```
 
 To pin a specific version, set `HERD_VERSION` in `.env`:
