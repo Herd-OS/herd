@@ -23,8 +23,7 @@ var passEnv = []string{
 	"GITHUB_TOKEN",
 	"GH_TOKEN",
 	"HERD_GITHUB_TOKEN",
-	// Codex subscription auth (opt-in). Only the bare CODEX_AUTH_JSON is forwarded;
-	// provisionCodexAuth reads CODEX_AUTH_JSON via os.Getenv at the herd plan path.
+	// Codex subscription auth (opt-in). Only the bare CODEX_AUTH_JSON is forwarded.
 	"CODEX_AUTH_JSON",
 	"CODEX_ACCESS_TOKEN",
 	"CODEX_HOME",

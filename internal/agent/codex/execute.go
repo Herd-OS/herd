@@ -26,10 +26,6 @@ import (
 // Note: Codex has no --max-turns flag; opts.MaxTurns is ignored for this
 // provider (mirroring opencode).
 func (c *CodexAgent) Execute(ctx context.Context, task agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
-	if err := ensureProvisioned(); err != nil {
-		return nil, fmt.Errorf("codex auth provisioning: %w", err)
-	}
-
 	taskPrompt := task.Body
 	if opts.SystemPrompt != "" {
 		taskPrompt = opts.SystemPrompt
