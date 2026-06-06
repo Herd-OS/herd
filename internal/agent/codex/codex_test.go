@@ -217,36 +217,58 @@ func TestBuildExecBaseArgs(t *testing.T) {
 	}
 }
 
-func TestChildEnv_MapsOpenAIKeyWhenCodexUnset(t *testing.T) {
-	t.Setenv("CODEX_API_KEY", "")
-	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
+func TestChildEnv_AuthPrecedence(t *testing.T) {
+	tests := []struct {
+		name           string
+		codexAPIKey    string
+		openAIAPIKey   string
+		writeAuthJSON  bool
+		wantCodexValue string
+	}{
+		{
+			name:           "explicit codex key wins even with auth.json",
+			codexAPIKey:    "sk-codex-explicit",
+			openAIAPIKey:   "sk-openai-123",
+			writeAuthJSON:  true,
+			wantCodexValue: "sk-codex-explicit",
+		},
+		{
+			name:           "auth.json present blocks openai mapping",
+			codexAPIKey:    "",
+			openAIAPIKey:   "sk-openai-123",
+			writeAuthJSON:  true,
+			wantCodexValue: "",
+		},
+		{
+			name:           "no auth.json maps openai key (api-key user convenience)",
+			codexAPIKey:    "",
+			openAIAPIKey:   "sk-openai-123",
+			writeAuthJSON:  false,
+			wantCodexValue: "sk-openai-123",
+		},
+		{
+			name:           "no keys, no mapping regardless of auth.json",
+			codexAPIKey:    "",
+			openAIAPIKey:   "",
+			writeAuthJSON:  true,
+			wantCodexValue: "",
+		},
+	}
 
-	env := childEnv()
-
-	// CODEX_API_KEY must be appended with the OPENAI_API_KEY value. Because the
-	// mapping appends, the LAST CODEX_API_KEY entry wins in the child process.
-	got := lastEnvValue(env, "CODEX_API_KEY")
-	assert.Equal(t, "sk-openai-123", got)
-}
-
-func TestChildEnv_PreservesExplicitCodexKey(t *testing.T) {
-	t.Setenv("CODEX_API_KEY", "sk-codex-explicit")
-	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
-
-	env := childEnv()
-
-	got := lastEnvValue(env, "CODEX_API_KEY")
-	assert.Equal(t, "sk-codex-explicit", got,
-		"explicit CODEX_API_KEY must be preserved, not overwritten by OPENAI_API_KEY")
-}
-
-func TestChildEnv_NoKeysNoMapping(t *testing.T) {
-	t.Setenv("CODEX_API_KEY", "")
-	t.Setenv("OPENAI_API_KEY", "")
-
-	env := childEnv()
-	assert.Equal(t, "", lastEnvValue(env, "CODEX_API_KEY"),
-		"with neither key set, no CODEX_API_KEY should be added")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			codexHome := t.TempDir()
+			t.Setenv("CODEX_HOME", codexHome)
+			t.Setenv("CODEX_API_KEY", tc.codexAPIKey)
+			t.Setenv("OPENAI_API_KEY", tc.openAIAPIKey)
+			if tc.writeAuthJSON {
+				require.NoError(t, os.WriteFile(
+					filepath.Join(codexHome, "auth.json"),
+					[]byte(`{"tokens":{}}`), 0o600))
+			}
+			assert.Equal(t, tc.wantCodexValue, lastEnvValue(childEnv(), "CODEX_API_KEY"))
+		})
+	}
 }
 
 // lastEnvValue returns the value of the last NAME=value entry in env for the
