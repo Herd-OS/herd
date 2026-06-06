@@ -50,6 +50,32 @@ func writeFakeCodex(t *testing.T, outputContent, stdoutLine string, exitCode int
 	return binary, argvDump, envDump
 }
 
+// writeFakeInteractiveCodex creates an executable shell script that mimics the
+// interactive `codex` CLI for tests. Like writeFakeCodex it records argv
+// (NUL-separated) to argvDump and its environment (newline-separated) to
+// envDump. Because the interactive path passes the output file path via the
+// HERD_PLAN_OUT env var rather than the --output-last-message flag, this fake
+// writes outputContent to "$HERD_PLAN_OUT" when that variable is non-empty.
+func writeFakeInteractiveCodex(t *testing.T, outputContent string, exitCode int) (binary, argvDump, envDump string) {
+	t.Helper()
+	dir := t.TempDir()
+	argvDump = filepath.Join(dir, "argv.bin")
+	envDump = filepath.Join(dir, "env.txt")
+	binary = filepath.Join(dir, "codex.sh")
+
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString(fmt.Sprintf("printf '%%s\\0' \"$@\" > '%s'\n", argvDump))
+	b.WriteString(fmt.Sprintf("env > '%s'\n", envDump))
+	if outputContent != "" {
+		b.WriteString(fmt.Sprintf("if [ -n \"$HERD_PLAN_OUT\" ]; then printf '%%s' '%s' > \"$HERD_PLAN_OUT\"; fi\n", outputContent))
+	}
+	b.WriteString(fmt.Sprintf("exit %d\n", exitCode))
+
+	require.NoError(t, os.WriteFile(binary, []byte(b.String()), 0o755))
+	return binary, argvDump, envDump
+}
+
 // readArgvDump reads a NUL-separated argv dump written by the fake codex
 // binary and returns the argv as a slice.
 func readArgvDump(t *testing.T, path string) []string {

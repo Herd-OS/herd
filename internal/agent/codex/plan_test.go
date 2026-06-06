@@ -92,7 +92,9 @@ func TestPlan_UsesTempFileWhenNoOutputPath(t *testing.T) {
 	binary, argvDump, _ := writeFakeCodex(t, fakePlanJSON, "", 0)
 
 	a := NewAgent(binary, "", "")
-	plan, err := a.Plan(context.Background(), "", agent.PlanOptions{
+	// A non-empty initialPrompt keeps Plan on the headless path, which is where
+	// the temp-file allocation lives.
+	plan, err := a.Plan(context.Background(), "plan a feature", agent.PlanOptions{
 		RepoRoot: t.TempDir(),
 		Context:  map[string]string{},
 	})
@@ -110,4 +112,61 @@ func TestPlan_UsesTempFileWhenNoOutputPath(t *testing.T) {
 		}
 	}
 	assert.NotEmpty(t, outPath, "Plan must allocate a temp output file when OutputPath is empty")
+}
+
+func TestPlan_EmptyInitialPromptUsesInteractive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+
+	repoRoot := t.TempDir()
+	outputPath := filepath.Join(repoRoot, "plan.json")
+	binary, argvDump, envDump := writeFakeInteractiveCodex(t, fakePlanJSON, 0)
+
+	a := NewAgent(binary, "", "")
+	plan, err := a.Plan(context.Background(), "", agent.PlanOptions{
+		RepoRoot:   repoRoot,
+		OutputPath: outputPath,
+		Context:    map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	assert.Equal(t, "codex-batch", plan.BatchName)
+
+	argv := readArgvDump(t, argvDump)
+	// Interactive mode must NOT use the exec subcommand or headless
+	// structured-output flags.
+	require.NotEmpty(t, argv)
+	assert.NotEqual(t, "exec", argv[0], "interactive plan must not invoke `codex exec`")
+	assert.NotContains(t, argv, "--output-schema")
+	assert.NotContains(t, argv, "--output-last-message")
+
+	// The output path must be handed to the child via HERD_PLAN_OUT.
+	env := readEnvDump(t, envDump)
+	assert.Equal(t, outputPath, env["HERD_PLAN_OUT"])
+}
+
+func TestPlan_NonEmptyInitialPromptStaysHeadless(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+
+	repoRoot := t.TempDir()
+	outputPath := filepath.Join(repoRoot, "plan.json")
+	binary, argvDump, _ := writeFakeCodex(t, fakePlanJSON, "", 0)
+
+	a := NewAgent(binary, "", "")
+	plan, err := a.Plan(context.Background(), "add a feature", agent.PlanOptions{
+		RepoRoot:   repoRoot,
+		OutputPath: outputPath,
+		Context:    map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+
+	argv := readArgvDump(t, argvDump)
+	require.NotEmpty(t, argv)
+	assert.Equal(t, "exec", argv[0], "non-empty initialPrompt must use headless `codex exec`")
+	assert.True(t, argvHasFlagValue(argv, "--output-last-message", outputPath))
+	assert.Contains(t, argv, "--output-schema")
 }
