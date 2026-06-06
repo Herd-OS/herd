@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -109,22 +108,4 @@ func Validate(cfg *Config) *ValidationError {
 		return ve
 	}
 	return nil
-}
-
-// CodexSubscriptionEnvSet reports whether any CODEX_AUTH_JSON or
-// CODEX_AUTH_JSON_<n> env var is present (non-empty after trimming). A set
-// value signals ChatGPT-subscription auth, which requires one auth.json per
-// runner; an empty environment signals plain API-key auth, which has no
-// shared-auth.json constraint.
-func CodexSubscriptionEnvSet() bool {
-	for _, kv := range os.Environ() {
-		name, val, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		if (name == "CODEX_AUTH_JSON" || strings.HasPrefix(name, "CODEX_AUTH_JSON_")) && strings.TrimSpace(val) != "" {
-			return true
-		}
-	}
-	return false
 }

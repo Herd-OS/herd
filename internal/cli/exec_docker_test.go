@@ -146,7 +146,6 @@ func TestPassEnv_ContainsCodexSubscriptionVars(t *testing.T) {
 	assert.Equal(t, 1, codexAPIKeyCount, "CODEX_API_KEY must appear exactly once: %v", passEnv)
 
 	want := []string{
-		"CODEX_AUTH_JSON",
 		"CODEX_ACCESS_TOKEN",
 		"CODEX_HOME",
 		"HERD_CODEX_KEEPALIVE_INTERVAL",
@@ -154,12 +153,8 @@ func TestPassEnv_ContainsCodexSubscriptionVars(t *testing.T) {
 	for _, k := range want {
 		assert.Contains(t, passEnv, k, "passEnv must include %s", k)
 	}
-	// The indexed per-replica variants must NOT be forwarded:
-	// only bare CODEX_AUTH_JSON is read at the herd plan --exec docker path.
-	for i := 1; i <= 16; i++ {
-		k := fmt.Sprintf("CODEX_AUTH_JSON_%d", i)
-		assert.NotContains(t, passEnv, k, "passEnv must not include %s", k)
-	}
+	// CODEX_AUTH_JSON was dropped from the passthrough; it must not be forwarded.
+	assert.NotContains(t, passEnv, "CODEX_AUTH_JSON", "passEnv must not include the removed CODEX_AUTH_JSON")
 }
 
 func TestBuildDockerExecCmd_GHConfigMountSkippedWhenMissing(t *testing.T) {
