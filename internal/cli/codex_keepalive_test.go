@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,13 +101,13 @@ func TestKeepalive_CodexHome(t *testing.T) {
 	})
 }
 
-func TestEntrypoint_SpawnsKeepaliveWhenSubscriptionEnvSet(t *testing.T) {
+func TestEntrypoint_SpawnsKeepaliveWhenAuthJsonPresent(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "images", "base", "entrypoint.herd.sh"))
 	require.NoError(t, err)
 	script := string(data)
 
-	guard := `env | grep -qE '^CODEX_AUTH_JSON=.'`
-	assert.Contains(t, script, guard, "entrypoint must guard on a non-empty CODEX_AUTH_JSON env var")
+	guard := `[ -f /home/runner/.codex/auth.json ]`
+	assert.Contains(t, script, guard, "entrypoint must guard on the presence of ~/.codex/auth.json")
 	assert.Contains(t, script, "herd codex keepalive-loop",
 		"entrypoint must spawn the keepalive loop")
 
@@ -120,85 +119,43 @@ func TestEntrypoint_SpawnsKeepaliveWhenSubscriptionEnvSet(t *testing.T) {
 		"keepalive guard block must appear before 'exec ./run.sh'")
 }
 
-// TestEntrypoint_KeepaliveGuardSemantics exercises the actual grep pattern from
-// the entrypoint against representative environments. This catches the
-// empty-value case that the compose template always renders (CODEX_AUTH_JSON=)
-// which the textual guard-string check cannot detect.
-func TestEntrypoint_KeepaliveGuardSemantics(t *testing.T) {
+// TestEntrypoint_KeepaliveGuardIsOnDiskCheck asserts the keepalive guard is an
+// on-disk file check rather than the old CODEX_AUTH_JSON env grep.
+func TestEntrypoint_KeepaliveGuardIsOnDiskCheck(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "images", "base", "entrypoint.herd.sh"))
 	require.NoError(t, err)
-	guard := extractKeepaliveGuardPattern(t, string(data))
+	script := string(data)
+	// New guard is an on-disk file check, not an env grep.
+	assert.Contains(t, script, "[ -f /home/runner/.codex/auth.json ]",
+		"entrypoint must guard the keepalive on the presence of auth.json")
+	assert.NotContains(t, script, "grep -qE '^CODEX_AUTH_JSON",
+		"the old CODEX_AUTH_JSON env guard must be gone")
+}
 
+// TestEntrypoint_AuthJsonGuardSemantics exercises the actual `[ -f ... ]` shell
+// condition for the present and absent cases to confirm both branches behave.
+func TestEntrypoint_AuthJsonGuardSemantics(t *testing.T) {
 	tests := []struct {
 		name      string
-		env       []string
+		create    bool
 		wantMatch bool
 	}{
-		{
-			name:      "unset — var absent entirely",
-			env:       []string{"PATH=/usr/bin"},
-			wantMatch: false,
-		},
-		{
-			name:      "empty — compose renders CODEX_AUTH_JSON= when unset",
-			env:       []string{"CODEX_AUTH_JSON="},
-			wantMatch: false,
-		},
-		{
-			name:      "non-empty subscription seed",
-			env:       []string{"CODEX_AUTH_JSON=eyAidG9rZW4iOiAiYWJjIiB9"},
-			wantMatch: true,
-		},
-		{
-			name:      "non-bare var starting with CODEX_AUTH_JSON does not match",
-			env:       []string{"CODEX_AUTH_JSONX=seed"},
-			wantMatch: false,
-		},
-		{
-			name:      "only enterprise access token set",
-			env:       []string{"CODEX_ACCESS_TOKEN=tok", "CODEX_AUTH_JSON="},
-			wantMatch: false,
-		},
+		{name: "auth.json present -> guard matches", create: true, wantMatch: true},
+		{name: "auth.json absent -> guard does not match", create: false, wantMatch: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matched := runGuardPattern(t, guard, tt.env)
+			dir := t.TempDir()
+			authFile := filepath.Join(dir, "auth.json")
+			if tt.create {
+				require.NoError(t, os.WriteFile(authFile, []byte("{}"), 0o600))
+			}
+			cmd := exec.Command("test", "-f", authFile)
+			err := cmd.Run()
+			matched := err == nil
 			assert.Equal(t, tt.wantMatch, matched)
 		})
 	}
-}
-
-// extractKeepaliveGuardPattern pulls the `grep -qE '<pattern>'` argument out of
-// the entrypoint's keepalive guard line so the test runs the real pattern.
-func extractKeepaliveGuardPattern(t *testing.T, script string) string {
-	t.Helper()
-	const marker = `grep -qE '`
-	start := strings.Index(script, marker)
-	require.NotEqual(t, -1, start, "entrypoint must use grep -qE for the keepalive guard")
-	rest := script[start+len(marker):]
-	end := strings.IndexByte(rest, '\'')
-	require.NotEqual(t, -1, end, "keepalive guard pattern must be single-quoted")
-	return rest[:end]
-}
-
-// runGuardPattern feeds env (one VAR=VALUE per line) into `grep -qE <pattern>`
-// and reports whether grep matched (exit 0).
-func runGuardPattern(t *testing.T, pattern string, env []string) bool {
-	t.Helper()
-	cmd := exec.Command("grep", "-qE", pattern)
-	cmd.Stdin = strings.NewReader(strings.Join(env, "\n") + "\n")
-	err := cmd.Run()
-	if err == nil {
-		return true
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		// grep exits 1 on no match — a clean "no match", not a test failure.
-		require.Equal(t, 1, exitErr.ExitCode(), "grep failed unexpectedly: %v", err)
-		return false
-	}
-	require.NoError(t, err, "running grep guard pattern")
-	return false
 }
 
 func TestKeepalive_ExitsOnContextCancel(t *testing.T) {

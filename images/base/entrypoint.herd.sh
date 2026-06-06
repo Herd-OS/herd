@@ -75,11 +75,12 @@ fi
   --ephemeral \
   --unattended
 
-# Keep the Codex OAuth chain warm if subscription auth is configured.
-# Skipped for Enterprise (CODEX_ACCESS_TOKEN only — no refresh needed) and
-# API-key (no expiry) setups. The pattern requires a non-empty value so the
-# compose-rendered `CODEX_AUTH_JSON=` (empty when unset) does not trigger it.
-if env | grep -qE '^CODEX_AUTH_JSON=.'; then
+# Keep the Codex OAuth chain warm if subscription auth is in use. Detected by
+# the presence of ~/.codex/auth.json, which `codex login` writes into the
+# persistent codex-auth volume. Skipped for Enterprise (CODEX_ACCESS_TOKEN
+# only — no refresh needed) and API-key (no expiry) setups, which have no
+# auth.json.
+if [ -f /home/runner/.codex/auth.json ]; then
   /opt/herd/bin/herd codex keepalive-loop \
     >>/var/log/herd-codex-keepalive.log 2>&1 &
 fi
