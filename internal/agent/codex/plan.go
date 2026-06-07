@@ -57,22 +57,11 @@ func (c *CodexAgent) planHeadless(ctx context.Context, systemPrompt, initialProm
 		combined += "\n\n" + initialPrompt
 	}
 
-	schemaFile, err := writeSchemaFile("plan.json")
+	schemaFile, outFile, cleanup, err := c.allocatePlanArtifacts(opts)
 	if err != nil {
-		return nil, fmt.Errorf("plan: writing schema file: %w", err)
+		return nil, err
 	}
-	defer func() { _ = os.Remove(schemaFile) }()
-
-	outFile := opts.OutputPath
-	if outFile == "" {
-		f, ferr := os.CreateTemp("", "codex-plan-*.json")
-		if ferr != nil {
-			return nil, fmt.Errorf("plan: creating output temp file: %w", ferr)
-		}
-		outFile = f.Name()
-		_ = f.Close()
-		defer func() { _ = os.Remove(outFile) }()
-	}
+	defer cleanup()
 
 	args := c.buildExecBaseArgs()
 	args = append(args, "--output-schema", schemaFile, "--output-last-message", outFile, combined)
@@ -108,22 +97,11 @@ func (c *CodexAgent) planHeadless(ctx context.Context, systemPrompt, initialProm
 // read back with prompt.ReadPlanFile; a missing/empty file surfaces as an error
 // (the user likely exited without finalizing).
 func (c *CodexAgent) planInteractive(ctx context.Context, systemPrompt string, opts agent.PlanOptions) (*agent.Plan, error) {
-	schemaFile, err := writeSchemaFile("plan.json")
+	schemaFile, outFile, cleanup, err := c.allocatePlanArtifacts(opts)
 	if err != nil {
-		return nil, fmt.Errorf("plan: writing schema file: %w", err)
+		return nil, err
 	}
-	defer func() { _ = os.Remove(schemaFile) }()
-
-	outFile := opts.OutputPath
-	if outFile == "" {
-		f, ferr := os.CreateTemp("", "codex-plan-*.json")
-		if ferr != nil {
-			return nil, fmt.Errorf("plan: creating output temp file: %w", ferr)
-		}
-		outFile = f.Name()
-		_ = f.Close()
-		defer func() { _ = os.Remove(outFile) }()
-	}
+	defer cleanup()
 
 	seed := systemPrompt + "\n\n" +
 		"You are starting an interactive planning session. Converse with the user to " +
@@ -155,7 +133,39 @@ func (c *CodexAgent) planInteractive(ctx context.Context, systemPrompt string, o
 
 	plan, err := prompt.ReadPlanFile(outFile)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("interactive plan did not produce a structured plan at %s — "+
+			"did you ask codex to finalize before exiting? underlying: %w", outFile, err)
 	}
 	return plan, nil
+}
+
+// allocatePlanArtifacts materializes the JSON Schema file and resolves the plan
+// output path shared by both plan modes. The output path is opts.OutputPath when
+// set, otherwise a freshly created temp file. The returned cleanup removes the
+// schema file and, when a temp output file was allocated, that file too; it is
+// always safe to defer.
+func (c *CodexAgent) allocatePlanArtifacts(opts agent.PlanOptions) (schemaFile, outFile string, cleanup func(), err error) {
+	schemaFile, err = writeSchemaFile("plan.json")
+	if err != nil {
+		return "", "", func() {}, fmt.Errorf("plan: writing schema file: %w", err)
+	}
+	cleanup = func() { _ = os.Remove(schemaFile) }
+
+	outFile = opts.OutputPath
+	if outFile == "" {
+		f, ferr := os.CreateTemp("", "codex-plan-*.json")
+		if ferr != nil {
+			cleanup()
+			return "", "", func() {}, fmt.Errorf("plan: creating output temp file: %w", ferr)
+		}
+		outFile = f.Name()
+		_ = f.Close()
+		schemaCleanup := cleanup
+		cleanup = func() {
+			schemaCleanup()
+			_ = os.Remove(outFile)
+		}
+	}
+
+	return schemaFile, outFile, cleanup, nil
 }

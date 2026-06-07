@@ -144,6 +144,7 @@ func TestPlan_EmptyInitialPromptUsesInteractive(t *testing.T) {
 	// The output path must be handed to the child via HERD_PLAN_OUT.
 	env := readEnvDump(t, envDump)
 	assert.Equal(t, outputPath, env["HERD_PLAN_OUT"])
+	assert.NotEmpty(t, env["HERD_PLAN_SCHEMA"], "interactive plan must pass schema path via env")
 }
 
 func TestPlan_NonEmptyInitialPromptStaysHeadless(t *testing.T) {

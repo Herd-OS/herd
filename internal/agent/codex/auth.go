@@ -77,6 +77,9 @@ func ensureConfigToml(path string) error {
 // (auth.json) exists under the resolved Codex home ($CODEX_HOME, else
 // $HOME/.codex). It returns false on any stat error (missing file, unreadable
 // home dir, etc.) so a missing auth.json is treated as "no subscription".
+// This is a deliberate policy choice: an "exists but unreadable" auth.json is
+// treated as "absent", so a broken credential file falls through to the
+// OPENAI_API_KEY->CODEX_API_KEY mapping rather than blocking it.
 func authJSONPresent() bool {
 	codexHome, err := resolveCodexHome()
 	if err != nil {
