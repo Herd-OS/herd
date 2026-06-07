@@ -252,7 +252,7 @@ The refreshed `auth.json` in the `codex-auth` volume is the source of truth — 
 
 ##### Keepalive
 
-When `~/.codex/auth.json` is present in the `codex-auth` volume, the runner entrypoint spawns a `herd codex keepalive-loop` goroutine. It periodically triggers Codex's own refresh via a near-noop `codex exec`, keeping idle OAuth chains warm so they don't lapse between batches. The default cadence is **6 days** (a ~2-day buffer before Codex's ~8-day forced refresh) and is tunable via `HERD_CODEX_KEEPALIVE_INTERVAL`, a Go duration string (e.g. `144h`). Logs go to `/var/log/herd-codex-keepalive.log`. The keepalive is **not** spawned for API-key-only or Enterprise-only (`CODEX_ACCESS_TOKEN`) setups, which need no refresh.
+When `~/.codex/auth.json` is present in the `codex-auth` volume, the runner entrypoint spawns a `herd codex keepalive-loop` goroutine. It periodically triggers Codex's own refresh via a near-noop `codex exec`, keeping idle OAuth chains warm so they don't lapse between batches. The default cadence is **6 days** (a ~2-day buffer before Codex's ~8-day forced refresh) and is tunable via `HERD_CODEX_KEEPALIVE_INTERVAL`, a Go duration string (e.g. `144h`). Logs go to `/opt/herd/herd-codex-keepalive.log` (owned by the runner user; survives the `RUNNER_UID` remap). The keepalive is **not** spawned for API-key-only or Enterprise-only (`CODEX_ACCESS_TOKEN`) setups, which need no refresh.
 
 ##### OpenAI security warnings
 

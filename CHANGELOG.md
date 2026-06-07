@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - Codex provider no longer silently overrides ChatGPT-subscription auth with `OPENAI_API_KEY`. The `OPENAI_API_KEY` -> `CODEX_API_KEY` convenience mapping is now skipped when a subscription `auth.json` exists (under `$CODEX_HOME`, or `~/.codex`), so a stray `OPENAI_API_KEY` in the shell can no longer clobber the subscription and bill against API quota. An explicit `CODEX_API_KEY` still always wins; pure API-key users (no `auth.json`) keep the mapping.
+- Codex keepalive log destination moved from `/var/log/herd-codex-keepalive.log` to `/opt/herd/herd-codex-keepalive.log`. The runner user owns `/opt/herd/` (chowned at image build time and re-chowned by the `RUNNER_UID` remap), but does not own `/var/log/` — under the unprivileged runner introduced in #712, the previous redirect failed with `Permission denied` and the keepalive process **never started**, so the OAuth chain lapsed silently after ~8 days idle on subscription-auth setups. Pure API-key and Enterprise (`CODEX_ACCESS_TOKEN`) setups were unaffected (keepalive is gated off for those).
 
 ### Removed
 
