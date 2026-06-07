@@ -11,7 +11,9 @@
 //     final agent message is written to a file via --output-last-message.
 //   - Auth: Codex reads CODEX_API_KEY (highest precedence). OPENAI_API_KEY is
 //     NOT in Codex's main auth path, so childEnv() maps it into CODEX_API_KEY
-//     for the child process when CODEX_API_KEY is unset.
+//     for the child process when CODEX_API_KEY is unset AND no subscription
+//     auth.json is present. When auth.json exists the mapping is skipped so the
+//     API key does not clobber the subscription.
 package codex
 
 import (
@@ -48,11 +50,15 @@ func NewAgent(binaryPath, model, reasoningEffort string) *CodexAgent {
 }
 
 // childEnv returns the parent environment with CODEX_API_KEY populated from
-// OPENAI_API_KEY when CODEX_API_KEY is empty and OPENAI_API_KEY is set. An
-// explicit CODEX_API_KEY is always preserved (user-explicit wins).
+// OPENAI_API_KEY when CODEX_API_KEY is empty, OPENAI_API_KEY is set, and no
+// subscription auth.json is present. An explicit CODEX_API_KEY is always
+// preserved (user-explicit wins). When a subscription auth.json exists, the
+// OPENAI_API_KEY mapping is skipped so it does not clobber the subscription
+// (Codex precedence: CODEX_API_KEY > ephemeral > CODEX_ACCESS_TOKEN >
+// auth.json).
 func childEnv() []string {
 	env := os.Environ()
-	if os.Getenv("CODEX_API_KEY") == "" {
+	if os.Getenv("CODEX_API_KEY") == "" && !authJSONPresent() {
 		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
 			env = append(env, "CODEX_API_KEY="+v)
 		}

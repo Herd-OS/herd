@@ -186,6 +186,12 @@ CODEX_API_KEY=sk-...
 
 > `.env` holds the Docker runner's agent credentials and is read at container startup. The only GitHub Actions secret needed for auth is `HERD_GITHUB_TOKEN` (workflow dispatch); AI provider keys are not secrets — see the principle box above.
 
+##### Auth precedence
+
+Codex resolves credentials in this order: `CODEX_API_KEY` > ephemeral key > `CODEX_ACCESS_TOKEN` > `~/.codex/auth.json` (ChatGPT subscription).
+
+herd's `OPENAI_API_KEY` -> `CODEX_API_KEY` convenience mapping is **skipped when a subscription `auth.json` is present** (under `$CODEX_HOME`, or `~/.codex` when `CODEX_HOME` is unset). This prevents a stray `OPENAI_API_KEY` in your shell from silently overriding your ChatGPT subscription and billing you per-token. Pure API-key users (no `auth.json`) keep the convenience mapping. An explicit `CODEX_API_KEY` always wins, with or without `auth.json`.
+
 #### Subscription auth (opt-in)
 
 API-key auth (above) remains the documented default. If you'd rather drive Codex from a ChatGPT subscription instead of paying per token, herd supports two opt-in subscription paths. The mechanics mirror OpenAI's own [CI/CD auth guide](https://developers.openai.com/codex/auth/ci-cd-auth).
@@ -219,11 +225,14 @@ Complete the device-auth flow in your browser when prompted. On success, the Cod
 If no worker container is up to exec into, run the login one-shot directly against the runner-base image with the `codex-auth` volume mounted, then let the container exit:
 
 ```bash
-docker run --rm -it -u runner \
+docker run --rm -it \
+  -u "$(grep -E '^RUNNER_UID=' .env | cut -d= -f2-)" \
   -v <project>_codex-auth:/home/runner/.codex \
   ghcr.io/herd-os/herd-runner-base:latest \
   codex login --device-auth
 ```
+
+The `-u` value must match the `RUNNER_UID` in your `.env` (default `1001`) so the written `auth.json` is owned by the same UID the running workers use. A mismatch causes a silent "no auth" fallback on the worker side — e.g. logging in as the base image's default `runner` (UID 1001) when your workers run with `RUNNER_UID=568` (the TrueNAS SCALE pattern) writes an `auth.json` the 568-running workers can't read. The `docker exec` primary path above doesn't have this problem because the running worker container has already chowned the volume. If `RUNNER_UID` is unset in `.env`, the shell expansion yields an empty `-u` (a docker error) — use the literal default `-u 1001` instead.
 
 The volume name follows docker compose's `<project>_codex-auth` convention — confirm the exact name with `docker volume ls` before running. The written `auth.json` persists in the volume and is picked up by workers on their next start.
 
