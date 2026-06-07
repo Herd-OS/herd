@@ -107,8 +107,9 @@ func TestExecute_EnvMapsOpenAIKey(t *testing.T) {
 		t.Skip("shell script fake binary not supported on Windows")
 	}
 
-	// Only OPENAI_API_KEY set; CODEX_API_KEY unset → child gets CODEX_API_KEY
-	// populated from OPENAI_API_KEY.
+	// Only OPENAI_API_KEY set; CODEX_API_KEY unset, no subscription auth.json →
+	// child gets CODEX_API_KEY populated from OPENAI_API_KEY.
+	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "sk-openai-from-test")
 

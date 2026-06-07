@@ -186,6 +186,12 @@ CODEX_API_KEY=sk-...
 
 > `.env` holds the Docker runner's agent credentials and is read at container startup. The only GitHub Actions secret needed for auth is `HERD_GITHUB_TOKEN` (workflow dispatch); AI provider keys are not secrets — see the principle box above.
 
+##### Auth precedence
+
+Codex resolves credentials in this order: `CODEX_API_KEY` > ephemeral key > `CODEX_ACCESS_TOKEN` > `~/.codex/auth.json` (ChatGPT subscription).
+
+herd's `OPENAI_API_KEY` -> `CODEX_API_KEY` convenience mapping is **skipped when a subscription `auth.json` is present** (under `$CODEX_HOME`, or `~/.codex` when `CODEX_HOME` is unset). This prevents a stray `OPENAI_API_KEY` in your shell from silently overriding your ChatGPT subscription and billing you per-token. Pure API-key users (no `auth.json`) keep the convenience mapping. An explicit `CODEX_API_KEY` always wins, with or without `auth.json`.
+
 #### Subscription auth (opt-in)
 
 API-key auth (above) remains the documented default. If you'd rather drive Codex from a ChatGPT subscription instead of paying per token, herd supports two opt-in subscription paths. The mechanics mirror OpenAI's own [CI/CD auth guide](https://developers.openai.com/codex/auth/ci-cd-auth).

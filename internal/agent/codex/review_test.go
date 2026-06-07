@@ -101,6 +101,7 @@ func TestReview_EnvMapsOpenAIKey(t *testing.T) {
 		t.Skip("shell script fake binary not supported on Windows")
 	}
 
+	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "sk-review-openai")
 

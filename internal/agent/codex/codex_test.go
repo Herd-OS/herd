@@ -50,6 +50,32 @@ func writeFakeCodex(t *testing.T, outputContent, stdoutLine string, exitCode int
 	return binary, argvDump, envDump
 }
 
+// writeFakeInteractiveCodex creates an executable shell script that mimics the
+// interactive `codex` CLI for tests. Like writeFakeCodex it records argv
+// (NUL-separated) to argvDump and its environment (newline-separated) to
+// envDump. Because the interactive path passes the output file path via the
+// HERD_PLAN_OUT env var rather than the --output-last-message flag, this fake
+// writes outputContent to "$HERD_PLAN_OUT" when that variable is non-empty.
+func writeFakeInteractiveCodex(t *testing.T, outputContent string, exitCode int) (binary, argvDump, envDump string) {
+	t.Helper()
+	dir := t.TempDir()
+	argvDump = filepath.Join(dir, "argv.bin")
+	envDump = filepath.Join(dir, "env.txt")
+	binary = filepath.Join(dir, "codex.sh")
+
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString(fmt.Sprintf("printf '%%s\\0' \"$@\" > '%s'\n", argvDump))
+	b.WriteString(fmt.Sprintf("env > '%s'\n", envDump))
+	if outputContent != "" {
+		b.WriteString(fmt.Sprintf("if [ -n \"$HERD_PLAN_OUT\" ]; then printf '%%s' '%s' > \"$HERD_PLAN_OUT\"; fi\n", outputContent))
+	}
+	b.WriteString(fmt.Sprintf("exit %d\n", exitCode))
+
+	require.NoError(t, os.WriteFile(binary, []byte(b.String()), 0o755))
+	return binary, argvDump, envDump
+}
+
 // readArgvDump reads a NUL-separated argv dump written by the fake codex
 // binary and returns the argv as a slice.
 func readArgvDump(t *testing.T, path string) []string {
@@ -191,36 +217,58 @@ func TestBuildExecBaseArgs(t *testing.T) {
 	}
 }
 
-func TestChildEnv_MapsOpenAIKeyWhenCodexUnset(t *testing.T) {
-	t.Setenv("CODEX_API_KEY", "")
-	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
+func TestChildEnv_AuthPrecedence(t *testing.T) {
+	tests := []struct {
+		name           string
+		codexAPIKey    string
+		openAIAPIKey   string
+		writeAuthJSON  bool
+		wantCodexValue string
+	}{
+		{
+			name:           "explicit codex key wins even with auth.json",
+			codexAPIKey:    "sk-codex-explicit",
+			openAIAPIKey:   "sk-openai-123",
+			writeAuthJSON:  true,
+			wantCodexValue: "sk-codex-explicit",
+		},
+		{
+			name:           "auth.json present blocks openai mapping",
+			codexAPIKey:    "",
+			openAIAPIKey:   "sk-openai-123",
+			writeAuthJSON:  true,
+			wantCodexValue: "",
+		},
+		{
+			name:           "no auth.json maps openai key (api-key user convenience)",
+			codexAPIKey:    "",
+			openAIAPIKey:   "sk-openai-123",
+			writeAuthJSON:  false,
+			wantCodexValue: "sk-openai-123",
+		},
+		{
+			name:           "no keys, no mapping regardless of auth.json",
+			codexAPIKey:    "",
+			openAIAPIKey:   "",
+			writeAuthJSON:  true,
+			wantCodexValue: "",
+		},
+	}
 
-	env := childEnv()
-
-	// CODEX_API_KEY must be appended with the OPENAI_API_KEY value. Because the
-	// mapping appends, the LAST CODEX_API_KEY entry wins in the child process.
-	got := lastEnvValue(env, "CODEX_API_KEY")
-	assert.Equal(t, "sk-openai-123", got)
-}
-
-func TestChildEnv_PreservesExplicitCodexKey(t *testing.T) {
-	t.Setenv("CODEX_API_KEY", "sk-codex-explicit")
-	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
-
-	env := childEnv()
-
-	got := lastEnvValue(env, "CODEX_API_KEY")
-	assert.Equal(t, "sk-codex-explicit", got,
-		"explicit CODEX_API_KEY must be preserved, not overwritten by OPENAI_API_KEY")
-}
-
-func TestChildEnv_NoKeysNoMapping(t *testing.T) {
-	t.Setenv("CODEX_API_KEY", "")
-	t.Setenv("OPENAI_API_KEY", "")
-
-	env := childEnv()
-	assert.Equal(t, "", lastEnvValue(env, "CODEX_API_KEY"),
-		"with neither key set, no CODEX_API_KEY should be added")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			codexHome := t.TempDir()
+			t.Setenv("CODEX_HOME", codexHome)
+			t.Setenv("CODEX_API_KEY", tc.codexAPIKey)
+			t.Setenv("OPENAI_API_KEY", tc.openAIAPIKey)
+			if tc.writeAuthJSON {
+				require.NoError(t, os.WriteFile(
+					filepath.Join(codexHome, "auth.json"),
+					[]byte(`{"tokens":{}}`), 0o600))
+			}
+			assert.Equal(t, tc.wantCodexValue, lastEnvValue(childEnv(), "CODEX_API_KEY"))
+		})
+	}
 }
 
 // lastEnvValue returns the value of the last NAME=value entry in env for the
