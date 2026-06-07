@@ -514,7 +514,7 @@ func TestRenderDockerCompose_SingleService(t *testing.T) {
 	// Core wiring.
 	assert.Contains(t, rendered, "RUNNER_LABELS=herd-worker")
 	assert.Contains(t, rendered, "REPO_URL=https://github.com/acme/widgets")
-	assert.Contains(t, rendered, "CODEX_AUTH_JSON=${CODEX_AUTH_JSON:-}")
+	assert.NotContains(t, rendered, "CODEX_AUTH_JSON")
 	// No multi-replica or unrendered-template artifacts.
 	assert.NotContains(t, rendered, "herd-worker-1")
 	assert.NotContains(t, rendered, "codex-auth-1")

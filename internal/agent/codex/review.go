@@ -24,10 +24,6 @@ import (
 // unparseable output yields ReviewResult{Approved:false, IsUnparseable:true}
 // with a Summary beginning "Failed to parse".
 func (c *CodexAgent) Review(ctx context.Context, diff string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
-	if err := ensureProvisioned(); err != nil {
-		return nil, fmt.Errorf("codex auth provisioning: %w", err)
-	}
-
 	reviewPrompt, err := prompt.RenderReviewPrompt(diff, opts)
 	if err != nil {
 		return nil, fmt.Errorf("rendering review prompt: %w", err)

@@ -32,10 +32,6 @@ import (
 // Both modes return the same *agent.Plan struct; only how the plan is collected
 // differs.
 func (c *CodexAgent) Plan(ctx context.Context, initialPrompt string, opts agent.PlanOptions) (*agent.Plan, error) {
-	if err := ensureProvisioned(); err != nil {
-		return nil, fmt.Errorf("codex auth provisioning: %w", err)
-	}
-
 	systemPrompt, err := prompt.RenderPlanningPrompt(opts)
 	if err != nil {
 		return nil, fmt.Errorf("rendering system prompt: %w", err)
