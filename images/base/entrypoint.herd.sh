@@ -81,8 +81,13 @@ fi
 # only — no refresh needed) and API-key (no expiry) setups, which have no
 # auth.json.
 if [ -f /home/runner/.codex/auth.json ]; then
+  # Log to /opt/herd/ rather than /var/log/: the runner user owns /opt/herd
+  # (chowned at image build time and re-chowned by the RUNNER_UID remap
+  # earlier in this script), but does not own /var/log. A redirect into
+  # /var/log fails with "Permission denied" and the keepalive process never
+  # actually starts, so the OAuth chain lapses silently after ~8 days idle.
   /opt/herd/bin/herd codex keepalive-loop \
-    >>/var/log/herd-codex-keepalive.log 2>&1 &
+    >>/opt/herd/herd-codex-keepalive.log 2>&1 &
 fi
 
 exec ./run.sh
