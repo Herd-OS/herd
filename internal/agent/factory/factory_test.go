@@ -51,7 +51,7 @@ func TestNew(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ag, err := New(tt.provider, "", "", "")
+			ag, err := New(tt.provider, "", "", "", "")
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Nil(t, ag)
@@ -68,7 +68,7 @@ func TestNew(t *testing.T) {
 
 func TestNewPassesBinaryAndModel(t *testing.T) {
 	t.Run("claude", func(t *testing.T) {
-		ag, err := New("claude", "/custom/claude", "opus", "")
+		ag, err := New("claude", "/custom/claude", "opus", "", "")
 		require.NoError(t, err)
 		ca, ok := ag.(*claude.ClaudeAgent)
 		require.True(t, ok)
@@ -77,7 +77,7 @@ func TestNewPassesBinaryAndModel(t *testing.T) {
 	})
 
 	t.Run("opencode", func(t *testing.T) {
-		ag, err := New("opencode", "/custom/opencode", "anthropic/claude-sonnet-4", "")
+		ag, err := New("opencode", "/custom/opencode", "anthropic/claude-sonnet-4", "", "")
 		require.NoError(t, err)
 		oa, ok := ag.(*opencode.OpenCodeAgent)
 		require.True(t, ok)
@@ -86,12 +86,13 @@ func TestNewPassesBinaryAndModel(t *testing.T) {
 	})
 
 	t.Run("codex", func(t *testing.T) {
-		ag, err := New("codex", "/custom/codex", "gpt-5-codex", "high")
+		ag, err := New("codex", "/custom/codex", "gpt-5-codex", "high", "danger-full-access")
 		require.NoError(t, err)
 		ca, ok := ag.(*codex.CodexAgent)
 		require.True(t, ok)
 		assert.Equal(t, "/custom/codex", ca.BinaryPath)
 		assert.Equal(t, "gpt-5-codex", ca.Model)
 		assert.Equal(t, "high", ca.ReasoningEffort)
+		assert.Equal(t, "danger-full-access", ca.Sandbox)
 	})
 }

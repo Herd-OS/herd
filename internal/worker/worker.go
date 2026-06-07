@@ -354,7 +354,41 @@ pushWork:
 			return &ExecResult{NoOp: true}, nil
 		}
 
-		// No changes — post report and label done without pushing
+		// Empty diff means the agent made no commits. There are two legitimate
+		// reasons for this and one failure mode we MUST NOT silently mark
+		// "done":
+		//
+		//   1. The agent inspected the codebase and determined the acceptance
+		//      criteria are already satisfied. The prompt at the top of this
+		//      file REQUIRES the agent to emit a structured verdict block
+		//      ("Findings reviewed against the current code:" + "Conclusion:")
+		//      in its final output when it takes this path. Presence of the
+		//      block is our positive proof of intent.
+		//   2. The agent crashed, was blocked by its sandbox, or otherwise
+		//      failed before it could do any work. Empty diff, no verdict
+		//      block. Historically the worker treated this identically to
+		//      case 1 and labeled the issue `done`, silently succeeding the
+		//      task without any code change — observed during the Codex
+		//      sandbox bubblewrap incident on TrueNAS where every shell and
+		//      apply_patch call exited with "No permissions to create a new
+		//      namespace" before the agent could read a single file, yet the
+		//      worker still flipped #729/#730/#731 to `done`.
+		//
+		// Gate the no-op success path on the verdict block being present.
+		// Missing block returns an error so the deferred handler labels
+		// the issue `failed` and the monitor can re-dispatch.
+		if !hasNoOpVerdictBlock(rawSummary) {
+			truncated := truncateOutput(rawSummary, 4000)
+			if truncated == "" {
+				truncated = "(no agent output captured)"
+			}
+			_ = p.Issues().AddComment(ctx, params.IssueNumber,
+				fmt.Sprintf("**Worker failed:** the agent produced no commits AND did not emit the required no-op verdict block (`Findings reviewed against the current code:` + `Conclusion:`). This usually means the agent crashed or was blocked by its sandbox before doing any work — not that the task was already complete. This issue will be retried by the monitor.\n\n<details>\n<summary>Agent output (last 4000 chars)</summary>\n\n```\n%s\n```\n\n</details>",
+					truncated))
+			return nil, fmt.Errorf("worker produced empty diff without a no-op verdict block (agent likely crashed or was sandboxed off)")
+		}
+
+		// Verified intentional no-op — post report and label done without pushing.
 		noOpReport := "**Worker Report**\n\nNo changes were needed — acceptance criteria already satisfied.\n"
 		if rawSummary != "" {
 			noOpReport += fmt.Sprintf("\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
@@ -1157,6 +1191,35 @@ const NoOpVerdictMarker = "**Worker #"
 // collector (to recognize and parse it).
 func noOpVerdictHeader(issueNumber int) string {
 	return fmt.Sprintf("**Worker #%d — no-op verdict**", issueNumber)
+}
+
+// hasNoOpVerdictBlock reports whether the agent emitted the structured
+// verdict block required by the worker prompt when no code change is being
+// made. The prompt mandates this exact pair of markers (case-sensitive):
+//
+//	Findings reviewed against the current code:
+//	...
+//	Conclusion:
+//
+// Presence of both markers is treated as positive proof that the agent
+// intentionally chose the no-op path after reviewing the codebase, rather
+// than crashing/being sandboxed off mid-task. The block must contain the
+// "Conclusion:" marker AFTER the "Findings reviewed..." header to count —
+// a "Conclusion:" before the findings header is not a valid no-op verdict.
+//
+// Returns false on empty input (typical for a crashed agent with no
+// stdout captured). The check tolerates leading/trailing whitespace but
+// the marker text itself is matched literally to keep the prompt contract
+// auditable.
+func hasNoOpVerdictBlock(summary string) bool {
+	const findingsMarker = "Findings reviewed against the current code:"
+	const conclusionMarker = "Conclusion:"
+	findingsIdx := strings.Index(summary, findingsMarker)
+	if findingsIdx < 0 {
+		return false
+	}
+	conclusionIdx := strings.Index(summary[findingsIdx+len(findingsMarker):], conclusionMarker)
+	return conclusionIdx >= 0
 }
 
 // buildNoOpVerdictComment renders the structured comment posted on the

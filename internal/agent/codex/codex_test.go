@@ -123,24 +123,29 @@ func TestNewAgent(t *testing.T) {
 		binaryPath      string
 		model           string
 		reasoningEffort string
+		sandbox         string
 		wantBinary      string
 		wantModel       string
 		wantEffort      string
+		wantSandbox     string
 	}{
 		{
-			name:       "defaults applied",
-			wantBinary: "codex",
-			wantModel:  "",
-			wantEffort: "medium",
+			name:        "defaults applied",
+			wantBinary:  "codex",
+			wantModel:   "",
+			wantEffort:  "medium",
+			wantSandbox: "workspace-write",
 		},
 		{
 			name:            "explicit values preserved",
 			binaryPath:      "/usr/local/bin/codex",
 			model:           "gpt-5-codex",
 			reasoningEffort: "high",
+			sandbox:         "danger-full-access",
 			wantBinary:      "/usr/local/bin/codex",
 			wantModel:       "gpt-5-codex",
 			wantEffort:      "high",
+			wantSandbox:     "danger-full-access",
 		},
 		{
 			name:            "empty effort defaults to medium",
@@ -150,15 +155,24 @@ func TestNewAgent(t *testing.T) {
 			wantBinary:      "codex",
 			wantModel:       "gpt-5",
 			wantEffort:      "medium",
+			wantSandbox:     "workspace-write",
+		},
+		{
+			name:        "read-only sandbox preserved",
+			sandbox:     "read-only",
+			wantBinary:  "codex",
+			wantEffort:  "medium",
+			wantSandbox: "read-only",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			a := NewAgent(tc.binaryPath, tc.model, tc.reasoningEffort)
+			a := NewAgent(tc.binaryPath, tc.model, tc.reasoningEffort, tc.sandbox)
 			assert.Equal(t, tc.wantBinary, a.BinaryPath)
 			assert.Equal(t, tc.wantModel, a.Model)
 			assert.Equal(t, tc.wantEffort, a.ReasoningEffort)
+			assert.Equal(t, tc.wantSandbox, a.Sandbox)
 		})
 	}
 }
@@ -168,17 +182,36 @@ func TestBuildExecBaseArgs(t *testing.T) {
 		name          string
 		model         string
 		effort        string
+		sandbox       string
 		wantContains  []string
 		wantNotInArgs []string
 	}{
 		{
-			name:   "default medium, no model",
+			name:   "default medium, no model, default sandbox",
 			effort: "medium",
 			wantContains: []string{
 				"exec", "--sandbox", "workspace-write", "--skip-git-repo-check",
 				"--ephemeral", "--ignore-user-config", "-c", "model_reasoning_effort=medium",
 			},
-			wantNotInArgs: []string{"--model", "--full-auto"},
+			wantNotInArgs: []string{"--model", "--full-auto", "danger-full-access"},
+		},
+		{
+			name:    "danger-full-access sandbox (container workers)",
+			effort:  "medium",
+			sandbox: "danger-full-access",
+			wantContains: []string{
+				"exec", "--sandbox", "danger-full-access",
+			},
+			wantNotInArgs: []string{"workspace-write", "--full-auto"},
+		},
+		{
+			name:    "read-only sandbox",
+			effort:  "medium",
+			sandbox: "read-only",
+			wantContains: []string{
+				"exec", "--sandbox", "read-only",
+			},
+			wantNotInArgs: []string{"workspace-write", "danger-full-access"},
 		},
 		{
 			name:   "with model and high effort",
@@ -193,7 +226,7 @@ func TestBuildExecBaseArgs(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewAgent("codex", tc.model, tc.effort)
+			c := NewAgent("codex", tc.model, tc.effort, tc.sandbox)
 			args := c.buildExecBaseArgs()
 
 			// exec must be the first element.

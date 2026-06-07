@@ -14,17 +14,18 @@ import (
 
 // New constructs an agent.Agent for the given provider. binary may be empty
 // (each provider falls back to its default binary name); model may be empty.
-// codexReasoningEffort is passed through to the codex provider, which applies
-// its own "medium" default when it is empty.
+// codexReasoningEffort and codexSandbox are passed through to the codex
+// provider only — codexReasoningEffort applies a "medium" default when empty;
+// codexSandbox empty preserves the Codex default sandbox (workspace-write).
 // An empty provider maps to claude to preserve current default behavior.
-func New(provider, binary, model, codexReasoningEffort string) (agent.Agent, error) {
+func New(provider, binary, model, codexReasoningEffort, codexSandbox string) (agent.Agent, error) {
 	switch provider {
 	case "claude", "":
 		return claude.New(binary, model), nil
 	case "opencode":
 		return opencode.New(binary, model), nil
 	case "codex":
-		return codex.NewAgent(binary, model, codexReasoningEffort), nil
+		return codex.NewAgent(binary, model, codexReasoningEffort, codexSandbox), nil
 	default:
 		return nil, fmt.Errorf("unknown agent provider %q (supported: claude, opencode, codex)", provider)
 	}

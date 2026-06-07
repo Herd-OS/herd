@@ -14,7 +14,7 @@ import (
 )
 
 func TestDiscuss_RequiresSystemPrompt(t *testing.T) {
-	a := NewAgent("codex", "", "")
+	a := NewAgent("codex", "", "", "")
 	err := a.Discuss(context.Background(), agent.DiscussOptions{RepoRoot: t.TempDir()})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "system prompt is required")
@@ -49,7 +49,7 @@ func TestDiscuss_Args(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			binary, argvDump, _ := writeFakeCodex(t, "", "", 0)
 
-			a := NewAgent(binary, tc.model, "")
+			a := NewAgent(binary, tc.model, "", "")
 			err := a.Discuss(context.Background(), agent.DiscussOptions{
 				RepoRoot:     t.TempDir(),
 				SystemPrompt: "you are a helpful assistant",
@@ -107,7 +107,7 @@ func TestDiscuss_WiresStdio(t *testing.T) {
 		captured <- string(data)
 	}()
 
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	derr := a.Discuss(context.Background(), agent.DiscussOptions{
 		RepoRoot:     dir,
 		SystemPrompt: "system",
@@ -130,7 +130,7 @@ func TestDiscuss_WiresStdio(t *testing.T) {
 }
 
 func TestDiscuss_FailingCommand(t *testing.T) {
-	a := NewAgent("false", "", "")
+	a := NewAgent("false", "", "", "")
 	err := a.Discuss(context.Background(), agent.DiscussOptions{
 		RepoRoot:     t.TempDir(),
 		SystemPrompt: "system",

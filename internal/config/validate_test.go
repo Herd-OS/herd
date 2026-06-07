@@ -109,3 +109,35 @@ func TestValidate_AgentCodexReasoningEffort(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_AgentCodexSandbox(t *testing.T) {
+	tests := []struct {
+		name      string
+		sandbox   string
+		wantError bool
+		errSubstr string
+	}{
+		{"empty is valid (uses Codex default)", "", false, ""},
+		{"read-only is valid", "read-only", false, ""},
+		{"workspace-write is valid", "workspace-write", false, ""},
+		{"danger-full-access is valid (container workers)", "danger-full-access", false, ""},
+		{"unknown is invalid", "off", true, "agent.codex_sandbox must be one of: read-only, workspace-write, danger-full-access"},
+		{"typo'd dangerous mode is invalid", "danger", true, "agent.codex_sandbox must be one of"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			cfg.Agent.CodexSandbox = tt.sandbox
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}

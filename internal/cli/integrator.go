@@ -211,7 +211,7 @@ func newIntegratorReviewCmd() *cobra.Command {
 				}
 			}
 
-			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort)
+			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort, cfg.Agent.CodexSandbox)
 			if err != nil {
 				return err
 			}
@@ -407,7 +407,7 @@ func newHandleCommentCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("getting current directory: %w", err)
 			}
-			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort)
+			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort, cfg.Agent.CodexSandbox)
 			if err != nil {
 				return err
 			}

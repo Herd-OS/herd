@@ -40,7 +40,7 @@ func TestPlan_StructuredOutput(t *testing.T) {
 			}
 			binary, argvDump, _ := writeFakeCodex(t, content, "", tc.exitCode)
 
-			a := NewAgent(binary, tc.model, "")
+			a := NewAgent(binary, tc.model, "", "")
 			plan, err := a.Plan(context.Background(), "plan a feature", agent.PlanOptions{
 				RepoRoot:   repoRoot,
 				OutputPath: outputPath,
@@ -91,7 +91,7 @@ func TestPlan_UsesTempFileWhenNoOutputPath(t *testing.T) {
 
 	binary, argvDump, _ := writeFakeCodex(t, fakePlanJSON, "", 0)
 
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	// A non-empty initialPrompt keeps Plan on the headless path, which is where
 	// the temp-file allocation lives.
 	plan, err := a.Plan(context.Background(), "plan a feature", agent.PlanOptions{
@@ -123,7 +123,7 @@ func TestPlan_EmptyInitialPromptUsesInteractive(t *testing.T) {
 	outputPath := filepath.Join(repoRoot, "plan.json")
 	binary, argvDump, envDump := writeFakeInteractiveCodex(t, fakePlanJSON, 0)
 
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	plan, err := a.Plan(context.Background(), "", agent.PlanOptions{
 		RepoRoot:   repoRoot,
 		OutputPath: outputPath,
@@ -156,7 +156,7 @@ func TestPlan_NonEmptyInitialPromptStaysHeadless(t *testing.T) {
 	outputPath := filepath.Join(repoRoot, "plan.json")
 	binary, argvDump, _ := writeFakeCodex(t, fakePlanJSON, "", 0)
 
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	plan, err := a.Plan(context.Background(), "add a feature", agent.PlanOptions{
 		RepoRoot:   repoRoot,
 		OutputPath: outputPath,
