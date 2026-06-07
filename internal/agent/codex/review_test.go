@@ -39,7 +39,7 @@ func TestReview_StructuredOutput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			binary, argvDump, _ := writeFakeCodex(t, tc.output, "", 0)
 
-			a := NewAgent(binary, "", "")
+			a := NewAgent(binary, "", "", "")
 			result, err := a.Review(context.Background(), "small diff", agent.ReviewOptions{
 				AcceptanceCriteria: []string{"tests pass"},
 				RepoRoot:           t.TempDir(),
@@ -84,7 +84,7 @@ func TestReview_UnparseableOutput(t *testing.T) {
 	// parse as the review JSON contract.
 	binary, _, _ := writeFakeCodex(t, "this output is definitely not valid json", "", 0)
 
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	result, err := a.Review(context.Background(), "small diff", agent.ReviewOptions{
 		AcceptanceCriteria: []string{"tests pass"},
 		RepoRoot:           t.TempDir(),
@@ -107,7 +107,7 @@ func TestReview_EnvMapsOpenAIKey(t *testing.T) {
 
 	binary, _, envDump := writeFakeCodex(t, `{"approved":true,"findings":[],"summary":"LGTM"}`, "", 0)
 
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	_, err := a.Review(context.Background(), "diff", agent.ReviewOptions{RepoRoot: t.TempDir()})
 	require.NoError(t, err)
 
@@ -117,7 +117,7 @@ func TestReview_EnvMapsOpenAIKey(t *testing.T) {
 }
 
 func TestReview_FailingCommand(t *testing.T) {
-	a := NewAgent("false", "", "")
+	a := NewAgent("false", "", "", "")
 	_, err := a.Review(context.Background(), "diff", agent.ReviewOptions{RepoRoot: t.TempDir()})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "agent review exited with error")

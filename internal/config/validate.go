@@ -42,6 +42,11 @@ func Validate(cfg *Config) *ValidationError {
 	default:
 		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.codex_reasoning_effort must be one of: minimal, low, medium, high — got %q", cfg.Agent.CodexReasoningEffort))
 	}
+	switch cfg.Agent.CodexSandbox {
+	case "", "read-only", "workspace-write", "danger-full-access":
+	default:
+		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.codex_sandbox must be one of: read-only, workspace-write, danger-full-access (or empty) — got %q", cfg.Agent.CodexSandbox))
+	}
 	switch cfg.Agent.Exec {
 	case "", "local", "docker":
 	default:

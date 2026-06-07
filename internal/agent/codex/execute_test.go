@@ -60,7 +60,7 @@ func TestExecute_CommandArgs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			binary, argvDump, _ := writeFakeCodex(t, "final agent message goes here", "", 0)
 
-			a := NewAgent(binary, tc.model, tc.effort)
+			a := NewAgent(binary, tc.model, tc.effort, "")
 			task := agent.TaskSpec{Body: tc.body}
 			opts := agent.ExecOptions{RepoRoot: t.TempDir(), SystemPrompt: tc.systemPrompt}
 
@@ -115,7 +115,7 @@ func TestExecute_EnvMapsOpenAIKey(t *testing.T) {
 
 	binary, _, envDump := writeFakeCodex(t, "the agent did the work successfully", "", 0)
 
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	_, err := a.Execute(context.Background(), agent.TaskSpec{Body: "do work"}, agent.ExecOptions{RepoRoot: t.TempDir()})
 	require.NoError(t, err)
 
@@ -135,7 +135,7 @@ func TestExecute_EnvPreservesExplicitCodexKey(t *testing.T) {
 
 	binary, _, envDump := writeFakeCodex(t, "the agent did the work successfully", "", 0)
 
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	_, err := a.Execute(context.Background(), agent.TaskSpec{Body: "do work"}, agent.ExecOptions{RepoRoot: t.TempDir()})
 	require.NoError(t, err)
 
@@ -156,7 +156,7 @@ func TestExecute_RunsInRepoRoot(t *testing.T) {
 	script := "#!/bin/sh\nout=''\nprev=''\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--output-last-message\" ]; then out=\"$a\"; fi\n  prev=\"$a\"\ndone\ntouch ran-here.marker\nprintf '%s' 'the agent completed the task in repo root' > \"$out\"\nexit 0\n"
 	require.NoError(t, os.WriteFile(binary, []byte(script), 0o755))
 
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	result, err := a.Execute(context.Background(), agent.TaskSpec{Body: "do work"}, agent.ExecOptions{RepoRoot: repoRoot})
 	require.NoError(t, err)
 	assert.Contains(t, result.Summary, "completed the task")
@@ -167,14 +167,14 @@ func TestExecute_RunsInRepoRoot(t *testing.T) {
 }
 
 func TestExecute_FailingCommand(t *testing.T) {
-	a := NewAgent("false", "", "") // "false" always exits 1
+	a := NewAgent("false", "", "", "") // "false" always exits 1
 	_, err := a.Execute(context.Background(), agent.TaskSpec{Body: "test"}, agent.ExecOptions{RepoRoot: t.TempDir()})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "agent exited with error")
 }
 
 func TestExecute_MissingBinary(t *testing.T) {
-	a := NewAgent("nonexistent-codex-binary-xyz", "", "")
+	a := NewAgent("nonexistent-codex-binary-xyz", "", "", "")
 	_, err := a.Execute(context.Background(), agent.TaskSpec{Body: "test"}, agent.ExecOptions{RepoRoot: t.TempDir()})
 	assert.Error(t, err)
 }
@@ -186,7 +186,7 @@ func TestExecute_SuspiciousOutputReturnsError(t *testing.T) {
 
 	// Final message is the suspicious "Execution error".
 	binary, _, _ := writeFakeCodex(t, "Execution error", "", 0)
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	_, err := a.Execute(context.Background(), agent.TaskSpec{Body: "do work"}, agent.ExecOptions{RepoRoot: t.TempDir()})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "suspicious output after retry")
@@ -199,7 +199,7 @@ func TestExecute_EmptyFileFallsBackToStdout(t *testing.T) {
 
 	// No file content written; stdout carries the substantive message instead.
 	binary, _, _ := writeFakeCodex(t, "", "this is a substantive multi word summary line", 0)
-	a := NewAgent(binary, "", "")
+	a := NewAgent(binary, "", "", "")
 	result, err := a.Execute(context.Background(), agent.TaskSpec{Body: "do work"}, agent.ExecOptions{RepoRoot: t.TempDir()})
 	require.NoError(t, err)
 	assert.Contains(t, result.Summary, "substantive multi word summary line")

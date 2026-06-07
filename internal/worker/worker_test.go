@@ -484,7 +484,11 @@ func TestWorkerNoOpPath_PostsReport(t *testing.T) {
 	}
 
 	ag := &mockAgent{
-		execResult: &agent.ExecResult{Summary: "Everything looks good"},
+		// Summary includes the structured no-op verdict block required by the
+		// worker prompt; without it the empty-diff path is treated as a
+		// crashed/sandboxed agent rather than an intentional no-op (see
+		// hasNoOpVerdictBlock in worker.go).
+		execResult: &agent.ExecResult{Summary: "Findings reviewed against the current code:\n\n- **Foo**: already implemented\n\nConclusion: No changes needed."},
 	}
 
 	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
@@ -507,6 +511,67 @@ func TestWorkerNoOpPath_PostsReport(t *testing.T) {
 		}
 	}
 	assert.True(t, foundReport, "no-op path must post a Worker Report comment")
+}
+
+// TestWorkerNoOpPath_RejectsMissingVerdictBlock locks in the Bug 2 defense:
+// when the agent produces no commits AND does not emit the required no-op
+// verdict block (the bubblewrap-sandbox-blocked codex case in TrueNAS that
+// silently flipped #729/#730/#731 to `done`), the worker must NOT mark the
+// issue done — it must return an error so the deferred handler labels the
+// issue `failed` and the monitor can re-dispatch.
+func TestWorkerNoOpPath_RejectsMissingVerdictBlock(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	ag := &mockAgent{
+		// This mirrors the real codex-on-TrueNAS-sandbox-failure output: the
+		// agent ran, was blocked by bwrap before any file read or apply_patch
+		// could succeed, and exited cleanly with a textual report — but
+		// without the structured "Findings reviewed... / Conclusion:" block
+		// that proves intent.
+		execResult: &agent.ExecResult{Summary: "Blocked by the execution environment before any repository command or file edit could run.\n\nbwrap: No permissions to create a new namespace"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+
+	// Must surface an error so the deferred failure handler runs.
+	require.Error(t, err, "worker must NOT silently succeed when the agent produced no diff and no verdict block")
+	assert.Nil(t, result, "ExecResult should be nil when the worker errored")
+	assert.Contains(t, err.Error(), "verdict block",
+		"error message should reference the missing verdict block so the cause is greppable")
+
+	// Must NOT have labeled the issue as done. The deferred failure handler
+	// labels it `failed`; assert that's what shows up.
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed,
+		"failed issues without a verdict block must be labeled failed")
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone,
+		"a verdict-block-less empty diff must NOT result in `done`")
+
+	// Must have posted an explanatory comment so the next human/agent reading
+	// the issue understands what happened.
+	foundExplanation := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker failed") && strings.Contains(c, "verdict block") {
+			foundExplanation = true
+			break
+		}
+	}
+	assert.True(t, foundExplanation, "must post a Worker failed comment explaining the missing verdict block")
 }
 
 // hangingAgent blocks until the context is cancelled, simulating Claude Code
@@ -1080,6 +1145,93 @@ func TestRenderWorkerPrompt_FixIssueWithMalformedFrontmatter(t *testing.T) {
 	assert.NotContains(t, prompt, "This is a fix issue")
 }
 
+func TestHasNoOpVerdictBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary string
+		want    bool
+	}{
+		{
+			name: "well-formed verdict block",
+			summary: `Findings reviewed against the current code:
+
+- **Foo**: already implemented at foo.go:42
+
+Conclusion: All findings already addressed.`,
+			want: true,
+		},
+		{
+			name: "verdict embedded in surrounding agent narration",
+			summary: `Started by reading the issue. The acceptance criteria looked already met.
+
+Findings reviewed against the current code:
+
+- **CodexHome**: already exported at auth.go:30
+
+Conclusion: No code change needed.
+
+Exiting cleanly without commits.`,
+			want: true,
+		},
+		{
+			name:    "empty summary (crashed agent, no output captured)",
+			summary: "",
+			want:    false,
+		},
+		{
+			name:    "informal 'no changes needed' without the structured block",
+			summary: "Everything looks good — no changes needed.",
+			want:    false,
+		},
+		{
+			name:    "conclusion only, no findings header",
+			summary: "Conclusion: Nothing to do.",
+			want:    false,
+		},
+		{
+			name:    "findings header only, no conclusion",
+			summary: "Findings reviewed against the current code:\n\n- nothing obvious",
+			want:    false,
+		},
+		{
+			name: "conclusion BEFORE findings header is not valid (must be after)",
+			summary: `Conclusion: Done.
+
+Findings reviewed against the current code:
+
+- (no follow-up)`,
+			want: false,
+		},
+		{
+			name: "bubblewrap-style sandbox failure (the actual Bug 2 case)",
+			summary: `Blocked by the execution environment before any repository command or file edit could run.
+
+Every filesystem/tool attempt failed at the sandbox wrapper with:
+
+` + "```" + `text
+bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.
+` + "```",
+			want: false,
+		},
+		{
+			name: "case-sensitive header is required",
+			summary: `findings reviewed against the current code:
+
+- ignored
+
+conclusion: ignored`,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasNoOpVerdictBlock(tt.summary)
+			assert.Equal(t, tt.want, got, "hasNoOpVerdictBlock(%q)", tt.summary)
+		})
+	}
+}
+
 func TestBuildNoOpVerdictComment(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1249,7 +1401,9 @@ func TestExec_ResumeMergeConflict_FallsBackToFreshBranch(t *testing.T) {
 	}
 
 	ag := &mockAgent{
-		execResult: &agent.ExecResult{Summary: "Done"},
+		// Include the required no-op verdict block so the empty-diff path
+		// completes successfully (see hasNoOpVerdictBlock in worker.go).
+		execResult: &agent.ExecResult{Summary: "Findings reviewed against the current code:\n\n- already in place\n\nConclusion: Done."},
 	}
 
 	// Exec should NOT fail with merge conflict — it should fall back to fresh branch
@@ -1357,7 +1511,9 @@ func TestExec_NonConflictNoOp_NotClosed(t *testing.T) {
 	}
 
 	ag := &mockAgent{
-		execResult: &agent.ExecResult{Summary: "Already done"},
+		// Include the required no-op verdict block so the empty-diff path
+		// completes successfully (see hasNoOpVerdictBlock in worker.go).
+		execResult: &agent.ExecResult{Summary: "Findings reviewed against the current code:\n\n- nothing to change\n\nConclusion: Already done."},
 	}
 
 	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{

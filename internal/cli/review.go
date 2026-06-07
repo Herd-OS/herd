@@ -77,7 +77,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 		return err
 	}
 
-	ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort)
+	ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort, cfg.Agent.CodexSandbox)
 	if err != nil {
 		return err
 	}

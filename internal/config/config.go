@@ -37,6 +37,17 @@ type Agent struct {
 	// One of minimal|low|medium|high (Codex provider only; default medium).
 	// Maps to `-c model_reasoning_effort=<value>` on every Codex invocation.
 	CodexReasoningEffort string `yaml:"codex_reasoning_effort"`
+	// CodexSandbox selects the Codex CLI sandbox policy. Empty uses Codex's
+	// own default (workspace-write). One of read-only|workspace-write|
+	// danger-full-access. Maps to `--sandbox <value>` on every Codex
+	// invocation. **Workers running inside a container** typically need
+	// `danger-full-access` because Codex's default workspace-write sandbox
+	// shells out to bubblewrap, which cannot create the nested user
+	// namespace it needs inside a Docker container without elevated host
+	// kernel settings (`kernel.unprivileged_userns_clone=1`) or container
+	// capabilities. The container itself is already a security boundary,
+	// so disabling Codex's inner sandbox in that context is safe.
+	CodexSandbox string `yaml:"codex_sandbox"`
 }
 
 type Workers struct {

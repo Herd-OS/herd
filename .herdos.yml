@@ -7,6 +7,12 @@ agent:
     provider: codex
     binary: ""
     model: "gpt-5.5"
+    # Workers run inside the runner container; Codex's bubblewrap-based
+    # sandboxes (read-only / workspace-write) fail there with "No
+    # permissions to create a new namespace" on most container hosts.
+    # The container is already the security boundary, so disable Codex's
+    # inner sandbox.
+    codex_sandbox: "danger-full-access"
 workers:
     max_concurrent: 3
     runner_label: herd-worker
