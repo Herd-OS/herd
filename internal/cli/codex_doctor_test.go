@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,9 +68,9 @@ func TestCheckCodexVersion(t *testing.T) {
 		},
 		{
 			name:       "timeout",
-			body:       "/bin/sleep 3\n",
+			body:       "/bin/sleep 12\n",
 			wantStatus: doctorErr,
-			wantDetail: "codex --version timed out after 2s",
+			wantDetail: "codex --version timed out after 10s",
 		},
 	}
 
@@ -246,8 +245,8 @@ func TestCheckCodexEffectiveAuth(t *testing.T) {
 			name:       "openai auto map beats access token when auth json absent",
 			env:        doctorEnvState{OpenAIAPIKey: true, CodexAccessToken: true},
 			auth:       doctorAuthState{Kind: doctorAuthAbsent},
-			wantStatus: doctorOK,
-			wantAuth:   "OPENAI_API_KEY auto-mapped to CODEX_API_KEY",
+			wantStatus: doctorWarn,
+			wantAuth:   "OPENAI_API_KEY auto-mapped to CODEX_API_KEY (CODEX_ACCESS_TOKEN ignored — auto-mapped OPENAI_API_KEY has higher precedence; unset OPENAI_API_KEY to use CODEX_ACCESS_TOKEN)",
 		},
 		{
 			name:       "access token wins before auth json",
@@ -330,7 +329,7 @@ func TestCheckCodexConfig(t *testing.T) {
 			name:       "non codex provider",
 			content:    ptr("version: 1\nagent:\n  provider: claude\n"),
 			wantStatus: doctorInfo,
-			wantDetail: "current is claude - checks 1-5 still useful for ad-hoc codex usage",
+			wantDetail: "current is claude — checks 1-5 still useful for ad-hoc codex usage",
 		},
 	}
 
@@ -466,7 +465,6 @@ func TestCodexDoctorCommandReturnsErrorForErrRows(t *testing.T) {
 	err := root.Execute()
 
 	assert.ErrorIs(t, err, errCodexDoctorFailed)
-	assert.True(t, errors.Is(err, errCodexDoctorFailed))
 	assert.Contains(t, out.String(), "not found in PATH=")
 }
 
@@ -476,6 +474,12 @@ func writeFakeDoctorCodex(t *testing.T, dir, body string) {
 	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755))
 }
 
+// chdir changes the process's working directory for the duration of the
+// test. NOT safe under t.Parallel() — os.Chdir is process-wide and any
+// other test running concurrently would observe the change. None of the
+// doctor tests use t.Parallel today; don't add it without first
+// rewriting these tests to avoid Chdir (e.g. by passing the directory
+// through context or via a loadConfig signature change).
 func chdir(t *testing.T, dir string) {
 	t.Helper()
 	old, err := os.Getwd()

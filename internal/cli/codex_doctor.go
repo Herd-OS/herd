@@ -106,6 +106,9 @@ func runCodexDoctor(ctx context.Context, out io.Writer) error {
 }
 
 func checkCodexBinary(context.Context, *doctorContext) doctorRow {
+	// Always looks up the literal "codex" rather than cfg.Agent.Binary — the
+	// doctor's job is to diagnose whether the codex CLI is reachable at all,
+	// not to validate a user's explicit binary-path override.
 	path, err := exec.LookPath("codex")
 	if err != nil {
 		return doctorRow{Status: doctorErr, Check: "Codex binary", Detail: "not found in PATH=" + os.Getenv("PATH")}
@@ -114,14 +117,14 @@ func checkCodexBinary(context.Context, *doctorContext) doctorRow {
 }
 
 func checkCodexVersion(ctx context.Context, _ *doctorContext) doctorRow {
-	timeoutCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(timeoutCtx, "codex", "--version")
 	output, err := cmd.CombinedOutput()
 	detail := strings.TrimSpace(string(output))
 	if timeoutCtx.Err() == context.DeadlineExceeded {
-		return doctorRow{Status: doctorErr, Check: "Codex version", Detail: "codex --version timed out after 2s"}
+		return doctorRow{Status: doctorErr, Check: "Codex version", Detail: "codex --version timed out after 10s"}
 	}
 	if err != nil {
 		if detail != "" {
@@ -218,6 +221,10 @@ func checkCodexEffectiveAuth(_ context.Context, dctx *doctorContext) doctorRow {
 		return doctorRow{Status: doctorOK, Check: "Effective auth", Detail: "Active path: " + dctx.EffectiveAuth}
 	case dctx.Env.OpenAIAPIKey && dctx.Auth.Kind == doctorAuthAbsent:
 		dctx.EffectiveAuth = "OPENAI_API_KEY auto-mapped to CODEX_API_KEY"
+		if dctx.Env.CodexAccessToken {
+			dctx.EffectiveAuth += " (CODEX_ACCESS_TOKEN ignored — auto-mapped OPENAI_API_KEY has higher precedence; unset OPENAI_API_KEY to use CODEX_ACCESS_TOKEN)"
+			return doctorRow{Status: doctorWarn, Check: "Effective auth", Detail: "Active path: " + dctx.EffectiveAuth}
+		}
 		return doctorRow{Status: doctorOK, Check: "Effective auth", Detail: "Active path: " + dctx.EffectiveAuth}
 	case dctx.Env.CodexAccessToken:
 		dctx.EffectiveAuth = "CODEX_ACCESS_TOKEN"
@@ -262,7 +269,7 @@ func checkCodexConfig(_ context.Context, _ *doctorContext) doctorRow {
 		}
 		return doctorRow{Status: doctorOK, Check: "Herd config", Detail: "agent.provider=codex agent.model=" + model}
 	}
-	return doctorRow{Status: doctorInfo, Check: "Herd config", Detail: fmt.Sprintf("Codex doctor runs against agent.provider: codex configs; current is %s - checks 1-5 still useful for ad-hoc codex usage", cfg.Agent.Provider)}
+	return doctorRow{Status: doctorInfo, Check: "Herd config", Detail: fmt.Sprintf("Codex doctor runs against agent.provider: codex configs; current is %s — checks 1-5 still useful for ad-hoc codex usage", cfg.Agent.Provider)}
 }
 
 func checkStaleCodexAuthJSONEnv(_ context.Context, dctx *doctorContext) doctorRow {
