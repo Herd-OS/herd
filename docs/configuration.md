@@ -18,10 +18,14 @@ agent:
   binary: ""                     # path to agent binary (auto-detect if empty)
   model: ""                      # model override (optional, agent-specific)
   codex_reasoning_effort: "medium" # minimal | low | medium | high (codex provider only)
-  codex_sandbox: ""              # read-only | workspace-write | danger-full-access (codex only; empty = workspace-write)
+  codex_sandbox: ""              # read-only | workspace-write | danger-full-access (codex only; empty = role/context-aware default)
   max_turns: 0                   # max agentic turns in headless mode (0 = agent default; ignored by opencode)
   exec: "local"                  # local | docker — where `herd plan` runs the agent (local default)
   exec_image: ""                 # override image for exec: docker (default ghcr.io/herd-os/herd-runner-base:<herd-version>)
+  planner:                       # optional sparse overrides for herd plan only
+    provider: "claude"           # provider, binary, model, max_turns, codex_reasoning_effort, codex_sandbox
+  workers:                       # optional sparse overrides for workers, integrator, and review
+    codex_sandbox: "danger-full-access"
 
 workers:
   max_concurrent: 3              # max simultaneous worker Actions
@@ -66,10 +70,29 @@ pull_requests:
 | `agent.binary` | string | `claude` for the `claude` provider, `opencode` for the `opencode` provider, `codex` for the `codex` provider | Path to the agent CLI binary. Empty falls back to the provider default and resolves via `PATH`. |
 | `agent.model` | string | `""` (provider default) | Model override. For `opencode`, use the provider/model form, e.g. `anthropic/claude-sonnet-4` or `openai/gpt-5`. For `codex`, use a **bare** model ID, e.g. `gpt-5-codex` or `gpt-5.2` (see [Codex model IDs](#codex-model-ids)). |
 | `agent.codex_reasoning_effort` | string | `medium` | Reasoning effort for the `codex` provider only: `minimal`, `low`, `medium`, or `high`. See [Codex reasoning effort](#codex-reasoning-effort). |
-| `agent.codex_sandbox` | string | `""` (uses `workspace-write`) | Codex CLI sandbox policy: `read-only`, `workspace-write`, or `danger-full-access`. **Set to `danger-full-access` for workers running inside a container** — Codex's bubblewrap-based sandboxes fail at startup with "No permissions to create a new namespace" on most container hosts (TrueNAS SCALE Apps, default Docker setups without `kernel.unprivileged_userns_clone=1`). The container is the security boundary in that context. See [Codex sandbox](#codex-sandbox). |
+| `agent.codex_sandbox` | string | `""` (role/context-aware) | Codex CLI sandbox policy: `read-only`, `workspace-write`, or `danger-full-access`. Empty is resolved by HerdOS from the role and execution context: local planning leaves it empty so Codex uses `workspace-write`; Docker planning and worker-like roles use `danger-full-access`. See [Codex sandbox](#codex-sandbox). |
 | `agent.max_turns` | int | `0` (agent default) | Maximum agentic turns in headless mode. **Ignored by the `opencode` provider** — OpenCode's `run` subcommand has no max-turns flag. |
 | `agent.exec` | string | `local` | `local` runs the agent on your machine (requires the agent CLI installed locally). `docker` runs `herd plan` inside `ghcr.io/herd-os/herd-runner-base`, which already carries all agent CLIs — no local agent install needed beyond Docker + the herd binary. See [Local vs Docker Agent Execution](#local-vs-docker-agent-execution). |
 | `agent.exec_image` | string | `ghcr.io/herd-os/herd-runner-base:<herd-version>` | Override the image used by `exec: docker`. Empty defaults to the version-pinned base image (falls back to `:latest` on dev builds). |
+
+### Per-role agent overrides
+
+Base `agent` fields apply to every role. Optional `agent.planner` and `agent.workers` blocks are sparse overrides: include only the fields that should differ from the base. The fields that can be overridden per role are `provider`, `binary`, `model`, `max_turns`, `codex_reasoning_effort`, and `codex_sandbox`.
+
+`agent.exec` and `agent.exec_image` stay base-only. They control where `herd plan` runs and are not valid under role blocks. The integrator and agent review use the `workers` role.
+
+```yaml
+agent:
+  provider: codex
+  model: gpt-5-codex
+  planner:
+    provider: claude
+    model: sonnet
+  workers:
+    codex_sandbox: danger-full-access
+```
+
+The `herd config list`, `herd config get`, and `herd config set` commands surface explicit role override fields only. They do not print or write resolved role defaults.
 
 ### Example: OpenCode
 
@@ -91,10 +114,19 @@ agent:
   binary: ""                       # defaults to "codex"
   model: "gpt-5-codex"             # bare model ID, NOT openai/gpt-5
   codex_reasoning_effort: "medium" # minimal | low | medium | high
-  codex_sandbox: "danger-full-access" # required for container-based workers
 ```
 
 The Codex provider uses API-key auth: set `OPENAI_API_KEY` (herd maps it to `CODEX_API_KEY` at invocation time when `CODEX_API_KEY` is unset) or set `CODEX_API_KEY` directly. See [runners.md](runners.md#codex-provider-agentprovider-codex) for the authentication setup.
+
+A minimal Codex config can omit role blocks:
+
+```yaml
+agent:
+  provider: codex
+  model: gpt-5-codex
+```
+
+With empty or local `agent.exec`, the planner leaves `codex_sandbox` empty and Codex uses its own `workspace-write` default. Workers, integrator, and review resolve to `danger-full-access` because they run in the runner container. If `agent.exec: docker`, the planner also resolves to `danger-full-access`. Explicit base or role `codex_sandbox` values override these smart defaults.
 
 #### Codex model IDs
 
@@ -124,11 +156,19 @@ The configured value maps to `-c model_reasoning_effort=<value>` on every Codex 
 | `read-only` | Codex can read files but not modify them. Bubblewrap-based. |
 | `workspace-write` | **Codex CLI default.** Codex can write within the workspace; network blocked. Bubblewrap-based. |
 | `danger-full-access` | No bubblewrap layer. Codex runs commands and edits files with full process privileges (the outer container or host is the boundary). |
-| `""` (empty) | Falls back to `workspace-write`. |
+| `""` (empty) | HerdOS resolves by role and execution context. Local/empty-exec planning stays empty, so Codex uses `workspace-write`; Docker planning and worker-like roles use `danger-full-access`. |
 
-**For workers running inside a Docker container, set `danger-full-access`.** The bubblewrap-based modes need an unprivileged user namespace, which most container hosts (notably TrueNAS SCALE Apps, default Docker without `sysctl kernel.unprivileged_userns_clone=1`) do not grant — every Codex shell or file edit fails with `bwrap: No permissions to create a new namespace`, the agent produces zero work, and the worker can't make progress. The container is already the security boundary in worker contexts, so disabling Codex's inner sandbox there is the correct trade-off.
+When unset, HerdOS never produces `read-only` as a smart default. Workers, the integrator, and agent review default to `danger-full-access` because they run inside the runner container. The bubblewrap-based modes need an unprivileged user namespace, which most container hosts (notably TrueNAS SCALE Apps, default Docker without `sysctl kernel.unprivileged_userns_clone=1`) do not grant. The container is already the security boundary in worker contexts, so disabling Codex's inner sandbox there is the correct trade-off.
 
-For local `agent.exec: local` use, leave it empty unless you specifically know your host can't run bubblewrap.
+For local `agent.exec: local` planning, leave it empty unless you specifically know your host can't run bubblewrap. If you previously set a broad base `agent.codex_sandbox: danger-full-access`, you can keep it for zero behavior change after upgrading. If you want safer local planning while keeping container workers on full access, move that value into `agent.workers.codex_sandbox` instead:
+
+```yaml
+agent:
+  provider: codex
+  model: gpt-5-codex
+  workers:
+    codex_sandbox: danger-full-access
+```
 
 ## Local vs Docker Agent Execution
 

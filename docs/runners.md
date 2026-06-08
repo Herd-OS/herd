@@ -206,6 +206,8 @@ API-key auth (above) remains the documented default. If you'd rather drive Codex
 
 In every subscription path, set `agent.provider: codex` and `agent.model: gpt-5-codex` in `.herdos.yml`.
 
+Codex workers run inside the runner container. When `agent.codex_sandbox` is unset, HerdOS defaults worker, integrator, and review runs to `danger-full-access`, because Codex's bubblewrap-based sandboxes usually cannot create namespaces inside container hosts. Set `codex_sandbox` only when you want an explicit base or per-role override. For local planning, an unset sandbox stays empty so Codex uses its own `workspace-write` default; `agent.exec: docker` planning uses the same container default as workers.
+
 ##### Path A — ChatGPT Enterprise (`CODEX_ACCESS_TOKEN`)
 
 For ChatGPT Enterprise workspaces:
