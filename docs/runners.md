@@ -192,6 +192,14 @@ Codex resolves credentials in this order: `CODEX_API_KEY` > ephemeral key > `COD
 
 herd's `OPENAI_API_KEY` -> `CODEX_API_KEY` convenience mapping is **skipped when a subscription `auth.json` is present** (under `$CODEX_HOME`, or `~/.codex` when `CODEX_HOME` is unset). This prevents a stray `OPENAI_API_KEY` in your shell from silently overriding your ChatGPT subscription and billing you per-token. Pure API-key users (no `auth.json`) keep the convenience mapping. An explicit `CODEX_API_KEY` always wins, with or without `auth.json`.
 
+##### Diagnostics
+
+`herd codex doctor` checks local Codex CLI presence, `auth.json` shape, env auth state, effective auth path, provider/model sanity, and stale `CODEX_AUTH_JSON`; it is local-only and does not inspect remote runner hosts.
+
+```bash
+herd codex doctor
+```
+
 #### Subscription auth (opt-in)
 
 API-key auth (above) remains the documented default. If you'd rather drive Codex from a ChatGPT subscription instead of paying per token, herd supports two opt-in subscription paths. The mechanics mirror OpenAI's own [CI/CD auth guide](https://developers.openai.com/codex/auth/ci-cd-auth).
