@@ -198,6 +198,7 @@ func TestCheckCodexAuthEnv(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			clearCodexDoctorEnv(t)
 			for name, value := range tt.env {
 				t.Setenv(name, value)
 			}
@@ -483,6 +484,20 @@ func chdir(t *testing.T, dir string) {
 	t.Cleanup(func() {
 		require.NoError(t, os.Chdir(old))
 	})
+}
+
+func clearCodexDoctorEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"CODEX_API_KEY",
+		"OPENAI_API_KEY",
+		"CODEX_ACCESS_TOKEN",
+		"CODEX_AUTH_JSON",
+		"CODEX_HOME",
+		"HOME",
+	} {
+		t.Setenv(name, "")
+	}
 }
 
 func ptr(s string) *string {
