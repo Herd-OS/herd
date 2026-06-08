@@ -74,7 +74,7 @@ func NewAgent(binaryPath, model, reasoningEffort, sandbox string) *CodexAgent {
 // auth.json).
 func childEnv() []string {
 	env := os.Environ()
-	if os.Getenv("CODEX_API_KEY") == "" && !authJSONPresent() {
+	if os.Getenv("CODEX_API_KEY") == "" && !AuthJSONPresent() {
 		if v := os.Getenv("OPENAI_API_KEY"); v != "" {
 			env = append(env, "CODEX_API_KEY="+v)
 		}
