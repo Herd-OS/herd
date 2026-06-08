@@ -162,6 +162,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 	if mode == "standalone" {
 		return execStandalone(ctx, p, ag, cfg, params)
 	}
+	workerRole := cfg.Agent.Resolve(config.AgentRoleWorkers)
 
 	// Get issue
 	issue, err := p.Issues().Get(ctx, params.IssueNumber)
@@ -280,7 +281,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		execOpts := agent.ExecOptions{
 			RepoRoot:     params.RepoRoot,
 			SystemPrompt: systemPrompt,
-			MaxTurns:     cfg.Agent.MaxTurns,
+			MaxTurns:     workerRole.MaxTurns,
 		}
 
 		// Execute task
@@ -429,7 +430,7 @@ pushWork:
 		retryExecOpts := agent.ExecOptions{
 			RepoRoot:     params.RepoRoot,
 			SystemPrompt: retryPrompt,
-			MaxTurns:     cfg.Agent.MaxTurns,
+			MaxTurns:     workerRole.MaxTurns,
 		}
 
 		// Re-invoke agent with validation errors
@@ -983,6 +984,8 @@ func renderStandalonePrompt(title, body string, issueNumber int, targetBranch, r
 // result, pushes back to the head branch with a non-force push, and posts
 // completion comments on the PR.
 func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.Config, params ExecParams) (*ExecResult, error) {
+	workerRole := cfg.Agent.Resolve(config.AgentRoleWorkers)
+
 	issue, err := p.Issues().Get(ctx, params.IssueNumber)
 	if err != nil {
 		return nil, fmt.Errorf("getting issue #%d: %w", params.IssueNumber, err)
@@ -1039,7 +1042,7 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 	_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
 	agentCtx, agentCancel := context.WithTimeout(ctx, agentTimeout)
 	taskSpec := agent.TaskSpec{IssueNumber: params.IssueNumber, Title: issue.Title, Body: issueBody}
-	execOpts := agent.ExecOptions{RepoRoot: params.RepoRoot, SystemPrompt: systemPrompt, MaxTurns: cfg.Agent.MaxTurns}
+	execOpts := agent.ExecOptions{RepoRoot: params.RepoRoot, SystemPrompt: systemPrompt, MaxTurns: workerRole.MaxTurns}
 	agentResult, agentErr := ag.Execute(agentCtx, taskSpec, execOpts)
 	agentCancel()
 	close(progressDone)
@@ -1105,7 +1108,7 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 		retryExecOpts := agent.ExecOptions{
 			RepoRoot:     params.RepoRoot,
 			SystemPrompt: retryPrompt,
-			MaxTurns:     cfg.Agent.MaxTurns,
+			MaxTurns:     workerRole.MaxTurns,
 		}
 		retrySpec := agent.TaskSpec{
 			IssueNumber: params.IssueNumber,

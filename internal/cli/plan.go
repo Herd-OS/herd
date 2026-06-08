@@ -13,10 +13,11 @@ import (
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/factory"
+	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/display"
-	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/planner"
+	"github.com/herd-os/herd/internal/platform"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -224,7 +225,7 @@ func runPlan(ctx context.Context, initialPrompt, batchNameOverride string, noDis
 	}
 
 	// Create agent and launch planning session
-	agentInstance, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort, cfg.Agent.CodexSandbox)
+	agentInstance, err := factory.New(cfg.Agent.Resolve(config.AgentRolePlanner))
 	if err != nil {
 		return err
 	}

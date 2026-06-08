@@ -11,6 +11,7 @@ import (
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/factory"
+	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/spf13/cobra"
 )
@@ -77,7 +78,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 		return err
 	}
 
-	ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort, cfg.Agent.CodexSandbox)
+	ag, err := factory.New(cfg.Agent.Resolve(config.AgentRoleWorkers))
 	if err != nil {
 		return err
 	}

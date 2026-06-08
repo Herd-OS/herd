@@ -9,49 +9,50 @@ import (
 	"github.com/herd-os/herd/internal/agent/claude"
 	"github.com/herd-os/herd/internal/agent/codex"
 	"github.com/herd-os/herd/internal/agent/opencode"
+	"github.com/herd-os/herd/internal/config"
 )
 
 func TestNew(t *testing.T) {
 	tests := []struct {
 		name     string
-		provider string
+		role     config.AgentRole
 		wantErr  bool
 		wantType any
 	}{
 		{
 			name:     "claude provider",
-			provider: "claude",
+			role:     config.AgentRole{Provider: "claude"},
 			wantErr:  false,
 			wantType: (*claude.ClaudeAgent)(nil),
 		},
 		{
 			name:     "empty provider defaults to claude",
-			provider: "",
+			role:     config.AgentRole{Provider: ""},
 			wantErr:  false,
 			wantType: (*claude.ClaudeAgent)(nil),
 		},
 		{
 			name:     "opencode provider",
-			provider: "opencode",
+			role:     config.AgentRole{Provider: "opencode"},
 			wantErr:  false,
 			wantType: (*opencode.OpenCodeAgent)(nil),
 		},
 		{
 			name:     "codex provider",
-			provider: "codex",
+			role:     config.AgentRole{Provider: "codex"},
 			wantErr:  false,
 			wantType: (*codex.CodexAgent)(nil),
 		},
 		{
-			name:     "unknown provider returns error",
-			provider: "gpt",
-			wantErr:  true,
+			name:    "unknown provider returns error",
+			role:    config.AgentRole{Provider: "gpt"},
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ag, err := New(tt.provider, "", "", "", "")
+			ag, err := New(tt.role)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Nil(t, ag)
@@ -68,7 +69,7 @@ func TestNew(t *testing.T) {
 
 func TestNewPassesBinaryAndModel(t *testing.T) {
 	t.Run("claude", func(t *testing.T) {
-		ag, err := New("claude", "/custom/claude", "opus", "", "")
+		ag, err := New(config.AgentRole{Provider: "claude", Binary: "/custom/claude", Model: "opus"})
 		require.NoError(t, err)
 		ca, ok := ag.(*claude.ClaudeAgent)
 		require.True(t, ok)
@@ -77,7 +78,7 @@ func TestNewPassesBinaryAndModel(t *testing.T) {
 	})
 
 	t.Run("opencode", func(t *testing.T) {
-		ag, err := New("opencode", "/custom/opencode", "anthropic/claude-sonnet-4", "", "")
+		ag, err := New(config.AgentRole{Provider: "opencode", Binary: "/custom/opencode", Model: "anthropic/claude-sonnet-4"})
 		require.NoError(t, err)
 		oa, ok := ag.(*opencode.OpenCodeAgent)
 		require.True(t, ok)
@@ -86,7 +87,13 @@ func TestNewPassesBinaryAndModel(t *testing.T) {
 	})
 
 	t.Run("codex", func(t *testing.T) {
-		ag, err := New("codex", "/custom/codex", "gpt-5-codex", "high", "danger-full-access")
+		ag, err := New(config.AgentRole{
+			Provider:             "codex",
+			Binary:               "/custom/codex",
+			Model:                "gpt-5-codex",
+			CodexReasoningEffort: "high",
+			CodexSandbox:         "danger-full-access",
+		})
 		require.NoError(t, err)
 		ca, ok := ag.(*codex.CodexAgent)
 		require.True(t, ok)
@@ -95,4 +102,22 @@ func TestNewPassesBinaryAndModel(t *testing.T) {
 		assert.Equal(t, "high", ca.ReasoningEffort)
 		assert.Equal(t, "danger-full-access", ca.Sandbox)
 	})
+}
+
+func TestNewWithResolvedPlannerAndWorkersRoles(t *testing.T) {
+	agentConfig := config.Agent{
+		AgentRole: config.AgentRole{Provider: "claude", Model: "sonnet"},
+		Workers:   &config.AgentRole{Provider: "codex", Model: "gpt-5-codex", CodexReasoningEffort: "high"},
+	}
+
+	plannerAgent, err := New(agentConfig.Resolve(config.AgentRolePlanner))
+	require.NoError(t, err)
+	assert.IsType(t, (*claude.ClaudeAgent)(nil), plannerAgent)
+
+	workersAgent, err := New(agentConfig.Resolve(config.AgentRoleWorkers))
+	require.NoError(t, err)
+	assert.IsType(t, (*codex.CodexAgent)(nil), workersAgent)
+	ca, ok := workersAgent.(*codex.CodexAgent)
+	require.True(t, ok)
+	assert.Equal(t, "danger-full-access", ca.Sandbox)
 }
