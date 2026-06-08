@@ -15,9 +15,8 @@ import (
 
 func newCodexCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "codex",
-		Short:  "Codex provider runner-side helpers",
-		Hidden: true,
+		Use:   "codex",
+		Short: "Codex provider tools",
 	}
 	cmd.AddCommand(&cobra.Command{
 		Use:    "keepalive-loop",
@@ -27,6 +26,15 @@ func newCodexCmd() *cobra.Command {
 		RunE: func(c *cobra.Command, _ []string) error {
 			runKeepaliveLoop(c.Context())
 			return nil
+		},
+		SilenceUsage: true,
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose local Codex configuration",
+		Args:  cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			return runCodexDoctor(c.Context(), c.OutOrStdout())
 		},
 		SilenceUsage: true,
 	})
