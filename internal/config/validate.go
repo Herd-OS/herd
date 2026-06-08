@@ -31,21 +31,12 @@ func Validate(cfg *Config) *ValidationError {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("platform.provider must be one of: github — got %q", cfg.Platform.Provider))
 	}
 
-	// Agent
-	switch cfg.Agent.Provider {
-	case "claude", "opencode", "codex":
-	default:
-		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.provider must be one of: claude, opencode, codex — got %q", cfg.Agent.Provider))
+	validateAgentRole(ve, "agent", cfg.Agent.AgentRole, true)
+	if cfg.Agent.Planner != nil {
+		validateAgentRole(ve, "agent.planner", *cfg.Agent.Planner, false)
 	}
-	switch cfg.Agent.CodexReasoningEffort {
-	case "", "minimal", "low", "medium", "high":
-	default:
-		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.codex_reasoning_effort must be one of: minimal, low, medium, high — got %q", cfg.Agent.CodexReasoningEffort))
-	}
-	switch cfg.Agent.CodexSandbox {
-	case "", "read-only", "workspace-write", "danger-full-access":
-	default:
-		ve.Errors = append(ve.Errors, fmt.Sprintf("agent.codex_sandbox must be one of: read-only, workspace-write, danger-full-access (or empty) — got %q", cfg.Agent.CodexSandbox))
+	if cfg.Agent.Workers != nil {
+		validateAgentRole(ve, "agent.workers", *cfg.Agent.Workers, false)
 	}
 	switch cfg.Agent.Exec {
 	case "", "local", "docker":
@@ -113,4 +104,26 @@ func Validate(cfg *Config) *ValidationError {
 		return ve
 	}
 	return nil
+}
+
+func validateAgentRole(ve *ValidationError, path string, role AgentRole, requireProvider bool) {
+	switch role.Provider {
+	case "claude", "opencode", "codex":
+	case "":
+		if requireProvider {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("%s.provider must be one of: claude, opencode, codex — got %q", path, role.Provider))
+		}
+	default:
+		ve.Errors = append(ve.Errors, fmt.Sprintf("%s.provider must be one of: claude, opencode, codex — got %q", path, role.Provider))
+	}
+	switch role.CodexReasoningEffort {
+	case "", "minimal", "low", "medium", "high":
+	default:
+		ve.Errors = append(ve.Errors, fmt.Sprintf("%s.codex_reasoning_effort must be one of: minimal, low, medium, high — got %q", path, role.CodexReasoningEffort))
+	}
+	switch role.CodexSandbox {
+	case "", "read-only", "workspace-write", "danger-full-access":
+	default:
+		ve.Errors = append(ve.Errors, fmt.Sprintf("%s.codex_sandbox must be one of: read-only, workspace-write, danger-full-access (or empty) — got %q", path, role.CodexSandbox))
+	}
 }

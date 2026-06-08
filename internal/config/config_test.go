@@ -15,6 +15,7 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, "github", cfg.Platform.Provider)
 	assert.Equal(t, "claude", cfg.Agent.Provider)
 	assert.Equal(t, "medium", cfg.Agent.CodexReasoningEffort)
+	assert.Empty(t, cfg.Agent.CodexSandbox)
 	assert.Equal(t, 3, cfg.Workers.MaxConcurrent)
 	assert.Equal(t, "herd-worker", cfg.Workers.RunnerLabel)
 	assert.Equal(t, 30, cfg.Workers.TimeoutMinutes)
@@ -101,6 +102,84 @@ agent:
 	assert.Equal(t, "example/foo:bar", cfg.Agent.ExecImage)
 }
 
+func TestLoadAgentRoleBlocks(t *testing.T) {
+	dir := t.TempDir()
+	content := `version: 1
+platform:
+  provider: "github"
+  owner: "org"
+  repo: "repo"
+agent:
+  provider: "claude"
+  binary: "claude"
+  model: "sonnet"
+  max_turns: 4
+  codex_reasoning_effort: "medium"
+  planner:
+    model: "opus"
+    max_turns: 8
+  workers:
+    provider: "codex"
+    codex_sandbox: "read-only"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
+
+	cfg, err := Load(dir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "claude", cfg.Agent.Provider)
+	assert.Equal(t, "claude", cfg.Agent.Binary)
+	assert.Equal(t, "sonnet", cfg.Agent.Model)
+	assert.Equal(t, 4, cfg.Agent.MaxTurns)
+	require.NotNil(t, cfg.Agent.Planner)
+	assert.Equal(t, AgentRole{Model: "opus", MaxTurns: 8}, *cfg.Agent.Planner)
+	require.NotNil(t, cfg.Agent.Workers)
+	assert.Equal(t, AgentRole{Provider: "codex", CodexSandbox: "read-only"}, *cfg.Agent.Workers)
+
+	assert.Equal(t, AgentRole{
+		Provider:             "claude",
+		Binary:               "claude",
+		Model:                "opus",
+		MaxTurns:             8,
+		CodexReasoningEffort: "medium",
+	}, cfg.Agent.Resolve(AgentRolePlanner))
+	assert.Equal(t, AgentRole{
+		Provider:             "codex",
+		Binary:               "claude",
+		Model:                "sonnet",
+		MaxTurns:             4,
+		CodexReasoningEffort: "medium",
+		CodexSandbox:         "read-only",
+	}, cfg.Agent.Resolve(AgentRoleWorkers))
+}
+
+func TestLoadSparseAgentRoleBlocks(t *testing.T) {
+	dir := t.TempDir()
+	content := `version: 1
+platform:
+  provider: "github"
+  owner: "org"
+  repo: "repo"
+agent:
+  provider: "codex"
+  exec: docker
+  planner: {}
+  workers:
+    model: "gpt-5-codex"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
+
+	cfg, err := Load(dir)
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Agent.Planner)
+	require.NotNil(t, cfg.Agent.Workers)
+	assert.Equal(t, AgentRole{}, *cfg.Agent.Planner)
+	assert.Equal(t, AgentRole{Model: "gpt-5-codex"}, *cfg.Agent.Workers)
+	assert.Equal(t, "danger-full-access", cfg.Agent.Resolve(AgentRolePlanner).CodexSandbox)
+	assert.Equal(t, "danger-full-access", cfg.Agent.Resolve(AgentRoleWorkers).CodexSandbox)
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	_, err := Load(t.TempDir())
 	assert.ErrorContains(t, err, "no .herdos.yml found")
@@ -147,6 +226,35 @@ platform:
 	assert.Equal(t, "gpu-runner", cfg.Workers.RunnerLabel)
 	assert.Equal(t, "opus", cfg.Agent.Model)
 	assert.Equal(t, 120, cfg.Workers.TimeoutMinutes)
+}
+
+func TestEnvOverrideModelOnlyUpdatesBaseAgent(t *testing.T) {
+	dir := t.TempDir()
+	content := `version: 1
+platform:
+  provider: "github"
+  owner: "org"
+  repo: "repo"
+agent:
+  provider: "claude"
+  model: "sonnet"
+  planner:
+    model: "planner-model"
+  workers:
+    model: "worker-model"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
+
+	t.Setenv("HERD_MODEL", "env-model")
+
+	cfg, err := Load(dir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "env-model", cfg.Agent.Model)
+	require.NotNil(t, cfg.Agent.Planner)
+	assert.Equal(t, "planner-model", cfg.Agent.Planner.Model)
+	require.NotNil(t, cfg.Agent.Workers)
+	assert.Equal(t, "worker-model", cfg.Agent.Workers.Model)
 }
 
 func TestValidateValid(t *testing.T) {

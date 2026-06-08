@@ -10,6 +10,11 @@ import (
 
 const ConfigFile = ".herdos.yml"
 
+const (
+	AgentRolePlanner = "planner"
+	AgentRoleWorkers = "workers"
+)
+
 type Config struct {
 	Version      int          `yaml:"version"`
 	Platform     Platform     `yaml:"platform"`
@@ -26,28 +31,91 @@ type Platform struct {
 	Repo     string `yaml:"repo"`
 }
 
-type Agent struct {
-	Provider  string `yaml:"provider"`
-	Binary    string `yaml:"binary"`
-	Model     string `yaml:"model"`
-	MaxTurns  int    `yaml:"max_turns"`  // Max agentic turns for headless mode (0 = agent default)
-	Exec      string `yaml:"exec"`       // local | docker (empty = local). Where `herd plan` runs the agent.
-	ExecImage string `yaml:"exec_image"` // Override image for exec=docker (empty = default ghcr.io/herd-os/herd-runner-base:<version>)
+type AgentRole struct {
+	Provider string `yaml:"provider,omitempty"`
+	Binary   string `yaml:"binary,omitempty"`
+	Model    string `yaml:"model,omitempty"`
+	MaxTurns int    `yaml:"max_turns,omitempty"`
 	// CodexReasoningEffort controls the Codex provider's reasoning depth.
 	// One of minimal|low|medium|high (Codex provider only; default medium).
 	// Maps to `-c model_reasoning_effort=<value>` on every Codex invocation.
-	CodexReasoningEffort string `yaml:"codex_reasoning_effort"`
+	CodexReasoningEffort string `yaml:"codex_reasoning_effort,omitempty"`
 	// CodexSandbox selects the Codex CLI sandbox policy. Empty uses Codex's
 	// own default (workspace-write). One of read-only|workspace-write|
 	// danger-full-access. Maps to `--sandbox <value>` on every Codex
-	// invocation. **Workers running inside a container** typically need
-	// `danger-full-access` because Codex's default workspace-write sandbox
-	// shells out to bubblewrap, which cannot create the nested user
-	// namespace it needs inside a Docker container without elevated host
-	// kernel settings (`kernel.unprivileged_userns_clone=1`) or container
-	// capabilities. The container itself is already a security boundary,
-	// so disabling Codex's inner sandbox in that context is safe.
-	CodexSandbox string `yaml:"codex_sandbox"`
+	// invocation.
+	CodexSandbox string `yaml:"codex_sandbox,omitempty"`
+}
+
+type Agent struct {
+	AgentRole `yaml:",inline"`
+
+	Exec      string `yaml:"exec,omitempty"`       // local | docker (empty = local). Where `herd plan` runs the agent.
+	ExecImage string `yaml:"exec_image,omitempty"` // Override image for exec=docker (empty = default ghcr.io/herd-os/herd-runner-base:<version>)
+
+	Planner *AgentRole `yaml:"planner,omitempty"`
+	Workers *AgentRole `yaml:"workers,omitempty"`
+}
+
+// Resolve returns the effective agent configuration for role.
+func (a *Agent) Resolve(role string) AgentRole {
+	resolved := a.AgentRole
+
+	switch role {
+	case AgentRolePlanner:
+		overlayAgentRole(&resolved, a.Planner)
+	case AgentRoleWorkers:
+		overlayAgentRole(&resolved, a.Workers)
+	default:
+		return resolved
+	}
+
+	if resolved.Provider == "codex" && resolved.CodexSandbox == "" {
+		switch role {
+		case AgentRolePlanner:
+			if a.Exec == "docker" {
+				resolved.CodexSandbox = "danger-full-access"
+			}
+		case AgentRoleWorkers:
+			resolved.CodexSandbox = "danger-full-access"
+		}
+	}
+
+	return resolved
+}
+
+// ResolveOrDefault returns the effective agent configuration for a known role.
+func (a *Agent) ResolveOrDefault(role string) (AgentRole, error) {
+	switch role {
+	case AgentRolePlanner, AgentRoleWorkers:
+		return a.Resolve(role), nil
+	default:
+		return AgentRole{}, fmt.Errorf("unknown agent role %q (supported: planner, workers)", role)
+	}
+}
+
+func overlayAgentRole(base *AgentRole, override *AgentRole) {
+	if override == nil {
+		return
+	}
+	if override.Provider != "" {
+		base.Provider = override.Provider
+	}
+	if override.Binary != "" {
+		base.Binary = override.Binary
+	}
+	if override.Model != "" {
+		base.Model = override.Model
+	}
+	if override.MaxTurns != 0 {
+		base.MaxTurns = override.MaxTurns
+	}
+	if override.CodexReasoningEffort != "" {
+		base.CodexReasoningEffort = override.CodexReasoningEffort
+	}
+	if override.CodexSandbox != "" {
+		base.CodexSandbox = override.CodexSandbox
+	}
 }
 
 type Workers struct {
