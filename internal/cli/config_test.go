@@ -203,14 +203,50 @@ func TestSetConfigValueAgentWorkersRoleOverrides(t *testing.T) {
 }
 
 func TestSetConfigValueAgentRoleOverrideUnknownField(t *testing.T) {
-	cfg := config.Default()
+	tests := []struct {
+		name        string
+		key         string
+		value       string
+		errContains string
+	}{
+		{
+			name:        "unknown planner field",
+			key:         "agent.planner.nonexistent",
+			value:       "value",
+			errContains: "unknown config key: agent.planner.nonexistent",
+		},
+		{
+			name:        "unknown workers field",
+			key:         "agent.workers.nonexistent",
+			value:       "value",
+			errContains: "unknown config key: agent.workers.nonexistent",
+		},
+		{
+			name:        "extra path under planner field",
+			key:         "agent.planner.provider.extra",
+			value:       "value",
+			errContains: "unknown config key: agent.planner.provider.extra",
+		},
+		{
+			name:        "invalid planner int value",
+			key:         "agent.planner.max_turns",
+			value:       "abc",
+			errContains: `agent.planner.max_turns must be a number, got "abc"`,
+		},
+	}
 
-	err := setConfigValue(cfg, "agent.planner.nonexistent", "value")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown config key: agent.planner.nonexistent")
-	require.NotNil(t, cfg.Agent.Planner)
-	assert.Equal(t, config.AgentRole{}, *cfg.Agent.Planner)
+			err := setConfigValue(cfg, tt.key, tt.value)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errContains)
+			assert.Nil(t, cfg.Agent.Planner)
+			assert.Nil(t, cfg.Agent.Workers)
+		})
+	}
 }
 
 func TestFlattenConfig(t *testing.T) {

@@ -229,19 +229,31 @@ func setConfigValue(cfg *config.Config, key, value string) error {
 	}
 
 	targetField := sectionField
+	var allocatedPointers []reflect.Value
+	fail := func(format string, args ...interface{}) error {
+		resetAllocatedPointers(allocatedPointers)
+		return fmt.Errorf(format, args...)
+	}
 	for _, part := range parts[1:] {
 		if targetField.Kind() == reflect.Pointer {
 			if targetField.IsNil() {
+				if targetField.Type().Elem().Kind() != reflect.Struct {
+					return fail("unknown config key: %s", key)
+				}
+				if !findField(reflect.New(targetField.Type().Elem()).Elem(), part).IsValid() {
+					return fail("unknown config key: %s", key)
+				}
 				targetField.Set(reflect.New(targetField.Type().Elem()))
+				allocatedPointers = append(allocatedPointers, targetField)
 			}
 			targetField = targetField.Elem()
 		}
 		if targetField.Kind() != reflect.Struct {
-			return fmt.Errorf("unknown config key: %s", key)
+			return fail("unknown config key: %s", key)
 		}
 		targetField = findField(targetField, part)
 		if !targetField.IsValid() {
-			return fmt.Errorf("unknown config key: %s", key)
+			return fail("unknown config key: %s", key)
 		}
 	}
 
@@ -251,20 +263,26 @@ func setConfigValue(cfg *config.Config, key, value string) error {
 	case reflect.Int:
 		n, err := strconv.Atoi(value)
 		if err != nil {
-			return fmt.Errorf("%s must be a number, got %q", key, value)
+			return fail("%s must be a number, got %q", key, value)
 		}
 		targetField.SetInt(int64(n))
 	case reflect.Bool:
 		b, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("%s must be true or false, got %q", key, value)
+			return fail("%s must be true or false, got %q", key, value)
 		}
 		targetField.SetBool(b)
 	default:
-		return fmt.Errorf("cannot set %s via CLI (use 'herd config edit')", key)
+		return fail("cannot set %s via CLI (use 'herd config edit')", key)
 	}
 
 	return nil
+}
+
+func resetAllocatedPointers(pointers []reflect.Value) {
+	for i := len(pointers) - 1; i >= 0; i-- {
+		pointers[i].Set(reflect.Zero(pointers[i].Type()))
+	}
 }
 
 func findField(v reflect.Value, yamlName string) reflect.Value {
