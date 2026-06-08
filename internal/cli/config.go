@@ -94,7 +94,7 @@ func runConfigGetSet(_ *cobra.Command, args []string) error {
 	// Set
 	oldVal, err := getConfigValue(cfg, key)
 	if err != nil {
-		return err
+		oldVal = "(not set)"
 	}
 
 	if err := setConfigValue(cfg, key, args[1]); err != nil {
@@ -154,6 +154,8 @@ func flattenConfig(cfg *config.Config) []keyValue {
 	kvs = append(kvs, keyValue{"agent.exec_image", displayValue(cfg.Agent.ExecImage)})
 	kvs = append(kvs, keyValue{"agent.codex_reasoning_effort", displayValue(cfg.Agent.CodexReasoningEffort)})
 	kvs = append(kvs, keyValue{"agent.codex_sandbox", displayValue(cfg.Agent.CodexSandbox)})
+	kvs = appendAgentRoleOverrides(kvs, "agent.planner", cfg.Agent.Planner)
+	kvs = appendAgentRoleOverrides(kvs, "agent.workers", cfg.Agent.Workers)
 	kvs = append(kvs, keyValue{"workers.max_concurrent", itoa(cfg.Workers.MaxConcurrent)})
 	kvs = append(kvs, keyValue{"workers.runner_label", cfg.Workers.RunnerLabel})
 	kvs = append(kvs, keyValue{"workers.timeout_minutes", itoa(cfg.Workers.TimeoutMinutes)})
@@ -180,6 +182,31 @@ func flattenConfig(cfg *config.Config) []keyValue {
 	return kvs
 }
 
+func appendAgentRoleOverrides(kvs []keyValue, prefix string, role *config.AgentRole) []keyValue {
+	if role == nil {
+		return kvs
+	}
+	if role.Provider != "" {
+		kvs = append(kvs, keyValue{prefix + ".provider", role.Provider})
+	}
+	if role.Binary != "" {
+		kvs = append(kvs, keyValue{prefix + ".binary", role.Binary})
+	}
+	if role.Model != "" {
+		kvs = append(kvs, keyValue{prefix + ".model", role.Model})
+	}
+	if role.MaxTurns != 0 {
+		kvs = append(kvs, keyValue{prefix + ".max_turns", itoa(role.MaxTurns)})
+	}
+	if role.CodexReasoningEffort != "" {
+		kvs = append(kvs, keyValue{prefix + ".codex_reasoning_effort", role.CodexReasoningEffort})
+	}
+	if role.CodexSandbox != "" {
+		kvs = append(kvs, keyValue{prefix + ".codex_sandbox", role.CodexSandbox})
+	}
+	return kvs
+}
+
 func getConfigValue(cfg *config.Config, key string) (string, error) {
 	for _, kv := range flattenConfig(cfg) {
 		if kv.key == key {
@@ -190,23 +217,32 @@ func getConfigValue(cfg *config.Config, key string) (string, error) {
 }
 
 func setConfigValue(cfg *config.Config, key, value string) error {
-	parts := strings.SplitN(key, ".", 2)
-	if len(parts) != 2 {
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
 		return fmt.Errorf("invalid key format: %s (expected section.field)", key)
 	}
 
-	section, field := parts[0], parts[1]
-
-	// Use reflection to set the field
 	cfgVal := reflect.ValueOf(cfg).Elem()
-	sectionField := findField(cfgVal, section)
+	sectionField := findField(cfgVal, parts[0])
 	if !sectionField.IsValid() {
-		return fmt.Errorf("unknown config section: %s", section)
+		return fmt.Errorf("unknown config section: %s", parts[0])
 	}
 
-	targetField := findField(sectionField, field)
-	if !targetField.IsValid() {
-		return fmt.Errorf("unknown config key: %s", key)
+	targetField := sectionField
+	for _, part := range parts[1:] {
+		if targetField.Kind() == reflect.Pointer {
+			if targetField.IsNil() {
+				targetField.Set(reflect.New(targetField.Type().Elem()))
+			}
+			targetField = targetField.Elem()
+		}
+		if targetField.Kind() != reflect.Struct {
+			return fmt.Errorf("unknown config key: %s", key)
+		}
+		targetField = findField(targetField, part)
+		if !targetField.IsValid() {
+			return fmt.Errorf("unknown config key: %s", key)
+		}
 	}
 
 	switch targetField.Kind() {
@@ -234,10 +270,19 @@ func setConfigValue(cfg *config.Config, key, value string) error {
 func findField(v reflect.Value, yamlName string) reflect.Value {
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
-		tag := t.Field(i).Tag.Get("yaml")
+		structField := t.Field(i)
+		tag := structField.Tag.Get("yaml")
 		tag = strings.Split(tag, ",")[0]
 		if tag == yamlName {
 			return v.Field(i)
+		}
+		if tag == "" && structField.Anonymous {
+			field := v.Field(i)
+			if field.Kind() == reflect.Struct {
+				if found := findField(field, yamlName); found.IsValid() {
+					return found
+				}
+			}
 		}
 	}
 	return reflect.Value{}
@@ -250,8 +295,8 @@ func displayValue(s string) string {
 	return s
 }
 
-func itoa(n int) string    { return strconv.Itoa(n) }
-func btoa(b bool) string   { return strconv.FormatBool(b) }
+func itoa(n int) string  { return strconv.Itoa(n) }
+func btoa(b bool) string { return strconv.FormatBool(b) }
 
 func formatStringSlice(ss []string) string {
 	if len(ss) == 0 {
