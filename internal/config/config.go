@@ -67,6 +67,9 @@ func (a *Agent) Resolve(role string) AgentRole {
 	case AgentRoleWorkers:
 		overlayAgentRole(&resolved, a.Workers)
 	default:
+		// Unknown roles intentionally get only the base AgentRole copy: no role
+		// overlay and no smart defaults. Normal call sites use the role constants;
+		// callers that want a hard error should use ResolveOrDefault instead.
 		return resolved
 	}
 
@@ -107,6 +110,8 @@ func overlayAgentRole(base *AgentRole, override *AgentRole) {
 	if override.Model != "" {
 		base.Model = override.Model
 	}
+	// MaxTurns uses 0 as the base-level "agent default" sentinel, so 0 in a
+	// sparse role override also means "do not override the base value."
 	if override.MaxTurns != 0 {
 		base.MaxTurns = override.MaxTurns
 	}
