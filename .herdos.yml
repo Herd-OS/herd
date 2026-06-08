@@ -7,11 +7,6 @@ agent:
     provider: codex
     binary: ""
     model: "gpt-5.5"
-    # Explicit base override retained for zero behavior change. After the
-    # per-role sandbox defaults upgrade, this can move to
-    # agent.workers.codex_sandbox if local planning should keep Codex's
-    # workspace-write default.
-    codex_sandbox: "danger-full-access"
 workers:
     max_concurrent: 3
     runner_label: herd-worker
