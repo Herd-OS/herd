@@ -8,8 +8,10 @@ func Default() *Config {
 			Provider: "github",
 		},
 		Agent: Agent{
-			Provider:             "claude",
-			CodexReasoningEffort: "medium",
+			AgentRole: AgentRole{
+				Provider:             "claude",
+				CodexReasoningEffort: "medium",
+			},
 		},
 		Workers: Workers{
 			MaxConcurrent:           3,

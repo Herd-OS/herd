@@ -78,6 +78,69 @@ func TestValidate_AgentProvider(t *testing.T) {
 	}
 }
 
+func TestValidate_AgentRoleProviders(t *testing.T) {
+	tests := []struct {
+		name      string
+		modify    func(*Config)
+		wantError bool
+		errSubstr string
+	}{
+		{
+			name: "base empty provider is invalid",
+			modify: func(cfg *Config) {
+				cfg.Agent.Provider = ""
+			},
+			wantError: true,
+			errSubstr: "agent.provider must be one of: claude, opencode, codex",
+		},
+		{
+			name: "planner sparse provider is valid",
+			modify: func(cfg *Config) {
+				cfg.Agent.Planner = &AgentRole{}
+			},
+		},
+		{
+			name: "workers sparse provider is valid",
+			modify: func(cfg *Config) {
+				cfg.Agent.Workers = &AgentRole{Model: "worker-model"}
+			},
+		},
+		{
+			name: "planner invalid provider has scoped path",
+			modify: func(cfg *Config) {
+				cfg.Agent.Planner = &AgentRole{Provider: "gpt"}
+			},
+			wantError: true,
+			errSubstr: "agent.planner.provider must be one of: claude, opencode, codex",
+		},
+		{
+			name: "workers invalid provider has scoped path",
+			modify: func(cfg *Config) {
+				cfg.Agent.Workers = &AgentRole{Provider: "gpt"}
+			},
+			wantError: true,
+			errSubstr: "agent.workers.provider must be one of: claude, opencode, codex",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			tt.modify(cfg)
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
 func TestValidate_AgentCodexReasoningEffort(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -110,6 +173,61 @@ func TestValidate_AgentCodexReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestValidate_AgentRoleCodexReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name      string
+		modify    func(*Config)
+		wantError bool
+		errSubstr string
+	}{
+		{
+			name: "planner empty effort is valid",
+			modify: func(cfg *Config) {
+				cfg.Agent.Planner = &AgentRole{}
+			},
+		},
+		{
+			name: "workers high effort is valid",
+			modify: func(cfg *Config) {
+				cfg.Agent.Workers = &AgentRole{CodexReasoningEffort: "high"}
+			},
+		},
+		{
+			name: "planner invalid effort has scoped path",
+			modify: func(cfg *Config) {
+				cfg.Agent.Planner = &AgentRole{CodexReasoningEffort: "extreme"}
+			},
+			wantError: true,
+			errSubstr: "agent.planner.codex_reasoning_effort must be one of: minimal, low, medium, high",
+		},
+		{
+			name: "workers invalid effort has scoped path",
+			modify: func(cfg *Config) {
+				cfg.Agent.Workers = &AgentRole{CodexReasoningEffort: "extreme"}
+			},
+			wantError: true,
+			errSubstr: "agent.workers.codex_reasoning_effort must be one of: minimal, low, medium, high",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			tt.modify(cfg)
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
 func TestValidate_AgentCodexSandbox(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -130,6 +248,61 @@ func TestValidate_AgentCodexSandbox(t *testing.T) {
 			cfg.Platform.Owner = "org"
 			cfg.Platform.Repo = "repo"
 			cfg.Agent.CodexSandbox = tt.sandbox
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
+func TestValidate_AgentRoleCodexSandbox(t *testing.T) {
+	tests := []struct {
+		name      string
+		modify    func(*Config)
+		wantError bool
+		errSubstr string
+	}{
+		{
+			name: "planner empty sandbox is valid",
+			modify: func(cfg *Config) {
+				cfg.Agent.Planner = &AgentRole{}
+			},
+		},
+		{
+			name: "workers explicit read-only is valid",
+			modify: func(cfg *Config) {
+				cfg.Agent.Workers = &AgentRole{CodexSandbox: "read-only"}
+			},
+		},
+		{
+			name: "planner invalid sandbox has scoped path",
+			modify: func(cfg *Config) {
+				cfg.Agent.Planner = &AgentRole{CodexSandbox: "off"}
+			},
+			wantError: true,
+			errSubstr: `agent.planner.codex_sandbox must be one of: read-only, workspace-write, danger-full-access (or empty) — got "off"`,
+		},
+		{
+			name: "workers invalid sandbox has scoped path",
+			modify: func(cfg *Config) {
+				cfg.Agent.Workers = &AgentRole{CodexSandbox: "off"}
+			},
+			wantError: true,
+			errSubstr: `agent.workers.codex_sandbox must be one of: read-only, workspace-write, danger-full-access (or empty) — got "off"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			tt.modify(cfg)
 
 			ve := Validate(cfg)
 			if tt.wantError {

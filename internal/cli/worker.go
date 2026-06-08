@@ -52,7 +52,7 @@ func newWorkerExecCmd() *cobra.Command {
 				return fmt.Errorf("creating GitHub client: %w", err)
 			}
 
-			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort, cfg.Agent.CodexSandbox)
+			ag, err := factory.New(cfg.Agent.Resolve(config.AgentRoleWorkers))
 			if err != nil {
 				return err
 			}

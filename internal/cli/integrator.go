@@ -181,9 +181,15 @@ func newIntegratorReviewCmd() *cobra.Command {
 				return fmt.Errorf("herd integrator review is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
 			set := 0
-			if runID != 0 { set++ }
-			if prNumber != 0 { set++ }
-			if batchNum != 0 { set++ }
+			if runID != 0 {
+				set++
+			}
+			if prNumber != 0 {
+				set++
+			}
+			if batchNum != 0 {
+				set++
+			}
 			if set == 0 {
 				return fmt.Errorf("one of --run-id, --pr, or --batch is required")
 			}
@@ -211,7 +217,7 @@ func newIntegratorReviewCmd() *cobra.Command {
 				}
 			}
 
-			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort, cfg.Agent.CodexSandbox)
+			ag, err := factory.New(cfg.Agent.Resolve(config.AgentRoleWorkers))
 			if err != nil {
 				return err
 			}
@@ -407,7 +413,7 @@ func newHandleCommentCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("getting current directory: %w", err)
 			}
-			ag, err := factory.New(cfg.Agent.Provider, cfg.Agent.Binary, cfg.Agent.Model, cfg.Agent.CodexReasoningEffort, cfg.Agent.CodexSandbox)
+			ag, err := factory.New(cfg.Agent.Resolve(config.AgentRoleWorkers))
 			if err != nil {
 				return err
 			}

@@ -27,12 +27,14 @@ import (
 type mockAgent struct {
 	execResult *agent.ExecResult
 	execErr    error
+	execOpts   []agent.ExecOptions
 }
 
 func (m *mockAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
 	return nil, nil
 }
-func (m *mockAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOptions) (*agent.ExecResult, error) {
+func (m *mockAgent) Execute(_ context.Context, _ agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
+	m.execOpts = append(m.execOpts, opts)
 	return m.execResult, m.execErr
 }
 func (m *mockAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
@@ -511,6 +513,41 @@ func TestWorkerNoOpPath_PostsReport(t *testing.T) {
 		}
 	}
 	assert.True(t, foundReport, "no-op path must post a Worker Report comment")
+}
+
+func TestExec_UsesResolvedWorkersMaxTurns(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+	ag := &mockAgent{
+		execResult: &agent.ExecResult{Summary: "Findings reviewed against the current code:\n\n- **Foo**: already implemented\n\nConclusion: No changes needed."},
+	}
+	cfg := &config.Config{
+		Agent: config.Agent{
+			AgentRole: config.AgentRole{MaxTurns: 2},
+			Workers:   &config.AgentRole{MaxTurns: 7},
+		},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, cfg, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, ag.execOpts, 1)
+	assert.Equal(t, 7, ag.execOpts[0].MaxTurns)
 }
 
 // TestWorkerNoOpPath_RejectsMissingVerdictBlock locks in the Bug 2 defense:
@@ -1933,6 +1970,45 @@ func TestExecStandalone_NoOpPath(t *testing.T) {
 
 	// Done label added
 	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
+}
+
+func TestExecStandalone_UsesResolvedWorkersMaxTurns(t *testing.T) {
+	targetBranch := "feature/noop-max-turns"
+	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 592,
+			Title:  "No-op fix",
+			Body:   standaloneIssueBody(targetBranch, 124),
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+	ag := &mockAgent{
+		execResult: &agent.ExecResult{Summary: "Already fixed"},
+	}
+	cfg := &config.Config{
+		Agent: config.Agent{
+			AgentRole: config.AgentRole{MaxTurns: 2},
+			Workers:   &config.AgentRole{MaxTurns: 9},
+		},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, cfg, ExecParams{
+		IssueNumber: 592,
+		RepoRoot:    work,
+		Mode:        "standalone",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, ag.execOpts, 1)
+	assert.Equal(t, 9, ag.execOpts[0].MaxTurns)
 }
 
 func TestExecStandalone_PushConflict(t *testing.T) {
