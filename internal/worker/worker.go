@@ -540,8 +540,18 @@ func remainingAgentTimeout(ctx context.Context, workerTimeoutMinutes int) time.D
 	if !ok {
 		return timeout
 	}
-	remaining := time.Until(deadline) - workerCleanupReserve
-	if remaining > 0 && remaining < timeout {
+	untilDeadline := time.Until(deadline)
+	if untilDeadline <= 0 {
+		return workerMinimumAgentTimeout
+	}
+	remaining := untilDeadline - workerCleanupReserve
+	if remaining <= 0 {
+		if untilDeadline < workerMinimumAgentTimeout {
+			return untilDeadline
+		}
+		return workerMinimumAgentTimeout
+	}
+	if remaining < timeout {
 		return remaining
 	}
 	return timeout

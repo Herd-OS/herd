@@ -749,6 +749,83 @@ func TestAgentExecutionTimeout(t *testing.T) {
 	}
 }
 
+func TestRemainingAgentTimeout(t *testing.T) {
+	tests := []struct {
+		name          string
+		deadlineFrom  *time.Duration
+		want          time.Duration
+		assertTimeout func(t *testing.T, got time.Duration, want time.Duration)
+	}{
+		{
+			name:         "no parent deadline uses agent execution timeout",
+			deadlineFrom: nil,
+			want:         22 * time.Minute,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.Equal(t, want, got)
+			},
+		},
+		{
+			name:         "parent deadline leaves cleanup reserve",
+			deadlineFrom: durationPtr(20 * time.Minute),
+			want:         12 * time.Minute,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.InDelta(t, want, got, float64(500*time.Millisecond))
+			},
+		},
+		{
+			name:         "deadline inside cleanup reserve gets minimum retry window",
+			deadlineFrom: durationPtr(5 * time.Minute),
+			want:         workerMinimumAgentTimeout,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.Equal(t, want, got)
+			},
+		},
+		{
+			name:         "shorter than minimum returns remaining parent window",
+			deadlineFrom: durationPtr(30 * time.Second),
+			want:         30 * time.Second,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.Positive(t, got)
+				assert.LessOrEqual(t, got, want)
+				assert.InDelta(t, want, got, float64(500*time.Millisecond))
+			},
+		},
+		{
+			name:         "expired parent deadline still returns positive minimum",
+			deadlineFrom: durationPtr(-1 * time.Second),
+			want:         workerMinimumAgentTimeout,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.Equal(t, want, got)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			cancel := func() {}
+			if tt.deadlineFrom != nil {
+				var cancelDeadline context.CancelFunc
+				ctx, cancelDeadline = context.WithDeadline(ctx, time.Now().Add(*tt.deadlineFrom))
+				cancel = cancelDeadline
+			}
+			defer cancel()
+
+			got := remainingAgentTimeout(ctx, 30)
+			tt.assertTimeout(t, got, tt.want)
+		})
+	}
+}
+
+func durationPtr(d time.Duration) *time.Duration {
+	return &d
+}
+
 func TestExec_BatchTimeoutWithCommittedWork(t *testing.T) {
 	repoDir := initTestRepoWithBatchBranch(t)
 
