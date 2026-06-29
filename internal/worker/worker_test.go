@@ -801,6 +801,64 @@ func TestExec_BatchTimeoutWithCommittedWork(t *testing.T) {
 	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
 }
 
+func TestExec_BatchTimeoutWithCommittedAndUncommittedWork(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	ag := &hangingAgent{
+		commitFunc: func() {
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "committed.txt"), []byte("done"), 0644))
+			gitRunT(t, repoDir, "git", "add", ".")
+			gitRunT(t, repoDir, "git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-m", "agent work")
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "dirty.txt"), []byte("partial"), 0644))
+		},
+	}
+
+	cfg := &config.Config{
+		Workers: config.Workers{TimeoutMinutes: 30, ProgressIntervalSeconds: 0, RunnerLabel: "herd-worker"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := Exec(ctx, mock, ag, cfg, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	gitRunT(t, repoDir, "git", "fetch", "origin")
+	log := gitOutputT(t, repoDir, "git", "log", "--oneline", "origin/herd/worker/42-test")
+	assert.Contains(t, log, "agent work")
+	assert.Contains(t, log, "Checkpoint timed-out work for #42")
+
+	tree := gitOutputT(t, repoDir, "git", "ls-tree", "-r", "--name-only", "origin/herd/worker/42-test")
+	assert.Contains(t, tree, "committed.txt")
+	assert.Contains(t, tree, "dirty.txt")
+
+	foundReport := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker Report") && strings.Contains(c, "checkpointed") {
+			foundReport = true
+		}
+	}
+	assert.True(t, foundReport, "mixed committed and dirty timeout work should be checkpointed and reported")
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
+}
+
 func TestExec_BatchTimeoutWithUncommittedWork(t *testing.T) {
 	repoDir := initTestRepoWithBatchBranch(t)
 

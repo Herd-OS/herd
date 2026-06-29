@@ -554,13 +554,13 @@ func checkpointTimedOutWork(ctx context.Context, p platform.Platform, g *git.Git
 	if diffErr != nil {
 		return "", false, fmt.Errorf("checking committed timeout diff: %w", diffErr)
 	}
-	if diff != "" {
-		return fmt.Sprintf("Agent timed out after committing work on `%s`; Herd will continue with validation and push the branch.", branch), true, nil
-	}
 
 	dirty, dirtyErr := g.IsDirty()
 	if dirtyErr != nil {
 		return "", false, fmt.Errorf("checking uncommitted timeout work: %w", dirtyErr)
+	}
+	if diff != "" && !dirty {
+		return fmt.Sprintf("Agent timed out after committing work on `%s`; Herd will continue with validation and push the branch.", branch), true, nil
 	}
 	if !dirty {
 		_ = p.Issues().AddComment(ctx, issueNumber,

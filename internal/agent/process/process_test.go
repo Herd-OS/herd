@@ -111,6 +111,54 @@ wait "$child"
 	assert.FileExists(t, readyFile)
 }
 
+func TestRun_UnixContextCancellationKillsTermIgnoringDescendant(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process group termination is Unix-only")
+	}
+
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	readyFile := filepath.Join(dir, "ready")
+	script := writeShellScript(t, "wrapper.sh", fmt.Sprintf(`
+sh -c 'trap "" TERM
+printf "%%s" "$$" > %s
+touch %s
+sleep 60' &
+wait "$!"
+`, shellQuote(pidFile), shellQuote(readyFile)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Command{Path: script})
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(readyFile)
+		return err == nil
+	}, 3*time.Second, 25*time.Millisecond)
+	pid := readPIDFile(t, pidFile)
+
+	start := time.Now()
+	cancel()
+
+	var err error
+	require.Eventually(t, func() bool {
+		select {
+		case err = <-errCh:
+			return true
+		default:
+			return false
+		}
+	}, defaultGracePeriod+3*time.Second, 25*time.Millisecond)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.GreaterOrEqual(t, time.Since(start), defaultGracePeriod,
+		"Run must not return when only the wrapper exits while descendants remain in the process group")
+	require.Eventually(t, func() bool {
+		return !processAlive(pid)
+	}, 3*time.Second, 25*time.Millisecond)
+}
+
 func writeShellScript(t *testing.T, name, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)

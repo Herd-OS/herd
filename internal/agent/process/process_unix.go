@@ -27,13 +27,34 @@ func terminateCommand(cmd *exec.Cmd, waitCh <-chan error) {
 
 	timer := time.NewTimer(defaultGracePeriod)
 	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
 
-	select {
-	case <-waitCh:
-		return
-	case <-timer.C:
-		_ = syscall.Kill(pgid, syscall.SIGKILL)
-		_ = cmd.Process.Kill()
-		<-waitCh
+	waitDone := false
+	for {
+		if waitDone && processGroupExited(pgid) {
+			return
+		}
+
+		select {
+		case <-waitCh:
+			waitDone = true
+		case <-ticker.C:
+			if processGroupExited(pgid) {
+				return
+			}
+		case <-timer.C:
+			_ = syscall.Kill(pgid, syscall.SIGKILL)
+			_ = cmd.Process.Kill()
+			if !waitDone {
+				<-waitCh
+			}
+			return
+		}
 	}
+}
+
+func processGroupExited(pgid int) bool {
+	err := syscall.Kill(pgid, 0)
+	return errors.Is(err, syscall.ESRCH)
 }
