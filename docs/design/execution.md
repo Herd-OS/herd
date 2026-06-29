@@ -248,14 +248,14 @@ attempt stopped).
 
 On inner agent timeout, the worker inspects git state before returning failure:
 
-- If batch-mode committed work already exists on the worker branch, HerdOS keeps
-  going through validation, reporting, and push on that worker branch.
+- If batch-mode committed work already exists on the worker branch, HerdOS leaves
+  it preserved there for retry and returns failure.
 - If batch-mode uncommitted work exists, HerdOS creates a checkpoint commit on
-  the worker branch, then continues through validation, reporting, and push. A
-  Monitor retry can then resume from the remote worker branch.
+  the worker branch and pushes it. A Monitor retry can then resume from the
+  remote worker branch, but the timed-out attempt still fails.
 - If standalone fix mode has uncommitted work, HerdOS creates a checkpoint commit
-  on the PR head branch, pushes it to that branch, then comments on the tracking
-  issue and PR.
+  on the PR head branch, pushes it to that branch for preservation, then comments
+  timeout diagnostics on the tracking issue and PR without marking the task done.
 - If no committed or uncommitted work exists, HerdOS posts a clear diagnostic
   failure comment and lets the Monitor retry the issue.
 
@@ -263,6 +263,11 @@ Checkpoint commits complement `.herd/progress/<issue-number>.md`: the progress
 file is the agent's checklist, while a checkpoint commit is the worker's fallback
 for preserving actual repository state when the agent timed out before it could
 commit or push.
+
+A timeout checkpoint preserves work; it is not a successful worker completion.
+The timed-out attempt remains failed/retryable and does not create
+`.herd/progress/<issue-number>.validation`, apply `herd/status:done`, or make the
+worker branch eligible for completed-worker consolidation.
 
 ### Concurrency
 
@@ -275,7 +280,7 @@ GitHub Actions limits.
 | Failure | Response |
 |---------|----------|
 | Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md`; if the batch branch has diverged and merge conflicts, the worker falls back to a fresh branch (partial work is lost); the retry skips agent invocation and proceeds directly to validation and reporting only when the progress file shows all work complete **and** the `.herd/progress/<issue-number>.validation` marker is present — otherwise the agent is re-invoked with the saved validation errors |
-| Inner agent timeout | Worker attempts to stop the agent process; Unix-like runners use process-group termination where possible, while Windows falls back to direct child termination; committed work continues through validation/report/push; uncommitted batch work is checkpointed on the worker branch; uncommitted standalone fix work is checkpointed and pushed to the PR head branch; no-work timeouts get a diagnostic failure comment and Monitor retry |
+| Inner agent timeout | Worker attempts to stop the agent process; Unix-like runners use process-group termination where possible, while Windows falls back to direct child termination; committed work remains on the worker branch for retry; uncommitted batch work is checkpointed and pushed on the worker branch for retry; uncommitted standalone fix work is checkpointed and pushed to the PR head branch for preservation; the timed-out attempt remains failed/retryable with no validation success marker, no `herd/status:done`, and no completed-worker consolidation; no-work timeouts get a diagnostic failure comment and Monitor retry |
 | Worker produces bad code | Integrator dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
 | Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |

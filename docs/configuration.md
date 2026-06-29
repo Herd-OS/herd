@@ -277,8 +277,8 @@ when this limit is reached.
 
 HerdOS gives the agent a shorter inner execution deadline so the worker has time
 to clean up before the outer job is cancelled. The cleanup window is used to stop
-the agent process, inspect git state, create timeout checkpoints when needed, run
-validation when work exists, report diagnostics, and push resumable state.
+the agent process, inspect git state, create timeout checkpoints when needed,
+report diagnostics, and push resumable checkpoint state.
 
 ```yaml
 workers:
@@ -293,12 +293,15 @@ to terminating the direct child process.
 
 Timeout recovery depends on what the worker can find:
 
-- In batch mode, committed work on the worker branch continues through
-  validation, reporting, and push. Uncommitted work is staged into a checkpoint
-  commit on the worker branch, then the worker continues through validation and
-  push so the Monitor retry can resume from the remote branch.
+- In batch mode, committed work on the worker branch is preserved for retry.
+  Uncommitted work is staged into a checkpoint commit on the worker branch and
+  pushed so the Monitor retry can resume from the remote branch. The timed-out
+  attempt still fails: it does not record a validation success marker, label the
+  issue `herd/status:done`, or allow Integrator consolidation as a completed
+  worker.
 - In standalone fix mode, uncommitted work is checkpointed and pushed directly to
-  the PR head branch, then HerdOS comments on the tracking issue and PR.
+  the PR head branch for preservation, then HerdOS reports timeout diagnostics
+  and leaves the tracking issue retryable/failed instead of marking it done.
 - If no committed or uncommitted work exists, HerdOS posts a diagnostic failure
   comment and lets the Monitor retry the issue instead of silently leaving it
   without useful output.
