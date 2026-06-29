@@ -457,6 +457,25 @@ See [Running runners directly with `docker run`](#running-runners-directly-with-
 
 `workers.runner_label` in `.herdos.yml` must match the `RUNNER_LABELS` environment variable on the runner container (set in `docker-compose.herd.yml`, or via `-e RUNNER_LABELS=…` / `.env` for direct `docker run`). Default is `herd-worker`. Use different labels to route heavy tasks to specific runners (e.g., `herd-gpu`).
 
+### Worker timeout sizing
+
+`workers.timeout_minutes` configures the outer GitHub Actions job timeout for
+worker jobs. HerdOS runs the inner agent command with a shorter deadline so it
+can stop the agent, checkpoint timed-out work, run validation when applicable,
+post diagnostics, and push resumable state before GitHub Actions cancels the
+job.
+
+Avoid very low `workers.timeout_minutes` values for complex Codex tasks, Rails
+apps, or repositories with long build/test cycles. Low values reduce the cleanup
+reserve and make it more likely that GitHub Actions cancels the job before HerdOS
+can checkpoint and report useful state. Prefer increasing the worker timeout for
+test-heavy repos instead of relying on Monitor retries as the normal path.
+
+On Unix-like self-hosted runners, HerdOS starts agent commands in a process group
+and terminates that group where possible when the inner timeout fires. This helps
+clean up wrapper-spawned descendants such as Codex's native child process. On
+Windows runners, HerdOS terminates the direct child process.
+
 ## 8. Cloud Runners
 
 You can run on cloud VMs instead of Docker. Requirements:
