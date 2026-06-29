@@ -110,7 +110,12 @@ func stripExecFlag(args []string) []string {
 // the command — the caller does that.
 func BuildDockerExecCmd(ctx context.Context, cfg *config.Config, args []string) (*exec.Cmd, error) {
 	dockerArgs := []string{"run", "--rm", "--init", "-i"}
-	if term.IsTerminal(int(os.Stdin.Fd())) {
+	// G115 (gosec): uintptr -> int conversion. Fd() returns a file
+	// descriptor which on every supported platform fits in an int (max
+	// value far below MaxInt32, let alone MaxInt64). gosec doesn't model
+	// platform integer widths, so suppress here rather than across the
+	// codebase. The term package's signature requires an int.
+	if term.IsTerminal(int(os.Stdin.Fd())) { //nolint:gosec // G115: file descriptor always fits in int
 		dockerArgs = append(dockerArgs, "-t")
 	}
 
