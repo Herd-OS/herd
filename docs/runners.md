@@ -396,9 +396,12 @@ herd image publish    # docker push ghcr.io/<owner>/<repo>-herd-runner:<tag>
 
 The owner and repo are detected from your git remote and lower-cased; the tag defaults to the herd version (`latest` for dev builds) and can be overridden with `--tag`.
 
-This is also automated. `herd init` installs `.github/workflows/herd-publish-runner.yml`, which builds and pushes the multi-arch consumer image (`ghcr.io/<owner>/<repo>-herd-runner:latest`) on `workflow_dispatch`. Trigger it after editing `Dockerfile.herd_runner` (or any change you want reflected in the published image) with `gh workflow run herd-publish-runner.yml --ref main`. The job is gated on the `HERD_ENABLED` variable being `true` and requires `packages: write` permission (the default `GITHUB_TOKEN` is used to authenticate to GHCR).
+This is also automated. `herd init` installs `.github/workflows/herd-publish-runner.yml`, which builds and pushes the multi-arch consumer image (`ghcr.io/<owner>/<repo>-herd-runner:latest`) on two triggers:
 
-> **Note:** there is no auto-trigger on push to `Dockerfile.herd_runner`. Earlier versions auto-rebuilt on every push to the wrapper, but that caused a duplicate build whenever a release tag followed a wrapper-touching PR (the tag-driven build in `release.yml` would already publish a fresh `:vX.Y.Z` image). Manual-only keeps the surface predictable; the convenience cost is one extra command per intentional rebuild.
+- **`push` to `main` that touches `Dockerfile.herd_runner`** — automatic. This is the path that picks up a new base-image version after merging an `Update HerdOS to <tag>` PR (which bumps the wrapper's `FROM ghcr.io/herd-os/herd-runner-base:<version>` line). Without it, workers would continue running with stale baked-in agent CLIs and project-specific tools until someone manually triggered a rebuild.
+- **`workflow_dispatch`** — manual escape hatch. `gh workflow run herd-publish-runner.yml --ref main` from your shell, or the **Run workflow** button in the Actions tab. Useful for re-publishing after editing the wrapper without going through a PR.
+
+The job is gated on the `HERD_ENABLED` variable being `true` and requires `packages: write` permission (the default `GITHUB_TOKEN` is used to authenticate to GHCR).
 
 ### Migrating from the local base image
 

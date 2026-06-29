@@ -1,11 +1,26 @@
 name: Herd Publish Runner Image
 on:
-  # Manual-only by design. Tag-driven rebuilds happen via the
-  # publish-runner-image job in release.yml (see #711). A push trigger on
-  # `Dockerfile.herd_runner` would cause a second wrapper-image build for
-  # any release that also touches the file — see #713 for the
-  # discussion.
+  # `push` rebuilds the wrapper image on every change to
+  # Dockerfile.herd_runner — this is how a consumer repo automatically
+  # picks up a new base-image version after merging an
+  # `Update HerdOS to <tag>` PR (which bumps the `FROM
+  # ghcr.io/herd-os/herd-runner-base:<version>` line). Without this
+  # trigger, the wrapper image at `:latest` stays at whatever it was
+  # last manually built, so worker containers continue to ship stale
+  # baked-in agent CLIs (codex, claude, opencode) and stale
+  # project-specific tools even after a herd upgrade.
+  #
+  # NOTE for the herd-os/herd repo itself: this can produce a duplicate
+  # wrapper build when a release tag closely follows a wrapper-touching
+  # PR — once via this push trigger, once via release.yml's
+  # publish-runner-image job. That double-build is herd-os/herd-specific
+  # and acceptable; consumer repos have no release.yml and would
+  # otherwise have no auto-rebuild path at all.
   workflow_dispatch:
+  push:
+    paths:
+      - 'Dockerfile.herd_runner'
+    branches: [ main ]
 
 permissions:
   contents: read
