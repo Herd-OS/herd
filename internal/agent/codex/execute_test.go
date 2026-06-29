@@ -3,9 +3,13 @@ package codex
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/stretchr/testify/assert"
@@ -203,4 +207,43 @@ func TestExecute_EmptyFileFallsBackToStdout(t *testing.T) {
 	result, err := a.Execute(context.Background(), agent.TaskSpec{Body: "do work"}, agent.ExecOptions{RepoRoot: t.TempDir()})
 	require.NoError(t, err)
 	assert.Contains(t, result.Summary, "substantive multi word summary line")
+}
+
+func TestExecute_ContextCancellationTerminatesDescendant(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process group termination is Unix-only")
+	}
+
+	repoRoot := t.TempDir()
+	pidFile := filepath.Join(repoRoot, "child.pid")
+	binary := filepath.Join(t.TempDir(), "codex.sh")
+	script := "#!/bin/sh\n" +
+		"(sleep 60) &\n" +
+		"child=$!\n" +
+		"printf '%s' \"$child\" > '" + strings.ReplaceAll(pidFile, "'", "'\\''") + "'\n" +
+		"wait \"$child\"\n"
+	require.NoError(t, os.WriteFile(binary, []byte(script), 0o755))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	a := NewAgent(binary, "", "", "")
+	_, err := a.Execute(ctx, agent.TaskSpec{Body: "do work"}, agent.ExecOptions{RepoRoot: repoRoot})
+
+	require.Error(t, err)
+	data, readErr := os.ReadFile(pidFile)
+	require.NoError(t, readErr)
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+	require.NoError(t, parseErr)
+	require.Eventually(t, func() bool {
+		return !pidExists(pid)
+	}, 3*time.Second, 25*time.Millisecond)
+}
+
+func pidExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := exec.Command("kill", "-0", strconv.Itoa(pid)).Run()
+	return err == nil
 }

@@ -155,6 +155,16 @@ agent's system prompt instructs it to run `git push` after completing each
 file or logical unit. This ensures that if the worker times out or crashes,
 the retry starts from where it left off rather than from scratch.
 
+The configured `workers.timeout_minutes` value remains the outer GitHub Actions
+job timeout. Inside that job, HerdOS gives the agent a shorter execution
+deadline so there is time left for cleanup before GitHub Actions cancels the
+whole worker. When the inner deadline fires, HerdOS attempts to stop the agent
+process. On Unix-like runners the shared process helper starts agent commands in
+their own process group and terminates that group where possible; on Windows it
+falls back to terminating the direct child process. The process-group behavior is
+important for agents such as Codex, whose Node wrapper can spawn a native
+`codex` child process.
+
 To track progress, the agent creates a `.herd/progress/<issue-number>.md` file
 before its first push. Each worker writes to a unique file (e.g., issue #17
 writes to `.herd/progress/17.md`), preventing merge conflicts between parallel
@@ -166,7 +176,9 @@ The `.herd/progress/<issue-number>.md` file is **agent-written** and means only
 correct — for that, the worker relies on the separate, worker-written
 `.herd/progress/<issue-number>.validation` marker (see
 [Validation Marker](#validation-marker)), which is present only when pre-push
-validation actually passed.
+validation actually passed. It also is not the only timeout recovery mechanism:
+when the agent times out before it can commit and push its own progress, HerdOS
+uses checkpoint commits as the orchestrator-level fallback.
 
 Example `.herd/progress/17.md`:
 ```
@@ -195,7 +207,9 @@ whether the worker branch already exists on the remote. If it does, the
 worker checks out the existing branch (which contains partial work from the
 previous attempt) instead of creating a fresh branch from the batch branch.
 The agent then reads `.herd/progress/<issue-number>.md` to continue where
-the previous attempt stopped.
+the previous attempt stopped. If the previous attempt reached the inner timeout,
+the branch may also contain a worker-created checkpoint commit that preserved
+uncommitted repository changes before the outer GitHub Actions timeout.
 
 If the merge of the batch branch into the resumed worker branch fails (e.g.,
 because the batch branch has diverged with conflicting changes from other
@@ -230,6 +244,31 @@ If the progress file shows incomplete work, the normal retry flow continues (the
 agent is launched with the progress file as context to continue where the previous
 attempt stopped).
 
+#### Timeout Checkpoints
+
+On inner agent timeout, the worker inspects git state before returning failure:
+
+- If batch-mode committed work already exists on the worker branch, HerdOS leaves
+  it preserved there for retry and returns failure.
+- If batch-mode uncommitted work exists, HerdOS creates a checkpoint commit on
+  the worker branch and pushes it. A Monitor retry can then resume from the
+  remote worker branch, but the timed-out attempt still fails.
+- If standalone fix mode has uncommitted work, HerdOS creates a checkpoint commit
+  on the PR head branch, pushes it to that branch for preservation, then comments
+  timeout diagnostics on the tracking issue and PR without marking the task done.
+- If no committed or uncommitted work exists, HerdOS posts a clear diagnostic
+  failure comment and lets the Monitor retry the issue.
+
+Checkpoint commits complement `.herd/progress/<issue-number>.md`: the progress
+file is the agent's checklist, while a checkpoint commit is the worker's fallback
+for preserving actual repository state when the agent timed out before it could
+commit or push.
+
+A timeout checkpoint preserves work; it is not a successful worker completion.
+The timed-out attempt remains failed/retryable and does not create
+`.herd/progress/<issue-number>.validation`, apply `herd/status:done`, or make the
+worker branch eligible for completed-worker consolidation.
+
 ### Concurrency
 
 Multiple workers run simultaneously on separate branches. Concurrency is bounded
@@ -241,6 +280,7 @@ GitHub Actions limits.
 | Failure | Response |
 |---------|----------|
 | Worker crashes mid-task | Partial work preserved via incremental pushes; Action fails; worker triggers Monitor for immediate response; Monitor re-dispatches; retried worker resumes from existing branch and `.herd/progress/<issue-number>.md`; if the batch branch has diverged and merge conflicts, the worker falls back to a fresh branch (partial work is lost); the retry skips agent invocation and proceeds directly to validation and reporting only when the progress file shows all work complete **and** the `.herd/progress/<issue-number>.validation` marker is present — otherwise the agent is re-invoked with the saved validation errors |
+| Inner agent timeout | Worker attempts to stop the agent process; Unix-like runners use process-group termination where possible, while Windows falls back to direct child termination; committed work remains on the worker branch for retry; uncommitted batch work is checkpointed and pushed on the worker branch for retry; uncommitted standalone fix work is checkpointed and pushed to the PR head branch for preservation; the timed-out attempt remains failed/retryable with no validation success marker, no `herd/status:done`, and no completed-worker consolidation; no-work timeouts get a diagnostic failure comment and Monitor retry |
 | Worker produces bad code | Integrator dispatches fix workers up to the CI fix cap; at cap, reverts consolidation and labels issue failed |
 | Worker can't complete task | Labels issue failed, triggers Monitor; Monitor comments diagnostics and @mentions notify_users |
 | Work already done (no-op) | Posts a Worker Report comment ("No changes were needed"), labels issue done without creating a branch; Integrator advances normally |

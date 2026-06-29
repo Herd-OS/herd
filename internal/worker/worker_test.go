@@ -631,6 +631,7 @@ func (h *hangingAgent) Execute(ctx context.Context, _ agent.TaskSpec, _ agent.Ex
 func (h *hangingAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return nil, nil
 }
+func (h *hangingAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error { return nil }
 
 func TestPostProgressUpdates_PostsAndUpdates(t *testing.T) {
 	dir := t.TempDir()
@@ -723,7 +724,109 @@ func TestPostProgressUpdates_FinalUpdateOnDone(t *testing.T) {
 	assert.Contains(t, finalBody, "Step 2")
 }
 
-func TestExec_AgentTimeoutWithCompletedWork(t *testing.T) {
+func TestAgentExecutionTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		minutes int
+		want    time.Duration
+	}{
+		{name: "default thirty leaves cleanup reserve", minutes: 30, want: 22 * time.Minute},
+		{name: "ten uses half", minutes: 10, want: 5 * time.Minute},
+		{name: "one uses half minute", minutes: 1, want: 30 * time.Second},
+		{name: "two uses minimum while still below outer", minutes: 2, want: 1 * time.Minute},
+		{name: "zero falls back to minimum", minutes: 0, want: 1 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := agentExecutionTimeout(tt.minutes)
+			assert.Equal(t, tt.want, got)
+			if tt.minutes > 0 {
+				assert.Less(t, got, time.Duration(tt.minutes)*time.Minute,
+					"inner timeout must fire before positive outer worker timeout")
+			}
+		})
+	}
+}
+
+func TestRemainingAgentTimeout(t *testing.T) {
+	tests := []struct {
+		name          string
+		deadlineFrom  *time.Duration
+		want          time.Duration
+		assertTimeout func(t *testing.T, got time.Duration, want time.Duration)
+	}{
+		{
+			name:         "no parent deadline uses agent execution timeout",
+			deadlineFrom: nil,
+			want:         22 * time.Minute,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.Equal(t, want, got)
+			},
+		},
+		{
+			name:         "parent deadline leaves cleanup reserve",
+			deadlineFrom: durationPtr(20 * time.Minute),
+			want:         12 * time.Minute,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.InDelta(t, want, got, float64(500*time.Millisecond))
+			},
+		},
+		{
+			name:         "deadline inside cleanup reserve gets minimum retry window",
+			deadlineFrom: durationPtr(5 * time.Minute),
+			want:         workerMinimumAgentTimeout,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.Equal(t, want, got)
+			},
+		},
+		{
+			name:         "shorter than minimum returns remaining parent window",
+			deadlineFrom: durationPtr(30 * time.Second),
+			want:         30 * time.Second,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.Positive(t, got)
+				assert.LessOrEqual(t, got, want)
+				assert.InDelta(t, want, got, float64(500*time.Millisecond))
+			},
+		},
+		{
+			name:         "expired parent deadline still returns positive minimum",
+			deadlineFrom: durationPtr(-1 * time.Second),
+			want:         workerMinimumAgentTimeout,
+			assertTimeout: func(t *testing.T, got time.Duration, want time.Duration) {
+				t.Helper()
+				assert.Equal(t, want, got)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			cancel := func() {}
+			if tt.deadlineFrom != nil {
+				var cancelDeadline context.CancelFunc
+				ctx, cancelDeadline = context.WithDeadline(ctx, time.Now().Add(*tt.deadlineFrom))
+				cancel = cancelDeadline
+			}
+			defer cancel()
+
+			got := remainingAgentTimeout(ctx, 30)
+			tt.assertTimeout(t, got, tt.want)
+		})
+	}
+}
+
+func durationPtr(d time.Duration) *time.Duration {
+	return &d
+}
+
+func TestExec_BatchTimeoutWithCommittedWork(t *testing.T) {
 	repoDir := initTestRepoWithBatchBranch(t)
 
 	issueSvc := &mockIssueService{
@@ -739,40 +842,198 @@ func TestExec_AgentTimeoutWithCompletedWork(t *testing.T) {
 		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
 	}
 
-	run := func(dir string, args ...string) {
-		t.Helper()
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		out, err := cmd.CombinedOutput()
-		require.NoError(t, err, "command %v failed: %s", args, string(out))
-	}
-
-	// The hanging agent commits a file before blocking
 	ag := &hangingAgent{
 		commitFunc: func() {
 			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "work.txt"), []byte("done"), 0644))
-			run(repoDir, "git", "add", ".")
-			run(repoDir, "git", "commit", "-m", "agent work")
+			gitRunT(t, repoDir, "git", "add", ".")
+			gitRunT(t, repoDir, "git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-m", "agent work")
 		},
 	}
 
 	cfg := &config.Config{
-		Workers: config.Workers{TimeoutMinutes: 1, RunnerLabel: "herd-worker"}, // 1 min = agent gets ~0 timeout, clamped to 5min... let's use a small value
+		Workers: config.Workers{TimeoutMinutes: 30, ProgressIntervalSeconds: 0, RunnerLabel: "herd-worker"},
 	}
 
-	// We can't easily test the full timeout (5 min minimum), so verify the
-	// source code has the timeout + goto pushWork pattern
-	source, err := os.ReadFile("worker.go")
-	require.NoError(t, err)
-	src := string(source)
-	assert.Contains(t, src, "context.WithTimeout(ctx, agentTimeout)")
-	assert.Contains(t, src, "context.DeadlineExceeded")
-	assert.Contains(t, src, "goto pushWork")
-	assert.Contains(t, src, "Work detected despite timeout")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 
-	_ = mock
-	_ = ag
-	_ = cfg
+	result, err := Exec(ctx, mock, ag, cfg, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "timed out after checkpointing work")
+
+	gitRunT(t, repoDir, "git", "fetch", "origin")
+	assert.Contains(t, gitOutputT(t, repoDir, "git", "log", "--oneline", "origin/herd/worker/42-test"), "agent work")
+	assert.Contains(t, gitOutputT(t, repoDir, "git", "ls-tree", "-r", "--name-only", "origin/herd/worker/42-test"), "work.txt")
+
+	foundCheckpointComment := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "preserved the work") && strings.Contains(c, "retry") {
+			foundCheckpointComment = true
+		}
+	}
+	assert.True(t, foundCheckpointComment, "timeout with committed work should post a retryable checkpoint comment")
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, mock.workflows.dispatched)
+	assert.False(t, checkValidationPassed(repoDir, 42), "timeout checkpoint must not write the validation success marker")
+}
+
+func TestExec_BatchTimeoutWithCommittedAndUncommittedWork(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	ag := &hangingAgent{
+		commitFunc: func() {
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "committed.txt"), []byte("done"), 0644))
+			gitRunT(t, repoDir, "git", "add", ".")
+			gitRunT(t, repoDir, "git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-m", "agent work")
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "dirty.txt"), []byte("partial"), 0644))
+		},
+	}
+
+	cfg := &config.Config{
+		Workers: config.Workers{TimeoutMinutes: 30, ProgressIntervalSeconds: 0, RunnerLabel: "herd-worker"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := Exec(ctx, mock, ag, cfg, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "timed out after checkpointing work")
+
+	gitRunT(t, repoDir, "git", "fetch", "origin")
+	log := gitOutputT(t, repoDir, "git", "log", "--oneline", "origin/herd/worker/42-test")
+	assert.Contains(t, log, "agent work")
+	assert.Contains(t, log, "Checkpoint timed-out work for #42")
+
+	tree := gitOutputT(t, repoDir, "git", "ls-tree", "-r", "--name-only", "origin/herd/worker/42-test")
+	assert.Contains(t, tree, "committed.txt")
+	assert.Contains(t, tree, "dirty.txt")
+
+	foundCheckpointComment := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "checkpointed and pushed") && strings.Contains(c, "retryable") {
+			foundCheckpointComment = true
+		}
+	}
+	assert.True(t, foundCheckpointComment, "mixed committed and dirty timeout work should be checkpointed and reported as retryable")
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, mock.workflows.dispatched)
+	assert.False(t, checkValidationPassed(repoDir, 42), "timeout checkpoint must not write the validation success marker")
+}
+
+func TestExec_BatchTimeoutWithUncommittedWork(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	ag := &hangingAgent{
+		commitFunc: func() {
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "checkpoint.txt"), []byte("partial"), 0644))
+		},
+	}
+	cfg := &config.Config{Workers: config.Workers{TimeoutMinutes: 30, ProgressIntervalSeconds: 0}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := Exec(ctx, mock, ag, cfg, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "timed out after checkpointing work")
+
+	gitRunT(t, repoDir, "git", "fetch", "origin")
+	log := gitOutputT(t, repoDir, "git", "log", "--oneline", "origin/herd/worker/42-test")
+	assert.Contains(t, log, "Checkpoint timed-out work for #42")
+	assert.Contains(t, gitOutputT(t, repoDir, "git", "ls-tree", "-r", "--name-only", "origin/herd/worker/42-test"), "checkpoint.txt")
+
+	foundCheckpointComment := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "checkpointed and pushed") && strings.Contains(c, "retryable") {
+			foundCheckpointComment = true
+		}
+	}
+	assert.True(t, foundCheckpointComment, "timeout checkpoint should be reported on the issue as retryable")
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, mock.workflows.dispatched)
+	assert.False(t, checkValidationPassed(repoDir, 42), "timeout checkpoint must not write the validation success marker")
+}
+
+func TestExec_BatchTimeoutWithNoWork(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 42, Title: "Test",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+	cfg := &config.Config{Workers: config.Workers{TimeoutMinutes: 30, ProgressIntervalSeconds: 0}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := Exec(ctx, mock, &hangingAgent{}, cfg, ExecParams{
+		IssueNumber: 42,
+		RepoRoot:    repoDir,
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "no work to checkpoint")
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, mock.workflows.dispatched)
+
+	foundDiagnostic := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "timed out") && strings.Contains(c, "no committed or uncommitted work") {
+			foundDiagnostic = true
+		}
+	}
+	assert.True(t, foundDiagnostic, "no-work timeout should post a diagnostic comment")
 }
 
 func TestRunValidation_NoGoMod(t *testing.T) {
@@ -1916,6 +2177,71 @@ func TestExecStandalone_PushesToTargetBranch(t *testing.T) {
 	assert.NotContains(t, issueSvc.addedLabels, issues.StatusFailed)
 }
 
+func TestExecStandalone_TimeoutWithUncommittedWork(t *testing.T) {
+	targetBranch := "feature/timeout-checkpoint"
+	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
+
+	prSvc := &mockPRService{}
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 594,
+			Title:  "Timeout fix",
+			Body:   standaloneIssueBody(targetBranch, 127),
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	ag := &hangingAgent{
+		commitFunc: func() {
+			require.NoError(t, os.WriteFile(filepath.Join(work, "standalone-checkpoint.txt"), []byte("partial"), 0644))
+		},
+	}
+	cfg := &config.Config{Workers: config.Workers{TimeoutMinutes: 30, ProgressIntervalSeconds: 0}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := Exec(ctx, mock, ag, cfg, ExecParams{
+		IssueNumber: 594,
+		RepoRoot:    work,
+		Mode:        "standalone",
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "timed out after checkpointing work")
+
+	gitRunT(t, work, "git", "fetch", "origin")
+	log := gitOutputT(t, work, "git", "log", "--oneline", "origin/"+targetBranch)
+	assert.Contains(t, log, "Checkpoint timed-out work for #594")
+	assert.Contains(t, gitOutputT(t, work, "git", "ls-tree", "-r", "--name-only", "origin/"+targetBranch), "standalone-checkpoint.txt")
+
+	foundIssueReport := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "checkpointed and pushed") && strings.Contains(c, "retryable") {
+			foundIssueReport = true
+		}
+	}
+	assert.True(t, foundIssueReport, "standalone timeout checkpoint should post a retryable issue report")
+
+	foundPRComment := false
+	for _, c := range prSvc.comments {
+		if strings.Contains(c, "timeout checkpoint") && strings.Contains(c, targetBranch) {
+			foundPRComment = true
+		}
+	}
+	assert.True(t, foundPRComment, "standalone timeout checkpoint should post a PR comment naming the target branch")
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, mock.workflows.dispatched)
+	assert.False(t, checkValidationPassed(work, 594), "timeout checkpoint must not write the validation success marker")
+}
+
 func TestExecStandalone_NoOpPath(t *testing.T) {
 	targetBranch := "feature/noop"
 	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
@@ -2282,21 +2608,27 @@ func TestRenderStandalonePrompt_WithRoleAndCoAuthor(t *testing.T) {
 type scriptedAgent struct {
 	prompts []string
 	bodies  []string
+	ctxs    []context.Context
 	calls   int
 	steps   []func(call int) // per-call side effect; indexed by call number
 	results []*agent.ExecResult
+	errors  []error
 }
 
 func (s *scriptedAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
 	return nil, nil
 }
-func (s *scriptedAgent) Execute(_ context.Context, spec agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
+func (s *scriptedAgent) Execute(ctx context.Context, spec agent.TaskSpec, opts agent.ExecOptions) (*agent.ExecResult, error) {
 	idx := s.calls
 	s.prompts = append(s.prompts, opts.SystemPrompt)
 	s.bodies = append(s.bodies, spec.Body)
+	s.ctxs = append(s.ctxs, ctx)
 	s.calls++
 	if idx < len(s.steps) && s.steps[idx] != nil {
 		s.steps[idx](idx)
+	}
+	if idx < len(s.errors) && s.errors[idx] != nil {
+		return nil, s.errors[idx]
 	}
 	if idx < len(s.results) && s.results[idx] != nil {
 		return s.results[idx], nil
@@ -2315,6 +2647,15 @@ func gitRunT(t *testing.T, dir string, args ...string) {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "command %v failed: %s", args, string(out))
+}
+
+func gitOutputT(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "command %v failed: %s", args, string(out))
+	return string(out)
 }
 
 // writeGoModule writes a minimal go.mod and a main.go (valid or broken) into dir.
@@ -2465,6 +2806,9 @@ func TestExec_RetryAgentDoesNotHonorProgressFile(t *testing.T) {
 	require.NoError(t, err)
 
 	require.GreaterOrEqual(t, len(ag.prompts), 2, "expected an initial run and a validation-failure retry")
+	require.GreaterOrEqual(t, len(ag.ctxs), 2, "expected retry context to be captured")
+	_, hasRetryDeadline := ag.ctxs[1].Deadline()
+	assert.True(t, hasRetryDeadline, "validation retry Execute must receive a context with a deadline")
 	assert.Contains(t, ag.prompts[0], "Do not redo completed work",
 		"the initial prompt should still carry the incremental-progress guidance")
 	assert.NotContains(t, ag.prompts[1], "Do not redo completed work",

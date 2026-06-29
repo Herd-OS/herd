@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/process"
 	"github.com/herd-os/herd/internal/agent/prompt"
 )
 
@@ -27,13 +27,14 @@ func (c *ClaudeAgent) Discuss(ctx context.Context, opts agent.DiscussOptions) er
 
 	args := buildDiscussArgs(c, opts, promptFile)
 
-	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
-	cmd.Dir = opts.RepoRoot
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := process.Run(ctx, process.Command{
+		Path:   c.BinaryPath,
+		Args:   args,
+		Dir:    opts.RepoRoot,
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+	}); err != nil {
 		return fmt.Errorf("claude exited with error: %w", err)
 	}
 	return nil

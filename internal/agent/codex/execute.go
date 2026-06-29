@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	agentprocess "github.com/herd-os/herd/internal/agent/process"
 	"github.com/herd-os/herd/internal/agent/prompt"
 )
 
@@ -45,15 +45,16 @@ func (c *CodexAgent) Execute(ctx context.Context, task agent.TaskSpec, opts agen
 	// runOnce returns the final agent message (file contents, falling back to
 	// stdout when the file is empty) along with stdout/stderr for diagnostics.
 	runOnce := func() (finalMsg, stdout, stderr string, err error) {
-		cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
-		cmd.Dir = opts.RepoRoot
-		cmd.Env = childEnv()
-
 		var outBuf, errBuf bytes.Buffer
-		cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf)
-		cmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
-
-		if runErr := cmd.Run(); runErr != nil {
+		runErr := agentprocess.Run(ctx, agentprocess.Command{
+			Path:   c.BinaryPath,
+			Args:   args,
+			Dir:    opts.RepoRoot,
+			Env:    childEnv(),
+			Stdout: io.MultiWriter(os.Stdout, &outBuf),
+			Stderr: io.MultiWriter(os.Stderr, &errBuf),
+		})
+		if runErr != nil {
 			return "", "", errBuf.String(), fmt.Errorf("agent exited with error: %w\n%s", runErr, errBuf.String())
 		}
 
