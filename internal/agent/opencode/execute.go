@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/process"
 	"github.com/herd-os/herd/internal/agent/prompt"
 )
 
@@ -34,17 +34,17 @@ func (o *OpenCodeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts a
 	args := buildRunArgs(o.Model)
 
 	runOnce := func() (string, string, error) {
-		cmd := exec.CommandContext(ctx, o.BinaryPath, args...)
-		cmd.Dir = opts.RepoRoot
 		// Pipe the prompt via stdin to avoid "argument list too long" on
 		// large prompts. OpenCode `run` reads stdin when it is not a TTY.
-		cmd.Stdin = strings.NewReader(taskPrompt)
-
 		var stdout, stderr bytes.Buffer
-		cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
-		cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
-
-		if err := cmd.Run(); err != nil {
+		if err := process.Run(ctx, process.Command{
+			Path:   o.BinaryPath,
+			Args:   args,
+			Dir:    opts.RepoRoot,
+			Stdin:  strings.NewReader(taskPrompt),
+			Stdout: io.MultiWriter(os.Stdout, &stdout),
+			Stderr: io.MultiWriter(os.Stderr, &stderr),
+		}); err != nil {
 			return "", stderr.String(), fmt.Errorf("agent exited with error: %w\n%s", err, stderr.String())
 		}
 		return stdout.String(), stderr.String(), nil

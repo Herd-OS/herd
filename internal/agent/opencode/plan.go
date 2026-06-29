@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/process"
 	"github.com/herd-os/herd/internal/agent/prompt"
 )
 
@@ -37,13 +37,14 @@ func (o *OpenCodeAgent) Plan(ctx context.Context, initialPrompt string, opts age
 
 	args := buildInteractiveArgs(o.Model, combined)
 
-	cmd := exec.CommandContext(ctx, o.BinaryPath, args...)
-	cmd.Dir = opts.RepoRoot
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := process.Run(ctx, process.Command{
+		Path:   o.BinaryPath,
+		Args:   args,
+		Dir:    opts.RepoRoot,
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+	}); err != nil {
 		return nil, fmt.Errorf("opencode exited with error: %w", err)
 	}
 

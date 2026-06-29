@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/process"
 	"github.com/herd-os/herd/internal/agent/prompt"
 )
 
@@ -32,18 +32,18 @@ func (o *OpenCodeAgent) Review(ctx context.Context, diff string, opts agent.Revi
 	args := buildRunArgs(o.Model)
 
 	runOnce := func() (string, string, error) {
-		cmd := exec.CommandContext(ctx, o.BinaryPath, args...)
-		cmd.Dir = opts.RepoRoot
 		// Pipe the combined message via stdin to avoid "argument list too
 		// long" on large diffs. OpenCode `run` reads stdin when it is not
 		// a TTY.
-		cmd.Stdin = strings.NewReader(message)
-
 		var stdout, stderr bytes.Buffer
-		cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
-		cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
-
-		if err := cmd.Run(); err != nil {
+		if err := process.Run(ctx, process.Command{
+			Path:   o.BinaryPath,
+			Args:   args,
+			Dir:    opts.RepoRoot,
+			Stdin:  strings.NewReader(message),
+			Stdout: io.MultiWriter(os.Stdout, &stdout),
+			Stderr: io.MultiWriter(os.Stderr, &stderr),
+		}); err != nil {
 			return "", stderr.String(), fmt.Errorf("agent review exited with error: %w\n%s", err, stderr.String())
 		}
 		return stdout.String(), stderr.String(), nil

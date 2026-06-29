@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/process"
 	"github.com/herd-os/herd/internal/agent/prompt"
 )
 
@@ -37,15 +37,15 @@ func (c *ClaudeAgent) Review(ctx context.Context, diff string, opts agent.Review
 	args = append(args, "-p")
 
 	runOnce := func() (string, string, error) {
-		cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
-		cmd.Dir = opts.RepoRoot
-		cmd.Stdin = strings.NewReader(reviewPrompt)
-
 		var stdout, stderr bytes.Buffer
-		cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
-		cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
-
-		if err := cmd.Run(); err != nil {
+		if err := process.Run(ctx, process.Command{
+			Path:   c.BinaryPath,
+			Args:   args,
+			Dir:    opts.RepoRoot,
+			Stdin:  strings.NewReader(reviewPrompt),
+			Stdout: io.MultiWriter(os.Stdout, &stdout),
+			Stderr: io.MultiWriter(os.Stderr, &stderr),
+		}); err != nil {
 			return "", stderr.String(), fmt.Errorf("agent review exited with error: %w\n%s", err, stderr.String())
 		}
 		return stdout.String(), stderr.String(), nil

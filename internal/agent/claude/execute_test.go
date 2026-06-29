@@ -5,7 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/stretchr/testify/assert"
@@ -71,8 +75,8 @@ func TestExecute_CommandArgs(t *testing.T) {
 
 func TestExecute_YAMLFrontmatterPrompt(t *testing.T) {
 	tests := []struct {
-		name  string
-		body  string
+		name string
+		body string
 	}{
 		{
 			name: "body starts with YAML frontmatter delimiters",
@@ -185,6 +189,39 @@ func TestExecute_CapturesOutput(t *testing.T) {
 	assert.Contains(t, result.Summary, "task completed successfully")
 }
 
+func TestExecute_UnixContextCancellationTerminatesDescendants(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process group termination is Unix-only")
+	}
+
+	dir := t.TempDir()
+	pidFile := dir + "/child.pid"
+	readyFile := dir + "/ready"
+	script := dir + "/test-agent.sh"
+	content := fmt.Sprintf(`#!/bin/sh
+cat > /dev/null
+(sleep 60) &
+child=$!
+printf '%%s' "$child" > %s
+touch %s
+wait "$child"
+`, shellQuote(pidFile), shellQuote(readyFile))
+	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	a := New(script, "")
+	_, err := a.Execute(ctx, agent.TaskSpec{Body: "do work"}, agent.ExecOptions{RepoRoot: dir})
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.FileExists(t, readyFile)
+	pid := readPIDFile(t, pidFile)
+	require.Eventually(t, func() bool {
+		return !processAlive(pid)
+	}, 3*time.Second, 25*time.Millisecond)
+}
+
 func TestExecute_SuspiciousOutputReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	script := dir + "/test-agent.sh"
@@ -237,6 +274,27 @@ fi
 	result, execErr := a.Execute(context.Background(), task, opts)
 	require.NoError(t, execErr)
 	assert.Contains(t, result.Summary, "Task completed successfully")
+}
+
+func readPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	require.NoError(t, err)
+	return pid
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := exec.Command("kill", "-0", strconv.Itoa(pid)).Run()
+	return err == nil
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func TestExecute_DebugModeDisabledByDefault(t *testing.T) {
