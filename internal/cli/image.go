@@ -66,6 +66,7 @@ func newImageBuildCmd(tag *string) *cobra.Command {
 				return err
 			}
 			if _, err := os.Stat(filepath.Join(dir, "Dockerfile.herd_runner")); os.IsNotExist(err) {
+				//nolint:staticcheck // ST1005: "Dockerfile.herd_runner" is a literal filename used as the sentence subject; lowercasing it ("dockerfile.herd_runner not found...") would be misleading.
 				return fmt.Errorf("Dockerfile.herd_runner not found — run `herd init` first")
 			}
 			ref, err := resolveImageRef(dir, *tag)
