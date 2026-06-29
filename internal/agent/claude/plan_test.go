@@ -2,11 +2,13 @@ package claude
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/stretchr/testify/assert"
@@ -130,6 +132,78 @@ func TestPlan_PassesInitialPromptAsPositional(t *testing.T) {
 			} else {
 				assert.NotContains(t, argv, "--model")
 			}
+		})
+	}
+}
+
+func TestInteractivePaths_UnixContextCancellationTerminatesDescendants(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process group termination is Unix-only")
+	}
+
+	tests := []struct {
+		name string
+		run  func(context.Context, *ClaudeAgent, string) error
+	}{
+		{
+			name: "plan",
+			run: func(ctx context.Context, c *ClaudeAgent, repoRoot string) error {
+				_, err := c.Plan(ctx, "plan work", agent.PlanOptions{
+					RepoRoot:   repoRoot,
+					OutputPath: filepath.Join(repoRoot, "plan.json"),
+					Context:    map[string]string{},
+				})
+				return err
+			},
+		},
+		{
+			name: "discuss",
+			run: func(ctx context.Context, c *ClaudeAgent, repoRoot string) error {
+				return c.Discuss(ctx, agent.DiscussOptions{
+					RepoRoot:     repoRoot,
+					SystemPrompt: "discuss work",
+				})
+			},
+		},
+		{
+			name: "review",
+			run: func(ctx context.Context, c *ClaudeAgent, repoRoot string) error {
+				_, err := c.Review(ctx, "diff body", agent.ReviewOptions{
+					AcceptanceCriteria: []string{"works"},
+					RepoRoot:           repoRoot,
+				})
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			pidFile := filepath.Join(dir, "child.pid")
+			readyFile := filepath.Join(dir, "ready")
+			script := filepath.Join(dir, "claude.sh")
+			content := fmt.Sprintf(`#!/bin/sh
+cat > /dev/null
+(sleep 60) &
+child=$!
+printf '%%s' "$child" > %s
+touch %s
+wait "$child"
+`, shellQuote(pidFile), shellQuote(readyFile))
+			require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			err := tc.run(ctx, New(script, ""), dir)
+
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.FileExists(t, readyFile)
+			pid := readPIDFile(t, pidFile)
+			require.Eventually(t, func() bool {
+				return !processAlive(pid)
+			}, 3*time.Second, 25*time.Millisecond)
 		})
 	}
 }
