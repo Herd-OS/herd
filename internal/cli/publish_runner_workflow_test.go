@@ -38,20 +38,29 @@ func TestPublishRunnerWorkflow_Rendered(t *testing.T) {
 	assert.NotContains(t, rendered, "{{`", "template escaping should be fully resolved")
 	assert.Contains(t, rendered, "${{ github.repository_owner }}")
 
-	// The `release: types: [published]` trigger was removed because GitHub
+	// The `release: types: [published]` trigger remains absent: GitHub
 	// silently blocks events caused by the default GITHUB_TOKEN (which
-	// creates the release) from cascading into other workflows, so the
-	// trigger never fired in practice.
+	// creates the release) from cascading into other workflows, so it
+	// never fired in practice. The push-on-Dockerfile.herd_runner trigger
+	// below is the real auto-rebuild path; release-event triggering would
+	// be dead weight even if it worked.
 	assert.NotContains(t, rendered, "types: [published]", "broken release trigger should not be present")
 	assert.NotContains(t, rendered, "release:", "broken release trigger should not be present")
 
-	// The `push` trigger on Dockerfile.herd_runner was also removed: it
-	// caused a duplicate wrapper-image build whenever a release tag
-	// followed a PR that touched Dockerfile.herd_runner (one build from
-	// the PR merge, one from the tag-driven publish-runner-image job in
-	// release.yml). Manual-only is intentional — see the template comment.
-	assert.NotContains(t, rendered, "push:", "workflow should be workflow_dispatch-only")
-	assert.NotContains(t, rendered, "paths:", "push paths filter should not be present")
-	assert.NotContains(t, rendered, "branches:", "branches filter should not be present")
+	// The push-on-Dockerfile.herd_runner trigger MUST be present.
+	// Without it, consumer repos that merge an `Update HerdOS to <tag>`
+	// PR (which bumps Dockerfile.herd_runner's FROM line) get no
+	// automatic wrapper-image rebuild, so workers continue running with
+	// stale baked-in agent CLIs and project-specific tools until a
+	// maintainer manually fires `gh workflow run
+	// herd-publish-runner.yml`. The trigger was briefly removed in #713
+	// because of a duplicate-build concern that only applies to
+	// herd-os/herd itself (which has a release.yml that ALSO rebuilds
+	// the wrapper); consumer repos have no release.yml and need this
+	// trigger as their only auto-rebuild path. See the template comment
+	// for the full rationale.
 	assert.Contains(t, rendered, "workflow_dispatch:", "workflow_dispatch must remain the manual trigger")
+	assert.Contains(t, rendered, "push:", "push trigger must be present for consumer auto-rebuild on Dockerfile.herd_runner changes")
+	assert.Contains(t, rendered, "'Dockerfile.herd_runner'", "push paths must scope to Dockerfile.herd_runner so unrelated pushes don't trigger image rebuilds")
+	assert.Contains(t, rendered, "branches: [ main ]", "push trigger must be scoped to main so feature-branch pushes don't fire it")
 }
