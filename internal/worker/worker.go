@@ -36,6 +36,13 @@ type ExecResult struct {
 	NoOp         bool // true if no changes were needed
 }
 
+const (
+	workerCleanupReserve      = 8 * time.Minute
+	workerMinimumAgentTimeout = 1 * time.Minute
+	workerCheckpointGitName   = "HerdOS Worker"
+	workerCheckpointGitEmail  = "herd@herd-os.com"
+)
+
 const workerPromptTemplate = `You are a HerdOS worker executing a task.
 
 ## Branch & PR Discipline (do not violate)
@@ -296,12 +303,9 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		progressDone := make(chan struct{})
 		go postProgressUpdates(ctx, p, params.IssueNumber, params.RepoRoot, cfg.Workers.ProgressIntervalSeconds, progressDone)
 
-		// Use a timeout for agent execution so the worker has time to push
-		// whatever work was done if the agent hangs after completing its task.
-		agentTimeout := time.Duration(cfg.Workers.TimeoutMinutes)*time.Minute - 5*time.Minute
-		if agentTimeout < 5*time.Minute {
-			agentTimeout = 5 * time.Minute
-		}
+		// Use an inner timeout that leaves explicit cleanup time before the
+		// outer worker job is cancelled by GitHub Actions.
+		agentTimeout := agentExecutionTimeout(cfg.Workers.TimeoutMinutes)
 		// Remove any stale validation marker so a previous pass cannot carry over;
 		// the marker is re-created only after runValidation reports allPassed().
 		_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
@@ -311,15 +315,17 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		close(progressDone)
 
 		if err != nil {
-			// If the agent timed out, check if work was done — if so, continue to push
 			if agentCtx.Err() == context.DeadlineExceeded {
 				fmt.Printf("Agent execution timed out after %s, checking for completed work...\n", agentTimeout)
-				diff, diffErr := g.Diff(batchBranch, "HEAD")
-				if diffErr == nil && diff != "" {
-					fmt.Println("Work detected despite timeout — proceeding to push.")
-					rawSummary = "Agent timed out but work was completed."
+				summary, checkpointed, checkpointErr := checkpointTimedOutWork(ctx, p, g, params.RepoRoot, params.IssueNumber, workerBranch, batchBranch, "batch")
+				if checkpointErr != nil {
+					return nil, fmt.Errorf("checkpointing timed-out work: %w", checkpointErr)
+				}
+				if checkpointed {
+					rawSummary = summary
 					goto pushWork
 				}
+				return nil, fmt.Errorf("agent execution timed out with no work to checkpoint: %w", err)
 			}
 			_ = p.Issues().AddComment(ctx, params.IssueNumber,
 				fmt.Sprintf("**Worker failed:** agent returned an error.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
@@ -441,7 +447,10 @@ pushWork:
 		}
 		// Remove any stale marker right before the retry invocation too.
 		_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
-		retryResult, retryErr := ag.Execute(ctx, retrySpec, retryExecOpts)
+		retryTimeout := remainingAgentTimeout(ctx, cfg.Workers.TimeoutMinutes)
+		retryCtx, retryCancel := context.WithTimeout(ctx, retryTimeout)
+		retryResult, retryErr := ag.Execute(retryCtx, retrySpec, retryExecOpts)
+		retryCancel()
 		if retryErr != nil {
 			_ = p.Issues().AddComment(ctx, params.IssueNumber,
 				fmt.Sprintf("**Worker failed:** agent returned an error during validation retry.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
@@ -500,6 +509,90 @@ pushWork:
 	return &ExecResult{
 		WorkerBranch: workerBranch,
 	}, nil
+}
+
+func agentExecutionTimeout(workerTimeoutMinutes int) time.Duration {
+	outer := time.Duration(workerTimeoutMinutes) * time.Minute
+	if outer <= 0 {
+		return workerMinimumAgentTimeout
+	}
+
+	if outer >= 2*workerCleanupReserve {
+		return outer - workerCleanupReserve
+	}
+
+	timeout := outer / 2
+	if timeout < workerMinimumAgentTimeout && workerMinimumAgentTimeout < outer {
+		timeout = workerMinimumAgentTimeout
+	}
+	if timeout >= outer {
+		timeout = outer / 2
+	}
+	if timeout <= 0 {
+		return outer / 2
+	}
+	return timeout
+}
+
+func remainingAgentTimeout(ctx context.Context, workerTimeoutMinutes int) time.Duration {
+	timeout := agentExecutionTimeout(workerTimeoutMinutes)
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return timeout
+	}
+	remaining := time.Until(deadline) - workerCleanupReserve
+	if remaining > 0 && remaining < timeout {
+		return remaining
+	}
+	return timeout
+}
+
+func checkpointTimedOutWork(ctx context.Context, p platform.Platform, g *git.Git, repoRoot string, issueNumber int, branch string, baseRef string, mode string) (summary string, checkpointed bool, err error) {
+	_ = repoRoot
+
+	diff, diffErr := g.Diff(baseRef, "HEAD")
+	if diffErr != nil {
+		return "", false, fmt.Errorf("checking committed timeout diff: %w", diffErr)
+	}
+	if diff != "" {
+		return fmt.Sprintf("Agent timed out after committing work on `%s`; Herd will continue with validation and push the branch.", branch), true, nil
+	}
+
+	dirty, dirtyErr := g.IsDirty()
+	if dirtyErr != nil {
+		return "", false, fmt.Errorf("checking uncommitted timeout work: %w", dirtyErr)
+	}
+	if !dirty {
+		_ = p.Issues().AddComment(ctx, issueNumber,
+			"**Worker timed out:** the agent hit its deadline, but Herd detected no committed or uncommitted work to checkpoint. This issue will be retried by the monitor.")
+		return "", false, nil
+	}
+
+	if err := g.ConfigureIdentity(workerCheckpointGitName, workerCheckpointGitEmail); err != nil {
+		return checkpointTimeoutFailure(ctx, p, issueNumber, "configuring git identity", err)
+	}
+	if err := g.Add("."); err != nil {
+		return checkpointTimeoutFailure(ctx, p, issueNumber, "staging repository changes", err)
+	}
+	if err := g.Commit(fmt.Sprintf("Checkpoint timed-out work for #%d", issueNumber)); err != nil {
+		return checkpointTimeoutFailure(ctx, p, issueNumber, "creating checkpoint commit", err)
+	}
+
+	if mode == "standalone" {
+		if err := g.Push("origin", branch); err != nil {
+			return checkpointTimeoutFailure(ctx, p, issueNumber, fmt.Sprintf("pushing checkpoint commit to `%s`", branch), err)
+		}
+		return fmt.Sprintf("Agent timed out with uncommitted work; Herd checkpointed and pushed it to `%s`.", branch), true, nil
+	}
+
+	return fmt.Sprintf("Agent timed out with uncommitted work; Herd checkpointed it in a commit on `%s` and will continue with validation and push.", branch), true, nil
+}
+
+func checkpointTimeoutFailure(ctx context.Context, p platform.Platform, issueNumber int, action string, err error) (string, bool, error) {
+	_ = p.Issues().AddComment(ctx, issueNumber,
+		fmt.Sprintf("**Worker timed out:** Herd detected uncommitted work, but could not checkpoint it while %s.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
+			action, truncateOutput(err.Error(), 2000)))
+	return "", false, err
 }
 
 type validationResult struct {
@@ -1002,7 +1095,7 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 	if err = g.Fetch("origin"); err != nil {
 		return nil, fmt.Errorf("fetching: %w", err)
 	}
-	if err = g.ConfigureIdentity("HerdOS Worker", "herd@herd-os.com"); err != nil {
+	if err = g.ConfigureIdentity(workerCheckpointGitName, workerCheckpointGitEmail); err != nil {
 		return nil, fmt.Errorf("configuring git identity: %w", err)
 	}
 	if err = g.Checkout(targetBranch); err != nil {
@@ -1033,10 +1126,7 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 	progressDone := make(chan struct{})
 	go postProgressUpdates(ctx, p, params.IssueNumber, params.RepoRoot, cfg.Workers.ProgressIntervalSeconds, progressDone)
 
-	agentTimeout := time.Duration(cfg.Workers.TimeoutMinutes)*time.Minute - 5*time.Minute
-	if agentTimeout < 5*time.Minute {
-		agentTimeout = 5 * time.Minute
-	}
+	agentTimeout := agentExecutionTimeout(cfg.Workers.TimeoutMinutes)
 	// Remove any stale validation marker so a previous pass cannot carry over;
 	// the marker is re-created only after runValidation reports allPassed().
 	_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
@@ -1048,18 +1138,20 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 	close(progressDone)
 
 	rawSummary := ""
+	timeoutCheckpointed := false
 	if agentErr != nil {
-		timedOutWithWork := false
 		if agentCtx.Err() == context.DeadlineExceeded {
 			fmt.Printf("Agent execution timed out after %s, checking for completed work...\n", agentTimeout)
-			diff, diffErr := g.Diff("origin/"+targetBranch, "HEAD")
-			if diffErr == nil && diff != "" {
-				fmt.Println("Work detected despite timeout — proceeding to push.")
-				rawSummary = "Agent timed out but work was completed."
-				timedOutWithWork = true
+			summary, checkpointed, checkpointErr := checkpointTimedOutWork(ctx, p, g, params.RepoRoot, params.IssueNumber, targetBranch, "origin/"+targetBranch, "standalone")
+			if checkpointErr != nil {
+				return nil, fmt.Errorf("checkpointing timed-out work: %w", checkpointErr)
+			}
+			if checkpointed {
+				rawSummary = summary
+				timeoutCheckpointed = true
 			}
 		}
-		if !timedOutWithWork {
+		if !timeoutCheckpointed {
 			_ = p.Issues().AddComment(ctx, params.IssueNumber,
 				fmt.Sprintf("**Worker failed:** agent returned an error.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
 					truncateOutput(agentErr.Error(), 2000)))
@@ -1076,7 +1168,7 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 		return nil, fmt.Errorf("checking for changes: %w", diffErr)
 	}
 
-	if diff == "" {
+	if diff == "" && !timeoutCheckpointed {
 		noOpComment := fmt.Sprintf("Worker #%d — no-op: no changes were needed. (Standalone fix completed without modifying any files.)", params.IssueNumber)
 		if rawSummary != "" {
 			noOpComment += fmt.Sprintf("\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
@@ -1117,7 +1209,10 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 		}
 		// Remove any stale marker right before the retry invocation too.
 		_ = removeValidationMarker(params.RepoRoot, params.IssueNumber)
-		retryResult, retryErr := ag.Execute(ctx, retrySpec, retryExecOpts)
+		retryTimeout := remainingAgentTimeout(ctx, cfg.Workers.TimeoutMinutes)
+		retryCtx, retryCancel := context.WithTimeout(ctx, retryTimeout)
+		retryResult, retryErr := ag.Execute(retryCtx, retrySpec, retryExecOpts)
+		retryCancel()
 		if retryErr != nil {
 			_ = p.Issues().AddComment(ctx, params.IssueNumber,
 				fmt.Sprintf("**Worker failed:** agent returned an error during validation retry.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
@@ -1169,7 +1264,9 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 	_ = p.Issues().AddComment(ctx, params.IssueNumber, report)
 
 	var confirmComment string
-	if count, cerr := g.RevListCount(startSHA + "..HEAD"); cerr == nil && count > 0 {
+	if timeoutCheckpointed {
+		confirmComment = fmt.Sprintf("✓ Standalone timeout checkpoint complete — pushed checkpointed work to `%s`.", targetBranch)
+	} else if count, cerr := g.RevListCount(startSHA + "..HEAD"); cerr == nil && count > 0 {
 		confirmComment = fmt.Sprintf("✓ Standalone fix complete — pushed %d commit(s) to `%s`.", count, targetBranch)
 	} else {
 		confirmComment = fmt.Sprintf("✓ Standalone fix complete — pushed to `%s`.", targetBranch)
