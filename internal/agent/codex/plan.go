@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/herd-os/herd/internal/agent"
+	agentprocess "github.com/herd-os/herd/internal/agent/process"
 	"github.com/herd-os/herd/internal/agent/prompt"
 )
 
@@ -62,15 +62,16 @@ func (c *CodexAgent) planHeadless(ctx context.Context, systemPrompt, initialProm
 	args := c.buildExecBaseArgs()
 	args = append(args, "--output-schema", schemaFile, "--output-last-message", outFile, combined)
 
-	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
-	cmd.Dir = opts.RepoRoot
-	cmd.Env = childEnv()
 	// Headless mode: stdin is not a TTY. The structured plan is read from the
 	// output file, so just stream child stdout/stderr to the parent.
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := agentprocess.Run(ctx, agentprocess.Command{
+		Path:   c.BinaryPath,
+		Args:   args,
+		Dir:    opts.RepoRoot,
+		Env:    childEnv(),
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+	}); err != nil {
 		return nil, fmt.Errorf("codex exited with error: %w", err)
 	}
 
@@ -112,18 +113,20 @@ func (c *CodexAgent) planInteractive(ctx context.Context, systemPrompt string, o
 	}
 	args = append(args, seed)
 
-	cmd := exec.CommandContext(ctx, c.BinaryPath, args...)
-	cmd.Dir = opts.RepoRoot
-	cmd.Env = append(childEnv(),
+	env := append(childEnv(),
 		"HERD_PLAN_OUT="+outFile,
 		"HERD_PLAN_SCHEMA="+schemaFile,
 	)
 	// Interactive mode: wire stdio through to the user's TTY.
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := agentprocess.Run(ctx, agentprocess.Command{
+		Path:   c.BinaryPath,
+		Args:   args,
+		Dir:    opts.RepoRoot,
+		Env:    env,
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+	}); err != nil {
 		return nil, fmt.Errorf("codex exited with error: %w", err)
 	}
 
