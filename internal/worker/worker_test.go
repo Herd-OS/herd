@@ -861,21 +861,25 @@ func TestExec_BatchTimeoutWithCommittedWork(t *testing.T) {
 		IssueNumber: 42,
 		RepoRoot:    repoDir,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, result)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "timed out after checkpointing work")
 
 	gitRunT(t, repoDir, "git", "fetch", "origin")
 	assert.Contains(t, gitOutputT(t, repoDir, "git", "log", "--oneline", "origin/herd/worker/42-test"), "agent work")
 	assert.Contains(t, gitOutputT(t, repoDir, "git", "ls-tree", "-r", "--name-only", "origin/herd/worker/42-test"), "work.txt")
 
-	foundReport := false
+	foundCheckpointComment := false
 	for _, c := range issueSvc.comments {
-		if strings.Contains(c, "Worker Report") && strings.Contains(c, "timed out after committing work") {
-			foundReport = true
+		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "preserved the work") && strings.Contains(c, "retry") {
+			foundCheckpointComment = true
 		}
 	}
-	assert.True(t, foundReport, "timeout with committed work should post a worker report")
-	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, foundCheckpointComment, "timeout with committed work should post a retryable checkpoint comment")
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, mock.workflows.dispatched)
+	assert.False(t, checkValidationPassed(repoDir, 42), "timeout checkpoint must not write the validation success marker")
 }
 
 func TestExec_BatchTimeoutWithCommittedAndUncommittedWork(t *testing.T) {
@@ -914,8 +918,9 @@ func TestExec_BatchTimeoutWithCommittedAndUncommittedWork(t *testing.T) {
 		IssueNumber: 42,
 		RepoRoot:    repoDir,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, result)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "timed out after checkpointing work")
 
 	gitRunT(t, repoDir, "git", "fetch", "origin")
 	log := gitOutputT(t, repoDir, "git", "log", "--oneline", "origin/herd/worker/42-test")
@@ -926,14 +931,17 @@ func TestExec_BatchTimeoutWithCommittedAndUncommittedWork(t *testing.T) {
 	assert.Contains(t, tree, "committed.txt")
 	assert.Contains(t, tree, "dirty.txt")
 
-	foundReport := false
+	foundCheckpointComment := false
 	for _, c := range issueSvc.comments {
-		if strings.Contains(c, "Worker Report") && strings.Contains(c, "checkpointed") {
-			foundReport = true
+		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "checkpointed and pushed") && strings.Contains(c, "retryable") {
+			foundCheckpointComment = true
 		}
 	}
-	assert.True(t, foundReport, "mixed committed and dirty timeout work should be checkpointed and reported")
-	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, foundCheckpointComment, "mixed committed and dirty timeout work should be checkpointed and reported as retryable")
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, mock.workflows.dispatched)
+	assert.False(t, checkValidationPassed(repoDir, 42), "timeout checkpoint must not write the validation success marker")
 }
 
 func TestExec_BatchTimeoutWithUncommittedWork(t *testing.T) {
@@ -966,22 +974,26 @@ func TestExec_BatchTimeoutWithUncommittedWork(t *testing.T) {
 		IssueNumber: 42,
 		RepoRoot:    repoDir,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, result)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "timed out after checkpointing work")
 
 	gitRunT(t, repoDir, "git", "fetch", "origin")
 	log := gitOutputT(t, repoDir, "git", "log", "--oneline", "origin/herd/worker/42-test")
 	assert.Contains(t, log, "Checkpoint timed-out work for #42")
 	assert.Contains(t, gitOutputT(t, repoDir, "git", "ls-tree", "-r", "--name-only", "origin/herd/worker/42-test"), "checkpoint.txt")
 
-	foundReport := false
+	foundCheckpointComment := false
 	for _, c := range issueSvc.comments {
-		if strings.Contains(c, "Worker Report") && strings.Contains(c, "checkpointed") {
-			foundReport = true
+		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "checkpointed and pushed") && strings.Contains(c, "retryable") {
+			foundCheckpointComment = true
 		}
 	}
-	assert.True(t, foundReport, "timeout checkpoint should be reported on the issue")
-	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, foundCheckpointComment, "timeout checkpoint should be reported on the issue as retryable")
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, mock.workflows.dispatched)
+	assert.False(t, checkValidationPassed(repoDir, 42), "timeout checkpoint must not write the validation success marker")
 }
 
 func TestExec_BatchTimeoutWithNoWork(t *testing.T) {
@@ -2200,8 +2212,9 @@ func TestExecStandalone_TimeoutWithUncommittedWork(t *testing.T) {
 		RepoRoot:    work,
 		Mode:        "standalone",
 	})
-	require.NoError(t, err)
-	require.NotNil(t, result)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "timed out after checkpointing work")
 
 	gitRunT(t, work, "git", "fetch", "origin")
 	log := gitOutputT(t, work, "git", "log", "--oneline", "origin/"+targetBranch)
@@ -2210,11 +2223,11 @@ func TestExecStandalone_TimeoutWithUncommittedWork(t *testing.T) {
 
 	foundIssueReport := false
 	for _, c := range issueSvc.comments {
-		if strings.Contains(c, "Worker Report") && strings.Contains(c, "checkpointed and pushed") {
+		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "checkpointed and pushed") && strings.Contains(c, "retryable") {
 			foundIssueReport = true
 		}
 	}
-	assert.True(t, foundIssueReport, "standalone timeout checkpoint should post an issue report")
+	assert.True(t, foundIssueReport, "standalone timeout checkpoint should post a retryable issue report")
 
 	foundPRComment := false
 	for _, c := range prSvc.comments {
@@ -2223,7 +2236,10 @@ func TestExecStandalone_TimeoutWithUncommittedWork(t *testing.T) {
 		}
 	}
 	assert.True(t, foundPRComment, "standalone timeout checkpoint should post a PR comment naming the target branch")
-	assert.Contains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
+	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
+	assert.True(t, mock.workflows.dispatched)
+	assert.False(t, checkValidationPassed(work, 594), "timeout checkpoint must not write the validation success marker")
 }
 
 func TestExecStandalone_NoOpPath(t *testing.T) {

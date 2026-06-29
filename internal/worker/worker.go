@@ -322,8 +322,7 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 					return nil, fmt.Errorf("checkpointing timed-out work: %w", checkpointErr)
 				}
 				if checkpointed {
-					rawSummary = summary
-					goto pushWork
+					return nil, fmt.Errorf("agent execution timed out after checkpointing work: %s: %w", summary, err)
 				}
 				return nil, fmt.Errorf("agent execution timed out with no work to checkpoint: %w", err)
 			}
@@ -338,7 +337,6 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 	}
 
-pushWork:
 	// Check for no-op (no commits made)
 	diff, diffErr := g.Diff(batchBranch, "HEAD")
 	if diffErr != nil {
@@ -570,7 +568,12 @@ func checkpointTimedOutWork(ctx context.Context, p platform.Platform, g *git.Git
 		return "", false, fmt.Errorf("checking uncommitted timeout work: %w", dirtyErr)
 	}
 	if diff != "" && !dirty {
-		return fmt.Sprintf("Agent timed out after committing work on `%s`; Herd will continue with validation and push the branch.", branch), true, nil
+		if err := pushTimeoutCheckpoint(g, mode, branch); err != nil {
+			return checkpointTimeoutFailure(ctx, p, issueNumber, fmt.Sprintf("pushing committed timeout work to `%s`", branch), err)
+		}
+		summary := fmt.Sprintf("Agent timed out after committing work on `%s`; Herd preserved the work and will retry instead of marking the task complete.", branch)
+		_ = p.Issues().AddComment(ctx, issueNumber, fmt.Sprintf("**Worker timed out:** %s", summary))
+		return summary, true, nil
 	}
 	if !dirty {
 		_ = p.Issues().AddComment(ctx, issueNumber,
@@ -588,14 +591,13 @@ func checkpointTimedOutWork(ctx context.Context, p platform.Platform, g *git.Git
 		return checkpointTimeoutFailure(ctx, p, issueNumber, "creating checkpoint commit", err)
 	}
 
-	if mode == "standalone" {
-		if err := g.Push("origin", branch); err != nil {
-			return checkpointTimeoutFailure(ctx, p, issueNumber, fmt.Sprintf("pushing checkpoint commit to `%s`", branch), err)
-		}
-		return fmt.Sprintf("Agent timed out with uncommitted work; Herd checkpointed and pushed it to `%s`.", branch), true, nil
+	if err := pushTimeoutCheckpoint(g, mode, branch); err != nil {
+		return checkpointTimeoutFailure(ctx, p, issueNumber, fmt.Sprintf("pushing checkpoint commit to `%s`", branch), err)
 	}
 
-	return fmt.Sprintf("Agent timed out with uncommitted work; Herd checkpointed it in a commit on `%s` and will continue with validation and push.", branch), true, nil
+	summary = fmt.Sprintf("Agent timed out with uncommitted work; Herd checkpointed and pushed it to `%s`, then left the issue retryable instead of marking it complete.", branch)
+	_ = p.Issues().AddComment(ctx, issueNumber, fmt.Sprintf("**Worker timed out:** %s", summary))
+	return summary, true, nil
 }
 
 func checkpointTimeoutFailure(ctx context.Context, p platform.Platform, issueNumber int, action string, err error) (string, bool, error) {
@@ -603,6 +605,13 @@ func checkpointTimeoutFailure(ctx context.Context, p platform.Platform, issueNum
 		fmt.Sprintf("**Worker timed out:** Herd detected uncommitted work, but could not checkpoint it while %s.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
 			action, truncateOutput(err.Error(), 2000)))
 	return "", false, err
+}
+
+func pushTimeoutCheckpoint(g *git.Git, mode string, branch string) error {
+	if mode == "standalone" {
+		return g.Push("origin", branch)
+	}
+	return g.ForcePush("origin", branch)
 }
 
 type validationResult struct {
@@ -1148,7 +1157,6 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 	close(progressDone)
 
 	rawSummary := ""
-	timeoutCheckpointed := false
 	if agentErr != nil {
 		if agentCtx.Err() == context.DeadlineExceeded {
 			fmt.Printf("Agent execution timed out after %s, checking for completed work...\n", agentTimeout)
@@ -1157,16 +1165,14 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 				return nil, fmt.Errorf("checkpointing timed-out work: %w", checkpointErr)
 			}
 			if checkpointed {
-				rawSummary = summary
-				timeoutCheckpointed = true
+				_ = p.PullRequests().AddComment(ctx, targetPR, fmt.Sprintf("Standalone timeout checkpoint pushed to `%s`. The tracking issue remains retryable because the worker timed out before completing validation.", targetBranch))
+				return nil, fmt.Errorf("agent execution timed out after checkpointing work: %s: %w", summary, agentErr)
 			}
 		}
-		if !timeoutCheckpointed {
-			_ = p.Issues().AddComment(ctx, params.IssueNumber,
-				fmt.Sprintf("**Worker failed:** agent returned an error.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
-					truncateOutput(agentErr.Error(), 2000)))
-			return nil, fmt.Errorf("agent execution failed: %w", agentErr)
-		}
+		_ = p.Issues().AddComment(ctx, params.IssueNumber,
+			fmt.Sprintf("**Worker failed:** agent returned an error.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
+				truncateOutput(agentErr.Error(), 2000)))
+		return nil, fmt.Errorf("agent execution failed: %w", agentErr)
 	}
 
 	if agentResult != nil && agentResult.Summary != "" {
@@ -1178,7 +1184,7 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 		return nil, fmt.Errorf("checking for changes: %w", diffErr)
 	}
 
-	if diff == "" && !timeoutCheckpointed {
+	if diff == "" {
 		noOpComment := fmt.Sprintf("Worker #%d — no-op: no changes were needed. (Standalone fix completed without modifying any files.)", params.IssueNumber)
 		if rawSummary != "" {
 			noOpComment += fmt.Sprintf("\n\n<details>\n<summary>Agent output</summary>\n\n```\n%s\n```\n\n</details>", truncateOutput(rawSummary, 60000))
@@ -1274,9 +1280,7 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 	_ = p.Issues().AddComment(ctx, params.IssueNumber, report)
 
 	var confirmComment string
-	if timeoutCheckpointed {
-		confirmComment = fmt.Sprintf("✓ Standalone timeout checkpoint complete — pushed checkpointed work to `%s`.", targetBranch)
-	} else if count, cerr := g.RevListCount(startSHA + "..HEAD"); cerr == nil && count > 0 {
+	if count, cerr := g.RevListCount(startSHA + "..HEAD"); cerr == nil && count > 0 {
 		confirmComment = fmt.Sprintf("✓ Standalone fix complete — pushed %d commit(s) to `%s`.", count, targetBranch)
 	} else {
 		confirmComment = fmt.Sprintf("✓ Standalone fix complete — pushed to `%s`.", targetBranch)
