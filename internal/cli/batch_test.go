@@ -170,12 +170,12 @@ func newMockPlatformForBatchCancel() *mockBatchCancelPlatform {
 }
 
 func (m *mockBatchCancelPlatform) Issues() platform.IssueService             { return m.issues }
-func (m *mockBatchCancelPlatform) PullRequests() platform.PullRequestService  { return m.prs }
-func (m *mockBatchCancelPlatform) Workflows() platform.WorkflowService        { return m.workflows }
-func (m *mockBatchCancelPlatform) Labels() platform.LabelService              { return nil }
-func (m *mockBatchCancelPlatform) Milestones() platform.MilestoneService      { return m.milestones }
-func (m *mockBatchCancelPlatform) Runners() platform.RunnerService            { return nil }
-func (m *mockBatchCancelPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockBatchCancelPlatform) PullRequests() platform.PullRequestService { return m.prs }
+func (m *mockBatchCancelPlatform) Workflows() platform.WorkflowService       { return m.workflows }
+func (m *mockBatchCancelPlatform) Labels() platform.LabelService             { return nil }
+func (m *mockBatchCancelPlatform) Milestones() platform.MilestoneService     { return m.milestones }
+func (m *mockBatchCancelPlatform) Runners() platform.RunnerService           { return nil }
+func (m *mockBatchCancelPlatform) Repository() platform.RepositoryService    { return m.repo }
 func (m *mockBatchCancelPlatform) Checks() platform.CheckService             { return nil }
 
 type mockBatchCancelPRService struct {
@@ -215,12 +215,12 @@ func (m *mockBatchCancelPRService) Close(_ context.Context, number int) error {
 }
 
 type mockBatchCancelIssueService struct {
-	listResult    []*platform.Issue
-	addedLabels   map[int][]string
-	removedLabels map[int][]string
-	updatedIssues map[int]platform.IssueUpdate
-	updateErr     error
-	addLabelsErr  error
+	listResult      []*platform.Issue
+	addedLabels     map[int][]string
+	removedLabels   map[int][]string
+	updatedIssues   map[int]platform.IssueUpdate
+	updateErr       error
+	addLabelsErr    error
 	removeLabelsErr error
 }
 
@@ -291,6 +291,9 @@ func (m *mockBatchCancelWorkflowService) ListRuns(_ context.Context, _ platform.
 func (m *mockBatchCancelWorkflowService) CancelRun(_ context.Context, id int64) error {
 	m.cancelledRuns = append(m.cancelledRuns, id)
 	return nil
+}
+func (m *mockBatchCancelWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
 }
 
 type mockBatchCancelMilestoneService struct {

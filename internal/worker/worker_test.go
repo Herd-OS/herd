@@ -182,6 +182,9 @@ func (m *mockWorkflowService) ListRuns(_ context.Context, _ platform.RunFilters)
 	return nil, nil
 }
 func (m *mockWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
+func (m *mockWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 type mockRepoService struct {
 	defaultBranch   string

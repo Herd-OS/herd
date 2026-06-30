@@ -22,14 +22,14 @@ type fakePlatform struct {
 	checks     platform.CheckService
 }
 
-func (f *fakePlatform) Issues() platform.IssueService            { return f.issues }
+func (f *fakePlatform) Issues() platform.IssueService             { return f.issues }
 func (f *fakePlatform) PullRequests() platform.PullRequestService { return f.prs }
-func (f *fakePlatform) Workflows() platform.WorkflowService      { return f.workflows }
-func (f *fakePlatform) Labels() platform.LabelService            { return nil }
-func (f *fakePlatform) Milestones() platform.MilestoneService    { return f.milestones }
-func (f *fakePlatform) Runners() platform.RunnerService          { return nil }
-func (f *fakePlatform) Repository() platform.RepositoryService   { return nil }
-func (f *fakePlatform) Checks() platform.CheckService            { return f.checks }
+func (f *fakePlatform) Workflows() platform.WorkflowService       { return f.workflows }
+func (f *fakePlatform) Labels() platform.LabelService             { return nil }
+func (f *fakePlatform) Milestones() platform.MilestoneService     { return f.milestones }
+func (f *fakePlatform) Runners() platform.RunnerService           { return nil }
+func (f *fakePlatform) Repository() platform.RepositoryService    { return nil }
+func (f *fakePlatform) Checks() platform.CheckService             { return f.checks }
 
 type fakeIssueService struct {
 	getResult    map[int]*platform.Issue
@@ -137,6 +137,9 @@ func (s *fakeWorkflowService) ListRuns(ctx context.Context, filters platform.Run
 	return s.listRunsResult, nil
 }
 func (s *fakeWorkflowService) CancelRun(ctx context.Context, runID int64) error { return nil }
+func (s *fakeWorkflowService) GetRunDiagnostics(ctx context.Context, runID int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 type fakeMilestoneService struct {
 	listResult []*platform.Milestone

@@ -98,6 +98,11 @@ func TestMapMilestoneNoDueDate(t *testing.T) {
 func TestMapRun(t *testing.T) {
 	ghRun := &gh.WorkflowRun{
 		ID:         gh.Ptr(int64(12345678)),
+		Name:       gh.Ptr("CI"),
+		Path:       gh.Ptr(".github/workflows/ci.yml"),
+		WorkflowID: gh.Ptr(int64(42)),
+		HeadBranch: gh.Ptr("herd/worker/42"),
+		HeadSHA:    gh.Ptr("abc123"),
 		Status:     gh.Ptr("completed"),
 		Conclusion: gh.Ptr("success"),
 		HTMLURL:    gh.Ptr("https://github.com/org/repo/actions/runs/12345678"),
@@ -106,6 +111,11 @@ func TestMapRun(t *testing.T) {
 	run := mapRun(ghRun)
 
 	assert.Equal(t, int64(12345678), run.ID)
+	assert.Equal(t, int64(42), run.WorkflowID)
+	assert.Equal(t, "CI", run.WorkflowName)
+	assert.Equal(t, ".github/workflows/ci.yml", run.WorkflowPath)
+	assert.Equal(t, "herd/worker/42", run.HeadBranch)
+	assert.Equal(t, "abc123", run.HeadSHA)
 	assert.Equal(t, "completed", run.Status)
 	assert.Equal(t, "success", run.Conclusion)
 	assert.Equal(t, "https://github.com/org/repo/actions/runs/12345678", run.URL)

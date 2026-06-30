@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"strconv"
 	"text/template"
 
 	"github.com/herd-os/herd/internal/config"
@@ -23,7 +24,7 @@ func workflowFiles() []workflowFile {
 		{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true},
 		{SrcName: "herd-publish-runner.yml.tmpl", DestName: "herd-publish-runner.yml", Template: true},
 		{SrcName: "herd-monitor.yml", DestName: "herd-monitor.yml"},
-		{SrcName: "herd-integrator.yml", DestName: "herd-integrator.yml"},
+		{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true},
 	}
 }
 
@@ -47,7 +48,9 @@ func RenderWorkflow(wf workflowFile, cfg *config.Config) ([]byte, error) {
 	if !wf.Template {
 		return raw, nil
 	}
-	tmpl, err := template.New(wf.SrcName).Parse(string(raw))
+	tmpl, err := template.New(wf.SrcName).Funcs(template.FuncMap{
+		"yamlQuote": strconv.Quote,
+	}).Parse(string(raw))
 	if err != nil {
 		return nil, fmt.Errorf("parsing workflow template %s: %w", wf.SrcName, err)
 	}

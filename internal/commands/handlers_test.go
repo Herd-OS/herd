@@ -29,14 +29,14 @@ type testPlatform struct {
 	checks     *testCheckService
 }
 
-func (m *testPlatform) Issues() platform.IssueService            { return m.issues }
+func (m *testPlatform) Issues() platform.IssueService             { return m.issues }
 func (m *testPlatform) PullRequests() platform.PullRequestService { return m.prs }
 func (m *testPlatform) Workflows() platform.WorkflowService       { return m.workflows }
 func (m *testPlatform) Labels() platform.LabelService             { return nil }
 func (m *testPlatform) Milestones() platform.MilestoneService     { return m.milestones }
 func (m *testPlatform) Runners() platform.RunnerService           { return nil }
 func (m *testPlatform) Repository() platform.RepositoryService    { return m.repo }
-func (m *testPlatform) Checks() platform.CheckService            { return m.checks }
+func (m *testPlatform) Checks() platform.CheckService             { return m.checks }
 
 // --- Mock IssueService ---
 
@@ -55,10 +55,10 @@ type testIssueService struct {
 
 func newTestIssueService() *testIssueService {
 	return &testIssueService{
-		getResult:    make(map[int]*platform.Issue),
-		addedLabels:  make(map[int][]string),
+		getResult:     make(map[int]*platform.Issue),
+		addedLabels:   make(map[int][]string),
 		removedLabels: make(map[int][]string),
-		nextIssueNum: 200,
+		nextIssueNum:  200,
 	}
 }
 
@@ -95,14 +95,14 @@ func (m *testIssueService) RemoveLabels(_ context.Context, number int, labels []
 	m.removedLabels[number] = append(m.removedLabels[number], labels...)
 	return nil
 }
-func (m *testIssueService) AddComment(_ context.Context, _ int, _ string) error  { return nil }
+func (m *testIssueService) AddComment(_ context.Context, _ int, _ string) error { return nil }
 func (m *testIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
 	return 0, nil
 }
 func (m *testIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
 	return nil
 }
-func (m *testIssueService) DeleteComment(_ context.Context, _ int64) error       { return nil }
+func (m *testIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
 func (m *testIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return m.listCommentsResult, nil
 }
@@ -180,6 +180,9 @@ func (m *testWorkflowService) ListRuns(_ context.Context, _ platform.RunFilters)
 	return nil, nil
 }
 func (m *testWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
+func (m *testWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 // --- Mock RepoService ---
 
@@ -193,7 +196,7 @@ func (m *testRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, m.defaultBranchErr
 }
 func (m *testRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
-func (m *testRepoService) DeleteBranch(_ context.Context, _ string) error     { return nil }
+func (m *testRepoService) DeleteBranch(_ context.Context, _ string) error    { return nil }
 func (m *testRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
 	return "abc123", nil
 }
@@ -225,8 +228,8 @@ func (m *testMilestoneService) Update(_ context.Context, _ int, _ platform.Miles
 // --- Mock CheckService ---
 
 type testCheckService struct {
-	status    string
-	rerunErr  error
+	status   string
+	rerunErr error
 }
 
 func (m *testCheckService) GetCombinedStatus(_ context.Context, _ string) (string, error) {
@@ -379,9 +382,10 @@ func TestHandleFixCI_NotBatchPR(t *testing.T) {
 	assert.Contains(t, result.Message, "can only be used on batch PRs")
 }
 
-func TestHandleFixCI_CISuccess(t *testing.T) {
+func TestHandleFixCI_ForceDispatchesOnCISuccess(t *testing.T) {
 	issueSvc := newTestIssueService()
 	issueSvc.listResult = []*platform.Issue{}
+	wf := &testWorkflowService{}
 	prSvc := &testPRService{
 		getResult: map[int]*platform.PullRequest{
 			10: {Number: 10, Head: "herd/batch/1-batch"},
@@ -391,7 +395,7 @@ func TestHandleFixCI_CISuccess(t *testing.T) {
 	p := &testPlatform{
 		issues:     issueSvc,
 		prs:        prSvc,
-		workflows:  &testWorkflowService{},
+		workflows:  wf,
 		repo:       &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}}},
 		checks:     &testCheckService{status: "success"},
@@ -407,7 +411,9 @@ func TestHandleFixCI_CISuccess(t *testing.T) {
 	result := handleFixCI(hctx, Command{Name: "fix-ci"})
 
 	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "✅ CI is passing")
+	assert.Contains(t, result.Message, "🔧 CI failed — dispatched fix workers")
+	assert.Len(t, issueSvc.createdIssues, 1)
+	assert.Len(t, wf.dispatched, 1)
 }
 
 func TestHandleFixCI_WithFixDispatch(t *testing.T) {
@@ -810,10 +816,10 @@ func TestHandleReview_Approved(t *testing.T) {
 		},
 	}
 	p := &testPlatform{
-		issues:  issueSvc,
-		prs:     prSvc,
+		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: &testWorkflowService{},
-		repo:    &testRepoService{defaultBranch: "main"},
+		repo:      &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{
 			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}},
 		},
@@ -850,10 +856,10 @@ func TestHandleReview_WithFixes(t *testing.T) {
 	}
 	wf := &testWorkflowService{}
 	p := &testPlatform{
-		issues:  issueSvc,
-		prs:     prSvc,
+		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: wf,
-		repo:    &testRepoService{defaultBranch: "main"},
+		repo:      &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{
 			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}},
 		},
@@ -902,10 +908,10 @@ func TestHandleReview_MaxCyclesHit(t *testing.T) {
 		},
 	}
 	p := &testPlatform{
-		issues:  issueSvc,
-		prs:     prSvc,
+		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: &testWorkflowService{},
-		repo:    &testRepoService{defaultBranch: "main"},
+		repo:      &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{
 			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}},
 		},
@@ -1132,10 +1138,10 @@ func TestHandleFix_Success(t *testing.T) {
 		},
 	}
 	p := &testPlatform{
-		issues:  issueSvc,
-		prs:     prSvc,
+		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: wf,
-		repo:    &testRepoService{defaultBranch: "main"},
+		repo:      &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{
 			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "My Batch"}},
 		},
@@ -1171,10 +1177,10 @@ func TestHandleFix_IncludesConversationHistory(t *testing.T) {
 		},
 	}
 	p := &testPlatform{
-		issues:  issueSvc,
-		prs:     prSvc,
+		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: &testWorkflowService{},
-		repo:    &testRepoService{defaultBranch: "main"},
+		repo:      &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{
 			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "My Batch"}},
 		},
@@ -1213,10 +1219,10 @@ func TestHandleFix_NoCommentsOmitsHistory(t *testing.T) {
 		},
 	}
 	p := &testPlatform{
-		issues:  issueSvc,
-		prs:     prSvc,
+		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: &testWorkflowService{},
-		repo:    &testRepoService{defaultBranch: "main"},
+		repo:      &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{
 			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "My Batch"}},
 		},
@@ -1326,10 +1332,10 @@ func TestHandleReview_ExtraInstructions(t *testing.T) {
 	}
 
 	p := &testPlatform{
-		issues:  issueSvc,
-		prs:     prSvc,
+		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: &testWorkflowService{},
-		repo:    &testRepoService{defaultBranch: "main"},
+		repo:      &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{
 			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}},
 		},
@@ -1370,10 +1376,10 @@ func TestHandleReview_SingleFixIssue(t *testing.T) {
 	}
 	wf := &testWorkflowService{}
 	p := &testPlatform{
-		issues:  issueSvc,
-		prs:     prSvc,
+		issues:    issueSvc,
+		prs:       prSvc,
 		workflows: wf,
-		repo:    &testRepoService{defaultBranch: "main"},
+		repo:      &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{
 			getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}},
 		},
@@ -1400,7 +1406,6 @@ func TestHandleReview_SingleFixIssue(t *testing.T) {
 	require.NoError(t, result.Error)
 	assert.Empty(t, result.Message, "Message must be empty to avoid double-posting; integrator.Review posts its own comment")
 }
-
 
 type capturingTestAgent struct {
 	result       *agent.ReviewResult

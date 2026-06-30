@@ -77,6 +77,18 @@ func Validate(cfg *Config) *ValidationError {
 	if cfg.Integrator.CIMaxFixCycles < 0 {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.ci_max_fix_cycles must be >= 0 (0 = unlimited), got %d", cfg.Integrator.CIMaxFixCycles))
 	}
+	seenCIWorkflows := map[string]struct{}{}
+	for i, workflow := range cfg.Integrator.CIWorkflows {
+		if strings.TrimSpace(workflow) == "" {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.ci_workflows[%d] must not be blank", i))
+			continue
+		}
+		if _, ok := seenCIWorkflows[workflow]; ok {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.ci_workflows[%d] duplicates workflow name %q", i, workflow))
+			continue
+		}
+		seenCIWorkflows[workflow] = struct{}{}
+	}
 
 	// Monitor
 	if cfg.Monitor.PatrolIntervalMinutes < 5 {

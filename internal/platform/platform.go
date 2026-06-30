@@ -50,6 +50,7 @@ type WorkflowService interface {
 	GetWorkflow(ctx context.Context, filename string) (workflowID int64, err error)
 	Dispatch(ctx context.Context, workflowFile, ref string, inputs map[string]string) (*Run, error)
 	GetRun(ctx context.Context, runID int64) (*Run, error)
+	GetRunDiagnostics(ctx context.Context, runID int64) (*WorkflowRunDiagnostics, error)
 	ListRuns(ctx context.Context, filters RunFilters) ([]*Run, error)
 	CancelRun(ctx context.Context, runID int64) error
 }

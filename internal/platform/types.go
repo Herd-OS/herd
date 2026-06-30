@@ -29,12 +29,38 @@ type PullRequest struct {
 }
 
 type Run struct {
+	ID           int64
+	WorkflowID   int64
+	WorkflowName string
+	WorkflowPath string
+	HeadBranch   string
+	HeadSHA      string
+	Status       string            // "queued", "in_progress", "completed"
+	Conclusion   string            // "success", "failure", "cancelled"
+	Inputs       map[string]string // workflow_dispatch inputs
+	URL          string
+	CreatedAt    time.Time
+}
+
+type WorkflowRunDiagnostics struct {
+	RunID       int64
+	Workflow    string
+	URL         string
+	Conclusion  string
+	HeadBranch  string
+	HeadSHA     string
+	Jobs        []WorkflowJobDiagnostic
+	Annotations []string
+	LogExcerpt  string
+	LogStatus   string
+}
+
+type WorkflowJobDiagnostic struct {
 	ID         int64
-	Status     string            // "queued", "in_progress", "completed"
-	Conclusion string            // "success", "failure", "cancelled"
-	Inputs     map[string]string // workflow_dispatch inputs
+	Name       string
 	URL        string
-	CreatedAt  time.Time
+	Conclusion string
+	Status     string
 }
 
 type Runner struct {
@@ -112,7 +138,7 @@ type MergeResult struct {
 // Filter and update types
 
 type IssueFilters struct {
-	State     string   // "open", "closed", "all"
+	State     string // "open", "closed", "all"
 	Labels    []string
 	Milestone *int
 }
@@ -131,10 +157,11 @@ type PRFilters struct {
 }
 
 type RunFilters struct {
-	WorkflowID       int64
-	WorkflowFileName string // e.g. "herd-worker.yml" — used to filter by workflow file
-	Status           string // "queued", "in_progress", "completed"
-	Branch           string
+	WorkflowID              int64
+	WorkflowFileName        string // e.g. "herd-worker.yml" — used to filter by workflow file
+	Status                  string // "queued", "in_progress", "completed"
+	Branch                  string
+	ResolveWorkflowIdentity bool // resolve workflow_id to the canonical workflow name/path
 }
 
 type MilestoneUpdate struct {

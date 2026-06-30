@@ -108,12 +108,12 @@ type mockStatusPlatform struct {
 }
 
 func (m *mockStatusPlatform) Issues() platform.IssueService             { return m.issues }
-func (m *mockStatusPlatform) PullRequests() platform.PullRequestService  { return nil }
-func (m *mockStatusPlatform) Workflows() platform.WorkflowService        { return m.workflows }
-func (m *mockStatusPlatform) Labels() platform.LabelService              { return nil }
-func (m *mockStatusPlatform) Milestones() platform.MilestoneService      { return m.milestones }
-func (m *mockStatusPlatform) Runners() platform.RunnerService            { return m.runners }
-func (m *mockStatusPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockStatusPlatform) PullRequests() platform.PullRequestService { return nil }
+func (m *mockStatusPlatform) Workflows() platform.WorkflowService       { return m.workflows }
+func (m *mockStatusPlatform) Labels() platform.LabelService             { return nil }
+func (m *mockStatusPlatform) Milestones() platform.MilestoneService     { return m.milestones }
+func (m *mockStatusPlatform) Runners() platform.RunnerService           { return m.runners }
+func (m *mockStatusPlatform) Repository() platform.RepositoryService    { return m.repo }
 func (m *mockStatusPlatform) Checks() platform.CheckService             { return nil }
 
 type mockStatusIssueService struct {
@@ -134,12 +134,14 @@ func (m *mockStatusIssueService) Update(_ context.Context, _ int, _ platform.Iss
 }
 func (m *mockStatusIssueService) AddLabels(_ context.Context, _ int, _ []string) error    { return nil }
 func (m *mockStatusIssueService) RemoveLabels(_ context.Context, _ int, _ []string) error { return nil }
-func (m *mockStatusIssueService) AddComment(_ context.Context, _ int, _ string) error { return nil }
+func (m *mockStatusIssueService) AddComment(_ context.Context, _ int, _ string) error     { return nil }
 func (m *mockStatusIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
 	return 0, nil
 }
-func (m *mockStatusIssueService) UpdateComment(_ context.Context, _ int64, _ string) error { return nil }
-func (m *mockStatusIssueService) DeleteComment(_ context.Context, _ int64) error           { return nil }
+func (m *mockStatusIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+func (m *mockStatusIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
 func (m *mockStatusIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }
@@ -177,6 +179,9 @@ func (m *mockStatusWorkflowService) ListRuns(_ context.Context, _ platform.RunFi
 	return nil, nil
 }
 func (m *mockStatusWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
+func (m *mockStatusWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 type mockStatusRunnerService struct{}
 

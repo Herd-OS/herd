@@ -25,17 +25,17 @@ type mockPlatform struct {
 }
 
 func (m *mockPlatform) Issues() platform.IssueService             { return m.issues }
-func (m *mockPlatform) PullRequests() platform.PullRequestService  { return m.prs }
-func (m *mockPlatform) Workflows() platform.WorkflowService        { return m.workflows }
-func (m *mockPlatform) Labels() platform.LabelService              { return nil }
+func (m *mockPlatform) PullRequests() platform.PullRequestService { return m.prs }
+func (m *mockPlatform) Workflows() platform.WorkflowService       { return m.workflows }
+func (m *mockPlatform) Labels() platform.LabelService             { return nil }
 func (m *mockPlatform) Milestones() platform.MilestoneService {
 	if m.milestones != nil {
 		return m.milestones
 	}
 	return &mockMilestoneService{}
 }
-func (m *mockPlatform) Runners() platform.RunnerService            { return nil }
-func (m *mockPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockPlatform) Runners() platform.RunnerService        { return nil }
+func (m *mockPlatform) Repository() platform.RepositoryService { return m.repo }
 func (m *mockPlatform) Checks() platform.CheckService {
 	if m.checks != nil {
 		return m.checks
@@ -238,6 +238,9 @@ func (m *mockWorkflowService) CancelRun(_ context.Context, id int64) error {
 	m.cancelled = append(m.cancelled, id)
 	return nil
 }
+func (m *mockWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 type mockRepoService struct {
 	defaultBranch string
@@ -247,8 +250,8 @@ func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error)
 func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, nil
 }
-func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error   { return nil }
-func (m *mockRepoService) DeleteBranch(_ context.Context, _ string) error      { return nil }
+func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
+func (m *mockRepoService) DeleteBranch(_ context.Context, _ string) error    { return nil }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
 	return "abc123", nil
 }
@@ -1124,9 +1127,9 @@ func TestHasCIFixPendingLabel_ErrorFallback(t *testing.T) {
 
 func TestDeleteCIFixComments(t *testing.T) {
 	tests := []struct {
-		name             string
-		comments         []*platform.Comment
-		expectedDeleted  []int64
+		name            string
+		comments        []*platform.Comment
+		expectedDeleted []int64
 	}{
 		{
 			name:            "no comments",
@@ -1303,7 +1306,7 @@ func TestPatrol_StaleReadyIssue_Dispatched(t *testing.T) {
 			Title:     "Ready task",
 			Labels:    []string{issues.StatusReady},
 			Milestone: &platform.Milestone{Number: 5, Title: "Sprint Alpha"},
-			Body: "---\nherd:\n  version: 1\n---\n## Task\nSome task",
+			Body:      "---\nherd:\n  version: 1\n---\n## Task\nSome task",
 			UpdatedAt: time.Now().Add(-1 * time.Hour),
 		},
 	}

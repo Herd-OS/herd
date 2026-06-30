@@ -16,7 +16,8 @@ import (
 
 // Review runs Codex in headless mode (`codex exec`) to review a diff using
 // native structured output. Because Codex exec has no --system-prompt flag, the
-// review system prompt is folded into the positional message (like opencode).
+// review system prompt is folded into the rendered review message. The combined
+// message is piped via stdin so large diffs do not trip the OS ARG_MAX limit.
 // An embedded JSON Schema is passed via --output-schema and the final JSON
 // message is written via --output-last-message.
 //
@@ -46,7 +47,7 @@ func (c *CodexAgent) Review(ctx context.Context, diff string, opts agent.ReviewO
 	defer func() { _ = os.Remove(outPath) }()
 
 	args := c.buildExecBaseArgs()
-	args = append(args, "--output-schema", schemaFile, "--output-last-message", outPath, message)
+	args = append(args, "--output-schema", schemaFile, "--output-last-message", outPath, "-")
 
 	// runOnce returns the final agent message (file contents, falling back to
 	// stdout when the file is empty) along with stdout/stderr for diagnostics.
@@ -57,6 +58,7 @@ func (c *CodexAgent) Review(ctx context.Context, diff string, opts agent.ReviewO
 			Args:         args,
 			Dir:          opts.RepoRoot,
 			Env:          childEnv(),
+			Stdin:        strings.NewReader(message),
 			Stdout:       io.MultiWriter(os.Stdout, &outBuf),
 			Stderr:       io.MultiWriter(os.Stderr, &errBuf),
 			ProcessGroup: true,

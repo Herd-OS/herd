@@ -60,6 +60,49 @@ func baseCIMocks() (*mockIssueService, *mockWorkflowService, *mockPRService) {
 	return issueSvc, wf, prSvc
 }
 
+func baseCIRunMocks() (*mockIssueService, *mockWorkflowService, *mockPRService, *mockMilestoneService) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	wf := &mockWorkflowService{}
+	prSvc := &mockPRService{
+		listResult: []*platform.PullRequest{
+			{Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch"},
+		},
+	}
+	msSvc := &mockMilestoneService{
+		getResult: map[int]*platform.Milestone{
+			1: {Number: 1, Title: "Batch"},
+		},
+	}
+	return issueSvc, wf, prSvc, msSvc
+}
+
+func testCIConfig() *config.Config {
+	return &config.Config{
+		Integrator: config.Integrator{
+			RequireCI:      true,
+			CIMaxFixCycles: 2,
+			CIWorkflows:    []string{"CI - ServiceKit Ruby", "CI — Accounts"},
+		},
+		Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+}
+
+func testCIRun(conclusion string, diag *platform.WorkflowRunDiagnostics) *CIFailureContext {
+	ctx := &CIFailureContext{
+		RunID:      200,
+		Workflow:   "CI — Accounts",
+		HeadBranch: "herd/batch/1-batch",
+		HeadSHA:    "abc123",
+		Conclusion: conclusion,
+		URL:        "https://example.test/actions/runs/200",
+	}
+	if diag != nil {
+		ctx.Diagnostics = diag
+	}
+	return ctx
+}
+
 func TestCheckCI(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -197,6 +240,382 @@ func TestCheckCI(t *testing.T) {
 			if tt.expectFixCount > 0 {
 				assert.Len(t, result.FixIssues, tt.expectFixCount)
 				assert.Len(t, wf.dispatched, tt.expectFixCount)
+			}
+		})
+	}
+}
+
+func TestCITriggerHelpers(t *testing.T) {
+	t.Run("configured workflow exact match preserves punctuation", func(t *testing.T) {
+		configured := []string{"CI - ServiceKit Ruby", "CI — Accounts"}
+		assert.True(t, isConfiguredCIWorkflow("CI — Accounts", configured))
+		assert.False(t, isConfiguredCIWorkflow("CI - Accounts", configured))
+	})
+
+	t.Run("configured workflow matches resolved workflow name for display-title runs", func(t *testing.T) {
+		assert.True(t, isConfiguredCIWorkflow("CI — Accounts", []string{"CI — Accounts"}))
+		assert.False(t, isConfiguredCIWorkflow("Deploy preview for abc123", []string{"CI — Accounts"}))
+	})
+
+	t.Run("configured workflow path and id are not accepted", func(t *testing.T) {
+		tests := []struct {
+			name       string
+			configured []string
+		}{
+			{name: "basename path", configured: []string{"accounts-ci.yml"}},
+			{name: "full path", configured: []string{".github/workflows/accounts-ci.yml"}},
+			{name: "workflow id", configured: []string{"42"}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				assert.False(t, isConfiguredCIWorkflow("CI — Accounts", tt.configured))
+			})
+		}
+	})
+
+	t.Run("parse batch number from branch", func(t *testing.T) {
+		tests := []struct {
+			branch string
+			want   int
+			ok     bool
+		}{
+			{"herd/batch/12", 12, true},
+			{"herd/batch/12-slug", 12, true},
+			{"herd/batch/x-slug", 0, false},
+			{"herd/batch/12slug", 0, false},
+			{"feature/12-slug", 0, false},
+			{"herd/batch/0-slug", 0, false},
+		}
+		for _, tt := range tests {
+			t.Run(tt.branch, func(t *testing.T) {
+				got, ok := parseBatchNumberFromBranch(tt.branch)
+				assert.Equal(t, tt.ok, ok)
+				assert.Equal(t, tt.want, got)
+			})
+		}
+	})
+
+	t.Run("failed conclusions", func(t *testing.T) {
+		for _, conclusion := range []string{"failure", "cancelled", "timed_out", "action_required"} {
+			assert.True(t, isFailedCIConclusion(conclusion))
+		}
+		for _, conclusion := range []string{"success", "skipped", "", "neutral"} {
+			assert.False(t, isFailedCIConclusion(conclusion))
+		}
+	})
+}
+
+func TestCheckCI_CIRunStatusRules(t *testing.T) {
+	tests := []struct {
+		name           string
+		combinedStatus string
+		ciRun          *CIFailureContext
+		expectStatus   string
+		expectSkipped  bool
+		expectFixCount int
+	}{
+		{
+			name:           "failed triggering CI run creates fix issue when combined status pending",
+			combinedStatus: "pending",
+			ciRun:          testCIRun("failure", nil),
+			expectStatus:   "failure",
+			expectFixCount: 1,
+		},
+		{
+			name:           "successful triggering CI run plus pending combined status creates no issue",
+			combinedStatus: "pending",
+			ciRun:          testCIRun("success", nil),
+			expectStatus:   "pending",
+		},
+		{
+			name:           "successful triggering CI run plus failed combined status creates fix issue",
+			combinedStatus: "failure",
+			ciRun:          testCIRun("success", nil),
+			expectStatus:   "failure",
+			expectFixCount: 1,
+		},
+		{
+			name:           "unconfigured workflow skips",
+			combinedStatus: "failure",
+			ciRun: &CIFailureContext{
+				RunID:      201,
+				Workflow:   "CI - Accounts",
+				HeadBranch: "herd/batch/1-batch",
+				Conclusion: "failure",
+			},
+			expectSkipped: true,
+		},
+		{
+			name:           "non-batch branch skips",
+			combinedStatus: "failure",
+			ciRun: &CIFailureContext{
+				RunID:      202,
+				Workflow:   "CI — Accounts",
+				HeadBranch: "feature/not-batch",
+				Conclusion: "failure",
+			},
+			expectSkipped: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc, wf, prSvc, msSvc := baseCIRunMocks()
+			createdIssues := []*platform.Issue{}
+			mockCreate := &mockIssueServiceWithCreate{
+				mockIssueService: issueSvc,
+				onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+					iss := &platform.Issue{Number: 99, Title: title, Body: body}
+					createdIssues = append(createdIssues, iss)
+					return iss, nil
+				},
+			}
+			checkSvc := &mockCheckService{status: tt.combinedStatus}
+			mock := &mockPlatformWithChecks{
+				mockPlatform: &mockPlatform{
+					issues:     mockCreate,
+					prs:        prSvc,
+					workflows:  wf,
+					repo:       &mockRepoService{defaultBranch: "main"},
+					milestones: msSvc,
+				},
+				checks: checkSvc,
+			}
+
+			result, err := CheckCI(context.Background(), mock, testCIConfig(), CheckCIParams{CIRun: tt.ciRun})
+			require.NoError(t, err)
+			if tt.expectSkipped {
+				assert.True(t, result.Skipped)
+				assert.Empty(t, createdIssues)
+				return
+			}
+			assert.Equal(t, tt.expectStatus, result.Status)
+			assert.Len(t, createdIssues, tt.expectFixCount)
+			assert.Len(t, wf.dispatched, tt.expectFixCount)
+		})
+	}
+}
+
+func TestCheckCI_CIRunMaxCycleAndActiveFixGuards(t *testing.T) {
+	tests := []struct {
+		name          string
+		existingIssue *platform.Issue
+		maxCycles     int
+		expectMaxHit  bool
+	}{
+		{
+			name: "max cycle applies to CIRun",
+			existingIssue: &platform.Issue{
+				Number: 80,
+				Body:   "---\nherd:\n  version: 1\n  ci_fix_cycle: 1\n---\n\n## Task\nFix CI\n",
+			},
+			maxCycles:    1,
+			expectMaxHit: true,
+		},
+		{
+			name: "active fix worker blocks CIRun dispatch",
+			existingIssue: &platform.Issue{
+				Number: 81,
+				Labels: []string{issues.TypeFix, issues.StatusInProgress},
+				Body: issues.RenderBody(issues.IssueBody{
+					FrontMatter: issues.FrontMatter{Version: 1, Batch: 1, Type: "fix"},
+					Task:        "review fix",
+				}),
+			},
+			maxCycles: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc, wf, prSvc, msSvc := baseCIRunMocks()
+			issueSvc.listResult = []*platform.Issue{tt.existingIssue}
+			mockCreate := &mockIssueServiceWithCreate{
+				mockIssueService: issueSvc,
+				onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+					return &platform.Issue{Number: 99, Title: title, Body: body}, nil
+				},
+			}
+			cfg := testCIConfig()
+			cfg.Integrator.CIMaxFixCycles = tt.maxCycles
+			mock := &mockPlatformWithChecks{
+				mockPlatform: &mockPlatform{
+					issues:     mockCreate,
+					prs:        prSvc,
+					workflows:  wf,
+					repo:       &mockRepoService{defaultBranch: "main"},
+					milestones: msSvc,
+				},
+				checks: &mockCheckService{status: "pending"},
+			}
+
+			result, err := CheckCI(context.Background(), mock, cfg, CheckCIParams{CIRun: testCIRun("failure", nil)})
+			require.NoError(t, err)
+			assert.Equal(t, "failure", result.Status)
+			assert.Equal(t, tt.expectMaxHit, result.MaxCyclesHit)
+			assert.Empty(t, result.FixIssues)
+			assert.Empty(t, wf.dispatched)
+		})
+	}
+}
+
+func TestCheckCI_CIRunDiagnosticsClassification(t *testing.T) {
+	tests := []struct {
+		name            string
+		diag            *platform.WorkflowRunDiagnostics
+		force           bool
+		expectIssue     bool
+		expectRerun     bool
+		expectPRComment bool
+		bodyContains    []string
+	}{
+		{
+			name: "runner lost communication annotation posts infra comment and creates no issue",
+			diag: &platform.WorkflowRunDiagnostics{
+				RunID:       200,
+				Workflow:    "CI — Accounts",
+				URL:         "https://example.test/actions/runs/200",
+				Conclusion:  "failure",
+				HeadBranch:  "herd/batch/1-batch",
+				HeadSHA:     "abc123",
+				Annotations: []string{"The runner lost communication with the server."},
+				LogStatus:   "available",
+				LogExcerpt:  "runner lost communication",
+			},
+			expectRerun:     true,
+			expectPRComment: true,
+		},
+		{
+			name: "unavailable logs without code context does not dispatch by default",
+			diag: &platform.WorkflowRunDiagnostics{
+				RunID:      200,
+				Workflow:   "CI — Accounts",
+				URL:        "https://example.test/actions/runs/200",
+				Conclusion: "failure",
+				HeadBranch: "herd/batch/1-batch",
+				HeadSHA:    "abc123",
+				LogStatus:  "unavailable",
+				LogExcerpt: "logs unavailable",
+			},
+			expectRerun:     true,
+			expectPRComment: true,
+		},
+		{
+			name: "RSpec failure creates issue with diagnostics section",
+			diag: &platform.WorkflowRunDiagnostics{
+				RunID:      200,
+				Workflow:   "CI — Accounts",
+				URL:        "https://example.test/actions/runs/200",
+				Conclusion: "failure",
+				HeadBranch: "herd/batch/1-batch",
+				HeadSHA:    "abc123",
+				Jobs: []platform.WorkflowJobDiagnostic{
+					{Name: "rspec", URL: "https://example.test/jobs/1", Conclusion: "failure"},
+				},
+				LogStatus:  "available",
+				LogExcerpt: "Failures:\nexpected: 1\n     got: 2",
+			},
+			expectIssue: true,
+			bodyContains: []string{
+				"## CI Failure",
+				"- Workflow: CI — Accounts",
+				"### Failed Jobs",
+				"https://example.test/jobs/1",
+				"### Log Excerpt",
+				"Failures:",
+			},
+		},
+		{
+			name: "go test failure creates issue with diagnostics section",
+			diag: &platform.WorkflowRunDiagnostics{
+				RunID:      200,
+				Workflow:   "CI — Accounts",
+				URL:        "https://example.test/actions/runs/200",
+				Conclusion: "failure",
+				HeadBranch: "herd/batch/1-batch",
+				HeadSHA:    "abc123",
+				Jobs: []platform.WorkflowJobDiagnostic{
+					{Name: "go test", URL: "https://example.test/jobs/2", Conclusion: "failure"},
+				},
+				LogStatus:  "available",
+				LogExcerpt: "--- FAIL: TestThing\nFAIL\tgithub.com/herd-os/herd/internal/integrator",
+			},
+			expectIssue: true,
+			bodyContains: []string{
+				"## CI Failure",
+				"FAIL\tgithub.com/herd-os/herd/internal/integrator",
+			},
+		},
+		{
+			name: "force creates fix issue despite infrastructure classification",
+			diag: &platform.WorkflowRunDiagnostics{
+				RunID:       200,
+				Workflow:    "CI — Accounts",
+				URL:         "https://example.test/actions/runs/200",
+				Conclusion:  "failure",
+				HeadBranch:  "herd/batch/1-batch",
+				HeadSHA:     "abc123",
+				Annotations: []string{"runner shutdown"},
+				LogStatus:   "unavailable",
+				LogExcerpt:  "workflow logs unavailable: runner shutdown",
+			},
+			force:       true,
+			expectIssue: true,
+			bodyContains: []string{
+				"## Failure Classification",
+				"looks like CI infrastructure",
+				"Unavailable: workflow logs unavailable",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc, wf, prSvc, msSvc := baseCIRunMocks()
+			createdIssues := []*platform.Issue{}
+			mockCreate := &mockIssueServiceWithCreate{
+				mockIssueService: issueSvc,
+				onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+					iss := &platform.Issue{Number: 99, Title: title, Body: body}
+					createdIssues = append(createdIssues, iss)
+					return iss, nil
+				},
+			}
+			checkSvc := &mockCheckService{status: "pending"}
+			mock := &mockPlatformWithChecks{
+				mockPlatform: &mockPlatform{
+					issues:     mockCreate,
+					prs:        prSvc,
+					workflows:  wf,
+					repo:       &mockRepoService{defaultBranch: "main"},
+					milestones: msSvc,
+				},
+				checks: checkSvc,
+			}
+
+			result, err := CheckCI(context.Background(), mock, testCIConfig(), CheckCIParams{
+				CIRun: testCIRun("failure", tt.diag),
+				Force: tt.force,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, "failure", result.Status)
+			assert.Equal(t, tt.expectRerun, checkSvc.rerunCalled)
+			if tt.expectPRComment {
+				require.Len(t, prSvc.comments[50], 1)
+				assert.Contains(t, prSvc.comments[50][0], "CI appears to have failed because of infrastructure")
+				assert.Contains(t, prSvc.comments[50][0], "CI — Accounts")
+			} else {
+				assert.Empty(t, prSvc.comments)
+			}
+			if tt.expectIssue {
+				require.Len(t, createdIssues, 1)
+				for _, expected := range tt.bodyContains {
+					assert.Contains(t, createdIssues[0].Body, expected)
+				}
+				require.Len(t, wf.dispatched, 1)
+			} else {
+				assert.Empty(t, createdIssues)
+				assert.Empty(t, wf.dispatched)
 			}
 		})
 	}

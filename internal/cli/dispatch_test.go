@@ -16,8 +16,8 @@ import (
 func TestDispatchIssue(t *testing.T) {
 	mock := newMockPlatformForDispatch()
 	mock.issues.getResult = &platform.Issue{
-		Number: 42,
-		Labels: []string{issues.StatusReady, issues.TypeFeature},
+		Number:    42,
+		Labels:    []string{issues.StatusReady, issues.TypeFeature},
 		Milestone: &platform.Milestone{Number: 1, Title: "Test"},
 	}
 
@@ -58,8 +58,8 @@ func TestDispatchIssue_WrongState(t *testing.T) {
 func TestDispatchIssue_FailedIssueCanBeDispatched(t *testing.T) {
 	mock := newMockPlatformForDispatch()
 	mock.issues.getResult = &platform.Issue{
-		Number: 42,
-		Labels: []string{issues.StatusFailed, issues.TypeFeature},
+		Number:    42,
+		Labels:    []string{issues.StatusFailed, issues.TypeFeature},
 		Milestone: &platform.Milestone{Number: 1, Title: "Test"},
 	}
 
@@ -74,8 +74,8 @@ func TestDispatchIssue_FailedIssueCanBeDispatched(t *testing.T) {
 func TestDispatchIssue_ManualTaskSkipped(t *testing.T) {
 	mock := newMockPlatformForDispatch()
 	mock.issues.getResult = &platform.Issue{
-		Number: 42,
-		Labels: []string{issues.StatusReady, issues.TypeManual},
+		Number:    42,
+		Labels:    []string{issues.StatusReady, issues.TypeManual},
 		Milestone: &platform.Milestone{Number: 1, Title: "Test"},
 	}
 
@@ -121,8 +121,8 @@ func TestEnsureBatchBranch_CreatesFromDefault(t *testing.T) {
 func TestDispatchSingle_ManualTaskSkipped(t *testing.T) {
 	mock := newMockPlatformForDispatch()
 	mock.issues.getResult = &platform.Issue{
-		Number: 42,
-		Labels: []string{issues.StatusReady, issues.TypeManual},
+		Number:    42,
+		Labels:    []string{issues.StatusReady, issues.TypeManual},
 		Milestone: &platform.Milestone{Number: 1, Title: "Test"},
 	}
 
@@ -174,12 +174,12 @@ func newMockPlatformForDispatch() *mockDispatchPlatform {
 }
 
 func (m *mockDispatchPlatform) Issues() platform.IssueService             { return m.issues }
-func (m *mockDispatchPlatform) PullRequests() platform.PullRequestService  { return nil }
-func (m *mockDispatchPlatform) Workflows() platform.WorkflowService        { return m.workflows }
-func (m *mockDispatchPlatform) Labels() platform.LabelService              { return nil }
-func (m *mockDispatchPlatform) Milestones() platform.MilestoneService      { return m.milestones }
-func (m *mockDispatchPlatform) Runners() platform.RunnerService            { return nil }
-func (m *mockDispatchPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockDispatchPlatform) PullRequests() platform.PullRequestService { return nil }
+func (m *mockDispatchPlatform) Workflows() platform.WorkflowService       { return m.workflows }
+func (m *mockDispatchPlatform) Labels() platform.LabelService             { return nil }
+func (m *mockDispatchPlatform) Milestones() platform.MilestoneService     { return m.milestones }
+func (m *mockDispatchPlatform) Runners() platform.RunnerService           { return nil }
+func (m *mockDispatchPlatform) Repository() platform.RepositoryService    { return m.repo }
 func (m *mockDispatchPlatform) Checks() platform.CheckService             { return nil }
 
 // mockDispatchIssueService
@@ -221,8 +221,10 @@ func (m *mockDispatchIssueService) AddComment(_ context.Context, _ int, _ string
 func (m *mockDispatchIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
 	return 0, nil
 }
-func (m *mockDispatchIssueService) UpdateComment(_ context.Context, _ int64, _ string) error { return nil }
-func (m *mockDispatchIssueService) DeleteComment(_ context.Context, _ int64) error           { return nil }
+func (m *mockDispatchIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+func (m *mockDispatchIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
 func (m *mockDispatchIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
 	return nil, nil
 }
@@ -257,6 +259,9 @@ func (m *mockDispatchWorkflowService) ListRuns(_ context.Context, _ platform.Run
 	return m.runs, nil
 }
 func (m *mockDispatchWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
+func (m *mockDispatchWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 // mockDispatchMilestoneService
 

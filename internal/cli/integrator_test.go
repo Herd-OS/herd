@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -103,6 +105,9 @@ func (m *mockIntegratorWorkflowService) ListRuns(_ context.Context, _ platform.R
 	return nil, nil
 }
 func (m *mockIntegratorWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
+func (m *mockIntegratorWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 type mockIntegratorPlatform struct {
 	*mockDispatchPlatform
@@ -110,6 +115,430 @@ type mockIntegratorPlatform struct {
 }
 
 func (m *mockIntegratorPlatform) Workflows() platform.WorkflowService { return m.wf }
+
+func TestValidateCheckCIFlags(t *testing.T) {
+	tests := []struct {
+		name       string
+		runID      int64
+		batchNum   int
+		ciRunID    int64
+		wantErr    bool
+		wantErrMsg string
+	}{
+		{
+			name:       "none provided",
+			wantErr:    true,
+			wantErrMsg: "--run-id, --batch, and --ci-run-id are mutually exclusive",
+		},
+		{name: "run-id accepted", runID: 100},
+		{name: "batch accepted", batchNum: 1},
+		{name: "ci-run-id accepted", ciRunID: 200},
+		{
+			name:       "run-id plus batch rejected",
+			runID:      100,
+			batchNum:   1,
+			wantErr:    true,
+			wantErrMsg: "--run-id, --batch, and --ci-run-id are mutually exclusive",
+		},
+		{
+			name:       "run-id plus ci-run-id rejected",
+			runID:      100,
+			ciRunID:    200,
+			wantErr:    true,
+			wantErrMsg: "--run-id, --batch, and --ci-run-id are mutually exclusive",
+		},
+		{
+			name:       "batch plus ci-run-id rejected",
+			batchNum:   1,
+			ciRunID:    200,
+			wantErr:    true,
+			wantErrMsg: "--run-id, --batch, and --ci-run-id are mutually exclusive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCheckCIFlags(tt.runID, tt.batchNum, tt.ciRunID)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErrMsg)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestCheckCIForCompletedWorkflowRun(t *testing.T) {
+	tests := []struct {
+		name              string
+		run               *platform.Run
+		diag              *platform.WorkflowRunDiagnostics
+		diagErr           error
+		ciWorkflows       []string
+		checkStatus       string
+		wantSkipped       bool
+		wantDiagnostics   bool
+		wantDiagnosticsTo bool
+		wantFixIssue      bool
+	}{
+		{
+			name: "unconfigured workflow skipped",
+			run: &platform.Run{
+				ID:           200,
+				WorkflowName: "Lint",
+				HeadBranch:   "herd/batch/1-batch",
+				Conclusion:   "failure",
+			},
+			wantSkipped: true,
+		},
+		{
+			name: "non-batch branch skipped",
+			run: &platform.Run{
+				ID:           200,
+				WorkflowName: "CI — Accounts",
+				HeadBranch:   "feature/not-batch",
+				Conclusion:   "failure",
+			},
+			wantSkipped: true,
+		},
+		{
+			name: "diagnostics error still calls CheckCI with base context",
+			run: &platform.Run{
+				ID:           200,
+				WorkflowName: "CI — Accounts",
+				HeadBranch:   "herd/batch/1-batch",
+				HeadSHA:      "abc123",
+				Conclusion:   "failure",
+				URL:          "https://example.test/actions/runs/200",
+			},
+			diagErr:      errors.New("logs unavailable"),
+			checkStatus:  "pending",
+			wantFixIssue: true,
+		},
+		{
+			name: "resolved workflow name accepted when display title differs",
+			run: &platform.Run{
+				ID:           200,
+				WorkflowID:   42,
+				WorkflowName: "CI — Accounts",
+				WorkflowPath: ".github/workflows/accounts-ci.yml",
+				HeadBranch:   "herd/batch/1-batch",
+				HeadSHA:      "abc123",
+				Conclusion:   "failure",
+				URL:          "https://example.test/actions/runs/200",
+			},
+			checkStatus:  "pending",
+			wantFixIssue: true,
+		},
+		{
+			name: "configured workflow path rejected",
+			run: &platform.Run{
+				ID:           200,
+				WorkflowID:   42,
+				WorkflowName: "CI — Accounts",
+				WorkflowPath: ".github/workflows/accounts-ci.yml",
+				HeadBranch:   "herd/batch/1-batch",
+				HeadSHA:      "abc123",
+				Conclusion:   "failure",
+				URL:          "https://example.test/actions/runs/200",
+			},
+			ciWorkflows: []string{"accounts-ci.yml", ".github/workflows/accounts-ci.yml"},
+			wantSkipped: true,
+		},
+		{
+			name: "configured workflow id rejected",
+			run: &platform.Run{
+				ID:           200,
+				WorkflowID:   42,
+				WorkflowName: "CI — Accounts",
+				WorkflowPath: ".github/workflows/accounts-ci.yml",
+				HeadBranch:   "herd/batch/1-batch",
+				HeadSHA:      "abc123",
+				Conclusion:   "failure",
+				URL:          "https://example.test/actions/runs/200",
+			},
+			ciWorkflows: []string{"42"},
+			wantSkipped: true,
+		},
+		{
+			name: "successful diagnostics passed through",
+			run: &platform.Run{
+				ID:           200,
+				WorkflowName: "CI — Accounts",
+				HeadBranch:   "herd/batch/1-batch",
+				HeadSHA:      "abc123",
+				Conclusion:   "failure",
+				URL:          "https://example.test/actions/runs/200",
+			},
+			diag: &platform.WorkflowRunDiagnostics{
+				RunID:      200,
+				Workflow:   "CI — Accounts",
+				HeadBranch: "herd/batch/1-batch",
+				HeadSHA:    "abc123",
+				Conclusion: "failure",
+				URL:        "https://example.test/actions/runs/200",
+				LogStatus:  "available",
+				LogExcerpt: "FAIL\tgithub.com/herd-os/herd/internal/cli",
+			},
+			checkStatus:       "pending",
+			wantDiagnostics:   true,
+			wantDiagnosticsTo: true,
+			wantFixIssue:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wf := &mockCheckCIWorkflowService{
+				run:     tt.run,
+				diag:    tt.diag,
+				diagErr: tt.diagErr,
+			}
+			issues := newMockCheckCIIssueService()
+			prs := &mockCheckCIPRService{
+				listResult: []*platform.PullRequest{{Number: 50, Head: "herd/batch/1-batch"}},
+			}
+			checks := &mockCheckCIStatusService{status: tt.checkStatus}
+			client := &mockCheckCIPlatform{
+				issues:     issues,
+				prs:        prs,
+				workflows:  wf,
+				milestones: &mockCheckCIMilestoneService{milestone: &platform.Milestone{Number: 1, Title: "Batch"}},
+				repo:       &mockCheckCIRepoService{defaultBranch: "main"},
+				checks:     checks,
+			}
+
+			cfg := testCheckCIConfig()
+			if tt.ciWorkflows != nil {
+				cfg.Integrator.CIWorkflows = tt.ciWorkflows
+			}
+			result, run, err := checkCIForCompletedWorkflowRun(context.Background(), client, cfg, 200, t.TempDir())
+			require.NoError(t, err)
+			require.Same(t, tt.run, run)
+			if tt.wantSkipped {
+				assert.True(t, result.Skipped)
+				assert.False(t, wf.diagnosticsCalled)
+				assert.False(t, checks.called)
+				assert.Empty(t, issues.created)
+				return
+			}
+
+			assert.True(t, wf.diagnosticsCalled)
+			assert.True(t, checks.called)
+			assert.Len(t, issues.created, boolToInt(tt.wantFixIssue))
+			if tt.wantDiagnostics {
+				require.Len(t, issues.created, 1)
+				assert.Contains(t, issues.created[0].Body, "## CI Failure")
+			}
+			if tt.wantDiagnosticsTo {
+				assert.Contains(t, issues.created[0].Body, "FAIL\tgithub.com/herd-os/herd/internal/cli")
+			}
+			if tt.diagErr != nil {
+				require.Len(t, issues.created, 1)
+				assert.Contains(t, issues.created[0].Body, "## CI Failure")
+				assert.NotContains(t, issues.created[0].Body, "### Log Excerpt")
+			}
+		})
+	}
+}
+
+func testCheckCIConfig() *config.Config {
+	return &config.Config{
+		Integrator: config.Integrator{
+			RequireCI:      true,
+			CIMaxFixCycles: 2,
+			CIWorkflows:    []string{"CI — Accounts"},
+		},
+		Workers: config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+	}
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+type mockCheckCIPlatform struct {
+	issues     platform.IssueService
+	prs        platform.PullRequestService
+	workflows  platform.WorkflowService
+	milestones platform.MilestoneService
+	repo       platform.RepositoryService
+	checks     platform.CheckService
+}
+
+func (m *mockCheckCIPlatform) Issues() platform.IssueService             { return m.issues }
+func (m *mockCheckCIPlatform) PullRequests() platform.PullRequestService { return m.prs }
+func (m *mockCheckCIPlatform) Workflows() platform.WorkflowService       { return m.workflows }
+func (m *mockCheckCIPlatform) Labels() platform.LabelService             { return nil }
+func (m *mockCheckCIPlatform) Milestones() platform.MilestoneService     { return m.milestones }
+func (m *mockCheckCIPlatform) Runners() platform.RunnerService           { return nil }
+func (m *mockCheckCIPlatform) Repository() platform.RepositoryService    { return m.repo }
+func (m *mockCheckCIPlatform) Checks() platform.CheckService             { return m.checks }
+
+type mockCheckCIWorkflowService struct {
+	run               *platform.Run
+	diag              *platform.WorkflowRunDiagnostics
+	diagErr           error
+	diagnosticsCalled bool
+	dispatched        []map[string]string
+}
+
+func (m *mockCheckCIWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) {
+	return 0, nil
+}
+func (m *mockCheckCIWorkflowService) Dispatch(_ context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
+	m.dispatched = append(m.dispatched, inputs)
+	return nil, nil
+}
+func (m *mockCheckCIWorkflowService) GetRun(_ context.Context, _ int64) (*platform.Run, error) {
+	return m.run, nil
+}
+func (m *mockCheckCIWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	m.diagnosticsCalled = true
+	if m.diagErr != nil {
+		return nil, m.diagErr
+	}
+	return m.diag, nil
+}
+func (m *mockCheckCIWorkflowService) ListRuns(_ context.Context, _ platform.RunFilters) ([]*platform.Run, error) {
+	return nil, nil
+}
+func (m *mockCheckCIWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
+
+type createdCheckCIIssue struct {
+	Title string
+	Body  string
+}
+
+type mockCheckCIIssueService struct {
+	created []createdCheckCIIssue
+}
+
+func newMockCheckCIIssueService() *mockCheckCIIssueService {
+	return &mockCheckCIIssueService{}
+}
+
+func (m *mockCheckCIIssueService) Create(_ context.Context, title, body string, _ []string, _ *int) (*platform.Issue, error) {
+	m.created = append(m.created, createdCheckCIIssue{Title: title, Body: body})
+	return &platform.Issue{Number: 99, Title: title, Body: body}, nil
+}
+func (m *mockCheckCIIssueService) Get(_ context.Context, _ int) (*platform.Issue, error) {
+	return nil, nil
+}
+func (m *mockCheckCIIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*platform.Issue, error) {
+	return nil, nil
+}
+func (m *mockCheckCIIssueService) Update(_ context.Context, _ int, _ platform.IssueUpdate) (*platform.Issue, error) {
+	return nil, nil
+}
+func (m *mockCheckCIIssueService) AddLabels(_ context.Context, _ int, _ []string) error {
+	return nil
+}
+func (m *mockCheckCIIssueService) RemoveLabels(_ context.Context, _ int, _ []string) error {
+	return nil
+}
+func (m *mockCheckCIIssueService) AddComment(_ context.Context, _ int, _ string) error {
+	return nil
+}
+func (m *mockCheckCIIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
+	return 0, nil
+}
+func (m *mockCheckCIIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+func (m *mockCheckCIIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
+func (m *mockCheckCIIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
+	return nil, nil
+}
+func (m *mockCheckCIIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+
+type mockCheckCIPRService struct {
+	listResult []*platform.PullRequest
+}
+
+func (m *mockCheckCIPRService) Create(_ context.Context, _, _, _, _ string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockCheckCIPRService) Get(_ context.Context, _ int) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockCheckCIPRService) List(_ context.Context, _ platform.PRFilters) ([]*platform.PullRequest, error) {
+	return m.listResult, nil
+}
+func (m *mockCheckCIPRService) Update(_ context.Context, _ int, _, _ *string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockCheckCIPRService) Merge(_ context.Context, _ int, _ platform.MergeMethod) (*platform.MergeResult, error) {
+	return nil, nil
+}
+func (m *mockCheckCIPRService) UpdateBranch(_ context.Context, _ int) error { return nil }
+func (m *mockCheckCIPRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
+	return nil
+}
+func (m *mockCheckCIPRService) AddComment(_ context.Context, _ int, _ string) error {
+	return nil
+}
+func (m *mockCheckCIPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
+func (m *mockCheckCIPRService) GetDiff(_ context.Context, _ int) (string, error) {
+	return "", nil
+}
+func (m *mockCheckCIPRService) Close(_ context.Context, _ int) error { return nil }
+
+type mockCheckCIMilestoneService struct {
+	milestone *platform.Milestone
+}
+
+func (m *mockCheckCIMilestoneService) Create(_ context.Context, _, _ string, _ *time.Time) (*platform.Milestone, error) {
+	return nil, nil
+}
+func (m *mockCheckCIMilestoneService) Get(_ context.Context, _ int) (*platform.Milestone, error) {
+	return m.milestone, nil
+}
+func (m *mockCheckCIMilestoneService) List(_ context.Context) ([]*platform.Milestone, error) {
+	return nil, nil
+}
+func (m *mockCheckCIMilestoneService) Update(_ context.Context, _ int, _ platform.MilestoneUpdate) (*platform.Milestone, error) {
+	return nil, nil
+}
+
+type mockCheckCIRepoService struct {
+	defaultBranch string
+}
+
+func (m *mockCheckCIRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) {
+	return nil, nil
+}
+func (m *mockCheckCIRepoService) GetDefaultBranch(_ context.Context) (string, error) {
+	return m.defaultBranch, nil
+}
+func (m *mockCheckCIRepoService) CreateBranch(_ context.Context, _, _ string) error {
+	return nil
+}
+func (m *mockCheckCIRepoService) DeleteBranch(_ context.Context, _ string) error { return nil }
+func (m *mockCheckCIRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
+type mockCheckCIStatusService struct {
+	status string
+	called bool
+}
+
+func (m *mockCheckCIStatusService) GetCombinedStatus(_ context.Context, _ string) (string, error) {
+	m.called = true
+	return m.status, nil
+}
+func (m *mockCheckCIStatusService) RerunFailedChecks(_ context.Context, _ string) error {
+	return nil
+}
 
 func TestIntegratorCmd_SubcommandStructure(t *testing.T) {
 	cmd := newIntegratorCmd()
@@ -335,7 +764,7 @@ func (m *mockFailurePlatform) Labels() platform.LabelService             { retur
 func (m *mockFailurePlatform) Milestones() platform.MilestoneService     { return m.milestones }
 func (m *mockFailurePlatform) Runners() platform.RunnerService           { return nil }
 func (m *mockFailurePlatform) Repository() platform.RepositoryService    { return nil }
-func (m *mockFailurePlatform) Checks() platform.CheckService            { return nil }
+func (m *mockFailurePlatform) Checks() platform.CheckService             { return nil }
 
 type mockFailureMilestoneService struct {
 	getResult *platform.Milestone
@@ -535,44 +964,44 @@ func TestBatchPRNumber(t *testing.T) {
 
 func TestPostIntegratorFailure(t *testing.T) {
 	tests := []struct {
-		name      string
-		number    int
-		step      string
-		err       error
-		wantBody  string
-		wantNum   int
+		name     string
+		number   int
+		step     string
+		err      error
+		wantBody string
+		wantNum  int
 	}{
 		{
-			name:   "consolidation failure",
-			number: 42,
-			step:   "consolidation",
-			err:    fmt.Errorf("merge conflict"),
+			name:     "consolidation failure",
+			number:   42,
+			step:     "consolidation",
+			err:      fmt.Errorf("merge conflict"),
 			wantBody: "⚠️ **Integrator failed** during consolidation: merge conflict\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
-			wantNum: 42,
+			wantNum:  42,
 		},
 		{
-			name:   "CI check failure",
-			number: 10,
-			step:   "CI check",
-			err:    fmt.Errorf("timeout"),
+			name:     "CI check failure",
+			number:   10,
+			step:     "CI check",
+			err:      fmt.Errorf("timeout"),
 			wantBody: "⚠️ **Integrator failed** during CI check: timeout\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
-			wantNum: 10,
+			wantNum:  10,
 		},
 		{
-			name:   "tier advancement failure",
-			number: 7,
-			step:   "tier advancement",
-			err:    fmt.Errorf("branch not found"),
+			name:     "tier advancement failure",
+			number:   7,
+			step:     "tier advancement",
+			err:      fmt.Errorf("branch not found"),
 			wantBody: "⚠️ **Integrator failed** during tier advancement: branch not found\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
-			wantNum: 7,
+			wantNum:  7,
 		},
 		{
-			name:   "review failure",
-			number: 55,
-			step:   "review",
-			err:    fmt.Errorf("agent error"),
+			name:     "review failure",
+			number:   55,
+			step:     "review",
+			err:      fmt.Errorf("agent error"),
 			wantBody: "⚠️ **Integrator failed** during review: agent error\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
-			wantNum: 55,
+			wantNum:  55,
 		},
 	}
 

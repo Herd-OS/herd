@@ -26,6 +26,8 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, 0, cfg.Integrator.ReviewMaxFixCycles)
 	assert.Equal(t, "standard", cfg.Integrator.ReviewStrictness)
 	assert.Equal(t, 0, cfg.Integrator.CIMaxFixCycles)
+	assert.Empty(t, cfg.Integrator.CIWorkflows)
+	assert.Nil(t, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, 15, cfg.Monitor.PatrolIntervalMinutes)
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
 	assert.Equal(t, false, cfg.PullRequests.AutoMerge)
@@ -52,6 +54,9 @@ integrator:
   review: true
   review_max_fix_cycles: 2
   ci_max_fix_cycles: 1
+  ci_workflows:
+    - "CI - ServiceKit Ruby"
+    - "CI — Accounts"
 monitor:
   patrol_interval_minutes: 10
   stale_threshold_minutes: 120
@@ -76,6 +81,7 @@ pull_requests:
 	assert.Equal(t, "rebase", cfg.Integrator.Strategy)
 	assert.Equal(t, "dispatch-resolver", cfg.Integrator.OnConflict)
 	assert.Equal(t, false, cfg.Integrator.RequireCI)
+	assert.Equal(t, []string{"CI - ServiceKit Ruby", "CI — Accounts"}, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, 10, cfg.Monitor.PatrolIntervalMinutes)
 	assert.Equal(t, false, cfg.Monitor.AutoRedispatch)
 	assert.Equal(t, []string{"alice", "bob"}, cfg.Monitor.NotifyUsers)
@@ -201,6 +207,7 @@ platform:
 	assert.Equal(t, 3, cfg.Workers.MaxConcurrent)
 	assert.Equal(t, "herd-worker", cfg.Workers.RunnerLabel)
 	assert.Equal(t, "squash", cfg.Integrator.Strategy)
+	assert.Nil(t, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
 }
 
@@ -470,6 +477,10 @@ func TestSave(t *testing.T) {
 	cfg.Platform.Repo = "test-repo"
 
 	require.NoError(t, Save(dir, cfg))
+
+	data, err := os.ReadFile(filepath.Join(dir, ConfigFile))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "ci_workflows")
 
 	loaded, err := Load(dir)
 	require.NoError(t, err)
