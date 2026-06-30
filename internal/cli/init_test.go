@@ -154,7 +154,7 @@ func TestWorkflowFiles(t *testing.T) {
 }
 
 func TestIntegratorWorkflowUsesStartsWithForCommentFilter(t *testing.T) {
-	content, err := workflowFS.ReadFile("workflows/herd-integrator.yml")
+	content, err := workflowFS.ReadFile("workflows/herd-integrator.yml.tmpl")
 	require.NoError(t, err)
 
 	body := string(content)

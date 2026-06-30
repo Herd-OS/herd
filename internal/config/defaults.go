@@ -30,6 +30,7 @@ func Default() *Config {
 			ReviewStrictness:              "standard",
 			ReviewFixSeverity:             "low",
 			CIMaxFixCycles:                0,
+			CIWorkflows:                   nil,
 		},
 		Monitor: Monitor{
 			PatrolIntervalMinutes: 15,

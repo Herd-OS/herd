@@ -1,0 +1,260 @@
+name: HerdOS Integrator
+on:
+  workflow_run:{{if .Integrator.CIWorkflows}}
+    workflows:
+      - "HerdOS Worker"
+{{range .Integrator.CIWorkflows}}      - {{yamlQuote .}}
+{{end}}    types: [completed]
+{{else}}
+    workflows: ["HerdOS Worker"]
+    types: [completed]
+{{end}}  check_run:
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [closed]
+  issues:
+    types: [closed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+  statuses: read
+  checks: read
+
+jobs:
+  integrate:{{if .Integrator.CIWorkflows}}
+    if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped' && github.event.workflow_run.name == 'HerdOS Worker'
+{{else}}
+    if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped'
+{{end}}    concurrency:
+      group: herd-integrate-${{`{{`}} github.event.workflow_run.head_branch || github.ref {{`}}`}}
+      cancel-in-progress: false
+    runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+
+      - name: Consolidate, advance, and review
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
+          ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
+          OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
+          GEMINI_API_KEY: ${{`{{`}} secrets.GEMINI_API_KEY {{`}}`}}
+          RUN_ID: ${{`{{`}} github.event.workflow_run.id {{`}}`}}
+        run: |
+          herd integrator consolidate --run-id "$RUN_ID"
+          herd integrator advance --run-id "$RUN_ID"
+          herd integrator review --run-id "$RUN_ID"
+          herd integrator check-ci --run-id "$RUN_ID"
+
+{{if .Integrator.CIWorkflows}}
+  check-ci-workflow-completion:
+    if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped' && startsWith(github.event.workflow_run.head_branch, 'herd/batch/') && github.event.workflow_run.name != 'HerdOS Worker'
+    concurrency:
+      group: herd-check-ci-${{`{{`}} github.event.workflow_run.head_branch || github.ref {{`}}`}}
+      cancel-in-progress: true
+    runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{`{{`}} github.event.workflow_run.head_branch {{`}}`}}
+          fetch-depth: 0
+          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+
+      - name: Check CI and dispatch fix workers
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
+          ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
+          OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
+          GEMINI_API_KEY: ${{`{{`}} secrets.GEMINI_API_KEY {{`}}`}}
+          RUN_ID: ${{`{{`}} github.event.workflow_run.id {{`}}`}}
+        run: |
+          herd integrator check-ci --ci-run-id "$RUN_ID"
+
+{{end}}  check-ci-on-completion:
+    if: >
+      vars.HERD_ENABLED == 'true'
+      && github.event_name == 'check_run'
+      && startsWith(github.event.check_run.check_suite.head_branch, 'herd/batch/')
+    concurrency:
+      group: herd-check-ci-${{`{{`}} github.event.check_run.check_suite.head_branch || github.ref {{`}}`}}
+      cancel-in-progress: true
+    runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{`{{`}} github.event.check_run.check_suite.head_branch {{`}}`}}
+          fetch-depth: 0
+          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+
+      - name: Check CI and dispatch fix workers
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
+          ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
+          OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
+          GEMINI_API_KEY: ${{`{{`}} secrets.GEMINI_API_KEY {{`}}`}}
+          HEAD_BRANCH: ${{`{{`}} github.event.check_run.check_suite.head_branch {{`}}`}}
+        run: |
+          BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+')
+          if [ -n "$BATCH" ]; then
+            herd integrator check-ci --batch "$BATCH"
+          fi
+
+  advance-on-close:
+    if: vars.HERD_ENABLED == 'true' && github.event_name == 'issues'
+    concurrency:
+      group: herd-advance-${{`{{`}} github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number {{`}}`}}
+      cancel-in-progress: false
+    runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+
+      - name: Check if herd issue and advance
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
+          ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
+          OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
+          GEMINI_API_KEY: ${{`{{`}} secrets.GEMINI_API_KEY {{`}}`}}
+          ISSUE_BODY: ${{`{{`}} github.event.issue.body {{`}}`}}
+        run: |
+          BATCH=$(echo "$ISSUE_BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1)
+          if [ -n "$BATCH" ]; then
+            herd integrator advance --batch "$BATCH"
+            herd integrator review --batch "$BATCH"
+            herd integrator check-ci --batch "$BATCH"
+          else
+            echo "Not a herd issue — skipping."
+          fi
+
+  re-review:
+    if: >
+      vars.HERD_ENABLED == 'true'
+      && github.event_name == 'pull_request_review'
+      && startsWith(github.event.pull_request.title, '[herd]')
+    concurrency:
+      group: herd-re-review-${{`{{`}} github.event.pull_request.number {{`}}`}}
+      cancel-in-progress: false
+    runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{`{{`}} github.event.pull_request.head.ref {{`}}`}}
+          fetch-depth: 0
+          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+
+      - name: Handle review
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
+          ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
+          OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
+          GEMINI_API_KEY: ${{`{{`}} secrets.GEMINI_API_KEY {{`}}`}}
+          REVIEW_STATE: ${{`{{`}} github.event.review.state {{`}}`}}
+          PR_NUMBER: ${{`{{`}} github.event.pull_request.number {{`}}`}}
+        run: |
+          if [ "$REVIEW_STATE" = "approved" ]; then
+            herd integrator merge --pr "$PR_NUMBER"
+          else
+            herd integrator review --pr "$PR_NUMBER"
+          fi
+
+  cleanup:
+    if: >
+      vars.HERD_ENABLED == 'true'
+      && github.event_name == 'pull_request'
+      && github.event.action == 'closed'
+      && startsWith(github.event.pull_request.title, '[herd]')
+    concurrency:
+      group: herd-cleanup-${{`{{`}} github.event.pull_request.number {{`}}`}}
+      cancel-in-progress: false
+    runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+
+      - name: Post-close cleanup
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
+          PR_NUMBER: ${{`{{`}} github.event.pull_request.number {{`}}`}}
+          PR_MERGED: ${{`{{`}} github.event.pull_request.merged {{`}}`}}
+        run: |
+          MERGED_FLAG=""
+          if [ "$PR_MERGED" = "true" ]; then
+            MERGED_FLAG="--merged"
+          fi
+          herd integrator cleanup --pr "$PR_NUMBER" $MERGED_FLAG
+
+  handle-comment:
+    if: >
+      vars.HERD_ENABLED == 'true'
+      && github.event_name == 'issue_comment'
+      && github.event.action == 'created'
+      && startsWith(github.event.comment.body, '/herd ')
+    concurrency:
+      group: herd-comment-${{`{{`}} github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number {{`}}`}}
+      cancel-in-progress: false
+    runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+
+      - name: Handle comment command
+        env:
+          HERD_RUNNER: "true"
+          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
+          ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
+          OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
+          GEMINI_API_KEY: ${{`{{`}} secrets.GEMINI_API_KEY {{`}}`}}
+          COMMENT_BODY: ${{`{{`}} github.event.comment.body {{`}}`}}
+          COMMENT_ID: ${{`{{`}} github.event.comment.id {{`}}`}}
+          ISSUE_NUMBER: ${{`{{`}} github.event.issue.number {{`}}`}}
+          ISSUE_BODY: ${{`{{`}} github.event.issue.body {{`}}`}}
+          AUTHOR_LOGIN: ${{`{{`}} github.event.comment.user.login {{`}}`}}
+          AUTHOR_ASSOCIATION: ${{`{{`}} github.event.comment.author_association {{`}}`}}
+          IS_PR: ${{`{{`}} github.event.issue.pull_request && 'true' || 'false' {{`}}`}}
+        run: |
+          herd integrator handle-comment \
+            --comment-id "$COMMENT_ID" \
+            --issue-number "$ISSUE_NUMBER" \
+            --author-login "$AUTHOR_LOGIN" \
+            --author-association "$AUTHOR_ASSOCIATION" \
+            --is-pr "$IS_PR"

@@ -95,6 +95,42 @@ func TestWorkersExtraEnv_NilSlice(t *testing.T) {
 		"nil ExtraEnv must render the same as empty ExtraEnv")
 }
 
+func TestIntegratorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	onDisk, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "herd-integrator.yml"))
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(rendered, onDisk),
+		"rendered integrator template with default config must match committed workflow.\nrendered:\n%s\non-disk:\n%s", rendered, onDisk)
+	assert.NotContains(t, string(rendered), "check-ci-workflow-completion")
+}
+
+func TestIntegratorWorkflow_RendersConfiguredCIWorkflows(t *testing.T) {
+	cfg := config.Default()
+	cfg.Integrator.CIWorkflows = []string{"CI - ServiceKit Ruby", "CI — Accounts"}
+	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+	s := string(rendered)
+
+	workflowRunStart := strings.Index(s, "  workflow_run:\n")
+	require.NotEqual(t, -1, workflowRunStart)
+	workflowRunEnd := strings.Index(s[workflowRunStart:], "    types: [completed]")
+	require.NotEqual(t, -1, workflowRunEnd)
+	workflowRunBlock := s[workflowRunStart : workflowRunStart+workflowRunEnd]
+
+	assert.Equal(t, 1, strings.Count(workflowRunBlock, `"HerdOS Worker"`))
+	assert.Contains(t, workflowRunBlock, `      - "CI - ServiceKit Ruby"`)
+	assert.Contains(t, workflowRunBlock, `      - "CI — Accounts"`)
+	assert.Contains(t, s, "check-ci-workflow-completion:")
+	assert.Contains(t, s, "github.event.workflow_run.name == 'HerdOS Worker'")
+	assert.Contains(t, s, "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
+}
+
 func TestRenderWorkflow_StaticPassThrough(t *testing.T) {
 	cfg := config.Default()
 	for _, wf := range workflowFiles() {
@@ -194,7 +230,8 @@ func TestWorkflowFiles_ContainsExpectedNames(t *testing.T) {
 	require.True(t, ok)
 	assert.False(t, monitor.Template)
 
-	integrator, ok := bySrc["herd-integrator.yml"]
+	integrator, ok := bySrc["herd-integrator.yml.tmpl"]
 	require.True(t, ok)
-	assert.False(t, integrator.Template)
+	assert.True(t, integrator.Template, "integrator workflow must be marked as template")
+	assert.Equal(t, "herd-integrator.yml", integrator.DestName)
 }

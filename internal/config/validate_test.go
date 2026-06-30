@@ -46,6 +46,41 @@ func TestValidate_AgentExecImageFreeForm(t *testing.T) {
 	assert.Nil(t, Validate(cfg))
 }
 
+func TestValidate_IntegratorCIWorkflows(t *testing.T) {
+	tests := []struct {
+		name      string
+		workflows []string
+		wantError bool
+		errSubstr string
+	}{
+		{"missing is valid", nil, false, ""},
+		{"empty list is valid", []string{}, false, ""},
+		{"one valid workflow is valid", []string{"CI"}, false, ""},
+		{"multiple valid workflows are valid", []string{"CI - ServiceKit Ruby", "CI — Accounts"}, false, ""},
+		{"blank entry is invalid", []string{""}, true, "integrator.ci_workflows[0] must not be blank"},
+		{"whitespace-only entry is invalid", []string{" \t\n"}, true, "integrator.ci_workflows[0] must not be blank"},
+		{"duplicate entry is invalid", []string{"CI", "CI"}, true, "integrator.ci_workflows[1] duplicates workflow name \"CI\""},
+		{"ascii hyphen and unicode dash are distinct", []string{"CI - Accounts", "CI — Accounts"}, false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			cfg.Integrator.CIWorkflows = tt.workflows
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
 func TestValidate_AgentProvider(t *testing.T) {
 	tests := []struct {
 		name      string
