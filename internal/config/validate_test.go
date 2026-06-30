@@ -83,19 +83,21 @@ func TestValidate_IntegratorCIWorkflows(t *testing.T) {
 
 func TestValidate_ImagePublishRunsOn(t *testing.T) {
 	tests := []struct {
-		name      string
-		runsOn    []string
-		wantError bool
-		errSubstr string
+		name       string
+		runsOn     []string
+		useDefault bool
+		wantError  bool
+		errSubstr  string
 	}{
-		{"default valid", nil, false, ""},
-		{"empty list invalid", []string{}, true, "image_publish.runs_on must contain at least one runner label"},
-		{"one empty string invalid", []string{""}, true, "image_publish.runs_on[0] must be a non-empty label"},
-		{"one whitespace-only string invalid", []string{" \t\n"}, true, "image_publish.runs_on[0] must be a non-empty label"},
-		{"duplicate labels invalid", []string{"self-hosted", "self-hosted"}, true, `image_publish.runs_on[1] duplicates image_publish.runs_on[0] ("self-hosted")`},
-		{"explicit ubuntu latest valid", []string{"ubuntu-latest"}, false, ""},
-		{"explicit self-hosted multi-label valid", []string{"self-hosted", "herd-publisher"}, false, ""},
-		{"explicit quoted labels valid", []string{"self-hosted", "linux x64", "gpu:large"}, false, ""},
+		{"default valid", nil, true, false, ""},
+		{"nil list invalid", nil, false, true, "image_publish.runs_on must contain at least one runner label"},
+		{"empty list invalid", []string{}, false, true, "image_publish.runs_on must contain at least one runner label"},
+		{"one empty string invalid", []string{""}, false, true, "image_publish.runs_on[0] must be a non-empty label"},
+		{"one whitespace-only string invalid", []string{" \t\n"}, false, true, "image_publish.runs_on[0] must be a non-empty label"},
+		{"duplicate labels invalid", []string{"self-hosted", "self-hosted"}, false, true, `image_publish.runs_on[1] duplicates image_publish.runs_on[0] ("self-hosted")`},
+		{"explicit ubuntu latest valid", []string{"ubuntu-latest"}, false, false, ""},
+		{"explicit self-hosted multi-label valid", []string{"self-hosted", "herd-publisher"}, false, false, ""},
+		{"explicit quoted labels valid", []string{"self-hosted", "linux x64", "gpu:large"}, false, false, ""},
 	}
 
 	for _, tt := range tests {
@@ -103,7 +105,7 @@ func TestValidate_ImagePublishRunsOn(t *testing.T) {
 			cfg := Default()
 			cfg.Platform.Owner = "org"
 			cfg.Platform.Repo = "repo"
-			if tt.runsOn != nil {
+			if !tt.useDefault {
 				cfg.ImagePublish.RunsOn = tt.runsOn
 			}
 
