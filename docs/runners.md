@@ -396,7 +396,7 @@ herd image publish    # docker push ghcr.io/<owner>/<repo>-herd-runner:<tag>
 
 The owner and repo are detected from your git remote and lower-cased; the tag defaults to the herd version (`latest` for dev builds) and can be overridden with `--tag`.
 
-This is also automated. `herd init` installs `.github/workflows/herd-publish-runner.yml`, which builds and pushes the multi-arch consumer image (`ghcr.io/<owner>/<repo>-herd-runner:latest`) on two triggers:
+This is also automated. `herd init` installs `.github/workflows/herd-publish-runner.yml`, which builds and pushes the consumer image (`ghcr.io/<owner>/<repo>-herd-runner:latest`) on two triggers. By default it publishes a multi-arch image for `linux/amd64` and `linux/arm64`; narrow `image_publish.platforms` when your fleet only needs one architecture.
 
 - **`push` to `main` that touches `Dockerfile.herd_runner`** — automatic. This is the path that picks up a new base-image version after merging an `Update HerdOS to <tag>` PR (which bumps the wrapper's `FROM ghcr.io/herd-os/herd-runner-base:<version>` line). Without it, workers would continue running with stale baked-in agent CLIs and project-specific tools until someone manually triggered a rebuild.
 - **`workflow_dispatch`** — manual escape hatch. `gh workflow run herd-publish-runner.yml --ref main` from your shell, or the **Run workflow** button in the Actions tab. Useful for re-publishing after editing the wrapper without going through a PR.
@@ -417,15 +417,14 @@ Switch this to a self-hosted publisher when private-repo Actions minutes are exp
 Self-hosted publisher prerequisites:
 
 - Docker daemon access for the runner user.
-- `docker buildx` available to the runner user.
-- QEMU emulation registered once per host if you keep the default multi-arch build (`--platform linux/amd64,linux/arm64`):
+- GHCR write credentials through the workflow's `secrets.GITHUB_TOKEN`; the generated workflow uses that token for `docker login ghcr.io`.
+- A distinct runner label that does not collide with `workers.runner_label` (default `herd-worker`).
+- For multi-platform publishing, `docker buildx` available to the runner user. The default `linux/amd64` + `linux/arm64` configuration is multi-platform and uses `docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.herd_runner -t ${IMAGE}:latest --push .`.
+- For multi-platform publishing, QEMU emulation registered once per host:
 
   ```bash
   docker run --rm --privileged tonistiigi/binfmt --install all
   ```
-
-- GHCR write credentials through the workflow's `secrets.GITHUB_TOKEN`; the generated workflow uses that token for `docker login ghcr.io`.
-- A distinct runner label that does not collide with `workers.runner_label` (default `herd-worker`).
 
 Do not co-locate publish builds on a `herd-worker`-labeled runner. Image builds can consume the host for several minutes, which blocks worker dispatch while the publisher job is running.
 
@@ -438,7 +437,16 @@ image_publish:
 
 The publish workflow runs only on `workflow_dispatch` or pushes to `Dockerfile.herd_runner` on `main`, so the publisher host can be sized for bursty image builds. It still must be available when Herd upgrade PRs merge, because those PRs update the runner image pin and trigger a rebuild after merge.
 
-If you only need one architecture, you can edit the workflow's `--platform` flag and drop the architecture you do not need. That is a managed-file edit, so accept the resulting drift from Herd's generated workflow.
+For x86-only worker fleets, set a single platform to avoid Buildx and QEMU requirements on self-hosted publisher runners:
+
+```yaml
+image_publish:
+  runs_on: ["self-hosted", "herd-publisher"]
+  platforms:
+    - linux/amd64
+```
+
+Single-platform publishing uses `docker build --platform <platform> -f Dockerfile.herd_runner -t ${IMAGE}:latest .` followed by `docker push ${IMAGE}:latest`. It creates a single-architecture `:latest` image tag, not a multi-arch manifest. Arm64-only fleets can use `linux/arm64` the same way.
 
 ### Migrating from the local base image
 

@@ -68,6 +68,21 @@ func Validate(cfg *Config) *ValidationError {
 		}
 		seen[label] = i
 	}
+	if len(cfg.ImagePublish.Platforms) == 0 {
+		ve.Errors = append(ve.Errors, "image_publish.platforms must contain at least one platform")
+	}
+	seenPlatforms := map[string]int{}
+	for i, platform := range cfg.ImagePublish.Platforms {
+		switch platform {
+		case "linux/amd64", "linux/arm64":
+		default:
+			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.platforms[%d] must be one of: linux/amd64, linux/arm64 — got %q", i, platform))
+		}
+		if first, ok := seenPlatforms[platform]; ok {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.platforms[%d] duplicates image_publish.platforms[%d] (%q)", i, first, platform))
+		}
+		seenPlatforms[platform] = i
+	}
 
 	// Integrator
 	switch cfg.Integrator.Strategy {
