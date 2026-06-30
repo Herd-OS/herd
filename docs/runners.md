@@ -403,6 +403,43 @@ This is also automated. `herd init` installs `.github/workflows/herd-publish-run
 
 The job is gated on the `HERD_ENABLED` variable being `true` and requires `packages: write` permission (the default `GITHUB_TOKEN` is used to authenticate to GHCR).
 
+### Publishing on a self-hosted runner
+
+By default, the publish workflow runs on GitHub-hosted runners:
+
+```yaml
+image_publish:
+  runs_on: ["ubuntu-latest"]
+```
+
+Switch this to a self-hosted publisher when private-repo Actions minutes are expensive, the build needs access to an internal or air-gapped registry, or compliance policy disallows GitHub-hosted runners.
+
+Self-hosted publisher prerequisites:
+
+- Docker daemon access for the runner user.
+- `docker buildx` available to the runner user.
+- QEMU emulation registered once per host if you keep the default multi-arch build (`--platform linux/amd64,linux/arm64`):
+
+  ```bash
+  docker run --rm --privileged tonistiigi/binfmt --install all
+  ```
+
+- GHCR write credentials through the workflow's `secrets.GITHUB_TOKEN`; the generated workflow uses that token for `docker login ghcr.io`.
+- A distinct runner label that does not collide with `workers.runner_label` (default `herd-worker`).
+
+Do not co-locate publish builds on a `herd-worker`-labeled runner. Image builds can consume the host for several minutes, which blocks worker dispatch while the publisher job is running.
+
+```yaml
+image_publish:
+  runs_on: ["self-hosted", "herd-publisher"]
+```
+
+`herd-publisher` is only a suggested convention. You can choose any label registered on the host, and multi-label selectors such as `["self-hosted", "linux", "x64", "my-publisher"]` are allowed.
+
+The publish workflow runs only on `workflow_dispatch` or pushes to `Dockerfile.herd_runner` on `main`, so the publisher host can be sized for bursty image builds. It still must be available when Herd upgrade PRs merge, because those PRs update the runner image pin and trigger a rebuild after merge.
+
+If you only need one architecture, you can edit the workflow's `--platform` flag and drop the architecture you do not need. That is a managed-file edit, so accept the resulting drift from Herd's generated workflow.
+
 ### Migrating from the local base image
 
 Older versions of `herd init` generated a local two-layer build: a herd-managed `Dockerfile.herd_runner_base` plus a `Dockerfile.herd_runner` that did `FROM herd-runner-base`, with a separate base service in `docker-compose.herd.yml`. The base image is now published to GHCR, so:
