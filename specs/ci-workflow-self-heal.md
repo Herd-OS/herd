@@ -414,6 +414,11 @@ Likely files:
 - any existing integrator/CI automation docs
 - `CHANGELOG.md`
 
+After the implementation and documentation tasks have converted this
+planning spec into durable docs, delete `specs/ci-workflow-self-heal.md`
+from the repository. The `specs/` file is planning input, not product
+documentation, and should not remain after the batch lands.
+
 ## Acceptance Criteria
 
 - A repository can configure CI workflow names in `.herdos.yml`.
@@ -444,6 +449,10 @@ This is likely a 4-tier batch:
 2. `--ci-run-id` command path and `CheckCI` trigger-context semantics.
 3. CI diagnostics, failure classification, and richer fix issue bodies.
 4. Documentation and changelog updates.
+
+The final documentation task must also delete
+`specs/ci-workflow-self-heal.md` after the relevant behavior is covered
+in `docs/` and `CHANGELOG.md`.
 
 Keep tasks small enough that each worker can validate its own package
 tests plus the final full Go validation suite.
