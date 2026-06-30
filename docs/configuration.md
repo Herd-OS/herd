@@ -40,6 +40,7 @@ integrator:
   max_conflict_resolution_attempts: 2  # when exhausted, batch enters cascade-failed state
                                        # (see design/execution.md#when-cascades-fail)
   require_ci: true
+  ci_workflows: []              # explicit GitHub Actions CI workflow names for workflow_run self-heal
   review: true                   # agent reviews batch PRs before merge
   review_max_fix_cycles: 0       # max fix-and-re-review cycles (0 = unlimited)
   review_strictness: "standard"  # standard | strict | lenient
@@ -233,7 +234,13 @@ When you see that comment, run `/herd review` (optionally with a focus area) on 
 
 ## CI Fix Loop
 
-`integrator.require_ci` enables CI failure detection on the batch branch, and `integrator.ci_max_fix_cycles` caps how many CI-failure fix cycles the Integrator will dispatch (0 = unlimited).
+`integrator.require_ci` enables CI failure detection on the batch branch. `integrator.ci_max_fix_cycles` caps how many CI-failure fix cycles the Integrator will dispatch (0 = unlimited).
+
+`integrator.ci_workflows` defaults to an empty list. When non-empty, `herd init` renders `workflow_run` triggers for those exact GitHub Actions workflow names, and failed completed runs on `herd/batch/` branches can self-heal without waiting for the Monitor. The strings are matched exactly and preserved as configured, including punctuation and Unicode dashes.
+
+GitHub Actions CI uses `workflow_run` because `check_run` events are unreliable for some Actions-created check suites. The existing `check_run` path remains as a fallback for third-party check providers. The scheduled Monitor also remains a fallback for batch PR CI failures, and `/herd fix-ci` remains a manual override that can force a CI fix cycle.
+
+CI fix issues include the workflow/run URL, failed job URLs, head branch, head SHA, annotations when available, and either a short log excerpt or a logs-unavailable note. Obvious runner/log infrastructure failures are classified separately: Herd comments on the batch PR and does not dispatch code-fix workers for those by default.
 
 CheckCI pauses dispatching a new CI fix worker if any fix-type worker — review fix, CI fix, or conflict resolution — is still in progress in the same batch milestone. The next `workflow_run` trigger (when that worker completes) re-runs CheckCI, which then proceeds with dispatch if CI is still failing. This prevents the Integrator from creating overlapping fix workers that would race on the same batch branch.
 

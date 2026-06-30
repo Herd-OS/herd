@@ -560,5 +560,5 @@ See [configuration.md](configuration.md) for the full field reference.
 | 403 on listing PRs | Missing permission | Ensure `pull-requests: write` is in workflow permissions |
 | Dispatch succeeds but no run appears | Missing secret | Add `HERD_GITHUB_TOKEN` as org/repo secret (see section 1) |
 | Token permission errors | Insufficient scope | Fine-grained: needs Administration read/write. Classic: needs `repo` scope |
-| Integrator crashes checking CI | Missing Statuses permission | Add **Statuses: Read** to fine-grained PAT, or set `require_ci: false` in `.herdos.yml` |
+| Integrator crashes checking CI | Missing CI read permission | Add **Actions: Read**, **Checks: Read**, and **Statuses: Read** to the fine-grained PAT, or set `require_ci: false` in `.herdos.yml`. CI diagnostics are best-effort and depend on the permissions GitHub grants to the workflow/token. |
 | Auth errors in worker | Missing credentials | Verify `.env` has the right key for the configured provider — Claude: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenCode: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` matching `agent.model`; Codex: `OPENAI_API_KEY` or `CODEX_API_KEY` |

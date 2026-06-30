@@ -26,6 +26,9 @@ integrator:
   on_conflict: dispatch-resolver
   max_conflict_resolution_attempts: 3    # More attempts — CI-heavy repos have more merge friction
   require_ci: true                       # CI must pass before merge
+  ci_workflows:                          # Exact GitHub Actions workflow names for workflow_run self-heal
+    - CI
+    - Integration Tests
   review: true                           # Agent review enabled
   review_max_fix_cycles: 3              # Let the agent iterate on review feedback
   ci_max_fix_cycles: 3                   # More CI fix attempts — flaky tests and build issues
