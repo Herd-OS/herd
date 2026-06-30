@@ -124,7 +124,7 @@ func (s *workflowService) ListRuns(ctx context.Context, filters platform.RunFilt
 			return nil, fmt.Errorf("listing workflow runs by file: %w", err)
 		}
 		for _, r := range runs.WorkflowRuns {
-			result = append(result, s.mapRunWithWorkflowIdentity(ctx, r))
+			result = append(result, s.mapListRun(ctx, r, filters.ResolveWorkflowIdentity))
 		}
 	} else if filters.WorkflowID != 0 {
 		runs, _, err := s.c.gh.Actions.ListWorkflowRunsByID(ctx, s.c.owner, s.c.repo, filters.WorkflowID, opts)
@@ -132,7 +132,7 @@ func (s *workflowService) ListRuns(ctx context.Context, filters platform.RunFilt
 			return nil, fmt.Errorf("listing workflow runs: %w", err)
 		}
 		for _, r := range runs.WorkflowRuns {
-			result = append(result, s.mapRunWithWorkflowIdentity(ctx, r))
+			result = append(result, s.mapListRun(ctx, r, filters.ResolveWorkflowIdentity))
 		}
 	} else {
 		runs, _, err := s.c.gh.Actions.ListRepositoryWorkflowRuns(ctx, s.c.owner, s.c.repo, opts)
@@ -140,7 +140,7 @@ func (s *workflowService) ListRuns(ctx context.Context, filters platform.RunFilt
 			return nil, fmt.Errorf("listing workflow runs: %w", err)
 		}
 		for _, r := range runs.WorkflowRuns {
-			result = append(result, s.mapRunWithWorkflowIdentity(ctx, r))
+			result = append(result, s.mapListRun(ctx, r, filters.ResolveWorkflowIdentity))
 		}
 	}
 
@@ -159,6 +159,13 @@ func (s *workflowService) CancelRun(ctx context.Context, runID int64) error {
 		return fmt.Errorf("cancelling run %d: %w", runID, err)
 	}
 	return nil
+}
+
+func (s *workflowService) mapListRun(ctx context.Context, r *gh.WorkflowRun, resolveWorkflowIdentity bool) *platform.Run {
+	if resolveWorkflowIdentity {
+		return s.mapRunWithWorkflowIdentity(ctx, r)
+	}
+	return mapRun(r)
 }
 
 func (s *workflowService) mapRunWithWorkflowIdentity(ctx context.Context, r *gh.WorkflowRun) *platform.Run {

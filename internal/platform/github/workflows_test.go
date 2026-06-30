@@ -50,6 +50,7 @@ func TestWorkflowServiceDispatch(t *testing.T) {
 
 func TestWorkflowServiceGetRun(t *testing.T) {
 	ts := gh.Timestamp{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	workflowMetadataCalls := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99", func(w http.ResponseWriter, r *http.Request) {
 		resp := gh.WorkflowRun{
@@ -67,6 +68,7 @@ func TestWorkflowServiceGetRun(t *testing.T) {
 		json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("GET /repos/test-org/test-repo/actions/workflows/321", func(w http.ResponseWriter, r *http.Request) {
+		workflowMetadataCalls++
 		resp := gh.Workflow{
 			ID:   gh.Ptr(int64(321)),
 			Name: gh.Ptr("CI"),
@@ -88,6 +90,7 @@ func TestWorkflowServiceGetRun(t *testing.T) {
 	assert.Equal(t, "completed", run.Status)
 	assert.Equal(t, "success", run.Conclusion)
 	assert.Equal(t, time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC), run.CreatedAt)
+	assert.Equal(t, 1, workflowMetadataCalls)
 }
 
 func TestWorkflowServiceGetRunDiagnostics(t *testing.T) {
@@ -234,24 +237,96 @@ func TestWorkflowServiceGetRunDiagnostics_MissingRun(t *testing.T) {
 }
 
 func TestWorkflowServiceListRuns(t *testing.T) {
+	workflowMetadataCalls := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs", func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "in_progress", r.URL.Query().Get("status"))
 		resp := gh.WorkflowRuns{
-			TotalCount: gh.Ptr(1),
+			TotalCount: gh.Ptr(2),
 			WorkflowRuns: []*gh.WorkflowRun{
-				{ID: gh.Ptr(int64(100)), Status: gh.Ptr("in_progress")},
+				{
+					ID:         gh.Ptr(int64(100)),
+					WorkflowID: gh.Ptr(int64(321)),
+					Name:       gh.Ptr("Display title from run-name"),
+					Path:       gh.Ptr(".github/workflows/old-ci.yml"),
+					Status:     gh.Ptr("in_progress"),
+				},
+				{
+					ID:         gh.Ptr(int64(101)),
+					WorkflowID: gh.Ptr(int64(322)),
+					Name:       gh.Ptr("Another display title"),
+					Path:       gh.Ptr(".github/workflows/another.yml"),
+					Status:     gh.Ptr("in_progress"),
+				},
 			},
 		}
 		json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/workflows/321", func(w http.ResponseWriter, r *http.Request) {
+		workflowMetadataCalls++
+		json.NewEncoder(w).Encode(gh.Workflow{
+			ID:   gh.Ptr(int64(321)),
+			Name: gh.Ptr("CI"),
+			Path: gh.Ptr(".github/workflows/ci.yml"),
+		})
+	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/workflows/322", func(w http.ResponseWriter, r *http.Request) {
+		workflowMetadataCalls++
+		json.NewEncoder(w).Encode(gh.Workflow{
+			ID:   gh.Ptr(int64(322)),
+			Name: gh.Ptr("Lint"),
+			Path: gh.Ptr(".github/workflows/lint.yml"),
+		})
 	})
 
 	client, _ := newTestClient(t, mux)
 	runs, err := client.Workflows().ListRuns(context.Background(), platform.RunFilters{Status: "in_progress"})
 
 	require.NoError(t, err)
-	assert.Len(t, runs, 1)
+	require.Len(t, runs, 2)
 	assert.Equal(t, int64(100), runs[0].ID)
+	assert.Equal(t, "Display title from run-name", runs[0].WorkflowName)
+	assert.Equal(t, ".github/workflows/old-ci.yml", runs[0].WorkflowPath)
+	assert.Equal(t, 0, workflowMetadataCalls)
+}
+
+func TestWorkflowServiceListRuns_ResolveWorkflowIdentity(t *testing.T) {
+	workflowMetadataCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs", func(w http.ResponseWriter, r *http.Request) {
+		resp := gh.WorkflowRuns{
+			TotalCount: gh.Ptr(1),
+			WorkflowRuns: []*gh.WorkflowRun{
+				{
+					ID:         gh.Ptr(int64(100)),
+					WorkflowID: gh.Ptr(int64(321)),
+					Name:       gh.Ptr("Display title from run-name"),
+					Path:       gh.Ptr(".github/workflows/old-ci.yml"),
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/workflows/321", func(w http.ResponseWriter, r *http.Request) {
+		workflowMetadataCalls++
+		resp := gh.Workflow{
+			ID:   gh.Ptr(int64(321)),
+			Name: gh.Ptr("CI"),
+			Path: gh.Ptr(".github/workflows/ci.yml"),
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	client, _ := newTestClient(t, mux)
+	runs, err := client.Workflows().ListRuns(context.Background(), platform.RunFilters{
+		ResolveWorkflowIdentity: true,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, "CI", runs[0].WorkflowName)
+	assert.Equal(t, ".github/workflows/ci.yml", runs[0].WorkflowPath)
+	assert.Equal(t, 1, workflowMetadataCalls)
 }
 
 func TestWorkflowServiceListRuns_ByWorkflowFileName(t *testing.T) {
