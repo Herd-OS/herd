@@ -45,7 +45,8 @@ func Default() *Config {
 			AutoMerge: false,
 		},
 		ImagePublish: ImagePublish{
-			RunsOn: []string{"ubuntu-latest"},
+			RunsOn:    []string{"ubuntu-latest"},
+			Platforms: []string{"linux/amd64", "linux/arm64"},
 		},
 	}
 }

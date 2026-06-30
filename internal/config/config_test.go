@@ -32,6 +32,7 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
 	assert.Equal(t, false, cfg.PullRequests.AutoMerge)
 	assert.Equal(t, []string{"ubuntu-latest"}, cfg.ImagePublish.RunsOn)
+	assert.Equal(t, []string{"linux/amd64", "linux/arm64"}, cfg.ImagePublish.Platforms)
 }
 
 func TestLoad(t *testing.T) {
@@ -70,6 +71,8 @@ pull_requests:
   auto_merge: true
 image_publish:
   runs_on: ["self-hosted", "linux x64", "gpu:large"]
+  platforms:
+    - linux/amd64
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
 
@@ -90,6 +93,7 @@ image_publish:
 	assert.Equal(t, []string{"alice", "bob"}, cfg.Monitor.NotifyUsers)
 	assert.Equal(t, true, cfg.PullRequests.AutoMerge)
 	assert.Equal(t, []string{"self-hosted", "linux x64", "gpu:large"}, cfg.ImagePublish.RunsOn)
+	assert.Equal(t, []string{"linux/amd64"}, cfg.ImagePublish.Platforms)
 }
 
 func TestLoadAgentExecFields(t *testing.T) {

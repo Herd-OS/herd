@@ -120,6 +120,46 @@ func TestValidate_ImagePublishRunsOn(t *testing.T) {
 	}
 }
 
+func TestValidate_ImagePublishPlatforms(t *testing.T) {
+	tests := []struct {
+		name       string
+		platforms  []string
+		useDefault bool
+		wantError  bool
+		errSubstr  string
+	}{
+		{"default valid", nil, true, false, ""},
+		{"nil list invalid", nil, false, true, "image_publish.platforms must contain at least one platform"},
+		{"empty list invalid", []string{}, false, true, "image_publish.platforms must contain at least one platform"},
+		{"linux amd64 valid", []string{"linux/amd64"}, false, false, ""},
+		{"linux arm64 valid", []string{"linux/arm64"}, false, false, ""},
+		{"both supported platforms valid", []string{"linux/amd64", "linux/arm64"}, false, false, ""},
+		{"unsupported platform invalid", []string{"linux/s390x"}, false, true, `image_publish.platforms[0] must be one of: linux/amd64, linux/arm64 — got "linux/s390x"`},
+		{"empty string invalid", []string{""}, false, true, `image_publish.platforms[0] must be one of: linux/amd64, linux/arm64 — got ""`},
+		{"whitespace-only string invalid", []string{" \t\n"}, false, true, "image_publish.platforms[0] must be one of: linux/amd64, linux/arm64"},
+		{"duplicate linux amd64 invalid", []string{"linux/amd64", "linux/amd64"}, false, true, `image_publish.platforms[1] duplicates image_publish.platforms[0] ("linux/amd64")`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			if !tt.useDefault {
+				cfg.ImagePublish.Platforms = tt.platforms
+			}
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
 func TestValidate_AgentProvider(t *testing.T) {
 	tests := []struct {
 		name      string

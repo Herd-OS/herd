@@ -27,6 +27,10 @@ func TestGetConfigValue(t *testing.T) {
 	val, err = getConfigValue(cfg, "image_publish.runs_on")
 	require.NoError(t, err)
 	assert.Equal(t, "[ubuntu-latest]", val)
+
+	val, err = getConfigValue(cfg, "image_publish.platforms")
+	require.NoError(t, err)
+	assert.Equal(t, "[linux/amd64, linux/arm64]", val)
 }
 
 func TestGetConfigValueImagePublishRunsOn(t *testing.T) {
@@ -36,6 +40,15 @@ func TestGetConfigValueImagePublishRunsOn(t *testing.T) {
 	val, err := getConfigValue(cfg, "image_publish.runs_on")
 	require.NoError(t, err)
 	assert.Equal(t, "[self-hosted, herd-publisher]", val)
+}
+
+func TestGetConfigValueImagePublishPlatforms(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImagePublish.Platforms = []string{"linux/amd64"}
+
+	val, err := getConfigValue(cfg, "image_publish.platforms")
+	require.NoError(t, err)
+	assert.Equal(t, "[linux/amd64]", val)
 }
 
 func TestGetConfigValueUnknownKey(t *testing.T) {
@@ -130,6 +143,10 @@ func TestSetConfigValueSliceField(t *testing.T) {
 		{
 			name: "image publish runs on",
 			key:  "image_publish.runs_on",
+		},
+		{
+			name: "image publish platforms",
+			key:  "image_publish.platforms",
 		},
 	}
 
@@ -288,6 +305,7 @@ func TestFlattenConfig(t *testing.T) {
 	assert.True(t, len(kvs) > 20, "should have many keys, got %d", len(kvs))
 	got := keyValueMap(kvs)
 	assert.Equal(t, "[ubuntu-latest]", got["image_publish.runs_on"])
+	assert.Equal(t, "[linux/amd64, linux/arm64]", got["image_publish.platforms"])
 
 	// Verify all keys are dotted
 	for _, kv := range kvs {

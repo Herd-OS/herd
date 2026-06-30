@@ -130,6 +130,88 @@ func TestPublishRunnerWorkflow_RunsOn(t *testing.T) {
 	}
 }
 
+func TestPublishRunnerWorkflow_Platforms(t *testing.T) {
+	tests := []struct {
+		name      string
+		platforms []string
+		want      []string
+		notWant   []string
+	}{
+		{
+			name: "default multi-platform buildx workflow",
+			want: []string{
+				"docker/setup-qemu-action@v3",
+				"docker/setup-buildx-action@v3",
+				"docker buildx build",
+				"--platform linux/amd64,linux/arm64",
+				"--push .",
+			},
+			notWant: []string{
+				"docker push ${IMAGE}:latest",
+			},
+		},
+		{
+			name:      "single linux amd64 plain docker workflow",
+			platforms: []string{"linux/amd64"},
+			want: []string{
+				"docker build --platform linux/amd64 -f Dockerfile.herd_runner -t ${IMAGE}:latest .",
+				"docker push ${IMAGE}:latest",
+			},
+			notWant: []string{
+				"docker/setup-qemu-action@v3",
+				"docker/setup-buildx-action@v3",
+				"docker buildx build",
+				"--push .",
+			},
+		},
+		{
+			name:      "single linux arm64 plain docker workflow",
+			platforms: []string{"linux/arm64"},
+			want: []string{
+				"docker build --platform linux/arm64 -f Dockerfile.herd_runner -t ${IMAGE}:latest .",
+				"docker push ${IMAGE}:latest",
+			},
+			notWant: []string{
+				"docker/setup-qemu-action@v3",
+				"docker/setup-buildx-action@v3",
+				"docker buildx build",
+				"--push .",
+			},
+		},
+		{
+			name:      "multi-platform preserves configured order",
+			platforms: []string{"linux/arm64", "linux/amd64"},
+			want: []string{
+				"docker/setup-qemu-action@v3",
+				"docker/setup-buildx-action@v3",
+				"docker buildx build",
+				"--platform linux/arm64,linux/amd64",
+				"--push .",
+			},
+			notWant: []string{
+				"docker push ${IMAGE}:latest",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			if tt.platforms != nil {
+				cfg.ImagePublish.Platforms = tt.platforms
+			}
+
+			rendered := string(renderPublishRunnerWorkflow(t, cfg))
+			for _, want := range tt.want {
+				assert.Contains(t, rendered, want, "rendered workflow should contain %q", want)
+			}
+			for _, notWant := range tt.notWant {
+				assert.NotContains(t, rendered, notWant, "rendered workflow should not contain %q", notWant)
+			}
+		})
+	}
+}
+
 func TestYAMLScalar(t *testing.T) {
 	tests := []struct {
 		name  string

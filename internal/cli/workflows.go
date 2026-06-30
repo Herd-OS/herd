@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/herd-os/herd/internal/config"
@@ -52,8 +53,9 @@ func RenderWorkflow(wf workflowFile, cfg *config.Config) ([]byte, error) {
 		return raw, nil
 	}
 	tmpl, err := template.New(wf.SrcName).Funcs(template.FuncMap{
-		"yamlQuote":  strconv.Quote,
-		"yamlScalar": yamlScalar,
+		"joinPlatforms": joinPlatforms,
+		"yamlQuote":     strconv.Quote,
+		"yamlScalar":    yamlScalar,
 	}).Parse(string(raw))
 	if err != nil {
 		return nil, fmt.Errorf("parsing workflow template %s: %w", wf.SrcName, err)
@@ -70,4 +72,8 @@ func yamlScalar(value string) string {
 		return value
 	}
 	return strconv.Quote(value)
+}
+
+func joinPlatforms(platforms []string) string {
+	return strings.Join(platforms, ",")
 }

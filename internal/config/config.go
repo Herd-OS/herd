@@ -161,7 +161,8 @@ type PullRequests struct {
 }
 
 type ImagePublish struct {
-	RunsOn []string `yaml:"runs_on"`
+	RunsOn    []string `yaml:"runs_on"`
+	Platforms []string `yaml:"platforms"`
 }
 
 // Load reads and parses .herdos.yml from the given directory.
