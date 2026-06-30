@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/herd-os/herd/internal/config"
@@ -13,14 +17,7 @@ func TestPublishRunnerWorkflow_Rendered(t *testing.T) {
 	cfg.Platform.Owner = "acme"
 	cfg.Platform.Repo = "widgets"
 
-	wf := workflowFile{
-		SrcName:  "herd-publish-runner.yml.tmpl",
-		DestName: "herd-publish-runner.yml",
-		Template: true,
-	}
-
-	out, err := RenderWorkflow(wf, cfg)
-	require.NoError(t, err)
+	out := renderPublishRunnerWorkflow(t, cfg)
 	rendered := string(out)
 
 	wants := []string{
@@ -63,4 +60,65 @@ func TestPublishRunnerWorkflow_Rendered(t *testing.T) {
 	assert.Contains(t, rendered, "push:", "push trigger must be present for consumer auto-rebuild on Dockerfile.herd_runner changes")
 	assert.Contains(t, rendered, "'Dockerfile.herd_runner'", "push paths must scope to Dockerfile.herd_runner so unrelated pushes don't trigger image rebuilds")
 	assert.Contains(t, rendered, "branches: [ main ]", "push trigger must be scoped to main so feature-branch pushes don't fire it")
+}
+
+func TestPublishRunnerWorkflow_RunsOn(t *testing.T) {
+	t.Run("default single label matches committed workflow", func(t *testing.T) {
+		cfg := config.Default()
+		rendered := renderPublishRunnerWorkflow(t, cfg)
+
+		assert.Contains(t, string(rendered), "runs-on: ubuntu-latest")
+		assert.NotContains(t, string(rendered), "runs-on: [")
+
+		onDisk, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "herd-publish-runner.yml"))
+		require.NoError(t, err)
+		assert.True(t, bytes.Equal(rendered, onDisk),
+			"rendered publish runner workflow with default config must match committed workflow.\nrendered:\n%s\non-disk:\n%s", rendered, onDisk)
+	})
+
+	tests := []struct {
+		name   string
+		runsOn []string
+		want   string
+	}{
+		{
+			name:   "multi label flow list",
+			runsOn: []string{"self-hosted", "herd-publisher"},
+			want:   `runs-on: ["self-hosted", "herd-publisher"]`,
+		},
+		{
+			name:   "quoted labels",
+			runsOn: []string{"self-hosted", "linux x64", "gpu:large"},
+			want:   `runs-on: ["self-hosted", "linux x64", "gpu:large"]`,
+		},
+		{
+			name:   "escaping guard",
+			runsOn: []string{"self-hosted", `label"quote`, `path\\runner`},
+			want:   `runs-on: ["self-hosted", ` + strconv.Quote(`label"quote`) + `, ` + strconv.Quote(`path\\runner`) + `]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.ImagePublish.RunsOn = tt.runsOn
+
+			rendered := renderPublishRunnerWorkflow(t, cfg)
+			assert.Contains(t, string(rendered), tt.want)
+		})
+	}
+}
+
+func renderPublishRunnerWorkflow(t *testing.T, cfg *config.Config) []byte {
+	t.Helper()
+
+	wf := workflowFile{
+		SrcName:  "herd-publish-runner.yml.tmpl",
+		DestName: "herd-publish-runner.yml",
+		Template: true,
+	}
+
+	out, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+	return out
 }
