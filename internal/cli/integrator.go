@@ -483,17 +483,8 @@ func newIntegratorCheckCICmd() *cobra.Command {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator check-ci is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
-			if runID == 0 && ciRunID == 0 && batchNum == 0 {
-				return fmt.Errorf("one of --run-id, --ci-run-id, or --batch is required")
-			}
-			setFlags := 0
-			for _, v := range []int64{runID, ciRunID, int64(batchNum)} {
-				if v != 0 {
-					setFlags++
-				}
-			}
-			if setFlags > 1 {
-				return fmt.Errorf("--run-id, --ci-run-id, and --batch are mutually exclusive")
+			if err := validateCheckCIFlags(runID, batchNum, ciRunID); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -516,33 +507,21 @@ func newIntegratorCheckCICmd() *cobra.Command {
 				}
 			}
 
-			var ciRun *integrator.CIFailureContext
-			if ciRunID != 0 {
-				diag, err := client.Workflows().GetRunDiagnostics(cmd.Context(), ciRunID)
-				if err != nil {
-					return fmt.Errorf("getting CI run diagnostics: %w", err)
-				}
-				ciRun = &integrator.CIFailureContext{
-					RunID:       diag.RunID,
-					Workflow:    diag.Workflow,
-					HeadBranch:  diag.HeadBranch,
-					HeadSHA:     diag.HeadSHA,
-					Conclusion:  diag.Conclusion,
-					URL:         diag.URL,
-					Diagnostics: diag,
-				}
-			}
-
 			cwd, err := os.Getwd()
 			if err != nil {
 				return fmt.Errorf("getting current directory: %w", err)
 			}
-			result, err := integrator.CheckCI(cmd.Context(), client, cfg, integrator.CheckCIParams{
-				RunID:       runID,
-				CIRun:       ciRun,
-				BatchNumber: batchNum,
-				RepoRoot:    cwd,
-			})
+			var result *integrator.CheckCIResult
+			var ciRun *platform.Run
+			if ciRunID != 0 {
+				result, ciRun, err = checkCIForCompletedWorkflowRun(cmd.Context(), client, cfg, ciRunID, cwd)
+			} else {
+				result, err = integrator.CheckCI(cmd.Context(), client, cfg, integrator.CheckCIParams{
+					RunID:       runID,
+					BatchNumber: batchNum,
+					RepoRoot:    cwd,
+				})
+			}
 			if err != nil {
 				if runID != 0 {
 					if issNum, lookupErr := issueNumberFromRun(cmd.Context(), client, runID); lookupErr == nil {
@@ -550,6 +529,10 @@ func newIntegratorCheckCICmd() *cobra.Command {
 					}
 				} else if batchNum > 0 {
 					if prNum, lookupErr := batchPRNumber(cmd.Context(), client, batchNum); lookupErr == nil {
+						postIntegratorFailure(cmd.Context(), client.Issues(), prNum, "CI check", err)
+					}
+				} else if ciRun != nil {
+					if prNum, lookupErr := batchPRNumberFromBranch(cmd.Context(), client, ciRun.HeadBranch); lookupErr == nil {
 						postIntegratorFailure(cmd.Context(), client.Issues(), prNum, "CI check", err)
 					}
 				}
@@ -570,9 +553,74 @@ func newIntegratorCheckCICmd() *cobra.Command {
 	}
 
 	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID")
-	cmd.Flags().Int64Var(&ciRunID, "ci-run-id", 0, "Configured CI workflow run ID")
+	cmd.Flags().Int64Var(&ciRunID, "ci-run-id", 0, "Completed CI workflow run ID")
 	cmd.Flags().IntVar(&batchNum, "batch", 0, "Batch/milestone number")
 	return cmd
+}
+
+func validateCheckCIFlags(runID int64, batchNum int, ciRunID int64) error {
+	setFlags := 0
+	if runID != 0 {
+		setFlags++
+	}
+	if batchNum != 0 {
+		setFlags++
+	}
+	if ciRunID != 0 {
+		setFlags++
+	}
+	if setFlags == 0 {
+		return fmt.Errorf("one of --run-id, --batch, or --ci-run-id is required; --run-id, --batch, and --ci-run-id are mutually exclusive")
+	}
+	if setFlags > 1 {
+		return fmt.Errorf("--run-id, --batch, and --ci-run-id are mutually exclusive")
+	}
+	return nil
+}
+
+func checkCIForCompletedWorkflowRun(ctx context.Context, client platform.Platform, cfg *config.Config, ciRunID int64, repoRoot string) (*integrator.CheckCIResult, *platform.Run, error) {
+	run, err := client.Workflows().GetRun(ctx, ciRunID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting CI workflow run %d: %w", ciRunID, err)
+	}
+	if !strings.HasPrefix(run.HeadBranch, "herd/batch/") {
+		fmt.Printf("Skipping CI workflow run %d: head branch %q is not a herd batch branch.\n", run.ID, run.HeadBranch)
+		return &integrator.CheckCIResult{Skipped: true}, run, nil
+	}
+	if !isCheckCIWorkflowConfigured(run.WorkflowName, cfg.Integrator.CIWorkflows) {
+		fmt.Printf("Skipping CI workflow run %d: workflow %q is not configured for CI self-heal.\n", run.ID, run.WorkflowName)
+		return &integrator.CheckCIResult{Skipped: true}, run, nil
+	}
+
+	ciRun := &integrator.CIFailureContext{
+		RunID:      run.ID,
+		Workflow:   run.WorkflowName,
+		HeadBranch: run.HeadBranch,
+		HeadSHA:    run.HeadSHA,
+		Conclusion: run.Conclusion,
+		URL:        run.URL,
+	}
+	diag, err := client.Workflows().GetRunDiagnostics(ctx, ciRunID)
+	if err != nil {
+		fmt.Printf("Warning: failed to collect diagnostics for CI workflow run %d: %v\n", ciRunID, err)
+	} else {
+		ciRun.Diagnostics = diag
+	}
+
+	result, err := integrator.CheckCI(ctx, client, cfg, integrator.CheckCIParams{
+		CIRun:    ciRun,
+		RepoRoot: repoRoot,
+	})
+	return result, run, err
+}
+
+func isCheckCIWorkflowConfigured(name string, configured []string) bool {
+	for _, workflow := range configured {
+		if name == workflow {
+			return true
+		}
+	}
+	return false
 }
 
 // postCommentWithLog posts a comment to an issue and logs a warning to stderr
@@ -618,4 +666,38 @@ func batchPRNumber(ctx context.Context, client platform.Platform, batchNum int) 
 		return 0, fmt.Errorf("no open batch PR found")
 	}
 	return prs[0].Number, nil
+}
+
+func batchPRNumberFromBranch(ctx context.Context, client platform.Platform, branch string) (int, error) {
+	batchNum, ok := parseCheckCIBatchNumberFromBranch(branch)
+	if !ok {
+		return 0, fmt.Errorf("branch %q is not a herd batch branch", branch)
+	}
+	return batchPRNumber(ctx, client, batchNum)
+}
+
+func parseCheckCIBatchNumberFromBranch(branch string) (int, bool) {
+	const prefix = "herd/batch/"
+	if !strings.HasPrefix(branch, prefix) {
+		return 0, false
+	}
+	rest := strings.TrimPrefix(branch, prefix)
+	if rest == "" {
+		return 0, false
+	}
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	if end < len(rest) && rest[end] != '-' {
+		return 0, false
+	}
+	number, err := strconv.Atoi(rest[:end])
+	if err != nil || number <= 0 {
+		return 0, false
+	}
+	return number, true
 }
