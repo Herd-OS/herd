@@ -103,6 +103,9 @@ func (m *mockIntegratorWorkflowService) ListRuns(_ context.Context, _ platform.R
 	return nil, nil
 }
 func (m *mockIntegratorWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
+func (m *mockIntegratorWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 type mockIntegratorPlatform struct {
 	*mockDispatchPlatform
@@ -335,7 +338,7 @@ func (m *mockFailurePlatform) Labels() platform.LabelService             { retur
 func (m *mockFailurePlatform) Milestones() platform.MilestoneService     { return m.milestones }
 func (m *mockFailurePlatform) Runners() platform.RunnerService           { return nil }
 func (m *mockFailurePlatform) Repository() platform.RepositoryService    { return nil }
-func (m *mockFailurePlatform) Checks() platform.CheckService            { return nil }
+func (m *mockFailurePlatform) Checks() platform.CheckService             { return nil }
 
 type mockFailureMilestoneService struct {
 	getResult *platform.Milestone
@@ -535,44 +538,44 @@ func TestBatchPRNumber(t *testing.T) {
 
 func TestPostIntegratorFailure(t *testing.T) {
 	tests := []struct {
-		name      string
-		number    int
-		step      string
-		err       error
-		wantBody  string
-		wantNum   int
+		name     string
+		number   int
+		step     string
+		err      error
+		wantBody string
+		wantNum  int
 	}{
 		{
-			name:   "consolidation failure",
-			number: 42,
-			step:   "consolidation",
-			err:    fmt.Errorf("merge conflict"),
+			name:     "consolidation failure",
+			number:   42,
+			step:     "consolidation",
+			err:      fmt.Errorf("merge conflict"),
 			wantBody: "⚠️ **Integrator failed** during consolidation: merge conflict\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
-			wantNum: 42,
+			wantNum:  42,
 		},
 		{
-			name:   "CI check failure",
-			number: 10,
-			step:   "CI check",
-			err:    fmt.Errorf("timeout"),
+			name:     "CI check failure",
+			number:   10,
+			step:     "CI check",
+			err:      fmt.Errorf("timeout"),
 			wantBody: "⚠️ **Integrator failed** during CI check: timeout\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
-			wantNum: 10,
+			wantNum:  10,
 		},
 		{
-			name:   "tier advancement failure",
-			number: 7,
-			step:   "tier advancement",
-			err:    fmt.Errorf("branch not found"),
+			name:     "tier advancement failure",
+			number:   7,
+			step:     "tier advancement",
+			err:      fmt.Errorf("branch not found"),
 			wantBody: "⚠️ **Integrator failed** during tier advancement: branch not found\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
-			wantNum: 7,
+			wantNum:  7,
 		},
 		{
-			name:   "review failure",
-			number: 55,
-			step:   "review",
-			err:    fmt.Errorf("agent error"),
+			name:     "review failure",
+			number:   55,
+			step:     "review",
+			err:      fmt.Errorf("agent error"),
 			wantBody: "⚠️ **Integrator failed** during review: agent error\n\nYou can retry with `/herd integrate` on this issue or the batch PR.",
-			wantNum: 55,
+			wantNum:  55,
 		},
 	}
 

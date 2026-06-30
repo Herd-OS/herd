@@ -31,14 +31,14 @@ type statefulPlatform struct {
 	milestones *statefulMilestoneService
 }
 
-func (p *statefulPlatform) Issues() platform.IssueService            { return p.issues }
+func (p *statefulPlatform) Issues() platform.IssueService             { return p.issues }
 func (p *statefulPlatform) PullRequests() platform.PullRequestService { return p.prs }
-func (p *statefulPlatform) Workflows() platform.WorkflowService      { return p.workflows }
+func (p *statefulPlatform) Workflows() platform.WorkflowService       { return p.workflows }
 func (p *statefulPlatform) Labels() platform.LabelService             { return nil }
 func (p *statefulPlatform) Milestones() platform.MilestoneService     { return p.milestones }
 func (p *statefulPlatform) Runners() platform.RunnerService           { return nil }
 func (p *statefulPlatform) Repository() platform.RepositoryService    { return p.repo }
-func (p *statefulPlatform) Checks() platform.CheckService            { return nil }
+func (p *statefulPlatform) Checks() platform.CheckService             { return nil }
 
 // --- Stateful Issue Service ---
 
@@ -293,6 +293,9 @@ func (s *statefulWorkflowService) CancelRun(_ context.Context, id int64) error {
 	s.cancelled = append(s.cancelled, id)
 	return nil
 }
+func (s *statefulWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 func (s *statefulWorkflowService) addRun(issueNumber int, conclusion string) int64 {
 	id := s.nextRunID
@@ -314,9 +317,9 @@ func (s *statefulWorkflowService) addRun(issueNumber int, conclusion string) int
 // --- Stateful Repo Service ---
 
 type statefulRepoService struct {
-	defaultBranch  string
-	branches       map[string]string // name → SHA
-	deletedBranch  string
+	defaultBranch string
+	branches      map[string]string // name → SHA
+	deletedBranch string
 }
 
 func newStatefulRepoService() *statefulRepoService {

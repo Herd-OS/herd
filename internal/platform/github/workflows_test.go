@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +54,9 @@ func TestWorkflowServiceGetRun(t *testing.T) {
 	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99", func(w http.ResponseWriter, r *http.Request) {
 		resp := gh.WorkflowRun{
 			ID:         gh.Ptr(int64(99)),
+			Name:       gh.Ptr("CI"),
+			HeadBranch: gh.Ptr("herd/worker/99"),
+			HeadSHA:    gh.Ptr("abc123"),
 			Status:     gh.Ptr("completed"),
 			Conclusion: gh.Ptr("success"),
 			HTMLURL:    gh.Ptr("https://github.com/test-org/test-repo/actions/runs/99"),
@@ -66,9 +70,155 @@ func TestWorkflowServiceGetRun(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, int64(99), run.ID)
+	assert.Equal(t, "CI", run.WorkflowName)
+	assert.Equal(t, "herd/worker/99", run.HeadBranch)
+	assert.Equal(t, "abc123", run.HeadSHA)
 	assert.Equal(t, "completed", run.Status)
 	assert.Equal(t, "success", run.Conclusion)
 	assert.Equal(t, time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC), run.CreatedAt)
+}
+
+func TestWorkflowServiceGetRunDiagnostics(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99", func(w http.ResponseWriter, r *http.Request) {
+		resp := gh.WorkflowRun{
+			ID:         gh.Ptr(int64(99)),
+			Name:       gh.Ptr("CI"),
+			HeadBranch: gh.Ptr("herd/worker/99"),
+			HeadSHA:    gh.Ptr("abc123"),
+			Conclusion: gh.Ptr("failure"),
+			HTMLURL:    gh.Ptr("https://github.com/test-org/test-repo/actions/runs/99"),
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99/jobs", func(w http.ResponseWriter, r *http.Request) {
+		resp := gh.Jobs{
+			TotalCount: gh.Ptr(2),
+			Jobs: []*gh.WorkflowJob{
+				{
+					ID:          gh.Ptr(int64(501)),
+					Name:        gh.Ptr("test"),
+					Status:      gh.Ptr("completed"),
+					Conclusion:  gh.Ptr("failure"),
+					HTMLURL:     gh.Ptr("https://github.com/test-org/test-repo/actions/runs/99/job/501"),
+					CheckRunURL: gh.Ptr("https://api.github.com/repos/test-org/test-repo/check-runs/9001"),
+				},
+				{
+					ID:         gh.Ptr(int64(502)),
+					Name:       gh.Ptr("lint"),
+					Status:     gh.Ptr("completed"),
+					Conclusion: gh.Ptr("success"),
+					HTMLURL:    gh.Ptr("https://github.com/test-org/test-repo/actions/runs/99/job/502"),
+				},
+			},
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/check-runs/9001/annotations", func(w http.ResponseWriter, r *http.Request) {
+		resp := []*gh.CheckRunAnnotation{{Message: gh.Ptr("expected 2, got 1")}}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/jobs/501/logs", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://"+r.Host+"/logs/job-501", http.StatusFound)
+	})
+	mux.HandleFunc("GET /logs/job-501", func(w http.ResponseWriter, r *http.Request) {
+		_, err := w.Write([]byte("line 1\nline 2\nfailure details"))
+		require.NoError(t, err)
+	})
+
+	client, _ := newTestClient(t, mux)
+	diagnostics, err := client.Workflows().GetRunDiagnostics(context.Background(), 99)
+
+	require.NoError(t, err)
+	require.NotNil(t, diagnostics)
+	assert.Equal(t, int64(99), diagnostics.RunID)
+	assert.Equal(t, "CI", diagnostics.Workflow)
+	assert.Equal(t, "https://github.com/test-org/test-repo/actions/runs/99", diagnostics.URL)
+	assert.Equal(t, "failure", diagnostics.Conclusion)
+	assert.Equal(t, "herd/worker/99", diagnostics.HeadBranch)
+	assert.Equal(t, "abc123", diagnostics.HeadSHA)
+	assert.Equal(t, []platform.WorkflowJobDiagnostic{
+		{
+			ID:         501,
+			Name:       "test",
+			URL:        "https://github.com/test-org/test-repo/actions/runs/99/job/501",
+			Conclusion: "failure",
+			Status:     "completed",
+		},
+		{
+			ID:         502,
+			Name:       "lint",
+			URL:        "https://github.com/test-org/test-repo/actions/runs/99/job/502",
+			Conclusion: "success",
+			Status:     "completed",
+		},
+	}, diagnostics.Jobs)
+	assert.Equal(t, []string{"test: expected 2, got 1"}, diagnostics.Annotations)
+	assert.Equal(t, "available", diagnostics.LogStatus)
+	assert.Equal(t, "line 1\nline 2\nfailure details", diagnostics.LogExcerpt)
+}
+
+func TestWorkflowServiceGetRunDiagnostics_LogUnavailableReturnsDiagnostics(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99", func(w http.ResponseWriter, r *http.Request) {
+		resp := gh.WorkflowRun{
+			ID:         gh.Ptr(int64(99)),
+			Name:       gh.Ptr("CI"),
+			Conclusion: gh.Ptr("failure"),
+			HTMLURL:    gh.Ptr("https://github.com/test-org/test-repo/actions/runs/99"),
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99/jobs", func(w http.ResponseWriter, r *http.Request) {
+		resp := gh.Jobs{
+			TotalCount: gh.Ptr(1),
+			Jobs: []*gh.WorkflowJob{
+				{
+					ID:         gh.Ptr(int64(501)),
+					Name:       gh.Ptr("test"),
+					Status:     gh.Ptr("completed"),
+					Conclusion: gh.Ptr("failure"),
+					HTMLURL:    gh.Ptr("https://github.com/test-org/test-repo/actions/runs/99/job/501"),
+				},
+			},
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(resp))
+	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/jobs/501/logs", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gone", http.StatusGone)
+	})
+
+	client, _ := newTestClient(t, mux)
+	diagnostics, err := client.Workflows().GetRunDiagnostics(context.Background(), 99)
+
+	require.NoError(t, err)
+	require.NotNil(t, diagnostics)
+	assert.Equal(t, "CI", diagnostics.Workflow)
+	assert.Equal(t, []platform.WorkflowJobDiagnostic{
+		{
+			ID:         501,
+			Name:       "test",
+			URL:        "https://github.com/test-org/test-repo/actions/runs/99/job/501",
+			Conclusion: "failure",
+			Status:     "completed",
+		},
+	}, diagnostics.Jobs)
+	assert.Equal(t, "unavailable", diagnostics.LogStatus)
+	assert.True(t, strings.Contains(diagnostics.LogExcerpt, "workflow logs unavailable:"))
+}
+
+func TestWorkflowServiceGetRunDiagnostics_MissingRun(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/404", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+
+	client, _ := newTestClient(t, mux)
+	diagnostics, err := client.Workflows().GetRunDiagnostics(context.Background(), 404)
+
+	require.Error(t, err)
+	assert.Nil(t, diagnostics)
+	assert.Contains(t, err.Error(), "getting run diagnostics for run 404")
 }
 
 func TestWorkflowServiceListRuns(t *testing.T) {
@@ -138,9 +288,9 @@ func TestWorkflowServiceGetRun_ParsesRunName(t *testing.T) {
 
 func TestParseRunNameInputs(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		input string
-		want map[string]string
+		want  map[string]string
 	}{
 		{"valid", "Herd Worker #42", map[string]string{"issue_number": "42"}},
 		{"large number", "Herd Worker #12345", map[string]string{"issue_number": "12345"}},

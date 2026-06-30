@@ -28,12 +28,12 @@ type mockPlatform struct {
 }
 
 func (m *mockPlatform) Issues() platform.IssueService             { return m.issues }
-func (m *mockPlatform) PullRequests() platform.PullRequestService  { return m.prs }
-func (m *mockPlatform) Workflows() platform.WorkflowService        { return m.workflows }
-func (m *mockPlatform) Labels() platform.LabelService              { return nil }
-func (m *mockPlatform) Milestones() platform.MilestoneService      { return m.milestones }
-func (m *mockPlatform) Runners() platform.RunnerService            { return nil }
-func (m *mockPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockPlatform) PullRequests() platform.PullRequestService { return m.prs }
+func (m *mockPlatform) Workflows() platform.WorkflowService       { return m.workflows }
+func (m *mockPlatform) Labels() platform.LabelService             { return nil }
+func (m *mockPlatform) Milestones() platform.MilestoneService     { return m.milestones }
+func (m *mockPlatform) Runners() platform.RunnerService           { return nil }
+func (m *mockPlatform) Repository() platform.RepositoryService    { return m.repo }
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 type mockIssueService struct {
@@ -202,11 +202,14 @@ func (m *mockWorkflowService) ListRuns(_ context.Context, filters platform.RunFi
 	return m.listResult, nil
 }
 func (m *mockWorkflowService) CancelRun(_ context.Context, _ int64) error { return nil }
+func (m *mockWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*platform.WorkflowRunDiagnostics, error) {
+	return nil, nil
+}
 
 type mockRepoService struct {
-	defaultBranch  string
-	branchExists   map[string]bool
-	deletedBranch  string
+	defaultBranch   string
+	branchExists    map[string]bool
+	deletedBranch   string
 	deletedBranches []string
 }
 
@@ -617,10 +620,10 @@ func TestAdvance_DispatchesReadyIssues(t *testing.T) {
 	}
 
 	mock := &mockPlatform{
-		issues:    issueSvc,
-		prs:       &mockPRService{},
-		workflows: wf,
-		repo:      &mockRepoService{defaultBranch: "main"},
+		issues:     issueSvc,
+		prs:        &mockPRService{},
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -898,7 +901,7 @@ func TestConsolidate_ConflictDispatchResolver(t *testing.T) {
 	_, g := initConflictRepo(t)
 
 	mock := &mockPlatform{
-		issues: mockCreate,
+		issues:    mockCreate,
 		workflows: wf,
 		repo: &mockRepoService{
 			defaultBranch: "main",
@@ -1609,10 +1612,10 @@ func TestAdvance_AllComplete_PRAlreadyExists(t *testing.T) {
 	prSvc.listResult = nil // First List returns empty
 
 	mock := &mockPlatform{
-		issues:    issueSvc,
-		prs:       prSvc,
-		workflows: wf,
-		repo:      &mockRepoService{defaultBranch: "main"},
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main"},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1625,11 +1628,11 @@ func TestAdvance_AllComplete_PRAlreadyExists(t *testing.T) {
 	// - Second call to List (fallback) should return the existing PR
 	// We need a stateful mock for this. Let's use a wrapper.
 	statefulPR := &statefulMockPRService{
-		inner:      prSvc,
-		listCalls:  0,
+		inner:     prSvc,
+		listCalls: 0,
 		listByCall: map[int][]*platform.PullRequest{
-			0: {},                            // first List: no PR found
-			1: {existingPR},                  // second List (fallback): PR found
+			0: {},           // first List: no PR found
+			1: {existingPR}, // second List (fallback): PR found
 		},
 	}
 	mock.prs = statefulPR
@@ -2012,7 +2015,7 @@ func TestCloseStaleConflictIssues(t *testing.T) {
 			Number: 99, Title: "Resolve conflict: #42",
 			State:  "open",
 			Labels: []string{issues.TypeFix},
-			Body: "---\nherd:\n  version: 1\n  batch: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/42-test\n    - herd/batch/1-batch\n---\n\n## Task\nResolve conflict\n",
+			Body:   "---\nherd:\n  version: 1\n  batch: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/42-test\n    - herd/batch/1-batch\n---\n\n## Task\nResolve conflict\n",
 		},
 	}
 
@@ -2047,7 +2050,7 @@ func TestCloseStaleConflictIssues_BranchStillExists(t *testing.T) {
 			Number: 99, Title: "Resolve conflict: #42",
 			State:  "open",
 			Labels: []string{issues.TypeFix},
-			Body: "---\nherd:\n  version: 1\n  batch: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/42-test\n    - herd/batch/1-batch\n---\n\n## Task\nResolve conflict\n",
+			Body:   "---\nherd:\n  version: 1\n  batch: 1\n  conflict_resolution: true\n  conflicting_branches:\n    - herd/worker/42-test\n    - herd/batch/1-batch\n---\n\n## Task\nResolve conflict\n",
 		},
 	}
 
