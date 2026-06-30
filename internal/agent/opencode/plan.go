@@ -37,13 +37,16 @@ func (o *OpenCodeAgent) Plan(ctx context.Context, initialPrompt string, opts age
 
 	args := buildInteractiveArgs(o.Model, combined)
 
+	// Interactive TUIs must stay in Herd's foreground terminal process group.
+	// Do not set ProcessGroup here; headless execute/review paths opt in.
 	if err := process.Run(ctx, process.Command{
-		Path:   o.BinaryPath,
-		Args:   args,
-		Dir:    opts.RepoRoot,
-		Stdin:  os.Stdin,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
+		Path:         o.BinaryPath,
+		Args:         args,
+		Dir:          opts.RepoRoot,
+		Stdin:        os.Stdin,
+		Stdout:       os.Stdout,
+		Stderr:       os.Stderr,
+		ProcessGroup: false,
 	}); err != nil {
 		return nil, fmt.Errorf("opencode exited with error: %w", err)
 	}

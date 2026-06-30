@@ -264,35 +264,19 @@ func TestDiscuss_FoldsSystemAndInitialIntoPrompt(t *testing.T) {
 	}
 }
 
-func TestInteractivePaths_UnixContextCancellationTerminatesDescendants(t *testing.T) {
+func TestReview_UnixContextCancellationTerminatesDescendants(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process group termination is Unix-only")
 	}
 
+	// Interactive plan/discuss sessions intentionally do not opt into process
+	// groups because TUIs must remain in the terminal foreground process group;
+	// internal/agent/process covers that default behavior directly. Headless
+	// review/execute paths retain descendant cleanup.
 	tests := []struct {
 		name string
 		run  func(context.Context, *OpenCodeAgent, string) error
 	}{
-		{
-			name: "plan",
-			run: func(ctx context.Context, o *OpenCodeAgent, repoRoot string) error {
-				_, err := o.Plan(ctx, "plan work", agent.PlanOptions{
-					RepoRoot:   repoRoot,
-					OutputPath: filepath.Join(repoRoot, "plan.json"),
-					Context:    map[string]string{},
-				})
-				return err
-			},
-		},
-		{
-			name: "discuss",
-			run: func(ctx context.Context, o *OpenCodeAgent, repoRoot string) error {
-				return o.Discuss(ctx, agent.DiscussOptions{
-					RepoRoot:     repoRoot,
-					SystemPrompt: "discuss work",
-				})
-			},
-		},
 		{
 			name: "review",
 			run: func(ctx context.Context, o *OpenCodeAgent, repoRoot string) error {

@@ -37,12 +37,13 @@ func (o *OpenCodeAgent) Review(ctx context.Context, diff string, opts agent.Revi
 		// a TTY.
 		var stdout, stderr bytes.Buffer
 		if err := process.Run(ctx, process.Command{
-			Path:   o.BinaryPath,
-			Args:   args,
-			Dir:    opts.RepoRoot,
-			Stdin:  strings.NewReader(message),
-			Stdout: io.MultiWriter(os.Stdout, &stdout),
-			Stderr: io.MultiWriter(os.Stderr, &stderr),
+			Path:         o.BinaryPath,
+			Args:         args,
+			Dir:          opts.RepoRoot,
+			Stdin:        strings.NewReader(message),
+			Stdout:       io.MultiWriter(os.Stdout, &stdout),
+			Stderr:       io.MultiWriter(os.Stderr, &stderr),
+			ProcessGroup: true,
 		}); err != nil {
 			return "", stderr.String(), fmt.Errorf("agent review exited with error: %w\n%s", err, stderr.String())
 		}

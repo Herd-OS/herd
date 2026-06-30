@@ -17,6 +17,12 @@ type Command struct {
 	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
+	// ProcessGroup starts the child in a private process group so context
+	// cancellation can terminate descendants. Use it for headless commands.
+	// Do not use it for interactive TUIs attached to the user's terminal:
+	// moving the child out of the terminal foreground process group can stop
+	// or hang the TUI when it reads from stdin.
+	ProcessGroup bool
 }
 
 func Run(ctx context.Context, spec Command) error {
@@ -30,7 +36,7 @@ func Run(ctx context.Context, spec Command) error {
 	cmd.Stdin = spec.Stdin
 	cmd.Stdout = spec.Stdout
 	cmd.Stderr = spec.Stderr
-	configureCommand(cmd)
+	configureCommand(cmd, spec.ProcessGroup)
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -45,7 +51,7 @@ func Run(ctx context.Context, spec Command) error {
 	case err := <-waitCh:
 		return err
 	case <-ctx.Done():
-		terminateCommand(cmd, waitCh)
+		terminateCommand(cmd, waitCh, spec.ProcessGroup)
 		return ctx.Err()
 	}
 }

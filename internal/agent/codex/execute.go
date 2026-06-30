@@ -47,12 +47,13 @@ func (c *CodexAgent) Execute(ctx context.Context, task agent.TaskSpec, opts agen
 	runOnce := func() (finalMsg, stdout, stderr string, err error) {
 		var outBuf, errBuf bytes.Buffer
 		runErr := agentprocess.Run(ctx, agentprocess.Command{
-			Path:   c.BinaryPath,
-			Args:   args,
-			Dir:    opts.RepoRoot,
-			Env:    childEnv(),
-			Stdout: io.MultiWriter(os.Stdout, &outBuf),
-			Stderr: io.MultiWriter(os.Stderr, &errBuf),
+			Path:         c.BinaryPath,
+			Args:         args,
+			Dir:          opts.RepoRoot,
+			Env:          childEnv(),
+			Stdout:       io.MultiWriter(os.Stdout, &outBuf),
+			Stderr:       io.MultiWriter(os.Stderr, &errBuf),
+			ProcessGroup: true,
 		})
 		if runErr != nil {
 			return "", "", errBuf.String(), fmt.Errorf("agent exited with error: %w\n%s", runErr, errBuf.String())
