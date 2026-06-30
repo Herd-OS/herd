@@ -119,14 +119,17 @@ func (c *CodexAgent) planInteractive(ctx context.Context, systemPrompt string, o
 		"HERD_PLAN_SCHEMA="+schemaFile,
 	)
 	// Interactive mode: wire stdio through to the user's TTY.
+	// Keep the TUI in Herd's foreground terminal process group. Do not set
+	// ProcessGroup here; headless exec/review paths opt in.
 	if err := agentprocess.Run(ctx, agentprocess.Command{
-		Path:   c.BinaryPath,
-		Args:   args,
-		Dir:    opts.RepoRoot,
-		Env:    env,
-		Stdin:  os.Stdin,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
+		Path:         c.BinaryPath,
+		Args:         args,
+		Dir:          opts.RepoRoot,
+		Env:          env,
+		Stdin:        os.Stdin,
+		Stdout:       os.Stdout,
+		Stderr:       os.Stderr,
+		ProcessGroup: false,
 	}); err != nil {
 		return nil, fmt.Errorf("codex exited with error: %w", err)
 	}

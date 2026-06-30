@@ -27,13 +27,16 @@ func (c *ClaudeAgent) Discuss(ctx context.Context, opts agent.DiscussOptions) er
 
 	args := buildDiscussArgs(c, opts, promptFile)
 
+	// Interactive TUIs must stay in Herd's foreground terminal process group.
+	// Do not set ProcessGroup here; headless execute/review paths opt in.
 	if err := process.Run(ctx, process.Command{
-		Path:   c.BinaryPath,
-		Args:   args,
-		Dir:    opts.RepoRoot,
-		Stdin:  os.Stdin,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
+		Path:         c.BinaryPath,
+		Args:         args,
+		Dir:          opts.RepoRoot,
+		Stdin:        os.Stdin,
+		Stdout:       os.Stdout,
+		Stderr:       os.Stderr,
+		ProcessGroup: false,
 	}); err != nil {
 		return fmt.Errorf("claude exited with error: %w", err)
 	}

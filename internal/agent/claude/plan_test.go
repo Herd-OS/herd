@@ -141,6 +141,10 @@ func TestReview_UnixContextCancellationTerminatesDescendants(t *testing.T) {
 		t.Skip("process group termination is Unix-only")
 	}
 
+	// Interactive plan/discuss sessions intentionally do not opt into process
+	// groups because TUIs must remain in the terminal foreground process group;
+	// internal/agent/process covers that default behavior directly. Headless
+	// review/execute paths retain descendant cleanup.
 	tests := []struct {
 		name string
 		run  func(context.Context, *ClaudeAgent, string) error
