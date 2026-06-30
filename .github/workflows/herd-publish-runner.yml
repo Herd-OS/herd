@@ -29,7 +29,7 @@ permissions:
 jobs:
   publish:
     if: vars.HERD_ENABLED == 'true'
-    runs-on: "ubuntu-latest"
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

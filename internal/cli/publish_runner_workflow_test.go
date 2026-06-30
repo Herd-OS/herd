@@ -67,7 +67,8 @@ func TestPublishRunnerWorkflow_RunsOn(t *testing.T) {
 		cfg := config.Default()
 		rendered := renderPublishRunnerWorkflow(t, cfg)
 
-		assert.Contains(t, string(rendered), `runs-on: "ubuntu-latest"`)
+		assert.Contains(t, string(rendered), "runs-on: ubuntu-latest")
+		assert.NotContains(t, string(rendered), `runs-on: "ubuntu-latest"`)
 		assert.NotContains(t, string(rendered), "runs-on: [")
 
 		onDisk, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "herd-publish-runner.yml"))
@@ -125,6 +126,51 @@ func TestPublishRunnerWorkflow_RunsOn(t *testing.T) {
 
 			rendered := renderPublishRunnerWorkflow(t, cfg)
 			assert.Contains(t, string(rendered), tt.want)
+		})
+	}
+}
+
+func TestYAMLScalar(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{
+			name:  "default github runner label stays plain",
+			value: "ubuntu-latest",
+			want:  "ubuntu-latest",
+		},
+		{
+			name:  "underscores and dots stay plain",
+			value: "runner_1.2",
+			want:  "runner_1.2",
+		},
+		{
+			name:  "space is quoted",
+			value: "linux x64",
+			want:  `"linux x64"`,
+		},
+		{
+			name:  "colon is quoted",
+			value: "gpu:large",
+			want:  `"gpu:large"`,
+		},
+		{
+			name:  "quote is escaped",
+			value: `label"quote`,
+			want:  strconv.Quote(`label"quote`),
+		},
+		{
+			name:  "backslash is escaped",
+			value: `path\\runner`,
+			want:  strconv.Quote(`path\\runner`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, yamlScalar(tt.value))
 		})
 	}
 }
