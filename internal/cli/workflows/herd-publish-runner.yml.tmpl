@@ -29,7 +29,7 @@ permissions:
 jobs:
   publish:
     if: vars.HERD_ENABLED == 'true'
-    runs-on: {{ if eq (len .ImagePublish.RunsOn) 1 }}{{ index .ImagePublish.RunsOn 0 }}{{ else }}[{{ range $i, $r := .ImagePublish.RunsOn }}{{ if $i }}, {{ end }}{{ yamlQuote $r }}{{ end }}]{{ end }}
+    runs-on: {{ if eq (len .ImagePublish.RunsOn) 1 }}{{ yamlQuote (index .ImagePublish.RunsOn 0) }}{{ else }}[{{ range $i, $r := .ImagePublish.RunsOn }}{{ if $i }}, {{ end }}{{ yamlQuote $r }}{{ end }}]{{ end }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

@@ -67,7 +67,7 @@ func TestPublishRunnerWorkflow_RunsOn(t *testing.T) {
 		cfg := config.Default()
 		rendered := renderPublishRunnerWorkflow(t, cfg)
 
-		assert.Contains(t, string(rendered), "runs-on: ubuntu-latest")
+		assert.Contains(t, string(rendered), `runs-on: "ubuntu-latest"`)
 		assert.NotContains(t, string(rendered), "runs-on: [")
 
 		onDisk, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "herd-publish-runner.yml"))
@@ -95,6 +95,26 @@ func TestPublishRunnerWorkflow_RunsOn(t *testing.T) {
 			name:   "escaping guard",
 			runsOn: []string{"self-hosted", `label"quote`, `path\\runner`},
 			want:   `runs-on: ["self-hosted", ` + strconv.Quote(`label"quote`) + `, ` + strconv.Quote(`path\\runner`) + `]`,
+		},
+		{
+			name:   "single label with space",
+			runsOn: []string{"linux x64"},
+			want:   `runs-on: "linux x64"`,
+		},
+		{
+			name:   "single label with colon",
+			runsOn: []string{"gpu:large"},
+			want:   `runs-on: "gpu:large"`,
+		},
+		{
+			name:   "single label with quote",
+			runsOn: []string{`label"quote`},
+			want:   `runs-on: ` + strconv.Quote(`label"quote`),
+		},
+		{
+			name:   "single label with backslash",
+			runsOn: []string{`path\\runner`},
+			want:   `runs-on: ` + strconv.Quote(`path\\runner`),
 		},
 	}
 
