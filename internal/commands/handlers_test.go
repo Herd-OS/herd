@@ -382,9 +382,10 @@ func TestHandleFixCI_NotBatchPR(t *testing.T) {
 	assert.Contains(t, result.Message, "can only be used on batch PRs")
 }
 
-func TestHandleFixCI_CISuccess(t *testing.T) {
+func TestHandleFixCI_ForceDispatchesOnCISuccess(t *testing.T) {
 	issueSvc := newTestIssueService()
 	issueSvc.listResult = []*platform.Issue{}
+	wf := &testWorkflowService{}
 	prSvc := &testPRService{
 		getResult: map[int]*platform.PullRequest{
 			10: {Number: 10, Head: "herd/batch/1-batch"},
@@ -394,7 +395,7 @@ func TestHandleFixCI_CISuccess(t *testing.T) {
 	p := &testPlatform{
 		issues:     issueSvc,
 		prs:        prSvc,
-		workflows:  &testWorkflowService{},
+		workflows:  wf,
 		repo:       &testRepoService{defaultBranch: "main"},
 		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch"}}},
 		checks:     &testCheckService{status: "success"},
@@ -410,7 +411,9 @@ func TestHandleFixCI_CISuccess(t *testing.T) {
 	result := handleFixCI(hctx, Command{Name: "fix-ci"})
 
 	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "✅ CI is passing")
+	assert.Contains(t, result.Message, "🔧 CI failed — dispatched fix workers")
+	assert.Len(t, issueSvc.createdIssues, 1)
+	assert.Len(t, wf.dispatched, 1)
 }
 
 func TestHandleFixCI_WithFixDispatch(t *testing.T) {

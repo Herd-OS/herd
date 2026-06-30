@@ -473,6 +473,7 @@ func runWasSuccessful(ctx context.Context, client platform.Platform, runID int64
 
 func newIntegratorCheckCICmd() *cobra.Command {
 	var runID int64
+	var ciRunID int64
 	var batchNum int
 
 	cmd := &cobra.Command{
@@ -482,11 +483,17 @@ func newIntegratorCheckCICmd() *cobra.Command {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator check-ci is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
-			if runID == 0 && batchNum == 0 {
-				return fmt.Errorf("one of --run-id or --batch is required")
+			if runID == 0 && ciRunID == 0 && batchNum == 0 {
+				return fmt.Errorf("one of --run-id, --ci-run-id, or --batch is required")
 			}
-			if runID != 0 && batchNum != 0 {
-				return fmt.Errorf("--run-id and --batch are mutually exclusive")
+			setFlags := 0
+			for _, v := range []int64{runID, ciRunID, int64(batchNum)} {
+				if v != 0 {
+					setFlags++
+				}
+			}
+			if setFlags > 1 {
+				return fmt.Errorf("--run-id, --ci-run-id, and --batch are mutually exclusive")
 			}
 
 			cfg, err := config.Load(".")
@@ -509,12 +516,30 @@ func newIntegratorCheckCICmd() *cobra.Command {
 				}
 			}
 
+			var ciRun *integrator.CIFailureContext
+			if ciRunID != 0 {
+				diag, err := client.Workflows().GetRunDiagnostics(cmd.Context(), ciRunID)
+				if err != nil {
+					return fmt.Errorf("getting CI run diagnostics: %w", err)
+				}
+				ciRun = &integrator.CIFailureContext{
+					RunID:       diag.RunID,
+					Workflow:    diag.Workflow,
+					HeadBranch:  diag.HeadBranch,
+					HeadSHA:     diag.HeadSHA,
+					Conclusion:  diag.Conclusion,
+					URL:         diag.URL,
+					Diagnostics: diag,
+				}
+			}
+
 			cwd, err := os.Getwd()
 			if err != nil {
 				return fmt.Errorf("getting current directory: %w", err)
 			}
 			result, err := integrator.CheckCI(cmd.Context(), client, cfg, integrator.CheckCIParams{
 				RunID:       runID,
+				CIRun:       ciRun,
 				BatchNumber: batchNum,
 				RepoRoot:    cwd,
 			})
@@ -545,6 +570,7 @@ func newIntegratorCheckCICmd() *cobra.Command {
 	}
 
 	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID")
+	cmd.Flags().Int64Var(&ciRunID, "ci-run-id", 0, "Configured CI workflow run ID")
 	cmd.Flags().IntVar(&batchNum, "batch", 0, "Batch/milestone number")
 	return cmd
 }

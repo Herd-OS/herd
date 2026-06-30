@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/issues"
@@ -11,10 +12,22 @@ import (
 	"github.com/herd-os/herd/internal/platform"
 )
 
+// CIFailureContext describes a completed configured CI workflow_run trigger.
+type CIFailureContext struct {
+	RunID       int64
+	Workflow    string
+	HeadBranch  string
+	HeadSHA     string
+	Conclusion  string
+	URL         string
+	Diagnostics *platform.WorkflowRunDiagnostics
+}
+
 // CheckCIParams holds parameters for CI failure handling.
 type CheckCIParams struct {
 	RunID          int64
-	BatchNumber    int    // Alternative to RunID — used by check_suite trigger
+	CIRun          *CIFailureContext
+	BatchNumber    int // Alternative to RunID — used by check_suite trigger
 	RepoRoot       string
 	UserContext    string // Optional hint from the user, prepended to fix issue body
 	BeforeDispatch func() // optional; called once, right before worker dispatch
@@ -49,6 +62,23 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		}
 		ms = got
 		batchBranch = fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	} else if params.CIRun != nil {
+		// CI workflow_run lookup — used by configured CI workflow completion triggers.
+		if !isConfiguredCIWorkflow(params.CIRun.Workflow, cfg.Integrator.CIWorkflows) {
+			fmt.Printf("Skipping CI workflow run %d: workflow %q is not configured for CI self-heal.\n", params.CIRun.RunID, params.CIRun.Workflow)
+			return &CheckCIResult{Skipped: true}, nil
+		}
+		batchNumber, ok := parseBatchNumberFromBranch(params.CIRun.HeadBranch)
+		if !ok {
+			fmt.Printf("Skipping CI workflow run %d: head branch %q is not a herd batch branch.\n", params.CIRun.RunID, params.CIRun.HeadBranch)
+			return &CheckCIResult{Skipped: true}, nil
+		}
+		got, err := p.Milestones().Get(ctx, batchNumber)
+		if err != nil {
+			return nil, fmt.Errorf("getting milestone #%d: %w", batchNumber, err)
+		}
+		ms = got
+		batchBranch = params.CIRun.HeadBranch
 	} else {
 		// Run-based lookup — used by workflow_run trigger
 		run, err := p.Workflows().GetRun(ctx, params.RunID)
@@ -85,10 +115,15 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		return nil, fmt.Errorf("getting CI status: %w", err)
 	}
 
-	if status == "success" {
+	effectiveStatus := status
+	if params.CIRun != nil && isFailedCIConclusion(params.CIRun.Conclusion) {
+		effectiveStatus = "failure"
+	}
+
+	if effectiveStatus == "success" && !params.Force {
 		return &CheckCIResult{Status: status}, nil
 	}
-	if status == "pending" && !params.Force {
+	if effectiveStatus == "pending" && !params.Force {
 		return &CheckCIResult{Status: status}, nil
 	}
 
@@ -149,9 +184,6 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		return &CheckCIResult{Status: "failure", MaxCyclesHit: true}, nil
 	}
 
-	// Create a fix issue for CI failure
-	nextCycle := currentCycle + 1
-
 	// Find the batch PR to comment on
 	prs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})
 	if err != nil || len(prs) == 0 {
@@ -159,9 +191,40 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 	}
 	batchPR := prs[0]
 
+	classification := classifyCIFailure(diagnosticsFromContext(params.CIRun))
+	if classification == "infrastructure" && !params.Force {
+		message := "CI appears to have failed because of infrastructure rather than a code change. HerdOS will not dispatch a code-fix worker for this run."
+		if params.CIRun != nil {
+			message += "\n\n" + renderInfraFailureSummary(params.CIRun)
+		}
+		if rerunErr := p.Checks().RerunFailedChecks(ctx, batchBranch); rerunErr != nil {
+			fmt.Printf("Warning: failed to rerun failed checks for %s: %v\n", batchBranch, rerunErr)
+			message += fmt.Sprintf("\n\nWarning: failed to request a rerun automatically: %v", rerunErr)
+		}
+		_ = p.PullRequests().AddComment(ctx, batchPR.Number,
+			fmt.Sprintf("⚠️ **HerdOS Integrator**\n\n%s", message))
+		return &CheckCIResult{Status: "failure"}, nil
+	}
+
+	// Create a fix issue for CI failure
+	nextCycle := currentCycle + 1
+
 	taskText := "CI is failing on the batch branch. Investigate the failures, fix the issues, and ensure all tests pass."
 	if params.UserContext != "" {
 		taskText = params.UserContext + "\n\n" + taskText
+	}
+	contextText := fmt.Sprintf("CI failed on batch branch `%s` after consolidation (cycle %d).", batchBranch, nextCycle)
+	if failureContext := renderCIFailureContext(params.CIRun); failureContext != "" {
+		contextText += "\n\n" + failureContext
+	}
+	if classification == "infrastructure" || classification == "unknown" {
+		contextText += "\n\n## Failure Classification\n\n"
+		switch classification {
+		case "infrastructure":
+			contextText += "This failure looks like CI infrastructure. A fix worker is being dispatched because the check was forced."
+		default:
+			contextText += "HerdOS could not confidently classify this CI failure from the available diagnostics."
+		}
 	}
 
 	body := issues.RenderBody(issues.IssueBody{
@@ -173,7 +236,7 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 			BatchPR:    batchPR.Number,
 		},
 		Task:    taskText,
-		Context: fmt.Sprintf("CI failed on batch branch `%s` after consolidation (cycle %d).", batchBranch, nextCycle),
+		Context: contextText,
 	})
 
 	truncatedBody, overflow := issues.TruncateIssueBody(body)
@@ -218,4 +281,25 @@ func notifyCI(ctx context.Context, p platform.Platform, batchBranch, message str
 	}
 	_ = p.PullRequests().AddComment(ctx, prs[0].Number,
 		fmt.Sprintf("⚠️ **HerdOS Integrator**\n\n%s", message))
+}
+
+func diagnosticsFromContext(ctx *CIFailureContext) *platform.WorkflowRunDiagnostics {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Diagnostics
+}
+
+func renderInfraFailureSummary(ctx *CIFailureContext) string {
+	var b strings.Builder
+	if ctx.Workflow != "" {
+		b.WriteString(fmt.Sprintf("- Workflow: %s\n", ctx.Workflow))
+	}
+	if ctx.URL != "" {
+		b.WriteString(fmt.Sprintf("- Run: %s\n", ctx.URL))
+	}
+	if ctx.Diagnostics != nil && ctx.Diagnostics.LogStatus != "" {
+		b.WriteString(fmt.Sprintf("- Log status: %s\n", ctx.Diagnostics.LogStatus))
+	}
+	return strings.TrimSpace(b.String())
 }
