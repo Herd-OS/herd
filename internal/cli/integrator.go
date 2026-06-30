@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 
@@ -587,18 +588,20 @@ func checkCIForCompletedWorkflowRun(ctx context.Context, client platform.Platfor
 		fmt.Printf("Skipping CI workflow run %d: head branch %q is not a herd batch branch.\n", run.ID, run.HeadBranch)
 		return &integrator.CheckCIResult{Skipped: true}, run, nil
 	}
-	if !isCheckCIWorkflowConfigured(run.WorkflowName, cfg.Integrator.CIWorkflows) {
+	if !isCheckCIWorkflowConfigured(run, cfg.Integrator.CIWorkflows) {
 		fmt.Printf("Skipping CI workflow run %d: workflow %q is not configured for CI self-heal.\n", run.ID, run.WorkflowName)
 		return &integrator.CheckCIResult{Skipped: true}, run, nil
 	}
 
 	ciRun := &integrator.CIFailureContext{
-		RunID:      run.ID,
-		Workflow:   run.WorkflowName,
-		HeadBranch: run.HeadBranch,
-		HeadSHA:    run.HeadSHA,
-		Conclusion: run.Conclusion,
-		URL:        run.URL,
+		RunID:        run.ID,
+		WorkflowID:   run.WorkflowID,
+		Workflow:     run.WorkflowName,
+		WorkflowPath: run.WorkflowPath,
+		HeadBranch:   run.HeadBranch,
+		HeadSHA:      run.HeadSHA,
+		Conclusion:   run.Conclusion,
+		URL:          run.URL,
 	}
 	diag, err := client.Workflows().GetRunDiagnostics(ctx, ciRunID)
 	if err != nil {
@@ -614,9 +617,27 @@ func checkCIForCompletedWorkflowRun(ctx context.Context, client platform.Platfor
 	return result, run, err
 }
 
-func isCheckCIWorkflowConfigured(name string, configured []string) bool {
+func isCheckCIWorkflowConfigured(run *platform.Run, configured []string) bool {
+	if run == nil {
+		return false
+	}
 	for _, workflow := range configured {
-		if name == workflow {
+		if workflow == "" {
+			continue
+		}
+		if run.WorkflowName == workflow {
+			return true
+		}
+		if run.WorkflowID != 0 && strconv.FormatInt(run.WorkflowID, 10) == workflow {
+			return true
+		}
+		if run.WorkflowPath == "" {
+			continue
+		}
+		if run.WorkflowPath == workflow || path.Base(run.WorkflowPath) == workflow {
+			return true
+		}
+		if !strings.Contains(workflow, "/") && run.WorkflowPath == ".github/workflows/"+workflow {
 			return true
 		}
 	}

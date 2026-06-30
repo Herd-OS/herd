@@ -175,6 +175,7 @@ func TestCheckCIForCompletedWorkflowRun(t *testing.T) {
 		run               *platform.Run
 		diag              *platform.WorkflowRunDiagnostics
 		diagErr           error
+		ciWorkflows       []string
 		checkStatus       string
 		wantSkipped       bool
 		wantDiagnostics   bool
@@ -212,6 +213,21 @@ func TestCheckCIForCompletedWorkflowRun(t *testing.T) {
 				URL:          "https://example.test/actions/runs/200",
 			},
 			diagErr:      errors.New("logs unavailable"),
+			checkStatus:  "pending",
+			wantFixIssue: true,
+		},
+		{
+			name: "configured workflow path accepted when display title differs",
+			run: &platform.Run{
+				ID:           200,
+				WorkflowName: "Deploy preview for abc123",
+				WorkflowPath: ".github/workflows/accounts-ci.yml",
+				HeadBranch:   "herd/batch/1-batch",
+				HeadSHA:      "abc123",
+				Conclusion:   "failure",
+				URL:          "https://example.test/actions/runs/200",
+			},
+			ciWorkflows:  []string{"accounts-ci.yml"},
 			checkStatus:  "pending",
 			wantFixIssue: true,
 		},
@@ -263,7 +279,11 @@ func TestCheckCIForCompletedWorkflowRun(t *testing.T) {
 				checks:     checks,
 			}
 
-			result, run, err := checkCIForCompletedWorkflowRun(context.Background(), client, testCheckCIConfig(), 200, t.TempDir())
+			cfg := testCheckCIConfig()
+			if tt.ciWorkflows != nil {
+				cfg.Integrator.CIWorkflows = tt.ciWorkflows
+			}
+			result, run, err := checkCIForCompletedWorkflowRun(context.Background(), client, cfg, 200, t.TempDir())
 			require.NoError(t, err)
 			require.Same(t, tt.run, run)
 			if tt.wantSkipped {

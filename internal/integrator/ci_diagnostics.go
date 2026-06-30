@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 	"unicode"
@@ -9,9 +10,24 @@ import (
 	"github.com/herd-os/herd/internal/platform"
 )
 
-func isConfiguredCIWorkflow(name string, configured []string) bool {
+func isConfiguredCIWorkflow(name, workflowPath string, workflowID int64, configured []string) bool {
 	for _, workflow := range configured {
+		if workflow == "" {
+			continue
+		}
 		if name == workflow {
+			return true
+		}
+		if workflowID != 0 && strconv.FormatInt(workflowID, 10) == workflow {
+			return true
+		}
+		if workflowPath == "" {
+			continue
+		}
+		if workflowPath == workflow || path.Base(workflowPath) == workflow {
+			return true
+		}
+		if !strings.Contains(workflow, "/") && workflowPath == ".github/workflows/"+workflow {
 			return true
 		}
 	}

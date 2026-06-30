@@ -127,8 +127,10 @@ func TestIntegratorWorkflow_RendersConfiguredCIWorkflows(t *testing.T) {
 	assert.Contains(t, workflowRunBlock, `      - "CI - ServiceKit Ruby"`)
 	assert.Contains(t, workflowRunBlock, `      - "CI — Accounts"`)
 	assert.Contains(t, s, "check-ci-workflow-completion:")
-	assert.Contains(t, s, "github.event.workflow_run.name == 'HerdOS Worker'")
+	assert.Contains(t, s, "github.event.workflow_run.path == '.github/workflows/herd-worker.yml'")
+	assert.Contains(t, s, "github.event.workflow_run.path != '.github/workflows/herd-worker.yml'")
 	assert.Contains(t, s, "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
+	assert.Contains(t, s, "herd integrator review --batch \"$BATCH\"")
 }
 
 func TestRenderWorkflow_StaticPassThrough(t *testing.T) {

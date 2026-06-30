@@ -30,7 +30,9 @@ type PullRequest struct {
 
 type Run struct {
 	ID           int64
+	WorkflowID   int64
 	WorkflowName string
+	WorkflowPath string
 	HeadBranch   string
 	HeadSHA      string
 	Status       string            // "queued", "in_progress", "completed"

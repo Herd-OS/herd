@@ -60,7 +60,7 @@ func (s *workflowService) GetRun(ctx context.Context, runID int64) (*platform.Ru
 	if err != nil {
 		return nil, fmt.Errorf("getting run %d: %w", runID, err)
 	}
-	return mapRun(run), nil
+	return s.mapRunWithWorkflowIdentity(ctx, run), nil
 }
 
 func (s *workflowService) GetRunDiagnostics(ctx context.Context, runID int64) (*platform.WorkflowRunDiagnostics, error) {
@@ -124,7 +124,7 @@ func (s *workflowService) ListRuns(ctx context.Context, filters platform.RunFilt
 			return nil, fmt.Errorf("listing workflow runs by file: %w", err)
 		}
 		for _, r := range runs.WorkflowRuns {
-			result = append(result, mapRun(r))
+			result = append(result, s.mapRunWithWorkflowIdentity(ctx, r))
 		}
 	} else if filters.WorkflowID != 0 {
 		runs, _, err := s.c.gh.Actions.ListWorkflowRunsByID(ctx, s.c.owner, s.c.repo, filters.WorkflowID, opts)
@@ -132,7 +132,7 @@ func (s *workflowService) ListRuns(ctx context.Context, filters platform.RunFilt
 			return nil, fmt.Errorf("listing workflow runs: %w", err)
 		}
 		for _, r := range runs.WorkflowRuns {
-			result = append(result, mapRun(r))
+			result = append(result, s.mapRunWithWorkflowIdentity(ctx, r))
 		}
 	} else {
 		runs, _, err := s.c.gh.Actions.ListRepositoryWorkflowRuns(ctx, s.c.owner, s.c.repo, opts)
@@ -140,7 +140,7 @@ func (s *workflowService) ListRuns(ctx context.Context, filters platform.RunFilt
 			return nil, fmt.Errorf("listing workflow runs: %w", err)
 		}
 		for _, r := range runs.WorkflowRuns {
-			result = append(result, mapRun(r))
+			result = append(result, s.mapRunWithWorkflowIdentity(ctx, r))
 		}
 	}
 
@@ -161,10 +161,30 @@ func (s *workflowService) CancelRun(ctx context.Context, runID int64) error {
 	return nil
 }
 
+func (s *workflowService) mapRunWithWorkflowIdentity(ctx context.Context, r *gh.WorkflowRun) *platform.Run {
+	run := mapRun(r)
+	if run.WorkflowID == 0 {
+		return run
+	}
+	workflow, _, err := s.c.gh.Actions.GetWorkflowByID(ctx, s.c.owner, s.c.repo, run.WorkflowID)
+	if err != nil {
+		return run
+	}
+	if workflow.GetName() != "" {
+		run.WorkflowName = workflow.GetName()
+	}
+	if workflow.GetPath() != "" {
+		run.WorkflowPath = workflow.GetPath()
+	}
+	return run
+}
+
 func mapRun(r *gh.WorkflowRun) *platform.Run {
 	run := &platform.Run{
 		ID:           r.GetID(),
+		WorkflowID:   r.GetWorkflowID(),
 		WorkflowName: r.GetName(),
+		WorkflowPath: r.GetPath(),
 		HeadBranch:   r.GetHeadBranch(),
 		HeadSHA:      r.GetHeadSHA(),
 		Status:       r.GetStatus(),
@@ -174,10 +194,19 @@ func mapRun(r *gh.WorkflowRun) *platform.Run {
 	}
 	// Parse inputs from run name (format: "worker #42" set by run-name in workflow)
 	// This is needed because GitHub's REST API doesn't return dispatch inputs on the run object.
-	if name := r.GetName(); name != "" {
+	if name := firstNonEmpty(r.GetDisplayTitle(), r.GetName()); name != "" {
 		run.Inputs = parseRunNameInputs(name)
 	}
 	return run
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // parseRunNameInputs extracts inputs from the run name.

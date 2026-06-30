@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   integrate:{{if .Integrator.CIWorkflows}}
-    if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped' && github.event.workflow_run.name == 'HerdOS Worker'
+    if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped' && github.event.workflow_run.path == '.github/workflows/herd-worker.yml'
 {{else}}
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped'
 {{end}}    concurrency:
@@ -61,7 +61,7 @@ jobs:
 
 {{if .Integrator.CIWorkflows}}
   check-ci-workflow-completion:
-    if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped' && startsWith(github.event.workflow_run.head_branch, 'herd/batch/') && github.event.workflow_run.name != 'HerdOS Worker'
+    if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped' && startsWith(github.event.workflow_run.head_branch, 'herd/batch/') && github.event.workflow_run.path != '.github/workflows/herd-worker.yml'
     concurrency:
       group: herd-check-ci-${{`{{`}} github.event.workflow_run.head_branch || github.ref {{`}}`}}
       cancel-in-progress: true
@@ -84,8 +84,13 @@ jobs:
           OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
           GEMINI_API_KEY: ${{`{{`}} secrets.GEMINI_API_KEY {{`}}`}}
           RUN_ID: ${{`{{`}} github.event.workflow_run.id {{`}}`}}
+          HEAD_BRANCH: ${{`{{`}} github.event.workflow_run.head_branch {{`}}`}}
         run: |
           herd integrator check-ci --ci-run-id "$RUN_ID"
+          BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+')
+          if [ -n "$BATCH" ]; then
+            herd integrator review --batch "$BATCH"
+          fi
 
 {{end}}  check-ci-on-completion:
     if: >

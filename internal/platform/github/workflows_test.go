@@ -54,7 +54,9 @@ func TestWorkflowServiceGetRun(t *testing.T) {
 	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99", func(w http.ResponseWriter, r *http.Request) {
 		resp := gh.WorkflowRun{
 			ID:         gh.Ptr(int64(99)),
-			Name:       gh.Ptr("CI"),
+			Name:       gh.Ptr("CI run for abc123"),
+			WorkflowID: gh.Ptr(int64(321)),
+			Path:       gh.Ptr(".github/workflows/old-ci.yml"),
 			HeadBranch: gh.Ptr("herd/worker/99"),
 			HeadSHA:    gh.Ptr("abc123"),
 			Status:     gh.Ptr("completed"),
@@ -64,13 +66,23 @@ func TestWorkflowServiceGetRun(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(resp)
 	})
+	mux.HandleFunc("GET /repos/test-org/test-repo/actions/workflows/321", func(w http.ResponseWriter, r *http.Request) {
+		resp := gh.Workflow{
+			ID:   gh.Ptr(int64(321)),
+			Name: gh.Ptr("CI"),
+			Path: gh.Ptr(".github/workflows/ci.yml"),
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
 
 	client, _ := newTestClient(t, mux)
 	run, err := client.Workflows().GetRun(context.Background(), 99)
 
 	require.NoError(t, err)
 	assert.Equal(t, int64(99), run.ID)
+	assert.Equal(t, int64(321), run.WorkflowID)
 	assert.Equal(t, "CI", run.WorkflowName)
+	assert.Equal(t, ".github/workflows/ci.yml", run.WorkflowPath)
 	assert.Equal(t, "herd/worker/99", run.HeadBranch)
 	assert.Equal(t, "abc123", run.HeadSHA)
 	assert.Equal(t, "completed", run.Status)
@@ -271,10 +283,11 @@ func TestWorkflowServiceGetRun_ParsesRunName(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/test-org/test-repo/actions/runs/99", func(w http.ResponseWriter, r *http.Request) {
 		resp := gh.WorkflowRun{
-			ID:        gh.Ptr(int64(99)),
-			Name:      gh.Ptr("Herd Worker #42"),
-			Status:    gh.Ptr("completed"),
-			CreatedAt: &ts,
+			ID:           gh.Ptr(int64(99)),
+			Name:         gh.Ptr("HerdOS Worker"),
+			DisplayTitle: gh.Ptr("Herd Worker #42"),
+			Status:       gh.Ptr("completed"),
+			CreatedAt:    &ts,
 		}
 		json.NewEncoder(w).Encode(resp)
 	})
