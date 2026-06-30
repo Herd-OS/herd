@@ -66,7 +66,7 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		batchBranch = fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
 	} else if params.CIRun != nil {
 		// CI workflow_run lookup — used by configured CI workflow completion triggers.
-		if !isConfiguredCIWorkflow(params.CIRun.Workflow, params.CIRun.WorkflowPath, params.CIRun.WorkflowID, cfg.Integrator.CIWorkflows) {
+		if !isConfiguredCIWorkflow(params.CIRun.Workflow, cfg.Integrator.CIWorkflows) {
 			fmt.Printf("Skipping CI workflow run %d: workflow %q is not configured for CI self-heal.\n", params.CIRun.RunID, params.CIRun.Workflow)
 			return &CheckCIResult{Skipped: true}, nil
 		}

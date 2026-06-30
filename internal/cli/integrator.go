@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path"
 	"strconv"
 	"strings"
 
@@ -626,18 +625,6 @@ func isCheckCIWorkflowConfigured(run *platform.Run, configured []string) bool {
 			continue
 		}
 		if run.WorkflowName == workflow {
-			return true
-		}
-		if run.WorkflowID != 0 && strconv.FormatInt(run.WorkflowID, 10) == workflow {
-			return true
-		}
-		if run.WorkflowPath == "" {
-			continue
-		}
-		if run.WorkflowPath == workflow || path.Base(run.WorkflowPath) == workflow {
-			return true
-		}
-		if !strings.Contains(workflow, "/") && run.WorkflowPath == ".github/workflows/"+workflow {
 			return true
 		}
 	}

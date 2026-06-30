@@ -248,15 +248,29 @@ func TestCheckCI(t *testing.T) {
 func TestCITriggerHelpers(t *testing.T) {
 	t.Run("configured workflow exact match preserves punctuation", func(t *testing.T) {
 		configured := []string{"CI - ServiceKit Ruby", "CI — Accounts"}
-		assert.True(t, isConfiguredCIWorkflow("CI — Accounts", "", 0, configured))
-		assert.False(t, isConfiguredCIWorkflow("CI - Accounts", "", 0, configured))
+		assert.True(t, isConfiguredCIWorkflow("CI — Accounts", configured))
+		assert.False(t, isConfiguredCIWorkflow("CI - Accounts", configured))
 	})
 
-	t.Run("configured workflow path and id match display-title runs", func(t *testing.T) {
-		assert.True(t, isConfiguredCIWorkflow("CI for abc123", ".github/workflows/accounts-ci.yml", 0, []string{"accounts-ci.yml"}))
-		assert.True(t, isConfiguredCIWorkflow("CI for abc123", ".github/workflows/accounts-ci.yml", 42, []string{".github/workflows/accounts-ci.yml"}))
-		assert.True(t, isConfiguredCIWorkflow("CI for abc123", "", 42, []string{"42"}))
-		assert.False(t, isConfiguredCIWorkflow("CI for abc123", ".github/workflows/accounts-ci.yml", 42, []string{"other.yml"}))
+	t.Run("configured workflow matches resolved workflow name for display-title runs", func(t *testing.T) {
+		assert.True(t, isConfiguredCIWorkflow("CI — Accounts", []string{"CI — Accounts"}))
+		assert.False(t, isConfiguredCIWorkflow("Deploy preview for abc123", []string{"CI — Accounts"}))
+	})
+
+	t.Run("configured workflow path and id are not accepted", func(t *testing.T) {
+		tests := []struct {
+			name       string
+			configured []string
+		}{
+			{name: "basename path", configured: []string{"accounts-ci.yml"}},
+			{name: "full path", configured: []string{".github/workflows/accounts-ci.yml"}},
+			{name: "workflow id", configured: []string{"42"}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				assert.False(t, isConfiguredCIWorkflow("CI — Accounts", tt.configured))
+			})
+		}
 	})
 
 	t.Run("parse batch number from branch", func(t *testing.T) {
