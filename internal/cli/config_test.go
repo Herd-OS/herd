@@ -23,6 +23,19 @@ func TestGetConfigValue(t *testing.T) {
 	val, err = getConfigValue(cfg, "pull_requests.auto_merge")
 	require.NoError(t, err)
 	assert.Equal(t, "false", val)
+
+	val, err = getConfigValue(cfg, "image_publish.runs_on")
+	require.NoError(t, err)
+	assert.Equal(t, "[ubuntu-latest]", val)
+}
+
+func TestGetConfigValueImagePublishRunsOn(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImagePublish.RunsOn = []string{"self-hosted", "herd-publisher"}
+
+	val, err := getConfigValue(cfg, "image_publish.runs_on")
+	require.NoError(t, err)
+	assert.Equal(t, "[self-hosted, herd-publisher]", val)
 }
 
 func TestGetConfigValueUnknownKey(t *testing.T) {
@@ -106,10 +119,30 @@ func TestSetConfigValueNoSection(t *testing.T) {
 }
 
 func TestSetConfigValueSliceField(t *testing.T) {
-	cfg := config.Default()
-	err := setConfigValue(cfg, "monitor.notify_users", "alice")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot set")
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{
+			name: "monitor notify users",
+			key:  "monitor.notify_users",
+		},
+		{
+			name: "image publish runs on",
+			key:  "image_publish.runs_on",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+
+			err := setConfigValue(cfg, tt.key, "self-hosted")
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot set "+tt.key+" via CLI (use 'herd config edit')")
+		})
+	}
 }
 
 func TestSetConfigValueAgentPlannerRoleOverrides(t *testing.T) {
@@ -253,6 +286,8 @@ func TestFlattenConfig(t *testing.T) {
 	cfg := config.Default()
 	kvs := flattenConfig(cfg)
 	assert.True(t, len(kvs) > 20, "should have many keys, got %d", len(kvs))
+	got := keyValueMap(kvs)
+	assert.Equal(t, "[ubuntu-latest]", got["image_publish.runs_on"])
 
 	// Verify all keys are dotted
 	for _, kv := range kvs {

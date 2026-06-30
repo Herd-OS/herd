@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"regexp"
 	"strconv"
 	"text/template"
 
@@ -12,6 +13,8 @@ import (
 
 //go:embed workflows/*.yml workflows/*.tmpl
 var workflowFS embed.FS
+
+var plainYAMLScalarPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 type workflowFile struct {
 	SrcName  string // name in the embed FS
@@ -49,7 +52,8 @@ func RenderWorkflow(wf workflowFile, cfg *config.Config) ([]byte, error) {
 		return raw, nil
 	}
 	tmpl, err := template.New(wf.SrcName).Funcs(template.FuncMap{
-		"yamlQuote": strconv.Quote,
+		"yamlQuote":  strconv.Quote,
+		"yamlScalar": yamlScalar,
 	}).Parse(string(raw))
 	if err != nil {
 		return nil, fmt.Errorf("parsing workflow template %s: %w", wf.SrcName, err)
@@ -59,4 +63,11 @@ func RenderWorkflow(wf workflowFile, cfg *config.Config) ([]byte, error) {
 		return nil, fmt.Errorf("executing workflow template %s: %w", wf.SrcName, err)
 	}
 	return buf.Bytes(), nil
+}
+
+func yamlScalar(value string) string {
+	if plainYAMLScalarPattern.MatchString(value) {
+		return value
+	}
+	return strconv.Quote(value)
 }

@@ -31,6 +31,7 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, 15, cfg.Monitor.PatrolIntervalMinutes)
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
 	assert.Equal(t, false, cfg.PullRequests.AutoMerge)
+	assert.Equal(t, []string{"ubuntu-latest"}, cfg.ImagePublish.RunsOn)
 }
 
 func TestLoad(t *testing.T) {
@@ -67,6 +68,8 @@ monitor:
   notify_users: ["alice", "bob"]
 pull_requests:
   auto_merge: true
+image_publish:
+  runs_on: ["self-hosted", "linux x64", "gpu:large"]
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
 
@@ -86,6 +89,7 @@ pull_requests:
 	assert.Equal(t, false, cfg.Monitor.AutoRedispatch)
 	assert.Equal(t, []string{"alice", "bob"}, cfg.Monitor.NotifyUsers)
 	assert.Equal(t, true, cfg.PullRequests.AutoMerge)
+	assert.Equal(t, []string{"self-hosted", "linux x64", "gpu:large"}, cfg.ImagePublish.RunsOn)
 }
 
 func TestLoadAgentExecFields(t *testing.T) {
@@ -209,6 +213,7 @@ platform:
 	assert.Equal(t, "squash", cfg.Integrator.Strategy)
 	assert.Nil(t, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
+	assert.Equal(t, []string{"ubuntu-latest"}, cfg.ImagePublish.RunsOn)
 }
 
 func TestEnvOverrides(t *testing.T) {
