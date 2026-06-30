@@ -2,10 +2,14 @@ package codex
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/prompt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -73,6 +77,56 @@ func TestReview_StructuredOutput(t *testing.T) {
 			assert.Contains(t, argv, "--output-last-message")
 		})
 	}
+}
+
+func TestReview_LargeDiffPassedViaStdin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	argvDump := dir + "/argv.bin"
+	stdinDump := dir + "/stdin.txt"
+	script := dir + "/codex.sh"
+	content := fmt.Sprintf(`#!/bin/sh
+printf '%%s\0' "$@" > '%s'
+cat > '%s'
+out=''
+prev=''
+for a in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$a"; fi
+  prev="$a"
+done
+if [ -n "$out" ]; then printf '%%s' '{"approved":true,"findings":[],"summary":"LGTM"}' > "$out"; fi
+`, argvDump, stdinDump)
+	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+
+	largeDiffMarker := "large codex review diff marker"
+	largeDiff := strings.Repeat("+ "+largeDiffMarker+"\n", 150000)
+
+	a := NewAgent(script, "", "", "")
+	result, err := a.Review(context.Background(), largeDiff, agent.ReviewOptions{
+		AcceptanceCriteria: []string{"tests pass"},
+		RepoRoot:           dir,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+
+	argv := readArgvDump(t, argvDump)
+	require.NotEmpty(t, argv)
+	assert.Equal(t, "exec", argv[0])
+	assert.Contains(t, argv, "-")
+	for _, arg := range argv {
+		assert.NotContains(t, arg, largeDiffMarker, "argv must not contain the large diff")
+		assert.NotContains(t, arg, prompt.ReviewSystemPrompt, "argv must not contain the review system prompt")
+	}
+
+	stdinBytes, err := os.ReadFile(stdinDump)
+	require.NoError(t, err)
+	stdinContent := string(stdinBytes)
+	assert.True(t, strings.HasPrefix(stdinContent, prompt.ReviewSystemPrompt))
+	assert.Contains(t, stdinContent, largeDiffMarker)
 }
 
 func TestReview_UnparseableOutput(t *testing.T) {
