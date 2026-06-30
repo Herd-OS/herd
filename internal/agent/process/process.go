@@ -10,13 +10,14 @@ import (
 const defaultGracePeriod = 2 * time.Second
 
 type Command struct {
-	Path   string
-	Args   []string
-	Dir    string
-	Env    []string
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Path         string
+	Args         []string
+	Dir          string
+	Env          []string
+	Stdin        io.Reader
+	Stdout       io.Writer
+	Stderr       io.Writer
+	ProcessGroup bool
 }
 
 func Run(ctx context.Context, spec Command) error {
@@ -30,7 +31,7 @@ func Run(ctx context.Context, spec Command) error {
 	cmd.Stdin = spec.Stdin
 	cmd.Stdout = spec.Stdout
 	cmd.Stderr = spec.Stderr
-	configureCommand(cmd)
+	configureCommand(cmd, spec.ProcessGroup)
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -45,7 +46,7 @@ func Run(ctx context.Context, spec Command) error {
 	case err := <-waitCh:
 		return err
 	case <-ctx.Done():
-		terminateCommand(cmd, waitCh)
+		terminateCommand(cmd, waitCh, spec.ProcessGroup)
 		return ctx.Err()
 	}
 }

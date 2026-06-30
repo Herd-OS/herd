@@ -43,12 +43,13 @@ func (c *ClaudeAgent) Execute(ctx context.Context, task agent.TaskSpec, opts age
 	runOnce := func() (string, string, error) {
 		var stdout, stderr bytes.Buffer
 		if err := process.Run(ctx, process.Command{
-			Path:   c.BinaryPath,
-			Args:   args,
-			Dir:    opts.RepoRoot,
-			Stdin:  strings.NewReader(taskPrompt),
-			Stdout: io.MultiWriter(os.Stdout, &stdout),
-			Stderr: io.MultiWriter(os.Stderr, &stderr),
+			Path:         c.BinaryPath,
+			Args:         args,
+			Dir:          opts.RepoRoot,
+			Stdin:        strings.NewReader(taskPrompt),
+			Stdout:       io.MultiWriter(os.Stdout, &stdout),
+			Stderr:       io.MultiWriter(os.Stderr, &stderr),
+			ProcessGroup: true,
 		}); err != nil {
 			return "", stderr.String(), fmt.Errorf("agent exited with error: %w\n%s", err, stderr.String())
 		}

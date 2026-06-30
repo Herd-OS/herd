@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -82,6 +83,25 @@ func TestRun_PreCancelledContextDoesNotLaunch(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "pre-cancelled Run must not launch the child")
 }
 
+func TestRun_DefaultDoesNotCreateNewProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process group test is Unix-only")
+	}
+
+	script := writeShellScript(t, "pgid.sh", "ps -o pgid= -p $$\n")
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), Command{
+		Path:   script,
+		Stdout: &stdout,
+	})
+
+	require.NoError(t, err)
+	got, err := strconv.Atoi(strings.TrimSpace(stdout.String()))
+	require.NoError(t, err)
+	assert.Equal(t, syscall.Getpgrp(), got)
+}
+
 func TestRun_UnixContextCancellationTerminatesDescendants(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process group termination is Unix-only")
@@ -101,7 +121,7 @@ wait "$child"
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := Run(ctx, Command{Path: script})
+	err := Run(ctx, Command{Path: script, ProcessGroup: true})
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	pid := readPIDFile(t, pidFile)
@@ -130,7 +150,7 @@ wait "$!"
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- Run(ctx, Command{Path: script})
+		errCh <- Run(ctx, Command{Path: script, ProcessGroup: true})
 	}()
 
 	require.Eventually(t, func() bool {

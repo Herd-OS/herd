@@ -136,7 +136,7 @@ func TestPlan_PassesInitialPromptAsPositional(t *testing.T) {
 	}
 }
 
-func TestInteractivePaths_UnixContextCancellationTerminatesDescendants(t *testing.T) {
+func TestReview_UnixContextCancellationTerminatesDescendants(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process group termination is Unix-only")
 	}
@@ -145,26 +145,6 @@ func TestInteractivePaths_UnixContextCancellationTerminatesDescendants(t *testin
 		name string
 		run  func(context.Context, *ClaudeAgent, string) error
 	}{
-		{
-			name: "plan",
-			run: func(ctx context.Context, c *ClaudeAgent, repoRoot string) error {
-				_, err := c.Plan(ctx, "plan work", agent.PlanOptions{
-					RepoRoot:   repoRoot,
-					OutputPath: filepath.Join(repoRoot, "plan.json"),
-					Context:    map[string]string{},
-				})
-				return err
-			},
-		},
-		{
-			name: "discuss",
-			run: func(ctx context.Context, c *ClaudeAgent, repoRoot string) error {
-				return c.Discuss(ctx, agent.DiscussOptions{
-					RepoRoot:     repoRoot,
-					SystemPrompt: "discuss work",
-				})
-			},
-		},
 		{
 			name: "review",
 			run: func(ctx context.Context, c *ClaudeAgent, repoRoot string) error {

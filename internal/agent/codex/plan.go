@@ -65,12 +65,13 @@ func (c *CodexAgent) planHeadless(ctx context.Context, systemPrompt, initialProm
 	// Headless mode: stdin is not a TTY. The structured plan is read from the
 	// output file, so just stream child stdout/stderr to the parent.
 	if err := agentprocess.Run(ctx, agentprocess.Command{
-		Path:   c.BinaryPath,
-		Args:   args,
-		Dir:    opts.RepoRoot,
-		Env:    childEnv(),
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
+		Path:         c.BinaryPath,
+		Args:         args,
+		Dir:          opts.RepoRoot,
+		Env:          childEnv(),
+		Stdout:       os.Stdout,
+		Stderr:       os.Stderr,
+		ProcessGroup: true,
 	}); err != nil {
 		return nil, fmt.Errorf("codex exited with error: %w", err)
 	}

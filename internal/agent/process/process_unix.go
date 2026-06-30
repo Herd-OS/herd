@@ -9,12 +9,20 @@ import (
 	"time"
 )
 
-func configureCommand(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+func configureCommand(cmd *exec.Cmd, processGroup bool) {
+	if processGroup {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 }
 
-func terminateCommand(cmd *exec.Cmd, waitCh <-chan error) {
+func terminateCommand(cmd *exec.Cmd, waitCh <-chan error, processGroup bool) {
 	if cmd.Process == nil {
+		return
+	}
+
+	if !processGroup {
+		_ = cmd.Process.Kill()
+		<-waitCh
 		return
 	}
 

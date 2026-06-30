@@ -264,7 +264,7 @@ func TestDiscuss_FoldsSystemAndInitialIntoPrompt(t *testing.T) {
 	}
 }
 
-func TestInteractivePaths_UnixContextCancellationTerminatesDescendants(t *testing.T) {
+func TestReview_UnixContextCancellationTerminatesDescendants(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process group termination is Unix-only")
 	}
@@ -273,26 +273,6 @@ func TestInteractivePaths_UnixContextCancellationTerminatesDescendants(t *testin
 		name string
 		run  func(context.Context, *OpenCodeAgent, string) error
 	}{
-		{
-			name: "plan",
-			run: func(ctx context.Context, o *OpenCodeAgent, repoRoot string) error {
-				_, err := o.Plan(ctx, "plan work", agent.PlanOptions{
-					RepoRoot:   repoRoot,
-					OutputPath: filepath.Join(repoRoot, "plan.json"),
-					Context:    map[string]string{},
-				})
-				return err
-			},
-		},
-		{
-			name: "discuss",
-			run: func(ctx context.Context, o *OpenCodeAgent, repoRoot string) error {
-				return o.Discuss(ctx, agent.DiscussOptions{
-					RepoRoot:     repoRoot,
-					SystemPrompt: "discuss work",
-				})
-			},
-		},
 		{
 			name: "review",
 			run: func(ctx context.Context, o *OpenCodeAgent, repoRoot string) error {
