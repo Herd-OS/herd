@@ -52,6 +52,23 @@ func Validate(cfg *Config) *ValidationError {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("workers.timeout_minutes must be > 0, got %d", cfg.Workers.TimeoutMinutes))
 	}
 
+	// Image publish
+	if len(cfg.ImagePublish.RunsOn) == 0 {
+		ve.Errors = append(ve.Errors, "image_publish.runs_on must contain at least one runner label")
+	}
+	for i, label := range cfg.ImagePublish.RunsOn {
+		if strings.TrimSpace(label) == "" {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.runs_on[%d] must be a non-empty label", i))
+		}
+	}
+	seen := map[string]int{}
+	for i, label := range cfg.ImagePublish.RunsOn {
+		if first, ok := seen[label]; ok {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.runs_on[%d] duplicates image_publish.runs_on[%d] (%q)", i, first, label))
+		}
+		seen[label] = i
+	}
+
 	// Integrator
 	switch cfg.Integrator.Strategy {
 	case "squash", "rebase", "merge":

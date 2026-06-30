@@ -81,6 +81,43 @@ func TestValidate_IntegratorCIWorkflows(t *testing.T) {
 	}
 }
 
+func TestValidate_ImagePublishRunsOn(t *testing.T) {
+	tests := []struct {
+		name      string
+		runsOn    []string
+		wantError bool
+		errSubstr string
+	}{
+		{"default valid", nil, false, ""},
+		{"empty list invalid", []string{}, true, "image_publish.runs_on must contain at least one runner label"},
+		{"one empty string invalid", []string{""}, true, "image_publish.runs_on[0] must be a non-empty label"},
+		{"one whitespace-only string invalid", []string{" \t\n"}, true, "image_publish.runs_on[0] must be a non-empty label"},
+		{"duplicate labels invalid", []string{"self-hosted", "self-hosted"}, true, `image_publish.runs_on[1] duplicates image_publish.runs_on[0] ("self-hosted")`},
+		{"explicit ubuntu latest valid", []string{"ubuntu-latest"}, false, ""},
+		{"explicit self-hosted multi-label valid", []string{"self-hosted", "herd-publisher"}, false, ""},
+		{"explicit quoted labels valid", []string{"self-hosted", "linux x64", "gpu:large"}, false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			if tt.runsOn != nil {
+				cfg.ImagePublish.RunsOn = tt.runsOn
+			}
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
 func TestValidate_AgentProvider(t *testing.T) {
 	tests := []struct {
 		name      string

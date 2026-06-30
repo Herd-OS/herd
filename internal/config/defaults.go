@@ -44,5 +44,8 @@ func Default() *Config {
 		PullRequests: PullRequests{
 			AutoMerge: false,
 		},
+		ImagePublish: ImagePublish{
+			RunsOn: []string{"ubuntu-latest"},
+		},
 	}
 }

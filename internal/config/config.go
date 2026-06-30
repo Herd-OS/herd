@@ -23,6 +23,7 @@ type Config struct {
 	Integrator   Integrator   `yaml:"integrator"`
 	Monitor      Monitor      `yaml:"monitor"`
 	PullRequests PullRequests `yaml:"pull_requests"`
+	ImagePublish ImagePublish `yaml:"image_publish"`
 }
 
 type Platform struct {
@@ -157,6 +158,10 @@ type Monitor struct {
 type PullRequests struct {
 	AutoMerge     bool   `yaml:"auto_merge"`
 	CoAuthorEmail string `yaml:"co_author_email"` // e.g. "123456+herd-os[bot]@users.noreply.github.com"
+}
+
+type ImagePublish struct {
+	RunsOn []string `yaml:"runs_on"`
 }
 
 // Load reads and parses .herdos.yml from the given directory.
