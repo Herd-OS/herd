@@ -68,7 +68,14 @@ Respond with ONLY a JSON object (no markdown fencing, no extra text):
 
 If you find issues, classify each finding as HIGH, MEDIUM, or LOW severity.
 {{if .MinFixSeverity}}Set approved to false if ANY finding is {{.MinFixSeverityDesc}} severity or higher. Only set approved to true if all findings are below {{.MinFixSeverityDesc}} severity.{{else}}Set approved to false if any finding is MEDIUM or HIGH severity.{{end}}
-{"approved": false, "findings": [{"severity": "HIGH", "description": "issue description"}, {"severity": "MEDIUM", "description": "minor issue"}], "summary": "brief summary of findings"}
+For each actionable finding, make the description detailed enough for a fix worker to act without rediscovering the problem. Include:
+- The specific file/line, function, symbol, or behavior involved.
+- The root cause and the failure scenario or user-visible impact.
+- A suggested fix that names relevant local helpers, APIs, or patterns when you can infer them from the diff.
+- Tests or verification that should be added or run.
+- Any constraints or "do not" notes that would prevent a shallow or regressive fix.
+Do not pad findings with generic advice. If you are uncertain about the exact fix, say what must be investigated and what invariant the fix must preserve.
+{"approved": false, "findings": [{"severity": "HIGH", "description": "internal/foo/bar.go:123: Root cause: ... Impact: ... Suggested fix: ... Tests: ... Constraints: ..."}, {"severity": "MEDIUM", "description": "minor issue with root cause, impact, suggested fix, and tests"}], "summary": "brief summary of findings"}
 Use severity "CRITERIA" only when the acceptance criterion itself is flawed, not the code.
 
 Severity guide:

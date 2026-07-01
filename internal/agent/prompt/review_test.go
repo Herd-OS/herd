@@ -179,6 +179,20 @@ func TestRenderReviewPrompt_SeverityGuide(t *testing.T) {
 	assert.Contains(t, prompt, "CRITERIA: An acceptance criterion itself is wrong")
 }
 
+func TestRenderReviewPrompt_ActionableFindingGuidance(t *testing.T) {
+	opts := agent.ReviewOptions{AcceptanceCriteria: []string{"works"}}
+	prompt, err := RenderReviewPrompt("diff", opts)
+	require.NoError(t, err)
+
+	assert.Contains(t, prompt, "detailed enough for a fix worker to act without rediscovering the problem")
+	assert.Contains(t, prompt, "file/line, function, symbol, or behavior")
+	assert.Contains(t, prompt, "root cause and the failure scenario")
+	assert.Contains(t, prompt, "suggested fix")
+	assert.Contains(t, prompt, "Tests or verification")
+	assert.Contains(t, prompt, `constraints or "do not" notes`)
+	assert.Contains(t, prompt, "what invariant the fix must preserve")
+}
+
 func TestRenderReviewPrompt_MinFixSeverity(t *testing.T) {
 	opts := agent.ReviewOptions{AcceptanceCriteria: []string{"works"}}
 	prompt, err := RenderReviewPrompt("diff", opts)
