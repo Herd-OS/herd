@@ -47,15 +47,19 @@ func acquireReviewLock(ctx context.Context, issueSvc platform.IssueService, repo
 		return nil, false, fmt.Errorf("listing review lock comments for PR #%d: %w", prNumber, err)
 	}
 	lockBranch := reviewLockBranch(prNumber)
-	foundReviewLockComment := false
 	for _, c := range comments {
 		state, ok := parseReviewLockComment(c.Body)
 		if !ok || state.PRNumber != prNumber {
 			continue
 		}
-		foundReviewLockComment = true
 		if state.ExpiresAt.After(now) {
 			return nil, false, nil
+		}
+		if state.BranchSHA == "" {
+			if err := issueSvc.DeleteComment(ctx, c.ID); err != nil && !isNotFoundLikeError(err) {
+				return nil, false, fmt.Errorf("deleting stale review lock comment %d: %w", c.ID, err)
+			}
+			continue
 		}
 		if ok, err := deleteReviewLockBranchIfCurrent(ctx, repoSvc, lockBranch, state.BranchSHA); err != nil {
 			return nil, false, fmt.Errorf("deleting stale review lock branch %s: %w", lockBranch, err)
@@ -76,10 +80,8 @@ func acquireReviewLock(ctx context.Context, issueSvc platform.IssueService, repo
 	lockSHA, err := createReviewLockBranch(ctx, repoSvc, lockBranch, lockFromSHA, lockCommitMessage)
 	if err != nil {
 		if isAlreadyExistsLikeError(err) {
-			if !foundReviewLockComment {
-				if err := createOrphanedReviewLockBranchComment(ctx, issueSvc, repoSvc, prNumber, batchNumber, lockBranch, now); err != nil {
-					return nil, false, err
-				}
+			if err := createOrphanedReviewLockBranchComment(ctx, issueSvc, repoSvc, prNumber, batchNumber, lockBranch, now); err != nil {
+				return nil, false, err
 			}
 			return nil, false, nil
 		}
@@ -130,6 +132,11 @@ func releaseReviewLock(ctx context.Context, issueSvc platform.IssueService, repo
 			}
 		}
 	}
+	if h.state.BranchSHA != "" && h.state.PRNumber != 0 {
+		if err := deleteReviewLockCommentsForBranchSHA(ctx, issueSvc, h.state.PRNumber, h.state.BranchSHA, h.commentID); err != nil {
+			return err
+		}
+	}
 	if h.branch == "" {
 		return nil
 	}
@@ -137,6 +144,26 @@ func releaseReviewLock(ctx context.Context, issueSvc platform.IssueService, repo
 		return fmt.Errorf("deleting review lock branch %s: %w", h.branch, err)
 	} else if !ok {
 		return nil
+	}
+	return nil
+}
+
+func deleteReviewLockCommentsForBranchSHA(ctx context.Context, issueSvc platform.IssueService, prNumber int, branchSHA string, skipCommentID int64) error {
+	comments, err := issueSvc.ListComments(ctx, prNumber)
+	if err != nil {
+		return fmt.Errorf("listing review lock comments for PR #%d: %w", prNumber, err)
+	}
+	for _, c := range comments {
+		if c.ID == skipCommentID {
+			continue
+		}
+		state, ok := parseReviewLockComment(c.Body)
+		if !ok || state.PRNumber != prNumber || state.BranchSHA != branchSHA {
+			continue
+		}
+		if err := issueSvc.DeleteComment(ctx, c.ID); err != nil && !isNotFoundLikeError(err) {
+			return fmt.Errorf("deleting review lock comment %d: %w", c.ID, err)
+		}
 	}
 	return nil
 }
