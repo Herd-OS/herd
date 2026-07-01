@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -208,7 +209,7 @@ func lockedReviewLockState(prNumber int, batchNumber int, runID int64, batchBran
 func parseReviewLockCommitMessage(message string) (reviewLockState, bool) {
 	var state reviewLockState
 	if err := json.Unmarshal([]byte(strings.TrimSpace(message)), &state); err != nil {
-		return reviewLockState{}, false
+		return parseLegacyReviewLockCommitMessage(message)
 	}
 	if state.Kind != "herd-review-lock" || state.Version != 1 {
 		return reviewLockState{}, false
@@ -226,6 +227,78 @@ func parseReviewLockCommitMessage(message string) (reviewLockState, bool) {
 		return reviewLockState{}, false
 	}
 	return state, true
+}
+
+func parseLegacyReviewLockCommitMessage(message string) (reviewLockState, bool) {
+	lines := strings.Split(strings.TrimSpace(message), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "Herd review lock" {
+		return reviewLockState{}, false
+	}
+
+	fields := make(map[string]string)
+	for _, line := range lines[1:] {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(strings.ToLower(key))
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			fields[key] = value
+		}
+	}
+
+	prNumber, ok := parsePositiveReviewLockInt(fields["pr"])
+	if !ok {
+		return reviewLockState{}, false
+	}
+	acquiredAt, ok := parseReviewLockTime(fields["acquired_at"])
+	if !ok {
+		return reviewLockState{}, false
+	}
+	expiresAt := acquiredAt.Add(reviewLockExpiry).UTC()
+
+	batchNumber, _ := parsePositiveReviewLockInt(fields["batch"])
+	return reviewLockState{
+		Kind:        "herd-review-lock",
+		Version:     1,
+		Status:      "locked",
+		LockID:      fields["token"],
+		PRNumber:    prNumber,
+		BatchNumber: batchNumber,
+		Owner:       fields["owner"],
+		AcquiredAt:  &acquiredAt,
+		ExpiresAt:   &expiresAt,
+	}, true
+}
+
+func parsePositiveReviewLockInt(raw string) (int, bool) {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return 0, false
+	}
+	return value, true
+}
+
+func parseReviewLockTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999 -0700",
+		"2006-01-02 15:04:05 -0700 MST",
+		"2006-01-02 15:04:05 -0700",
+	}
+	for _, format := range formats {
+		if parsed, err := time.Parse(format, raw); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func buildReviewLockCommitMessage(state reviewLockState) (string, error) {

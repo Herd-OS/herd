@@ -225,6 +225,8 @@ Review already in progress for PR #N; skipping duplicate review trigger.
 
 Stale locks expire conservatively after their recorded expiry window so a dead Actions job does not block future reviews forever. The implementation treats expiry as recovery from an abandoned review, not as permission for overlapping active reviews. Manual `/herd review` still bypasses stable-disagreement suspension, but it never bypasses the active-review lock.
 
+Pre-append-only lock branches from older HerdOS versions are migrated only when their old marker commit is recognizable as a Herd review lock and is stale according to its acquisition timestamp. Unknown or fresh legacy state fails closed rather than risking duplicate reviews.
+
 Hidden PR comments are not authoritative for locking. If diagnostic lock comments exist, HerdOS filters them out of review context and never uses them to decide whether a lock is active; the GitHub-backed lock state is authoritative.
 
 ## 4. Runners

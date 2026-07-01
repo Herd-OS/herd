@@ -137,6 +137,10 @@ func mustReviewLockCommitMessage(t *testing.T, state reviewLockState) string {
 	return body
 }
 
+func legacyReviewLockCommitMessage(prNumber, batchNumber int, owner string, acquiredAt time.Time) string {
+	return fmt.Sprintf("Herd review lock\n\npr: %d\nbatch: %d\nowner: %s\nacquired_at: %s\ntoken: legacy-token", prNumber, batchNumber, owner, acquiredAt.UTC().Format(time.RFC3339Nano))
+}
+
 func reviewLockCommentCount(comments []*platform.Comment, prNumber int) int {
 	count := 0
 	for _, c := range comments {
@@ -182,6 +186,60 @@ func TestParseReviewLockComment(t *testing.T) {
 				assert.Equal(t, valid.PRNumber, got.PRNumber)
 				assert.Equal(t, valid.BatchNumber, got.BatchNumber)
 				assert.Equal(t, valid.RunID, got.RunID)
+			}
+		})
+	}
+}
+
+func TestParseLegacyReviewLockCommitMessage(t *testing.T) {
+	acquiredAt := time.Date(2026, 7, 1, 9, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		message     string
+		wantOK      bool
+		wantPR      int
+		wantBatch   int
+		wantOwner   string
+		wantExpires time.Time
+	}{
+		{
+			name:        "valid legacy marker",
+			message:     legacyReviewLockCommitMessage(50, 7, "old-owner-7", acquiredAt),
+			wantOK:      true,
+			wantPR:      50,
+			wantBatch:   7,
+			wantOwner:   "old-owner-7",
+			wantExpires: acquiredAt.Add(reviewLockExpiry),
+		},
+		{
+			name:        "valid legacy marker with time string format",
+			message:     fmt.Sprintf("Herd review lock\n\npr: 50\nbatch: 1\nowner: old-owner\nacquired_at: %s\ntoken: legacy-token", acquiredAt.Format("2006-01-02 15:04:05 -0700 MST")),
+			wantOK:      true,
+			wantPR:      50,
+			wantBatch:   1,
+			wantOwner:   "old-owner",
+			wantExpires: acquiredAt.Add(reviewLockExpiry),
+		},
+		{name: "missing herd header", message: "Other lock\n\npr: 50\nacquired_at: 2026-07-01T09:30:00Z", wantOK: false},
+		{name: "missing pr", message: "Herd review lock\n\nbatch: 1\nacquired_at: 2026-07-01T09:30:00Z", wantOK: false},
+		{name: "invalid pr", message: "Herd review lock\n\npr: 50x\nbatch: 1\nacquired_at: 2026-07-01T09:30:00Z", wantOK: false},
+		{name: "missing acquired_at", message: "Herd review lock\n\npr: 50\nbatch: 1", wantOK: false},
+		{name: "invalid acquired_at", message: "Herd review lock\n\npr: 50\nbatch: 1\nacquired_at: yesterday", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseLegacyReviewLockCommitMessage(tt.message)
+
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, "locked", got.Status)
+				assert.Equal(t, tt.wantPR, got.PRNumber)
+				assert.Equal(t, tt.wantBatch, got.BatchNumber)
+				assert.Equal(t, tt.wantOwner, got.Owner)
+				require.NotNil(t, got.AcquiredAt)
+				require.NotNil(t, got.ExpiresAt)
+				assert.Equal(t, tt.wantExpires, *got.ExpiresAt)
 			}
 		})
 	}
@@ -368,6 +426,82 @@ func TestAcquireReviewLock_BranchCreationRaceReadsExistingBranch(t *testing.T) {
 	assert.True(t, strings.HasPrefix(repoSvc.branchSHAs[lockBranch], "existing-unlocked-lock-"))
 }
 
+func TestAcquireReviewLock_StaleLegacyBranchStateIsMigratedByAppendingCommit(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "legacy-sha"},
+		commitMessages: map[string]string{
+			"legacy-sha": legacyReviewLockCommitMessage(50, 1, "old-owner", now.Add(-reviewLockExpiry-time.Minute)),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, handle)
+	newHead := repoSvc.branchSHAs[lockBranch]
+	assert.Equal(t, "legacy-sha", repoSvc.commitParents[newHead])
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[newHead])
+	require.True(t, ok)
+	assert.Equal(t, "locked", state.Status)
+	assert.Equal(t, 50, state.PRNumber)
+	assert.NotEmpty(t, state.LockID)
+}
+
+func TestAcquireReviewLock_FreshLegacyBranchStateStillBlocks(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "legacy-sha"},
+		commitMessages: map[string]string{
+			"legacy-sha": legacyReviewLockCommitMessage(50, 1, "old-owner", now.Add(-time.Minute)),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+
+	require.NoError(t, err)
+	assert.False(t, acquired)
+	assert.Nil(t, handle)
+	assert.Equal(t, "legacy-sha", repoSvc.branchSHAs[lockBranch])
+	assert.NotContains(t, repoSvc.commitParents, "legacy-sha")
+}
+
+func TestAcquireReviewLock_LegacyMigrationConflictRetries(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "legacy-sha"},
+		commitMessages: map[string]string{
+			"legacy-sha": legacyReviewLockCommitMessage(50, 1, "old-owner", now.Add(-reviewLockExpiry-time.Minute)),
+		},
+	}
+	repoSvc.onUpdateBranch = func(name, _ string) {
+		if name != lockBranch || repoSvc.branchSHAs[lockBranch] != "legacy-sha" {
+			return
+		}
+		winnerState := lockedReviewLockState(50, 1, 999, "new-sha", "winner-lock", now)
+		winnerSHA, createErr := repoSvc.CreateCommit(context.Background(), "legacy-sha", mustReviewLockCommitMessage(t, winnerState))
+		require.NoError(t, createErr)
+		repoSvc.branchSHAs[lockBranch] = winnerSHA
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+
+	require.NoError(t, err)
+	require.False(t, acquired)
+	require.Nil(t, handle)
+	headState, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "winner-lock", headState.LockID)
+	assert.GreaterOrEqual(t, repoSvc.markerCommitSeq, 2, "loser created a candidate before retrying after conflict")
+}
+
 func TestAcquireReviewLock_MalformedBranchStateFailsClosed(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	lockBranch := reviewLockBranch(50)
@@ -376,7 +510,9 @@ func TestAcquireReviewLock_MalformedBranchStateFailsClosed(t *testing.T) {
 		message string
 	}{
 		{name: "malformed json", message: `{"kind":`},
-		{name: "legacy non-json", message: "Herd review lock\n\nowner: old"},
+		{name: "legacy missing acquired_at", message: "Herd review lock\n\npr: 50\nbatch: 1\nowner: old"},
+		{name: "legacy wrong pr", message: legacyReviewLockCommitMessage(51, 1, "old-owner", now.Add(-reviewLockExpiry-time.Minute))},
+		{name: "non-herd non-json", message: "Some other lock\n\npr: 50\nacquired_at: 2026-07-01T09:00:00Z"},
 		{name: "wrong kind", message: `{"kind":"other","version":1,"status":"unlocked","pr_number":50}`},
 	}
 
