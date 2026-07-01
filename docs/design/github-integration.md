@@ -213,17 +213,9 @@ All groups use `cancel-in-progress: false` (except `check-ci-on-completion`) so 
 
 #### Agent Review Locking
 
-Batch PR reviews acquire an application-level GitHub Git ref lock before the Integrator fetches context or starts the review agent. The lock is per PR, so only one Herd agent review may run for a batch PR at a time while independent batch PRs can still review concurrently. Workflow concurrency is defense-in-depth only; correctness comes from the app-level lock branch and GitHub's documented non-forced fast-forward ref updates.
+Batch PR reviews acquire an application-level GitHub-backed lock before the Integrator fetches context or starts the review agent. The lock is per PR, so only one Herd agent review may run for a batch PR at a time while independent batch PRs can still review concurrently. Workflow concurrency is defense-in-depth only; correctness comes from the app-level lock and GitHub's atomic ref-update behavior.
 
-The lock branch is persistent:
-
-```
-herd/review-lock/pr-N
-```
-
-Normal acquire and release do not delete this branch. Instead, the branch HEAD is an append-only lock-state log. Each transition creates a small marker commit whose parent is the current lock branch HEAD, then updates the branch with `force: false`. GitHub rejects the update if another run moved the ref first, so the loser retries and observes the winning lock state rather than overwriting it.
-
-Marker commit messages contain JSON state. A locked marker records `kind: herd-review-lock`, `version: 1`, `status: locked`, a random `lock_id`, PR and batch numbers, run owner, batch branch SHA, `acquired_at`, and `expires_at`. A release appends an `unlocked` marker with the released lock ID and release time. Release only appends an unlock if the current HEAD is still locked with the caller's own `lock_id`; stale holders cannot unlock a newer lock.
+Lock acquisition and release are compare-and-swap operations against opaque lock state stored in GitHub. If two runs attempt to acquire or release the lock concurrently, only the run whose view of the current state is still valid succeeds; the other run reloads the latest state and either retries or observes that another review already owns the lock. A release is scoped to the holder that acquired the lock, so stale holders cannot release a newer review's lock.
 
 Duplicate triggers do not launch another agent review. They log or comment:
 
@@ -231,9 +223,9 @@ Duplicate triggers do not launch another agent review. They log or comment:
 Review already in progress for PR #N; skipping duplicate review trigger.
 ```
 
-Stale locks expire conservatively so a dead Actions job does not block future reviews forever. Manual `/herd review` still bypasses stable-disagreement suspension, but it never bypasses the active-review lock.
+Stale locks expire conservatively after their recorded expiry window so a dead Actions job does not block future reviews forever. The implementation treats expiry as recovery from an abandoned review, not as permission for overlapping active reviews. Manual `/herd review` still bypasses stable-disagreement suspension, but it never bypasses the active-review lock.
 
-Hidden PR comments are not authoritative for locking. If diagnostic lock comments exist, HerdOS filters them out of review context and never uses them to decide whether a lock is active; the lock branch HEAD state is authoritative.
+Hidden PR comments are not authoritative for locking. If diagnostic lock comments exist, HerdOS filters them out of review context and never uses them to decide whether a lock is active; the GitHub-backed lock state is authoritative.
 
 ## 4. Runners
 
