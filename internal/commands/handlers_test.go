@@ -51,14 +51,18 @@ type testIssueService struct {
 	addLabelsErr       error
 	createErr          error
 	listCommentsResult []*platform.Comment
+	storedComments     map[int][]*platform.Comment
+	nextCommentID      int64
 }
 
 func newTestIssueService() *testIssueService {
 	return &testIssueService{
-		getResult:     make(map[int]*platform.Issue),
-		addedLabels:   make(map[int][]string),
-		removedLabels: make(map[int][]string),
-		nextIssueNum:  200,
+		getResult:      make(map[int]*platform.Issue),
+		addedLabels:    make(map[int][]string),
+		removedLabels:  make(map[int][]string),
+		nextIssueNum:   200,
+		storedComments: make(map[int][]*platform.Comment),
+		nextCommentID:  1,
 	}
 }
 
@@ -96,15 +100,30 @@ func (m *testIssueService) RemoveLabels(_ context.Context, number int, labels []
 	return nil
 }
 func (m *testIssueService) AddComment(_ context.Context, _ int, _ string) error { return nil }
-func (m *testIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
-	return 0, nil
+func (m *testIssueService) AddCommentReturningID(_ context.Context, number int, body string) (int64, error) {
+	id := m.nextCommentID
+	m.nextCommentID++
+	m.storedComments[number] = append(m.storedComments[number], &platform.Comment{ID: id, Body: body})
+	return id, nil
 }
 func (m *testIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
 	return nil
 }
-func (m *testIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
-func (m *testIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
-	return m.listCommentsResult, nil
+func (m *testIssueService) DeleteComment(_ context.Context, commentID int64) error {
+	for number, comments := range m.storedComments {
+		for i, c := range comments {
+			if c.ID == commentID {
+				m.storedComments[number] = append(comments[:i], comments[i+1:]...)
+				return nil
+			}
+		}
+	}
+	return nil
+}
+func (m *testIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	result := append([]*platform.Comment{}, m.storedComments[number]...)
+	result = append(result, m.listCommentsResult...)
+	return result, nil
 }
 func (m *testIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
 	return nil

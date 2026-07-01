@@ -42,6 +42,7 @@ func initTestRepo(t *testing.T) (string, *git.Git) {
 type mockReviewAgent struct {
 	reviewResult *agent.ReviewResult
 	reviewErr    error
+	onReview     func()
 	// results, when non-nil, returns scripted ReviewResults on successive
 	// calls. After the slice is exhausted, the last entry is repeated.
 	results []*agent.ReviewResult
@@ -55,6 +56,9 @@ func (m *mockReviewAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.E
 	return nil, nil
 }
 func (m *mockReviewAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	if m.onReview != nil {
+		m.onReview()
+	}
 	if m.results != nil {
 		idx := m.calls
 		if idx >= len(m.results) {
@@ -93,6 +97,253 @@ func newReviewTestPlatform(prList []*platform.PullRequest, milestoneIssues []*pl
 		repo:       &mockRepoService{defaultBranch: "main"},
 		milestones: &mockMilestoneService{},
 	}
+}
+
+func newReviewLockTestPlatform(issueSvc platform.IssueService) *mockPlatform {
+	baseIssueSvc, ok := issueSvc.(*mockIssueService)
+	if ok {
+		baseIssueSvc.listResult = []*platform.Issue{
+			{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+		}
+	}
+	return &mockPlatform{
+		issues: issueSvc,
+		prs: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+		milestones: &mockMilestoneService{
+			getResult: map[int]*platform.Milestone{
+				1: {Number: 1, Title: "Batch"},
+			},
+		},
+	}
+}
+
+func mustReviewLockComment(t *testing.T, state reviewLockState) string {
+	t.Helper()
+	body, err := buildReviewLockComment(state)
+	require.NoError(t, err)
+	return body
+}
+
+func reviewLockCommentCount(comments []*platform.Comment, prNumber int) int {
+	count := 0
+	for _, c := range comments {
+		state, ok := parseReviewLockComment(c.Body)
+		if ok && state.PRNumber == prNumber {
+			count++
+		}
+	}
+	return count
+}
+
+func TestParseReviewLockComment(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	valid := reviewLockState{
+		PRNumber:    50,
+		BatchNumber: 1,
+		RunID:       100,
+		Owner:       "test",
+		AcquiredAt:  now,
+		ExpiresAt:   now.Add(reviewLockExpiry),
+	}
+	validBody := mustReviewLockComment(t, valid)
+
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "valid", body: validBody, want: true},
+		{name: "valid with surrounding text", body: "prefix\n" + validBody + "\nsuffix", want: true},
+		{name: "malformed json", body: reviewLockMarkerPrefix + `{"pr_number":` + reviewLockMarkerSuffix, want: false},
+		{name: "missing suffix", body: reviewLockMarkerPrefix + `{}`, want: false},
+		{name: "no marker", body: "ordinary comment", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseReviewLockComment(tt.body)
+			assert.Equal(t, tt.want, ok)
+			if tt.want {
+				assert.Equal(t, valid.PRNumber, got.PRNumber)
+				assert.Equal(t, valid.BatchNumber, got.BatchNumber)
+				assert.Equal(t, valid.RunID, got.RunID)
+			}
+		})
+	}
+}
+
+func TestReview_SkipsWhenReviewLockActive(t *testing.T) {
+	tests := []struct {
+		name   string
+		manual bool
+	}{
+		{name: "automatic review", manual: false},
+		{name: "manual review", manual: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			now := time.Now().UTC()
+			_, err := issueSvc.AddCommentReturningID(context.Background(), 50, mustReviewLockComment(t, reviewLockState{
+				PRNumber:    50,
+				BatchNumber: 1,
+				RunID:       99,
+				Owner:       "other",
+				AcquiredAt:  now,
+				ExpiresAt:   now.Add(reviewLockExpiry),
+			}))
+			require.NoError(t, err)
+
+			ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+			dir, g := initTestRepo(t)
+			result, err := Review(context.Background(), newReviewLockTestPlatform(issueSvc), ag, g, &config.Config{
+				Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+			}, ReviewParams{PRNumber: 50, RepoRoot: dir, Manual: tt.manual})
+
+			require.NoError(t, err)
+			assert.Equal(t, 50, result.BatchPRNumber)
+			assert.Equal(t, 0, ag.calls)
+			assert.Equal(t, 1, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+		})
+	}
+}
+
+func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
+	issueSvc := newMockIssueService()
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), newReviewLockTestPlatform(issueSvc), ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+}
+
+func TestReview_ReleasesReviewLockAfterCreatingFixIssue(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{
+		Approved: false,
+		Findings: []agent.ReviewFinding{{Severity: "HIGH", Description: "Missing validation"}},
+	}}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), newReviewLockTestPlatform(mockCreate), ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 1, createdIssues)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+}
+
+func TestReview_StaleReviewLockIsReplacedAndReviewRuns(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	_, err := issueSvc.AddCommentReturningID(context.Background(), 50, mustReviewLockComment(t, reviewLockState{
+		PRNumber:    50,
+		BatchNumber: 1,
+		RunID:       99,
+		Owner:       "stale",
+		AcquiredAt:  now.Add(-3 * time.Hour),
+		ExpiresAt:   now.Add(-time.Hour),
+	}))
+	require.NoError(t, err)
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), newReviewLockTestPlatform(issueSvc), ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+}
+
+func TestReview_MalformedAndUnrelatedReviewLocksDoNotBlock(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	_, err := issueSvc.AddCommentReturningID(context.Background(), 50, reviewLockMarkerPrefix+`{"pr_number":`+reviewLockMarkerSuffix)
+	require.NoError(t, err)
+	_, err = issueSvc.AddCommentReturningID(context.Background(), 50, mustReviewLockComment(t, reviewLockState{
+		PRNumber:    999,
+		BatchNumber: 1,
+		Owner:       "other-pr",
+		AcquiredAt:  now,
+		ExpiresAt:   now.Add(reviewLockExpiry),
+	}))
+	require.NoError(t, err)
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), newReviewLockTestPlatform(issueSvc), ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+	assert.Equal(t, 1, reviewLockCommentCount(issueSvc.storedComments[50], 999))
+}
+
+func TestReview_SecondTriggerSkipsWhileFirstHoldsReviewLock(t *testing.T) {
+	issueSvc := newMockIssueService()
+	mock := newReviewLockTestPlatform(issueSvc)
+	dir, g := initTestRepo(t)
+	cfg := &config.Config{Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3}}
+
+	secondAg := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "second"}}
+	secondResult := (*ReviewResult)(nil)
+	secondErr := error(nil)
+	calledSecond := false
+	firstAg := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "first"},
+		onReview: func() {
+			if calledSecond {
+				return
+			}
+			calledSecond = true
+			secondResult, secondErr = Review(context.Background(), mock, secondAg, g, cfg, ReviewParams{PRNumber: 50, RepoRoot: dir})
+		},
+	}
+
+	firstResult, err := Review(context.Background(), mock, firstAg, g, cfg, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NoError(t, secondErr)
+	require.NotNil(t, secondResult)
+	assert.True(t, firstResult.Approved)
+	assert.Equal(t, 50, secondResult.BatchPRNumber)
+	assert.Equal(t, 1, firstAg.calls)
+	assert.Equal(t, 0, secondAg.calls)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
 }
 
 func TestReview_NoBatchPR(t *testing.T) {
@@ -523,8 +774,8 @@ func TestReview_AutoMerge(t *testing.T) {
 	}
 
 	mock := &mockPlatform{
-		issues:     issueSvc,
-		prs:        prSvc,
+		issues: issueSvc,
+		prs:    prSvc,
 		workflows: &mockWorkflowService{
 			runs: map[int64]*platform.Run{
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
@@ -1543,11 +1794,11 @@ func TestFilterFindingsBySeverity_Criteria(t *testing.T) {
 
 func TestDedupFindings(t *testing.T) {
 	tests := []struct {
-		name          string
-		findings      []agent.ReviewFinding
-		openFixes     []*platform.Issue
-		wantDescs     []string
-		wantDedupLen  int
+		name         string
+		findings     []agent.ReviewFinding
+		openFixes    []*platform.Issue
+		wantDescs    []string
+		wantDedupLen int
 	}{
 		{
 			name: "title match deduplicates",

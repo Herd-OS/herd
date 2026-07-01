@@ -43,6 +43,8 @@ type mockIssueService struct {
 	removedLabels      map[int][]string
 	updatedIssues      map[int]platform.IssueUpdate
 	comments           map[int][]string
+	storedComments     map[int][]*platform.Comment
+	nextCommentID      int64
 	listCommentsResult []*platform.Comment
 	createResult       *platform.Issue
 	createErr          error
@@ -52,11 +54,13 @@ type mockIssueService struct {
 
 func newMockIssueService() *mockIssueService {
 	return &mockIssueService{
-		getResult:     make(map[int]*platform.Issue),
-		addedLabels:   make(map[int][]string),
-		removedLabels: make(map[int][]string),
-		updatedIssues: make(map[int]platform.IssueUpdate),
-		comments:      make(map[int][]string),
+		getResult:      make(map[int]*platform.Issue),
+		addedLabels:    make(map[int][]string),
+		removedLabels:  make(map[int][]string),
+		updatedIssues:  make(map[int]platform.IssueUpdate),
+		comments:       make(map[int][]string),
+		storedComments: make(map[int][]*platform.Comment),
+		nextCommentID:  1,
 	}
 }
 
@@ -96,15 +100,53 @@ func (m *mockIssueService) AddComment(_ context.Context, number int, body string
 	m.comments[number] = append(m.comments[number], body)
 	return nil
 }
-func (m *mockIssueService) AddCommentReturningID(_ context.Context, _ int, body string) (int64, error) {
-	return 0, nil
+func (m *mockIssueService) AddCommentReturningID(_ context.Context, number int, body string) (int64, error) {
+	id := m.nextCommentID
+	m.nextCommentID++
+	m.comments[number] = append(m.comments[number], body)
+	m.storedComments[number] = append(m.storedComments[number], &platform.Comment{ID: id, Body: body})
+	return id, nil
 }
-func (m *mockIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
+func (m *mockIssueService) UpdateComment(_ context.Context, commentID int64, body string) error {
+	for number, comments := range m.storedComments {
+		for _, c := range comments {
+			if c.ID == commentID {
+				oldBody := c.Body
+				c.Body = body
+				for j := range m.comments[number] {
+					if m.comments[number][j] == oldBody {
+						m.comments[number][j] = body
+						break
+					}
+				}
+				return nil
+			}
+		}
+	}
 	return nil
 }
-func (m *mockIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
-func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
-	return m.listCommentsResult, nil
+func (m *mockIssueService) DeleteComment(_ context.Context, commentID int64) error {
+	for number, comments := range m.storedComments {
+		for i, c := range comments {
+			if c.ID != commentID {
+				continue
+			}
+			m.storedComments[number] = append(comments[:i], comments[i+1:]...)
+			for j := range m.comments[number] {
+				if m.comments[number][j] == c.Body {
+					m.comments[number] = append(m.comments[number][:j], m.comments[number][j+1:]...)
+					break
+				}
+			}
+			return nil
+		}
+	}
+	return nil
+}
+func (m *mockIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	result := append([]*platform.Comment{}, m.storedComments[number]...)
+	result = append(result, m.listCommentsResult...)
+	return result, nil
 }
 func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
 	return nil

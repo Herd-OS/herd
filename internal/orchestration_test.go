@@ -43,16 +43,20 @@ func (p *statefulPlatform) Checks() platform.CheckService             { return n
 // --- Stateful Issue Service ---
 
 type statefulIssueService struct {
-	issues     map[int]*platform.Issue
-	nextNumber int
-	comments   map[int][]string
+	issues         map[int]*platform.Issue
+	nextNumber     int
+	comments       map[int][]string
+	storedComments map[int][]*platform.Comment
+	nextCommentID  int64
 }
 
 func newStatefulIssueService(initial ...*platform.Issue) *statefulIssueService {
 	s := &statefulIssueService{
-		issues:     make(map[int]*platform.Issue),
-		nextNumber: 200,
-		comments:   make(map[int][]string),
+		issues:         make(map[int]*platform.Issue),
+		nextNumber:     200,
+		comments:       make(map[int][]string),
+		storedComments: make(map[int][]*platform.Comment),
+		nextCommentID:  1,
 	}
 	for _, iss := range initial {
 		s.issues[iss.Number] = iss
@@ -155,15 +159,28 @@ func (s *statefulIssueService) AddComment(_ context.Context, number int, body st
 	s.comments[number] = append(s.comments[number], body)
 	return nil
 }
-func (s *statefulIssueService) AddCommentReturningID(_ context.Context, _ int, body string) (int64, error) {
-	return 0, nil
+func (s *statefulIssueService) AddCommentReturningID(_ context.Context, number int, body string) (int64, error) {
+	id := s.nextCommentID
+	s.nextCommentID++
+	s.storedComments[number] = append(s.storedComments[number], &platform.Comment{ID: id, Body: body})
+	return id, nil
 }
 func (s *statefulIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
 	return nil
 }
-func (s *statefulIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
-func (s *statefulIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
-	return nil, nil
+func (s *statefulIssueService) DeleteComment(_ context.Context, commentID int64) error {
+	for number, comments := range s.storedComments {
+		for i, c := range comments {
+			if c.ID == commentID {
+				s.storedComments[number] = append(comments[:i], comments[i+1:]...)
+				return nil
+			}
+		}
+	}
+	return nil
+}
+func (s *statefulIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	return append([]*platform.Comment{}, s.storedComments[number]...), nil
 }
 func (s *statefulIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
 	return nil
