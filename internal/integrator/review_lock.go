@@ -219,20 +219,20 @@ func createOrphanedReviewLockBranchComment(ctx context.Context, issueSvc platfor
 }
 
 func deleteReviewLockBranchIfCurrent(ctx context.Context, repoSvc platform.RepositoryService, branch string, expectedSHA string) (bool, error) {
-	if expectedSHA != "" {
-		repo, ok := repoSvc.(reviewLockCompareDeleteRepository)
-		if !ok {
-			return false, fmt.Errorf("repository service does not support leased review lock branch deletion")
+	if expectedSHA == "" {
+		if _, err := repoSvc.GetBranchSHA(ctx, branch); err != nil {
+			if isNotFoundLikeError(err) {
+				return true, nil
+			}
+			return false, err
 		}
-		return repo.DeleteBranchIfSHA(ctx, branch, expectedSHA)
+		return false, nil
 	}
-	if err := repoSvc.DeleteBranch(ctx, branch); err != nil {
-		if isNotFoundLikeError(err) {
-			return true, nil
-		}
-		return false, err
+	repo, ok := repoSvc.(reviewLockCompareDeleteRepository)
+	if !ok {
+		return false, fmt.Errorf("repository service does not support leased review lock branch deletion")
 	}
-	return true, nil
+	return repo.DeleteBranchIfSHA(ctx, branch, expectedSHA)
 }
 
 func filterReviewLockComments(comments []*platform.Comment) []*platform.Comment {
