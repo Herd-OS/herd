@@ -251,6 +251,7 @@ func (m *mockWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*pl
 type mockRepoService struct {
 	defaultBranch   string
 	branchExists    map[string]bool
+	branchSHAs      map[string]string
 	deletedBranch   string
 	deletedBranches []string
 }
@@ -259,7 +260,7 @@ func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error)
 func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, nil
 }
-func (m *mockRepoService) CreateBranch(_ context.Context, name, _ string) error {
+func (m *mockRepoService) CreateBranch(_ context.Context, name, sha string) error {
 	if m.branchExists == nil {
 		return nil
 	}
@@ -267,6 +268,9 @@ func (m *mockRepoService) CreateBranch(_ context.Context, name, _ string) error 
 		return fmt.Errorf("reference already exists")
 	}
 	m.branchExists[name] = true
+	if m.branchSHAs != nil {
+		m.branchSHAs[name] = sha
+	}
 	return nil
 }
 func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
@@ -275,11 +279,17 @@ func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 	if m.branchExists != nil {
 		delete(m.branchExists, name)
 	}
+	if m.branchSHAs != nil {
+		delete(m.branchSHAs, name)
+	}
 	return nil
 }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
 	if m.branchExists != nil {
 		if m.branchExists[name] {
+			if m.branchSHAs != nil && m.branchSHAs[name] != "" {
+				return m.branchSHAs[name], nil
+			}
 			return "abc123", nil
 		}
 	}
