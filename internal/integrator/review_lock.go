@@ -242,6 +242,17 @@ func createOrphanedReviewLockBranchComment(ctx context.Context, issueSvc platfor
 	if _, err := issueSvc.AddCommentReturningID(ctx, prNumber, body); err != nil {
 		return fmt.Errorf("creating orphaned review lock branch comment for PR #%d: %w", prNumber, err)
 	}
+	currentSHA, err := repoSvc.GetBranchSHA(ctx, lockBranch)
+	if err != nil {
+		if isNotFoundLikeError(err) {
+			_ = deleteReviewLockCommentsForBranchSHA(ctx, issueSvc, prNumber, branchSHA, 0)
+			return nil
+		}
+		return fmt.Errorf("validating orphaned review lock branch %s: %w", lockBranch, err)
+	}
+	if currentSHA != branchSHA {
+		_ = deleteReviewLockCommentsForBranchSHA(ctx, issueSvc, prNumber, branchSHA, 0)
+	}
 	return nil
 }
 

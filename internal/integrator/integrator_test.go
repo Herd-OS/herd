@@ -256,6 +256,7 @@ type mockRepoService struct {
 	deletedBranch   string
 	deletedBranches []string
 	onDeleteIfSHA   func(name, expectedSHA string)
+	onGetBranchSHA  func(name string)
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
@@ -309,6 +310,9 @@ func (m *mockRepoService) DeleteBranchIfSHA(ctx context.Context, name, expectedS
 	return true, m.DeleteBranch(ctx, name)
 }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
+	if m.onGetBranchSHA != nil {
+		m.onGetBranchSHA(name)
+	}
 	if m.branchExists != nil {
 		if m.branchExists[name] {
 			if m.branchSHAs != nil && m.branchSHAs[name] != "" {

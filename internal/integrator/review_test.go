@@ -244,6 +244,37 @@ func TestAcquireReviewLock_OrphanedBranchGetsExpiringCommentAndCanBeReclaimed(t 
 	assert.Equal(t, []string{lockBranch}, repoSvc.deletedBranches)
 }
 
+func TestAcquireReviewLock_OrphanCommentDeletedWhenBranchDisappearsAfterWrite(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	issueSvc := newMockIssueService()
+	getBranchCalls := 0
+	var repoSvc *mockRepoService
+	repoSvc = &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "active-sha"},
+		onGetBranchSHA: func(name string) {
+			if name != lockBranch {
+				return
+			}
+			getBranchCalls++
+			if getBranchCalls == 2 {
+				delete(repoSvc.branchExists, lockBranch)
+				delete(repoSvc.branchSHAs, lockBranch)
+			}
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), issueSvc, repoSvc, 50, 1, 100, "new-sha", now)
+
+	require.NoError(t, err)
+	require.False(t, acquired)
+	require.Nil(t, handle)
+	assert.False(t, repoSvc.branchExists[lockBranch])
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+	assert.Equal(t, 2, getBranchCalls)
+}
+
 func TestAcquireReviewLock_StaleCleanupDoesNotDeleteBranchWithDifferentSHA(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	lockBranch := reviewLockBranch(50)
