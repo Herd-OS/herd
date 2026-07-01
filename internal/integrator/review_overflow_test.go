@@ -82,7 +82,7 @@ func TestCreateFixIssue_PostsOverflowComment(t *testing.T) {
 			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
 		},
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -171,7 +171,7 @@ func TestCreateFixIssue_ShortBodyNoOverflowComment(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 

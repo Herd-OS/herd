@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -26,14 +25,16 @@ type reviewLockState struct {
 
 type reviewLockHandle struct {
 	commentID int64
+	branch    string
 	state     reviewLockState
 }
 
-func acquireReviewLock(ctx context.Context, issueSvc platform.IssueService, prNumber int, batchNumber int, runID int64, now time.Time) (*reviewLockHandle, bool, error) {
+func acquireReviewLock(ctx context.Context, issueSvc platform.IssueService, repoSvc platform.RepositoryService, prNumber int, batchNumber int, runID int64, lockFromSHA string, now time.Time) (*reviewLockHandle, bool, error) {
 	comments, err := issueSvc.ListComments(ctx, prNumber)
 	if err != nil {
 		return nil, false, fmt.Errorf("listing review lock comments for PR #%d: %w", prNumber, err)
 	}
+	lockBranch := reviewLockBranch(prNumber)
 	for _, c := range comments {
 		state, ok := parseReviewLockComment(c.Body)
 		if !ok || state.PRNumber != prNumber {
@@ -45,6 +46,16 @@ func acquireReviewLock(ctx context.Context, issueSvc platform.IssueService, prNu
 		if err := issueSvc.DeleteComment(ctx, c.ID); err != nil && !isNotFoundLikeError(err) {
 			return nil, false, fmt.Errorf("deleting stale review lock comment %d: %w", c.ID, err)
 		}
+		if err := repoSvc.DeleteBranch(ctx, lockBranch); err != nil && !isNotFoundLikeError(err) {
+			return nil, false, fmt.Errorf("deleting stale review lock branch %s: %w", lockBranch, err)
+		}
+	}
+
+	if err := repoSvc.CreateBranch(ctx, lockBranch, lockFromSHA); err != nil {
+		if isAlreadyExistsLikeError(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("creating review lock branch %s: %w", lockBranch, err)
 	}
 
 	state := reviewLockState{
@@ -61,34 +72,31 @@ func acquireReviewLock(ctx context.Context, issueSvc platform.IssueService, prNu
 	}
 	commentID, err := issueSvc.AddCommentReturningID(ctx, prNumber, body)
 	if err != nil {
+		_ = repoSvc.DeleteBranch(ctx, lockBranch)
 		return nil, false, fmt.Errorf("creating review lock comment for PR #%d: %w", prNumber, err)
 	}
-
-	comments, err = issueSvc.ListComments(ctx, prNumber)
-	if err != nil {
-		_ = issueSvc.DeleteComment(ctx, commentID)
-		return nil, false, fmt.Errorf("listing review lock comments after create for PR #%d: %w", prNumber, err)
-	}
-	active := activeReviewLocks(comments, prNumber, now)
-	if len(active) == 0 || active[0].commentID != commentID {
-		if err := issueSvc.DeleteComment(ctx, commentID); err != nil && !isNotFoundLikeError(err) {
-			return nil, false, fmt.Errorf("deleting duplicate review lock comment %d: %w", commentID, err)
-		}
-		return nil, false, nil
-	}
-
-	return &reviewLockHandle{commentID: commentID, state: state}, true, nil
+	return &reviewLockHandle{commentID: commentID, branch: lockBranch, state: state}, true, nil
 }
 
-func releaseReviewLock(ctx context.Context, issueSvc platform.IssueService, h *reviewLockHandle) error {
-	if h == nil || h.commentID == 0 {
+func releaseReviewLock(ctx context.Context, issueSvc platform.IssueService, repoSvc platform.RepositoryService, h *reviewLockHandle) error {
+	if h == nil {
 		return nil
 	}
-	if err := issueSvc.DeleteComment(ctx, h.commentID); err != nil {
+	if h.commentID != 0 {
+		if err := issueSvc.DeleteComment(ctx, h.commentID); err != nil {
+			if !isNotFoundLikeError(err) {
+				return fmt.Errorf("deleting review lock comment %d: %w", h.commentID, err)
+			}
+		}
+	}
+	if h.branch == "" {
+		return nil
+	}
+	if err := repoSvc.DeleteBranch(ctx, h.branch); err != nil {
 		if isNotFoundLikeError(err) {
 			return nil
 		}
-		return fmt.Errorf("deleting review lock comment %d: %w", h.commentID, err)
+		return fmt.Errorf("deleting review lock branch %s: %w", h.branch, err)
 	}
 	return nil
 }
@@ -126,22 +134,8 @@ func reviewLockOwner(batchNumber int, runID int64) string {
 	return fmt.Sprintf("batch-%d", batchNumber)
 }
 
-func activeReviewLocks(comments []*platform.Comment, prNumber int, now time.Time) []*reviewLockHandle {
-	var active []*reviewLockHandle
-	for _, c := range comments {
-		state, ok := parseReviewLockComment(c.Body)
-		if !ok || state.PRNumber != prNumber || !state.ExpiresAt.After(now) {
-			continue
-		}
-		active = append(active, &reviewLockHandle{commentID: c.ID, state: state})
-	}
-	sort.SliceStable(active, func(i, j int) bool {
-		if active[i].state.AcquiredAt.Equal(active[j].state.AcquiredAt) {
-			return active[i].commentID < active[j].commentID
-		}
-		return active[i].state.AcquiredAt.Before(active[j].state.AcquiredAt)
-	})
-	return active
+func reviewLockBranch(prNumber int) string {
+	return fmt.Sprintf("herd/review-lock/pr-%d", prNumber)
 }
 
 func filterReviewLockComments(comments []*platform.Comment) []*platform.Comment {
@@ -161,4 +155,14 @@ func isNotFoundLikeError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "404") || strings.Contains(msg, "not found")
+}
+
+func isAlreadyExistsLikeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "422") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "reference already exists")
 }

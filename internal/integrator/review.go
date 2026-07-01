@@ -104,7 +104,11 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 
 	if cfg.Integrator.Review {
-		reviewLock, acquired, err := acquireReviewLock(ctx, p.Issues(), pr.Number, ms.Number, params.RunID, time.Now())
+		lockFromSHA, err := p.Repository().GetBranchSHA(ctx, batchBranch)
+		if err != nil {
+			return nil, fmt.Errorf("getting branch SHA for review lock on %s: %w", batchBranch, err)
+		}
+		reviewLock, acquired, err := acquireReviewLock(ctx, p.Issues(), p.Repository(), pr.Number, ms.Number, params.RunID, lockFromSHA, time.Now())
 		if err != nil {
 			return nil, fmt.Errorf("acquiring review lock for PR #%d: %w", pr.Number, err)
 		}
@@ -113,7 +117,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			return &ReviewResult{BatchPRNumber: pr.Number}, nil
 		}
 		defer func() {
-			if err := releaseReviewLock(ctx, p.Issues(), reviewLock); err != nil {
+			if err := releaseReviewLock(ctx, p.Issues(), p.Repository(), reviewLock); err != nil {
 				fmt.Printf("Warning: failed to release review lock for PR #%d: %s\n", pr.Number, err)
 			}
 		}()

@@ -259,15 +259,27 @@ func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error)
 func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, nil
 }
-func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
+func (m *mockRepoService) CreateBranch(_ context.Context, name, _ string) error {
+	if m.branchExists == nil {
+		return nil
+	}
+	if m.branchExists[name] {
+		return fmt.Errorf("reference already exists")
+	}
+	m.branchExists[name] = true
+	return nil
+}
 func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 	m.deletedBranch = name
 	m.deletedBranches = append(m.deletedBranches, name)
+	if m.branchExists != nil {
+		delete(m.branchExists, name)
+	}
 	return nil
 }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
 	if m.branchExists != nil {
-		if _, ok := m.branchExists[name]; ok {
+		if m.branchExists[name] {
 			return "abc123", nil
 		}
 	}

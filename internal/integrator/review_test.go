@@ -94,7 +94,7 @@ func newReviewTestPlatform(prList []*platform.PullRequest, milestoneIssues []*pl
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 }
@@ -114,7 +114,7 @@ func newReviewLockTestPlatform(issueSvc platform.IssueService) *mockPlatform {
 			},
 		},
 		workflows: &mockWorkflowService{},
-		repo:      &mockRepoService{defaultBranch: "main"},
+		repo:      &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{
 			getResult: map[int]*platform.Milestone{
 				1: {Number: 1, Title: "Batch"},
@@ -139,6 +139,14 @@ func reviewLockCommentCount(comments []*platform.Comment, prNumber int) int {
 		}
 	}
 	return count
+}
+
+type hiddenReviewLockCommentIssueService struct {
+	*mockIssueService
+}
+
+func (s *hiddenReviewLockCommentIssueService) ListComments(context.Context, int) ([]*platform.Comment, error) {
+	return nil, nil
 }
 
 func TestParseReviewLockComment(t *testing.T) {
@@ -176,6 +184,26 @@ func TestParseReviewLockComment(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAcquireReviewLock_AtomicBranchBlocksDuplicateWhenCommentsLag(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	issueSvc := &hiddenReviewLockCommentIssueService{mockIssueService: newMockIssueService()}
+	repoSvc := &mockRepoService{branchExists: map[string]bool{"herd/batch/1-batch": true}}
+
+	first, acquired, err := acquireReviewLock(context.Background(), issueSvc, repoSvc, 50, 1, 100, "abc123", now)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, first)
+
+	second, acquired, err := acquireReviewLock(context.Background(), issueSvc, repoSvc, 50, 1, 101, "abc123", now)
+	require.NoError(t, err)
+	assert.False(t, acquired, "duplicate contender must be blocked even when comments are not visible yet")
+	assert.Nil(t, second)
+	assert.True(t, repoSvc.branchExists[reviewLockBranch(50)])
+
+	require.NoError(t, releaseReviewLock(context.Background(), issueSvc.mockIssueService, repoSvc, first))
+	assert.False(t, repoSvc.branchExists[reviewLockBranch(50)])
 }
 
 func TestReview_SkipsWhenReviewLockActive(t *testing.T) {
@@ -217,10 +245,13 @@ func TestReview_SkipsWhenReviewLockActive(t *testing.T) {
 
 func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
 	issueSvc := newMockIssueService()
+	repoSvc := &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}}
 	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
 
 	dir, g := initTestRepo(t)
-	result, err := Review(context.Background(), newReviewLockTestPlatform(issueSvc), ag, g, &config.Config{
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
 		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
 	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
 
@@ -228,6 +259,7 @@ func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
 	assert.True(t, result.Approved)
 	assert.Equal(t, 1, ag.calls)
 	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+	assert.False(t, repoSvc.branchExists[reviewLockBranch(50)])
 }
 
 func TestReview_ReleasesReviewLockAfterCreatingFixIssue(t *testing.T) {
@@ -432,7 +464,7 @@ func TestReview_ChangesRequested_CreatesFixes(t *testing.T) {
 			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
 		},
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -496,7 +528,7 @@ func TestReview_LowSeverityIncludedWhenConfigured(t *testing.T) {
 			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
 		},
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -556,7 +588,7 @@ func TestReview_SkipsWhenFixWorkersInProgress(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -605,7 +637,7 @@ func TestReview_SkipsWhenFixWorkersReady(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -687,7 +719,7 @@ func TestReview_SkipsWhenCIFixInProgress(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -781,7 +813,7 @@ func TestReview_AutoMerge(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -884,7 +916,7 @@ func TestReview_ByPRNumber(t *testing.T) {
 		workflows: &mockWorkflowService{
 			runs: map[int64]*platform.Run{},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: msSvc,
 	}
 
@@ -912,7 +944,7 @@ func TestReview_BatchLookup(t *testing.T) {
 			listResult: []*platform.PullRequest{{Number: 60, Title: "[herd] Batch", Head: "herd/batch/1-batch"}},
 		},
 		workflows: &mockWorkflowService{},
-		repo:      &mockRepoService{defaultBranch: "main"},
+		repo:      &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{
 			getResult: map[int]*platform.Milestone{
 				1: {Number: 1, Title: "Batch"},
@@ -941,7 +973,7 @@ func TestReview_BatchLookup_NoPR(t *testing.T) {
 			listResult: []*platform.PullRequest{},
 		},
 		workflows: &mockWorkflowService{},
-		repo:      &mockRepoService{defaultBranch: "main"},
+		repo:      &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{
 			getResult: map[int]*platform.Milestone{
 				5: {Number: 5, Title: "My Feature"},
@@ -982,7 +1014,7 @@ func TestReview_AutoMergeFailure(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1028,7 +1060,7 @@ func TestReview_DisabledAutoMergeFailure(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1119,7 +1151,7 @@ func TestReview_DispatchCountAccurateWhenSomeCreatesFail(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1187,7 +1219,7 @@ func TestReview_NoCommentWhenAllCreatesFail(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1320,7 +1352,7 @@ func TestReview_OnlyLowFindings_Approves(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1384,7 +1416,7 @@ func TestReview_RequestChangesReview(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1440,7 +1472,7 @@ func TestReview_BatchFixIssue_SingleIssue(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1507,7 +1539,7 @@ func TestReview_DedupFindings(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1584,7 +1616,7 @@ func TestReview_RecurringFindingNotSwallowed(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1632,7 +1664,7 @@ func TestReview_SkipsCompletedBatch(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1676,7 +1708,7 @@ func TestReview_SkipsWhenSomeFixWorkersStillRunning(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2314,7 +2346,7 @@ func TestReview_PassesFixRequestsToAgent(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2434,7 +2466,7 @@ func TestReview_PassesPriorReviewCommentsToAgent(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2578,7 +2610,7 @@ func TestReview_UserFeedbackPassedToAgent(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2705,7 +2737,7 @@ func newStandalonePlatform() (*mockPlatform, *mockCapturingPRService, *mockIssue
 		issues:     issueSvc,
 		prs:        prSvc,
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 	return mock, prSvc, issueSvc, wf
@@ -2815,7 +2847,7 @@ func TestReviewStandalone_ExtraInstructions(t *testing.T) {
 		issues:     issueSvc,
 		prs:        prSvc,
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2853,7 +2885,7 @@ func TestReviewStandalone_UserFeedbackPassedToAgent(t *testing.T) {
 		issues:     issueSvc,
 		prs:        prSvc,
 		workflows:  &mockWorkflowService{},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2896,7 +2928,7 @@ func newUnparseableRetryPlatform() (*mockPlatform, *mockCapturingPRService) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 	return mock, prSvc
@@ -3167,7 +3199,7 @@ func TestReview_PassesWorkerNoOpVerdicts(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -3234,7 +3266,7 @@ func TestReview_DetectsStableDisagreement(t *testing.T) {
 		issues:     mockCreate,
 		prs:        prSvc,
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -3319,7 +3351,7 @@ func TestReview_NoStableDisagreementWhenAllNew(t *testing.T) {
 			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
 		},
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -3384,7 +3416,7 @@ func TestReview_BlockedByStableDisagreementLabel(t *testing.T) {
 		issues:     mockCreate,
 		prs:        prSvc,
 		workflows:  &mockWorkflowService{},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: msSvc,
 	}
 
@@ -3428,7 +3460,7 @@ func TestReview_ManualBypassesStableDisagreementLabel(t *testing.T) {
 		issues:     issueSvc,
 		prs:        prSvc,
 		workflows:  &mockWorkflowService{},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: msSvc,
 	}
 
