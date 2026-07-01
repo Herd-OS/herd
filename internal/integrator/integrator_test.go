@@ -43,6 +43,8 @@ type mockIssueService struct {
 	removedLabels      map[int][]string
 	updatedIssues      map[int]platform.IssueUpdate
 	comments           map[int][]string
+	storedComments     map[int][]*platform.Comment
+	nextCommentID      int64
 	listCommentsResult []*platform.Comment
 	createResult       *platform.Issue
 	createErr          error
@@ -52,11 +54,13 @@ type mockIssueService struct {
 
 func newMockIssueService() *mockIssueService {
 	return &mockIssueService{
-		getResult:     make(map[int]*platform.Issue),
-		addedLabels:   make(map[int][]string),
-		removedLabels: make(map[int][]string),
-		updatedIssues: make(map[int]platform.IssueUpdate),
-		comments:      make(map[int][]string),
+		getResult:      make(map[int]*platform.Issue),
+		addedLabels:    make(map[int][]string),
+		removedLabels:  make(map[int][]string),
+		updatedIssues:  make(map[int]platform.IssueUpdate),
+		comments:       make(map[int][]string),
+		storedComments: make(map[int][]*platform.Comment),
+		nextCommentID:  1,
 	}
 }
 
@@ -96,15 +100,53 @@ func (m *mockIssueService) AddComment(_ context.Context, number int, body string
 	m.comments[number] = append(m.comments[number], body)
 	return nil
 }
-func (m *mockIssueService) AddCommentReturningID(_ context.Context, _ int, body string) (int64, error) {
-	return 0, nil
+func (m *mockIssueService) AddCommentReturningID(_ context.Context, number int, body string) (int64, error) {
+	id := m.nextCommentID
+	m.nextCommentID++
+	m.comments[number] = append(m.comments[number], body)
+	m.storedComments[number] = append(m.storedComments[number], &platform.Comment{ID: id, Body: body})
+	return id, nil
 }
-func (m *mockIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
+func (m *mockIssueService) UpdateComment(_ context.Context, commentID int64, body string) error {
+	for number, comments := range m.storedComments {
+		for _, c := range comments {
+			if c.ID == commentID {
+				oldBody := c.Body
+				c.Body = body
+				for j := range m.comments[number] {
+					if m.comments[number][j] == oldBody {
+						m.comments[number][j] = body
+						break
+					}
+				}
+				return nil
+			}
+		}
+	}
 	return nil
 }
-func (m *mockIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
-func (m *mockIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
-	return m.listCommentsResult, nil
+func (m *mockIssueService) DeleteComment(_ context.Context, commentID int64) error {
+	for number, comments := range m.storedComments {
+		for i, c := range comments {
+			if c.ID != commentID {
+				continue
+			}
+			m.storedComments[number] = append(comments[:i], comments[i+1:]...)
+			for j := range m.comments[number] {
+				if m.comments[number][j] == c.Body {
+					m.comments[number] = append(m.comments[number][:j], m.comments[number][j+1:]...)
+					break
+				}
+			}
+			return nil
+		}
+	}
+	return nil
+}
+func (m *mockIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	result := append([]*platform.Comment{}, m.storedComments[number]...)
+	result = append(result, m.listCommentsResult...)
+	return result, nil
 }
 func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
 	return nil
@@ -209,23 +251,107 @@ func (m *mockWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*pl
 type mockRepoService struct {
 	defaultBranch   string
 	branchExists    map[string]bool
+	branchSHAs      map[string]string
+	commitMessages  map[string]string
+	commitParents   map[string]string
+	markerCommitSeq int
 	deletedBranch   string
 	deletedBranches []string
+	onGetBranchSHA  func(name string)
+	onUpdateBranch  func(name, sha string)
+	updateConflicts int
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
 func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, nil
 }
-func (m *mockRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
+func (m *mockRepoService) CreateBranch(_ context.Context, name, sha string) error {
+	if m.branchExists == nil {
+		return nil
+	}
+	if m.branchExists[name] {
+		return fmt.Errorf("reference already exists")
+	}
+	m.branchExists[name] = true
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	m.branchSHAs[name] = sha
+	return nil
+}
+func (m *mockRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, message string) (string, error) {
+	markerSHA, err := m.CreateCommit(ctx, sha, message)
+	if err != nil {
+		return "", err
+	}
+	if err := m.CreateBranch(ctx, name, markerSHA); err != nil {
+		return "", err
+	}
+	return markerSHA, nil
+}
+func (m *mockRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	m.markerCommitSeq++
+	markerSHA := fmt.Sprintf("%s-lock-%d", parentSHA, m.markerCommitSeq)
+	if m.commitMessages == nil {
+		m.commitMessages = make(map[string]string)
+	}
+	if m.commitParents == nil {
+		m.commitParents = make(map[string]string)
+	}
+	m.commitMessages[markerSHA] = message
+	m.commitParents[markerSHA] = parentSHA
+	return markerSHA, nil
+}
+func (m *mockRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if m.commitMessages != nil {
+		if msg, ok := m.commitMessages[sha]; ok {
+			return msg, nil
+		}
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (m *mockRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if m.onUpdateBranch != nil {
+		m.onUpdateBranch(name, sha)
+	}
+	if m.updateConflicts > 0 {
+		m.updateConflicts--
+		return platform.ErrRefUpdateConflict
+	}
+	if m.branchExists == nil {
+		m.branchExists = make(map[string]bool)
+	}
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if !m.branchExists[name] || m.branchSHAs[name] != m.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
+	m.branchExists[name] = true
+	m.branchSHAs[name] = sha
+	return nil
+}
 func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 	m.deletedBranch = name
 	m.deletedBranches = append(m.deletedBranches, name)
+	if m.branchExists != nil {
+		delete(m.branchExists, name)
+	}
+	if m.branchSHAs != nil {
+		delete(m.branchSHAs, name)
+	}
 	return nil
 }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
+	if m.onGetBranchSHA != nil {
+		m.onGetBranchSHA(name)
+	}
 	if m.branchExists != nil {
-		if _, ok := m.branchExists[name]; ok {
+		if m.branchExists[name] {
+			if m.branchSHAs != nil && m.branchSHAs[name] != "" {
+				return m.branchSHAs[name], nil
+			}
 			return "abc123", nil
 		}
 	}

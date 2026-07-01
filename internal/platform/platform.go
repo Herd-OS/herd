@@ -2,8 +2,15 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+var ErrRefUpdateConflict = errors.New("git ref update conflict")
+
+func IsRefUpdateConflict(err error) bool {
+	return errors.Is(err, ErrRefUpdateConflict)
+}
 
 // Platform abstracts all interactions with the hosting platform (GitHub, GitLab, etc.).
 type Platform interface {

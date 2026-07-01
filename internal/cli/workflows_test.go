@@ -10,7 +10,26 @@ import (
 	"github.com/herd-os/herd/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
+
+type githubActionsWorkflow struct {
+	Jobs map[string]githubActionsJob `yaml:"jobs"`
+}
+
+type githubActionsJob struct {
+	Concurrency *githubActionsConcurrency `yaml:"concurrency"`
+	Steps       []githubActionsStep       `yaml:"steps"`
+}
+
+type githubActionsConcurrency struct {
+	Group            string `yaml:"group"`
+	CancelInProgress bool   `yaml:"cancel-in-progress"`
+}
+
+type githubActionsStep struct {
+	Run string `yaml:"run"`
+}
 
 func TestWorkersExtraEnv_DefaultsEmpty(t *testing.T) {
 	cfg := config.Default()
@@ -131,6 +150,80 @@ func TestIntegratorWorkflow_RendersConfiguredCIWorkflows(t *testing.T) {
 	assert.Contains(t, s, "github.event.workflow_run.path != '.github/workflows/herd-worker.yml'")
 	assert.Contains(t, s, "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
 	assert.Contains(t, s, "herd integrator review --batch \"$BATCH\"")
+}
+
+func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T) {
+	cfg := config.Default()
+	cfg.Integrator.CIWorkflows = []string{"CI"}
+	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+
+	expectedGroups := map[string]string{
+		"integrate":                    "herd-integrate-${{ github.event.workflow_run.head_branch || github.ref }}",
+		"check-ci-workflow-completion": "herd-integrate-${{ github.event.workflow_run.head_branch || github.ref }}",
+		"advance-on-close":             "herd-advance-${{ github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number }}",
+		"re-review":                    "herd-re-review-${{ github.event.pull_request.number }}",
+		"handle-comment":               "herd-comment-${{ github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number }}",
+	}
+
+	for jobName, expectedGroup := range expectedGroups {
+		t.Run(jobName, func(t *testing.T) {
+			job, ok := workflow.Jobs[jobName]
+			require.True(t, ok, "job should render")
+			require.NotNil(t, job.Concurrency, "review-capable job should define concurrency")
+			assert.Equal(t, expectedGroup, job.Concurrency.Group)
+			assert.False(t, job.Concurrency.CancelInProgress,
+				"review-capable job should queue review attempts for the application lock")
+		})
+	}
+
+	for jobName, job := range workflow.Jobs {
+		if !jobInvokesIntegratorReview(job) {
+			continue
+		}
+
+		require.NotNil(t, job.Concurrency, "%s invokes review and should define concurrency", jobName)
+		assert.NotEmpty(t, job.Concurrency.Group, "%s concurrency group should be scoped", jobName)
+		assert.False(t, job.Concurrency.CancelInProgress,
+			"%s invokes review and should not cancel queued review attempts", jobName)
+	}
+}
+
+func TestIntegratorWorkflow_ConfiguredCIReviewRetrySharesWorkerCompletionConcurrency(t *testing.T) {
+	cfg := config.Default()
+	cfg.Integrator.CIWorkflows = []string{"CI"}
+	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+
+	integrate := workflow.Jobs["integrate"]
+	checkCIWorkflowCompletion := workflow.Jobs["check-ci-workflow-completion"]
+	require.NotNil(t, integrate.Concurrency)
+	require.NotNil(t, checkCIWorkflowCompletion.Concurrency)
+	assert.Equal(t, integrate.Concurrency.Group, checkCIWorkflowCompletion.Concurrency.Group)
+	assert.NotContains(t, checkCIWorkflowCompletion.Concurrency.Group, "herd-check-ci")
+	assert.Contains(t, checkCIWorkflowCompletion.Concurrency.Group, "github.event.workflow_run.head_branch")
+	assert.True(t, jobInvokesIntegratorReview(checkCIWorkflowCompletion))
+	assert.Contains(t, string(rendered), "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
+	assert.Contains(t, string(rendered), "herd integrator review --batch \"$BATCH\"")
+}
+
+func jobInvokesIntegratorReview(job githubActionsJob) bool {
+	for _, step := range job.Steps {
+		if strings.Contains(step.Run, "herd integrator review") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRenderWorkflow_StaticPassThrough(t *testing.T) {

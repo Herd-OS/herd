@@ -103,6 +103,26 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
 
+	if cfg.Integrator.Review {
+		lockFromSHA, err := p.Repository().GetBranchSHA(ctx, batchBranch)
+		if err != nil {
+			return nil, fmt.Errorf("getting branch SHA for review lock on %s: %w", batchBranch, err)
+		}
+		reviewLock, acquired, err := acquireReviewLock(ctx, p.Issues(), p.Repository(), pr.Number, ms.Number, params.RunID, lockFromSHA, time.Now())
+		if err != nil {
+			return nil, fmt.Errorf("acquiring review lock for PR #%d: %w", pr.Number, err)
+		}
+		if !acquired {
+			fmt.Printf("Review already in progress for PR #%d; skipping duplicate review trigger.\n", pr.Number)
+			return &ReviewResult{BatchPRNumber: pr.Number}, nil
+		}
+		defer func() {
+			if err := releaseReviewLock(ctx, p.Issues(), p.Repository(), reviewLock); err != nil {
+				fmt.Printf("Warning: failed to release review lock for PR #%d: %s\n", pr.Number, err)
+			}
+		}()
+	}
+
 	// Stable-disagreement circuit breaker: once the integrator has detected
 	// a reviewer↔worker stalemate, automatic review is suspended until the
 	// user removes the label (or runs /herd review or /herd integrate
@@ -175,6 +195,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if commentErr != nil {
 		fmt.Printf("Warning: failed to list PR comments: %s\n", commentErr)
 	}
+	prComments = filterReviewLockComments(prComments)
 	for _, fix := range collectFixRequestsFromComments(prComments) {
 		allCriteria = append(allCriteria, "User requested: "+fix)
 	}

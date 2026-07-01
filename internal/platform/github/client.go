@@ -80,13 +80,13 @@ func (c *Client) HTTPClient() *http.Client {
 	return c.httpClient
 }
 
-func (c *Client) Issues() platform.IssueService           { return &issueService{c} }
+func (c *Client) Issues() platform.IssueService             { return &issueService{c} }
 func (c *Client) PullRequests() platform.PullRequestService { return &pullRequestService{c} }
 func (c *Client) Workflows() platform.WorkflowService       { return &workflowService{c} }
 func (c *Client) Labels() platform.LabelService             { return &labelService{c} }
 func (c *Client) Milestones() platform.MilestoneService     { return &milestoneService{c} }
 func (c *Client) Runners() platform.RunnerService           { return &runnerService{c} }
-func (c *Client) Repository() platform.RepositoryService   { return &repositoryService{c} }
+func (c *Client) Repository() platform.RepositoryService    { return &repositoryService{c} }
 func (c *Client) Checks() platform.CheckService             { return &checkService{c} }
 
 // repositoryService implements platform.RepositoryService.
@@ -126,6 +126,43 @@ func (s *repositoryService) CreateBranch(ctx context.Context, name, fromSHA stri
 	return nil
 }
 
+func (s *repositoryService) CreateBranchWithCommit(ctx context.Context, name, parentSHA, message string) (string, error) {
+	sha, err := s.CreateCommit(ctx, parentSHA, message)
+	if err != nil {
+		return "", err
+	}
+	if err := s.CreateBranch(ctx, name, sha); err != nil {
+		return "", err
+	}
+	return sha, nil
+}
+
+func (s *repositoryService) CreateCommit(ctx context.Context, parentSHA, message string) (string, error) {
+	parent, _, err := s.c.gh.Git.GetCommit(ctx, s.c.owner, s.c.repo, parentSHA)
+	if err != nil {
+		return "", fmt.Errorf("getting parent commit %s: %w", parentSHA, err)
+	}
+	tree := parent.GetTree()
+	if tree == nil || tree.GetSHA() == "" {
+		return "", fmt.Errorf("getting parent commit %s tree: missing tree", parentSHA)
+	}
+	commit, _, err := s.c.gh.Git.CreateCommit(ctx, s.c.owner, s.c.repo, &gh.Commit{
+		Message: gh.Ptr(message),
+		Tree:    &gh.Tree{SHA: gh.Ptr(tree.GetSHA())},
+		Parents: []*gh.Commit{
+			{SHA: gh.Ptr(parentSHA)},
+		},
+	}, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating marker commit: %w", err)
+	}
+	sha := commit.GetSHA()
+	if sha == "" {
+		return "", fmt.Errorf("creating marker commit: empty SHA")
+	}
+	return sha, nil
+}
+
 func (s *repositoryService) DeleteBranch(ctx context.Context, name string) error {
 	_, err := s.c.gh.Git.DeleteRef(ctx, s.c.owner, s.c.repo, "refs/heads/"+name)
 	if err != nil {
@@ -142,3 +179,25 @@ func (s *repositoryService) GetBranchSHA(ctx context.Context, name string) (stri
 	return ref.GetObject().GetSHA(), nil
 }
 
+func (s *repositoryService) GetCommitMessage(ctx context.Context, sha string) (string, error) {
+	commit, _, err := s.c.gh.Git.GetCommit(ctx, s.c.owner, s.c.repo, sha)
+	if err != nil {
+		return "", fmt.Errorf("getting commit %s: %w", sha, err)
+	}
+	return commit.GetMessage(), nil
+}
+
+func (s *repositoryService) UpdateBranchToCommit(ctx context.Context, name, sha string, force bool) error {
+	ref := &gh.Reference{
+		Ref:    gh.Ptr("refs/heads/" + name),
+		Object: &gh.GitObject{SHA: gh.Ptr(sha)},
+	}
+	_, _, err := s.c.gh.Git.UpdateRef(ctx, s.c.owner, s.c.repo, ref, force)
+	if err != nil {
+		if isGitHubRefUpdateConflict(err) {
+			return fmt.Errorf("updating branch %s to %s: %w", name, sha, platform.ErrRefUpdateConflict)
+		}
+		return fmt.Errorf("updating branch %s to %s: %w", name, sha, err)
+	}
+	return nil
+}

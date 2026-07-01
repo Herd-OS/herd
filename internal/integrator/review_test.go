@@ -42,6 +42,7 @@ func initTestRepo(t *testing.T) (string, *git.Git) {
 type mockReviewAgent struct {
 	reviewResult *agent.ReviewResult
 	reviewErr    error
+	onReview     func()
 	// results, when non-nil, returns scripted ReviewResults on successive
 	// calls. After the slice is exhausted, the last entry is repeated.
 	results []*agent.ReviewResult
@@ -55,6 +56,9 @@ func (m *mockReviewAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.E
 	return nil, nil
 }
 func (m *mockReviewAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	if m.onReview != nil {
+		m.onReview()
+	}
 	if m.results != nil {
 		idx := m.calls
 		if idx >= len(m.results) {
@@ -90,9 +94,656 @@ func newReviewTestPlatform(prList []*platform.PullRequest, milestoneIssues []*pl
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
+}
+
+func newReviewLockTestPlatform(issueSvc platform.IssueService) *mockPlatform {
+	baseIssueSvc, ok := issueSvc.(*mockIssueService)
+	if ok {
+		baseIssueSvc.listResult = []*platform.Issue{
+			{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+		}
+	}
+	return &mockPlatform{
+		issues: issueSvc,
+		prs: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
+		milestones: &mockMilestoneService{
+			getResult: map[int]*platform.Milestone{
+				1: {Number: 1, Title: "Batch"},
+			},
+		},
+	}
+}
+
+func mustReviewLockComment(t *testing.T, state reviewLockState) string {
+	t.Helper()
+	body, err := buildReviewLockComment(state)
+	require.NoError(t, err)
+	return body
+}
+
+func mustReviewLockCommitMessage(t *testing.T, state reviewLockState) string {
+	t.Helper()
+	body, err := buildReviewLockCommitMessage(state)
+	require.NoError(t, err)
+	return body
+}
+
+func legacyReviewLockCommitMessage(prNumber, batchNumber int, owner string, acquiredAt time.Time) string {
+	return fmt.Sprintf("Herd review lock\n\npr: %d\nbatch: %d\nowner: %s\nacquired_at: %s\ntoken: legacy-token", prNumber, batchNumber, owner, acquiredAt.UTC().Format(time.RFC3339Nano))
+}
+
+func reviewLockCommentCount(comments []*platform.Comment, prNumber int) int {
+	count := 0
+	for _, c := range comments {
+		state, ok := parseReviewLockComment(c.Body)
+		if ok && state.PRNumber == prNumber {
+			count++
+		}
+	}
+	return count
+}
+
+func TestParseReviewLockComment(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	acquiredAt := now
+	expiresAt := now.Add(reviewLockExpiry)
+	valid := reviewLockState{
+		PRNumber:    50,
+		BatchNumber: 1,
+		RunID:       100,
+		Owner:       "test",
+		AcquiredAt:  &acquiredAt,
+		ExpiresAt:   &expiresAt,
+	}
+	validBody := mustReviewLockComment(t, valid)
+
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "valid", body: validBody, want: true},
+		{name: "valid with surrounding text", body: "prefix\n" + validBody + "\nsuffix", want: true},
+		{name: "malformed json", body: reviewLockMarkerPrefix + `{"pr_number":` + reviewLockMarkerSuffix, want: false},
+		{name: "missing suffix", body: reviewLockMarkerPrefix + `{}`, want: false},
+		{name: "no marker", body: "ordinary comment", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseReviewLockComment(tt.body)
+			assert.Equal(t, tt.want, ok)
+			if tt.want {
+				assert.Equal(t, valid.PRNumber, got.PRNumber)
+				assert.Equal(t, valid.BatchNumber, got.BatchNumber)
+				assert.Equal(t, valid.RunID, got.RunID)
+			}
+		})
+	}
+}
+
+func TestParseLegacyReviewLockCommitMessage(t *testing.T) {
+	acquiredAt := time.Date(2026, 7, 1, 9, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		message     string
+		wantOK      bool
+		wantPR      int
+		wantBatch   int
+		wantOwner   string
+		wantExpires time.Time
+	}{
+		{
+			name:        "valid legacy marker",
+			message:     legacyReviewLockCommitMessage(50, 7, "old-owner-7", acquiredAt),
+			wantOK:      true,
+			wantPR:      50,
+			wantBatch:   7,
+			wantOwner:   "old-owner-7",
+			wantExpires: acquiredAt.Add(reviewLockExpiry),
+		},
+		{
+			name:        "valid legacy marker with time string format",
+			message:     fmt.Sprintf("Herd review lock\n\npr: 50\nbatch: 1\nowner: old-owner\nacquired_at: %s\ntoken: legacy-token", acquiredAt.Format("2006-01-02 15:04:05 -0700 MST")),
+			wantOK:      true,
+			wantPR:      50,
+			wantBatch:   1,
+			wantOwner:   "old-owner",
+			wantExpires: acquiredAt.Add(reviewLockExpiry),
+		},
+		{name: "missing herd header", message: "Other lock\n\npr: 50\nacquired_at: 2026-07-01T09:30:00Z", wantOK: false},
+		{name: "missing pr", message: "Herd review lock\n\nbatch: 1\nacquired_at: 2026-07-01T09:30:00Z", wantOK: false},
+		{name: "invalid pr", message: "Herd review lock\n\npr: 50x\nbatch: 1\nacquired_at: 2026-07-01T09:30:00Z", wantOK: false},
+		{name: "missing acquired_at", message: "Herd review lock\n\npr: 50\nbatch: 1", wantOK: false},
+		{name: "invalid acquired_at", message: "Herd review lock\n\npr: 50\nbatch: 1\nacquired_at: yesterday", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseLegacyReviewLockCommitMessage(tt.message)
+
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, "locked", got.Status)
+				assert.Equal(t, tt.wantPR, got.PRNumber)
+				assert.Equal(t, tt.wantBatch, got.BatchNumber)
+				assert.Equal(t, tt.wantOwner, got.Owner)
+				require.NotNil(t, got.AcquiredAt)
+				require.NotNil(t, got.ExpiresAt)
+				assert.Equal(t, tt.wantExpires, *got.ExpiresAt)
+			}
+		})
+	}
+}
+
+func TestAcquireReviewLock_FastForwardConflictBlocksDuplicate(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	issueSvc := newMockIssueService()
+	repoSvc := &mockRepoService{branchExists: map[string]bool{"herd/batch/1-batch": true}}
+
+	first, acquired, err := acquireReviewLock(context.Background(), issueSvc, repoSvc, 50, 1, 100, "abc123", now)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, first)
+
+	require.NoError(t, releaseReviewLock(context.Background(), issueSvc, repoSvc, first))
+	unlockedSHA := repoSvc.branchSHAs[lockBranch]
+	unlockedCommitCount := repoSvc.markerCommitSeq
+	repoSvc.onUpdateBranch = func(name, _ string) {
+		if name != lockBranch || repoSvc.branchSHAs[lockBranch] != unlockedSHA {
+			return
+		}
+		winnerState := lockedReviewLockState(50, 1, 999, "abc123", "winner-lock", now)
+		winnerSHA, createErr := repoSvc.CreateCommit(context.Background(), unlockedSHA, mustReviewLockCommitMessage(t, winnerState))
+		require.NoError(t, createErr)
+		repoSvc.branchSHAs[lockBranch] = winnerSHA
+	}
+
+	second, acquired, err := acquireReviewLock(context.Background(), issueSvc, repoSvc, 50, 1, 101, "abc123", now)
+	require.NoError(t, err)
+	assert.False(t, acquired)
+	assert.Nil(t, second)
+	assert.GreaterOrEqual(t, repoSvc.markerCommitSeq, unlockedCommitCount+2, "loser created a candidate before losing the fast-forward update")
+	headState, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "winner-lock", headState.LockID)
+	assert.True(t, repoSvc.branchExists[lockBranch])
+}
+
+func TestAcquireReviewLock_ExpiredLockIsReclaimedByAppendingCommit(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	expiredAt := now.Add(-time.Minute)
+	acquiredAt := now.Add(-3 * time.Hour)
+	expiredState := reviewLockState{
+		Kind:        "herd-review-lock",
+		Version:     1,
+		Status:      "locked",
+		LockID:      "expired",
+		PRNumber:    50,
+		BatchNumber: 1,
+		AcquiredAt:  &acquiredAt,
+		ExpiresAt:   &expiredAt,
+	}
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "expired-sha"},
+		commitMessages: map[string]string{
+			"expired-sha": mustReviewLockCommitMessage(t, expiredState),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, handle)
+	assert.True(t, strings.HasPrefix(repoSvc.branchSHAs[lockBranch], "expired-sha-lock-"))
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "locked", state.Status)
+	assert.NotEqual(t, "expired", state.LockID)
+}
+
+func TestAcquireReviewLock_ConcurrentStaleReclaimLoserObservesWinner(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	expiredAt := now.Add(-time.Minute)
+	acquiredAt := now.Add(-3 * time.Hour)
+	expiredState := reviewLockState{Kind: "herd-review-lock", Version: 1, Status: "locked", LockID: "expired", PRNumber: 50, BatchNumber: 1, AcquiredAt: &acquiredAt, ExpiresAt: &expiredAt}
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "expired-sha"},
+		commitMessages: map[string]string{
+			"expired-sha": mustReviewLockCommitMessage(t, expiredState),
+		},
+	}
+	repoSvc.onUpdateBranch = func(name, _ string) {
+		if name != lockBranch || repoSvc.branchSHAs[lockBranch] != "expired-sha" {
+			return
+		}
+		winnerState := lockedReviewLockState(50, 1, 999, "new-sha", "winner-lock", now)
+		winnerSHA, createErr := repoSvc.CreateCommit(context.Background(), "expired-sha", mustReviewLockCommitMessage(t, winnerState))
+		require.NoError(t, createErr)
+		repoSvc.branchSHAs[lockBranch] = winnerSHA
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+	require.NoError(t, err)
+	require.False(t, acquired)
+	require.Nil(t, handle)
+	headState, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "winner-lock", headState.LockID)
+}
+
+func TestReleaseReviewLockOnlyUnlocksMatchingLockID(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	active := lockedReviewLockState(50, 1, 200, "sha", "new-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "new-lock-sha"},
+		commitMessages: map[string]string{
+			"new-lock-sha": mustReviewLockCommitMessage(t, active),
+		},
+	}
+	oldHandle := &reviewLockHandle{branch: lockBranch, state: lockedReviewLockState(50, 1, 100, "sha", "old-lock", now)}
+
+	require.NoError(t, releaseReviewLock(context.Background(), newMockIssueService(), repoSvc, oldHandle))
+	assert.Equal(t, "new-lock-sha", repoSvc.branchSHAs[lockBranch])
+	assert.Equal(t, 0, repoSvc.markerCommitSeq)
+}
+
+func TestReleaseReviewLockOldHolderCannotUnlockNewerLock(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	oldHandle := &reviewLockHandle{branch: lockBranch, state: lockedReviewLockState(50, 1, 100, "sha", "old-lock", now)}
+	active := lockedReviewLockState(50, 1, 200, "sha", "new-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "new-lock-sha"},
+		commitMessages: map[string]string{
+			"new-lock-sha": mustReviewLockCommitMessage(t, active),
+		},
+	}
+
+	require.NoError(t, releaseReviewLock(context.Background(), newMockIssueService(), repoSvc, oldHandle))
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "locked", state.Status)
+	assert.Equal(t, "new-lock", state.LockID)
+}
+
+func TestReleaseReviewLockConflictRetryUnlocksOwnLock(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	active := lockedReviewLockState(50, 1, 100, "sha", "own-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists:    map[string]bool{lockBranch: true},
+		branchSHAs:      map[string]string{lockBranch: "own-lock-sha"},
+		updateConflicts: 1,
+		commitMessages: map[string]string{
+			"own-lock-sha": mustReviewLockCommitMessage(t, active),
+		},
+	}
+	handle := &reviewLockHandle{branch: lockBranch, state: active}
+
+	require.NoError(t, releaseReviewLock(context.Background(), newMockIssueService(), repoSvc, handle))
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "unlocked", state.Status)
+	assert.Equal(t, "own-lock", state.ReleasedLockID)
+	assert.Equal(t, 0, repoSvc.updateConflicts)
+}
+
+func TestAcquireReviewLock_BranchCreationRaceReadsExistingBranch(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	releasedAt := now.Add(-time.Minute)
+	unlocked := reviewLockState{Kind: "herd-review-lock", Version: 1, Status: "unlocked", PRNumber: 50, BatchNumber: 1, ReleasedAt: &releasedAt}
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "existing-unlocked"},
+		commitMessages: map[string]string{
+			"existing-unlocked": mustReviewLockCommitMessage(t, unlocked),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, handle)
+	assert.True(t, strings.HasPrefix(repoSvc.branchSHAs[lockBranch], "existing-unlocked-lock-"))
+}
+
+func TestAcquireReviewLock_StaleLegacyBranchStateIsMigratedByAppendingCommit(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "legacy-sha"},
+		commitMessages: map[string]string{
+			"legacy-sha": legacyReviewLockCommitMessage(50, 1, "old-owner", now.Add(-reviewLockExpiry-time.Minute)),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, handle)
+	newHead := repoSvc.branchSHAs[lockBranch]
+	assert.Equal(t, "legacy-sha", repoSvc.commitParents[newHead])
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[newHead])
+	require.True(t, ok)
+	assert.Equal(t, "locked", state.Status)
+	assert.Equal(t, 50, state.PRNumber)
+	assert.NotEmpty(t, state.LockID)
+}
+
+func TestAcquireReviewLock_FreshLegacyBranchStateStillBlocks(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "legacy-sha"},
+		commitMessages: map[string]string{
+			"legacy-sha": legacyReviewLockCommitMessage(50, 1, "old-owner", now.Add(-time.Minute)),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+
+	require.NoError(t, err)
+	assert.False(t, acquired)
+	assert.Nil(t, handle)
+	assert.Equal(t, "legacy-sha", repoSvc.branchSHAs[lockBranch])
+	assert.NotContains(t, repoSvc.commitParents, "legacy-sha")
+}
+
+func TestAcquireReviewLock_LegacyMigrationConflictRetries(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "legacy-sha"},
+		commitMessages: map[string]string{
+			"legacy-sha": legacyReviewLockCommitMessage(50, 1, "old-owner", now.Add(-reviewLockExpiry-time.Minute)),
+		},
+	}
+	repoSvc.onUpdateBranch = func(name, _ string) {
+		if name != lockBranch || repoSvc.branchSHAs[lockBranch] != "legacy-sha" {
+			return
+		}
+		winnerState := lockedReviewLockState(50, 1, 999, "new-sha", "winner-lock", now)
+		winnerSHA, createErr := repoSvc.CreateCommit(context.Background(), "legacy-sha", mustReviewLockCommitMessage(t, winnerState))
+		require.NoError(t, createErr)
+		repoSvc.branchSHAs[lockBranch] = winnerSHA
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+
+	require.NoError(t, err)
+	require.False(t, acquired)
+	require.Nil(t, handle)
+	headState, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "winner-lock", headState.LockID)
+	assert.GreaterOrEqual(t, repoSvc.markerCommitSeq, 2, "loser created a candidate before retrying after conflict")
+}
+
+func TestAcquireReviewLock_MalformedBranchStateFailsClosed(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{name: "malformed json", message: `{"kind":`},
+		{name: "legacy missing acquired_at", message: "Herd review lock\n\npr: 50\nbatch: 1\nowner: old"},
+		{name: "legacy wrong pr", message: legacyReviewLockCommitMessage(51, 1, "old-owner", now.Add(-reviewLockExpiry-time.Minute))},
+		{name: "non-herd non-json", message: "Some other lock\n\npr: 50\nacquired_at: 2026-07-01T09:00:00Z"},
+		{name: "wrong kind", message: `{"kind":"other","version":1,"status":"unlocked","pr_number":50}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoSvc := &mockRepoService{
+				branchExists:   map[string]bool{lockBranch: true},
+				branchSHAs:     map[string]string{lockBranch: "bad-sha"},
+				commitMessages: map[string]string{"bad-sha": tt.message},
+			}
+
+			handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 100, "new-sha", now)
+
+			require.NoError(t, err)
+			assert.False(t, acquired)
+			assert.Nil(t, handle)
+			assert.Equal(t, "bad-sha", repoSvc.branchSHAs[lockBranch])
+		})
+	}
+}
+
+func TestFilterReviewLockCommentsRemovesDiagnosticLockState(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	acquiredAt := now
+	expiresAt := now.Add(reviewLockExpiry)
+	body := mustReviewLockComment(t, reviewLockState{PRNumber: 50, BatchNumber: 1, AcquiredAt: &acquiredAt, ExpiresAt: &expiresAt})
+
+	got := filterReviewLockComments([]*platform.Comment{
+		{ID: 1, Body: "ordinary"},
+		{ID: 2, Body: body},
+	})
+
+	require.Len(t, got, 1)
+	assert.Equal(t, int64(1), got[0].ID)
+}
+
+func TestReview_SkipsWhenReviewLockActive(t *testing.T) {
+	tests := []struct {
+		name   string
+		manual bool
+	}{
+		{name: "automatic review", manual: false},
+		{name: "manual review", manual: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			now := time.Now().UTC()
+			lockBranch := reviewLockBranch(50)
+			active := lockedReviewLockState(50, 1, 99, "abc123", "active-lock", now)
+			repoSvc := &mockRepoService{
+				defaultBranch: "main",
+				branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
+				branchSHAs:    map[string]string{lockBranch: "active-sha"},
+				commitMessages: map[string]string{
+					"active-sha": mustReviewLockCommitMessage(t, active),
+				},
+			}
+
+			ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+			dir, g := initTestRepo(t)
+			mock := newReviewLockTestPlatform(issueSvc)
+			mock.repo = repoSvc
+			result, err := Review(context.Background(), mock, ag, g, &config.Config{
+				Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+			}, ReviewParams{PRNumber: 50, RepoRoot: dir, Manual: tt.manual})
+
+			require.NoError(t, err)
+			assert.Equal(t, 50, result.BatchPRNumber)
+			assert.Equal(t, 0, ag.calls)
+			assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+		})
+	}
+}
+
+func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
+	issueSvc := newMockIssueService()
+	repoSvc := &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+	lockBranch := reviewLockBranch(50)
+	assert.True(t, repoSvc.branchExists[lockBranch])
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "unlocked", state.Status)
+}
+
+func TestReview_ReleasesReviewLockAfterCreatingFixIssue(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{
+		Approved: false,
+		Findings: []agent.ReviewFinding{{Severity: "HIGH", Description: "Missing validation"}},
+	}}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), newReviewLockTestPlatform(mockCreate), ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 1, createdIssues)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+}
+
+func TestReview_StaleReviewLockIsReplacedAndReviewRuns(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	lockBranch := reviewLockBranch(50)
+	acquiredAt := now.Add(-3 * time.Hour)
+	expiresAt := now.Add(-time.Hour)
+	staleState := reviewLockState{
+		Kind:        "herd-review-lock",
+		Version:     1,
+		Status:      "locked",
+		LockID:      "stale-lock",
+		PRNumber:    50,
+		BatchNumber: 1,
+		RunID:       99,
+		Owner:       "stale",
+		AcquiredAt:  &acquiredAt,
+		ExpiresAt:   &expiresAt,
+	}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
+		branchSHAs:    map[string]string{lockBranch: "stale-sha"},
+		commitMessages: map[string]string{
+			"stale-sha": mustReviewLockCommitMessage(t, staleState),
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+}
+
+func TestReview_MalformedAndUnrelatedReviewLocksDoNotBlock(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	_, err := issueSvc.AddCommentReturningID(context.Background(), 50, reviewLockMarkerPrefix+`{"pr_number":`+reviewLockMarkerSuffix)
+	require.NoError(t, err)
+	acquiredAt := now
+	expiresAt := now.Add(reviewLockExpiry)
+	_, err = issueSvc.AddCommentReturningID(context.Background(), 50, mustReviewLockComment(t, reviewLockState{
+		PRNumber:    999,
+		BatchNumber: 1,
+		Owner:       "other-pr",
+		AcquiredAt:  &acquiredAt,
+		ExpiresAt:   &expiresAt,
+	}))
+	require.NoError(t, err)
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), newReviewLockTestPlatform(issueSvc), ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+	assert.Equal(t, 1, reviewLockCommentCount(issueSvc.storedComments[50], 999))
+}
+
+func TestReview_SecondTriggerSkipsWhileFirstHoldsReviewLock(t *testing.T) {
+	issueSvc := newMockIssueService()
+	mock := newReviewLockTestPlatform(issueSvc)
+	dir, g := initTestRepo(t)
+	cfg := &config.Config{Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3}}
+
+	secondAg := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "second"}}
+	secondResult := (*ReviewResult)(nil)
+	secondErr := error(nil)
+	calledSecond := false
+	firstAg := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "first"},
+		onReview: func() {
+			if calledSecond {
+				return
+			}
+			calledSecond = true
+			secondResult, secondErr = Review(context.Background(), mock, secondAg, g, cfg, ReviewParams{PRNumber: 50, RepoRoot: dir})
+		},
+	}
+
+	firstResult, err := Review(context.Background(), mock, firstAg, g, cfg, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NoError(t, secondErr)
+	require.NotNil(t, secondResult)
+	assert.True(t, firstResult.Approved)
+	assert.Equal(t, 50, secondResult.BatchPRNumber)
+	assert.Equal(t, 1, firstAg.calls)
+	assert.Equal(t, 0, secondAg.calls)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
 }
 
 func TestReview_NoBatchPR(t *testing.T) {
@@ -181,7 +832,7 @@ func TestReview_ChangesRequested_CreatesFixes(t *testing.T) {
 			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
 		},
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -245,7 +896,7 @@ func TestReview_LowSeverityIncludedWhenConfigured(t *testing.T) {
 			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
 		},
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -305,7 +956,7 @@ func TestReview_SkipsWhenFixWorkersInProgress(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -354,7 +1005,7 @@ func TestReview_SkipsWhenFixWorkersReady(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -436,7 +1087,7 @@ func TestReview_SkipsWhenCIFixInProgress(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -523,14 +1174,14 @@ func TestReview_AutoMerge(t *testing.T) {
 	}
 
 	mock := &mockPlatform{
-		issues:     issueSvc,
-		prs:        prSvc,
+		issues: issueSvc,
+		prs:    prSvc,
 		workflows: &mockWorkflowService{
 			runs: map[int64]*platform.Run{
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -633,7 +1284,7 @@ func TestReview_ByPRNumber(t *testing.T) {
 		workflows: &mockWorkflowService{
 			runs: map[int64]*platform.Run{},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: msSvc,
 	}
 
@@ -661,7 +1312,7 @@ func TestReview_BatchLookup(t *testing.T) {
 			listResult: []*platform.PullRequest{{Number: 60, Title: "[herd] Batch", Head: "herd/batch/1-batch"}},
 		},
 		workflows: &mockWorkflowService{},
-		repo:      &mockRepoService{defaultBranch: "main"},
+		repo:      &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{
 			getResult: map[int]*platform.Milestone{
 				1: {Number: 1, Title: "Batch"},
@@ -690,7 +1341,7 @@ func TestReview_BatchLookup_NoPR(t *testing.T) {
 			listResult: []*platform.PullRequest{},
 		},
 		workflows: &mockWorkflowService{},
-		repo:      &mockRepoService{defaultBranch: "main"},
+		repo:      &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{
 			getResult: map[int]*platform.Milestone{
 				5: {Number: 5, Title: "My Feature"},
@@ -731,7 +1382,7 @@ func TestReview_AutoMergeFailure(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -777,7 +1428,7 @@ func TestReview_DisabledAutoMergeFailure(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -868,7 +1519,7 @@ func TestReview_DispatchCountAccurateWhenSomeCreatesFail(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -936,7 +1587,7 @@ func TestReview_NoCommentWhenAllCreatesFail(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1069,7 +1720,7 @@ func TestReview_OnlyLowFindings_Approves(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1133,7 +1784,7 @@ func TestReview_RequestChangesReview(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1189,7 +1840,7 @@ func TestReview_BatchFixIssue_SingleIssue(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1256,7 +1907,7 @@ func TestReview_DedupFindings(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1333,7 +1984,7 @@ func TestReview_RecurringFindingNotSwallowed(t *testing.T) {
 		workflows: &mockWorkflowService{runs: map[int64]*platform.Run{
 			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
 		}},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1381,7 +2032,7 @@ func TestReview_SkipsCompletedBatch(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1425,7 +2076,7 @@ func TestReview_SkipsWhenSomeFixWorkersStillRunning(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -1543,11 +2194,11 @@ func TestFilterFindingsBySeverity_Criteria(t *testing.T) {
 
 func TestDedupFindings(t *testing.T) {
 	tests := []struct {
-		name          string
-		findings      []agent.ReviewFinding
-		openFixes     []*platform.Issue
-		wantDescs     []string
-		wantDedupLen  int
+		name         string
+		findings     []agent.ReviewFinding
+		openFixes    []*platform.Issue
+		wantDescs    []string
+		wantDedupLen int
 	}{
 		{
 			name: "title match deduplicates",
@@ -2063,7 +2714,7 @@ func TestReview_PassesFixRequestsToAgent(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2183,7 +2834,7 @@ func TestReview_PassesPriorReviewCommentsToAgent(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2327,7 +2978,7 @@ func TestReview_UserFeedbackPassedToAgent(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2454,7 +3105,7 @@ func newStandalonePlatform() (*mockPlatform, *mockCapturingPRService, *mockIssue
 		issues:     issueSvc,
 		prs:        prSvc,
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 	return mock, prSvc, issueSvc, wf
@@ -2564,7 +3215,7 @@ func TestReviewStandalone_ExtraInstructions(t *testing.T) {
 		issues:     issueSvc,
 		prs:        prSvc,
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2602,7 +3253,7 @@ func TestReviewStandalone_UserFeedbackPassedToAgent(t *testing.T) {
 		issues:     issueSvc,
 		prs:        prSvc,
 		workflows:  &mockWorkflowService{},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2645,7 +3296,7 @@ func newUnparseableRetryPlatform() (*mockPlatform, *mockCapturingPRService) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 	return mock, prSvc
@@ -2916,7 +3567,7 @@ func TestReview_PassesWorkerNoOpVerdicts(t *testing.T) {
 				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
 			},
 		},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -2983,7 +3634,7 @@ func TestReview_DetectsStableDisagreement(t *testing.T) {
 		issues:     mockCreate,
 		prs:        prSvc,
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -3068,7 +3719,7 @@ func TestReview_NoStableDisagreementWhenAllNew(t *testing.T) {
 			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
 		},
 		workflows:  wf,
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
 
@@ -3133,7 +3784,7 @@ func TestReview_BlockedByStableDisagreementLabel(t *testing.T) {
 		issues:     mockCreate,
 		prs:        prSvc,
 		workflows:  &mockWorkflowService{},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: msSvc,
 	}
 
@@ -3177,7 +3828,7 @@ func TestReview_ManualBypassesStableDisagreementLabel(t *testing.T) {
 		issues:     issueSvc,
 		prs:        prSvc,
 		workflows:  &mockWorkflowService{},
-		repo:       &mockRepoService{defaultBranch: "main"},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: msSvc,
 	}
 

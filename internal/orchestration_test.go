@@ -43,16 +43,20 @@ func (p *statefulPlatform) Checks() platform.CheckService             { return n
 // --- Stateful Issue Service ---
 
 type statefulIssueService struct {
-	issues     map[int]*platform.Issue
-	nextNumber int
-	comments   map[int][]string
+	issues         map[int]*platform.Issue
+	nextNumber     int
+	comments       map[int][]string
+	storedComments map[int][]*platform.Comment
+	nextCommentID  int64
 }
 
 func newStatefulIssueService(initial ...*platform.Issue) *statefulIssueService {
 	s := &statefulIssueService{
-		issues:     make(map[int]*platform.Issue),
-		nextNumber: 200,
-		comments:   make(map[int][]string),
+		issues:         make(map[int]*platform.Issue),
+		nextNumber:     200,
+		comments:       make(map[int][]string),
+		storedComments: make(map[int][]*platform.Comment),
+		nextCommentID:  1,
 	}
 	for _, iss := range initial {
 		s.issues[iss.Number] = iss
@@ -155,15 +159,28 @@ func (s *statefulIssueService) AddComment(_ context.Context, number int, body st
 	s.comments[number] = append(s.comments[number], body)
 	return nil
 }
-func (s *statefulIssueService) AddCommentReturningID(_ context.Context, _ int, body string) (int64, error) {
-	return 0, nil
+func (s *statefulIssueService) AddCommentReturningID(_ context.Context, number int, body string) (int64, error) {
+	id := s.nextCommentID
+	s.nextCommentID++
+	s.storedComments[number] = append(s.storedComments[number], &platform.Comment{ID: id, Body: body})
+	return id, nil
 }
 func (s *statefulIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
 	return nil
 }
-func (s *statefulIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
-func (s *statefulIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
-	return nil, nil
+func (s *statefulIssueService) DeleteComment(_ context.Context, commentID int64) error {
+	for number, comments := range s.storedComments {
+		for i, c := range comments {
+			if c.ID == commentID {
+				s.storedComments[number] = append(comments[:i], comments[i+1:]...)
+				return nil
+			}
+		}
+	}
+	return nil
+}
+func (s *statefulIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	return append([]*platform.Comment{}, s.storedComments[number]...), nil
 }
 func (s *statefulIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
 	return nil
@@ -317,15 +334,20 @@ func (s *statefulWorkflowService) addRun(issueNumber int, conclusion string) int
 // --- Stateful Repo Service ---
 
 type statefulRepoService struct {
-	defaultBranch string
-	branches      map[string]string // name → SHA
-	deletedBranch string
+	defaultBranch  string
+	branches       map[string]string // name → SHA
+	commitMessages map[string]string
+	commitParents  map[string]string
+	markerSeq      int
+	deletedBranch  string
 }
 
 func newStatefulRepoService() *statefulRepoService {
 	return &statefulRepoService{
-		defaultBranch: "main",
-		branches:      make(map[string]string),
+		defaultBranch:  "main",
+		branches:       make(map[string]string),
+		commitMessages: make(map[string]string),
+		commitParents:  make(map[string]string),
 	}
 }
 
@@ -334,6 +356,36 @@ func (s *statefulRepoService) GetDefaultBranch(_ context.Context) (string, error
 	return s.defaultBranch, nil
 }
 func (s *statefulRepoService) CreateBranch(_ context.Context, name, sha string) error {
+	if _, ok := s.branches[name]; ok {
+		return fmt.Errorf("reference already exists")
+	}
+	s.branches[name] = sha
+	return nil
+}
+func (s *statefulRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, message string) (string, error) {
+	markerSHA, err := s.CreateCommit(ctx, sha, message)
+	if err != nil {
+		return "", err
+	}
+	return markerSHA, s.CreateBranch(ctx, name, markerSHA)
+}
+func (s *statefulRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	s.markerSeq++
+	markerSHA := fmt.Sprintf("%s-lock-%d", parentSHA, s.markerSeq)
+	s.commitMessages[markerSHA] = message
+	s.commitParents[markerSHA] = parentSHA
+	return markerSHA, nil
+}
+func (s *statefulRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if msg, ok := s.commitMessages[sha]; ok {
+		return msg, nil
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (s *statefulRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if s.branches[name] != s.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
 	s.branches[name] = sha
 	return nil
 }

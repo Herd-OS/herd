@@ -63,8 +63,8 @@ jobs:
   check-ci-workflow-completion:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped' && startsWith(github.event.workflow_run.head_branch, 'herd/batch/') && github.event.workflow_run.path != '.github/workflows/herd-worker.yml'
     concurrency:
-      group: herd-check-ci-${{`{{`}} github.event.workflow_run.head_branch || github.ref {{`}}`}}
-      cancel-in-progress: true
+      group: herd-integrate-${{`{{`}} github.event.workflow_run.head_branch || github.ref {{`}}`}}
+      cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
       - name: Checkout
@@ -128,6 +128,7 @@ jobs:
   advance-on-close:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'issues'
     concurrency:
+      # Closed herd issues do not expose a PR number at expression time; use the milestone when present.
       group: herd-advance-${{`{{`}} github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number {{`}}`}}
       cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
@@ -230,6 +231,7 @@ jobs:
       && github.event.action == 'created'
       && startsWith(github.event.comment.body, '/herd ')
     concurrency:
+      # Issue comments do not expose a herd PR number at expression time; use the milestone when present.
       group: herd-comment-${{`{{`}} github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number {{`}}`}}
       cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']

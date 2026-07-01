@@ -51,14 +51,18 @@ type testIssueService struct {
 	addLabelsErr       error
 	createErr          error
 	listCommentsResult []*platform.Comment
+	storedComments     map[int][]*platform.Comment
+	nextCommentID      int64
 }
 
 func newTestIssueService() *testIssueService {
 	return &testIssueService{
-		getResult:     make(map[int]*platform.Issue),
-		addedLabels:   make(map[int][]string),
-		removedLabels: make(map[int][]string),
-		nextIssueNum:  200,
+		getResult:      make(map[int]*platform.Issue),
+		addedLabels:    make(map[int][]string),
+		removedLabels:  make(map[int][]string),
+		nextIssueNum:   200,
+		storedComments: make(map[int][]*platform.Comment),
+		nextCommentID:  1,
 	}
 }
 
@@ -96,15 +100,30 @@ func (m *testIssueService) RemoveLabels(_ context.Context, number int, labels []
 	return nil
 }
 func (m *testIssueService) AddComment(_ context.Context, _ int, _ string) error { return nil }
-func (m *testIssueService) AddCommentReturningID(_ context.Context, _ int, _ string) (int64, error) {
-	return 0, nil
+func (m *testIssueService) AddCommentReturningID(_ context.Context, number int, body string) (int64, error) {
+	id := m.nextCommentID
+	m.nextCommentID++
+	m.storedComments[number] = append(m.storedComments[number], &platform.Comment{ID: id, Body: body})
+	return id, nil
 }
 func (m *testIssueService) UpdateComment(_ context.Context, _ int64, _ string) error {
 	return nil
 }
-func (m *testIssueService) DeleteComment(_ context.Context, _ int64) error { return nil }
-func (m *testIssueService) ListComments(_ context.Context, _ int) ([]*platform.Comment, error) {
-	return m.listCommentsResult, nil
+func (m *testIssueService) DeleteComment(_ context.Context, commentID int64) error {
+	for number, comments := range m.storedComments {
+		for i, c := range comments {
+			if c.ID == commentID {
+				m.storedComments[number] = append(comments[:i], comments[i+1:]...)
+				return nil
+			}
+		}
+	}
+	return nil
+}
+func (m *testIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	result := append([]*platform.Comment{}, m.storedComments[number]...)
+	result = append(result, m.listCommentsResult...)
+	return result, nil
 }
 func (m *testIssueService) CreateCommentReaction(_ context.Context, _ int64, _ string) error {
 	return nil
@@ -189,15 +208,70 @@ func (m *testWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*pl
 type testRepoService struct {
 	defaultBranch    string
 	defaultBranchErr error
+	branches         map[string]string
+	commitMessages   map[string]string
+	commitParents    map[string]string
+	markerSeq        int
 }
 
 func (m *testRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
 func (m *testRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, m.defaultBranchErr
 }
-func (m *testRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
-func (m *testRepoService) DeleteBranch(_ context.Context, _ string) error    { return nil }
-func (m *testRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
+func (m *testRepoService) CreateBranch(_ context.Context, name, sha string) error {
+	if m.branches == nil {
+		m.branches = make(map[string]string)
+	}
+	if _, ok := m.branches[name]; ok {
+		return fmt.Errorf("reference already exists")
+	}
+	m.branches[name] = sha
+	return nil
+}
+func (m *testRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, message string) (string, error) {
+	markerSHA, err := m.CreateCommit(ctx, sha, message)
+	if err != nil {
+		return "", err
+	}
+	return markerSHA, m.CreateBranch(ctx, name, markerSHA)
+}
+func (m *testRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	m.markerSeq++
+	markerSHA := fmt.Sprintf("%s-lock-%d", parentSHA, m.markerSeq)
+	if m.commitMessages == nil {
+		m.commitMessages = make(map[string]string)
+	}
+	if m.commitParents == nil {
+		m.commitParents = make(map[string]string)
+	}
+	m.commitMessages[markerSHA] = message
+	m.commitParents[markerSHA] = parentSHA
+	return markerSHA, nil
+}
+func (m *testRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if msg, ok := m.commitMessages[sha]; ok {
+		return msg, nil
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (m *testRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if m.branches == nil {
+		m.branches = make(map[string]string)
+	}
+	if m.branches[name] != m.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
+	m.branches[name] = sha
+	return nil
+}
+func (m *testRepoService) DeleteBranch(_ context.Context, name string) error {
+	delete(m.branches, name)
+	return nil
+}
+func (m *testRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
+	if sha, ok := m.branches[name]; ok {
+		return sha, nil
+	}
 	return "abc123", nil
 }
 
