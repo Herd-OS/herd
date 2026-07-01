@@ -238,6 +238,8 @@ If the agent returns unparseable output (e.g., the JSON cannot be decoded, or th
 
 When you see that comment, run `/herd review` (optionally with a focus area) on the batch PR to trigger a fresh review. The integrator does not silently drop the review or auto-approve the PR.
 
+Review retries and manual `/herd review` commands are serialized per batch PR by an application-level GitHub-backed review lock. If another review is already running, the duplicate trigger is skipped instead of launching another agent. Manual review still bypasses stable-disagreement suspension, but it respects the active-review lock. Existing active-fix guards still prevent duplicate fix cycles after review findings have already created fix issues.
+
 ## CI Fix Loop
 
 `integrator.require_ci` enables CI failure detection on the batch branch. `integrator.ci_max_fix_cycles` caps how many CI-failure fix cycles the Integrator will dispatch (0 = unlimited).

@@ -195,11 +195,12 @@ Multiple workers can complete near-simultaneously, triggering concurrent Integra
 
 #### Workflow Concurrency Groups
 
-All integrator workflow jobs use GitHub Actions [concurrency groups](https://docs.github.com/en/actions/using-jobs/using-concurrency) to prevent parallel runs from racing. Without these, two workers completing close together (or a `/herd integrate` comment firing at the same time as a `workflow_run` trigger) can cause duplicate fix issues, duplicate worker dispatches, and duplicate review comments.
+All integrator workflow jobs use GitHub Actions [concurrency groups](https://docs.github.com/en/actions/using-jobs/using-concurrency) as defense-in-depth to reduce obvious overlap. Without these, two workers completing close together (or a `/herd integrate` comment firing at the same time as a `workflow_run` trigger) can cause duplicate fix issues, duplicate worker dispatches, and duplicate review attempts.
 
 | Job | Group Key | cancel-in-progress | Rationale |
 |-----|-----------|-------------------|----------|
 | `integrate` | `herd-integrate-{head_branch}` | false | Serializes all integrator runs. Workers are dispatched with `ref: defaultBranch`, so `head_branch` is typically `main` — this serializes across batches, which is acceptable since integrator runs are quick and touch shared state. |
+| `check-ci-workflow-completion` | `herd-integrate-{head_branch}` | false | Optional when `integrator.ci_workflows` is configured. Serializes CI workflow completion handling with other workflow-run Integrator work on the same batch branch. |
 | `check-ci-on-completion` | `herd-check-ci-{head_branch}` | true | Fires once per `check_run` completion on a batch branch. Idempotent — only the last run matters, so earlier runs are cancelled to save runner time. |
 | `advance-on-close` | `herd-advance-{milestone \|\| issue_number}` | false | Uses milestone number (= batch number) to serialize per-batch. Falls back to issue number for non-herd issues. |
 | `re-review` | `herd-re-review-{pr_number}` | false | Prevents concurrent reviews on the same PR. |
@@ -208,7 +209,19 @@ All integrator workflow jobs use GitHub Actions [concurrency groups](https://doc
 
 All groups use `cancel-in-progress: false` (except `check-ci-on-completion`) so that queued runs wait rather than being cancelled. Every integrator run should complete — we want serialization, not cancellation.
 
-**Cross-job limitation:** The `integrate` and `handle-comment` jobs cannot share a concurrency group because they use different event payloads (`workflow_run` vs `issue_comment`) with no common batch identifier extractable at the expression level. Both jobs are idempotent, so concurrent execution produces duplicate work at worst, not data corruption.
+**Cross-job limitation:** Workflow concurrency cannot express one shared review group across every trigger HerdOS supports. Different event payloads expose different identifiers (`workflow_run`, `check_run`, `issues`, `pull_request_review`, and `issue_comment`), and manual commands do not always have the same batch PR fields available at expression time. HerdOS therefore treats workflow concurrency as a secondary guard. The correctness guarantee for agent review comes from an application-level GitHub-backed lock on the batch PR.
+
+#### Agent Review Locking
+
+Batch PR reviews acquire a hidden PR comment lock before the Integrator fetches context or starts the review agent. The lock is per PR, so only one Herd agent review may run for a batch PR at a time while independent batch PRs can still review concurrently.
+
+Duplicate triggers do not launch another agent review. They log or comment:
+
+```
+Review already in progress for PR #N; skipping duplicate review trigger.
+```
+
+Stale locks expire conservatively so a dead Actions job does not block future reviews forever. Manual `/herd review` still bypasses stable-disagreement suspension, but it never bypasses the active-review lock.
 
 ## 4. Runners
 
