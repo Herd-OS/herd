@@ -526,6 +526,65 @@ func TestReleaseReviewLockDeletesOrphanCommentForSameBranchSHA(t *testing.T) {
 	assert.Contains(t, remainingIDs, otherID)
 }
 
+func TestReleaseReviewLockDeletesOrphanCommentCreatedDuringBranchDelete(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	issueSvc := newMockIssueService()
+	branchSHA := "batch-sha-lock-1"
+	ownID, err := issueSvc.AddCommentReturningID(context.Background(), 50, mustReviewLockComment(t, reviewLockState{
+		PRNumber:    50,
+		BatchNumber: 1,
+		Owner:       "batch-1-run-100",
+		BranchSHA:   branchSHA,
+		AcquiredAt:  now,
+		ExpiresAt:   now.Add(reviewLockExpiry),
+	}))
+	require.NoError(t, err)
+	var orphanID int64
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: branchSHA},
+		onDeleteIfSHA: func(name, expectedSHA string) {
+			assert.Equal(t, lockBranch, name)
+			assert.Equal(t, branchSHA, expectedSHA)
+			var addErr error
+			orphanID, addErr = issueSvc.AddCommentReturningID(context.Background(), 50, mustReviewLockComment(t, reviewLockState{
+				PRNumber:    50,
+				BatchNumber: 1,
+				Owner:       "orphaned-branch",
+				BranchSHA:   branchSHA,
+				AcquiredAt:  now,
+				ExpiresAt:   now.Add(reviewLockOrphanBranchGrace),
+			}))
+			require.NoError(t, addErr)
+		},
+	}
+	handle := &reviewLockHandle{
+		commentID: ownID,
+		branch:    lockBranch,
+		state: reviewLockState{
+			PRNumber:    50,
+			BatchNumber: 1,
+			Owner:       "batch-1-run-100",
+			BranchSHA:   branchSHA,
+			AcquiredAt:  now,
+			ExpiresAt:   now.Add(reviewLockExpiry),
+		},
+	}
+
+	require.NoError(t, releaseReviewLock(context.Background(), issueSvc, repoSvc, handle))
+
+	assert.False(t, repoSvc.branchExists[lockBranch])
+	assert.NotZero(t, orphanID)
+	remainingIDs := make([]int64, 0, len(issueSvc.storedComments[50]))
+	for _, c := range issueSvc.storedComments[50] {
+		remainingIDs = append(remainingIDs, c.ID)
+	}
+	assert.NotContains(t, remainingIDs, ownID)
+	assert.NotContains(t, remainingIDs, orphanID)
+	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+}
+
 func TestReview_SkipsWhenReviewLockActive(t *testing.T) {
 	tests := []struct {
 		name   string

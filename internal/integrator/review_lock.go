@@ -132,18 +132,15 @@ func releaseReviewLock(ctx context.Context, issueSvc platform.IssueService, repo
 			}
 		}
 	}
+	if h.branch != "" {
+		if _, err := deleteReviewLockBranchIfCurrent(ctx, repoSvc, h.branch, h.state.BranchSHA); err != nil {
+			return fmt.Errorf("deleting review lock branch %s: %w", h.branch, err)
+		}
+	}
 	if h.state.BranchSHA != "" && h.state.PRNumber != 0 {
 		if err := deleteReviewLockCommentsForBranchSHA(ctx, issueSvc, h.state.PRNumber, h.state.BranchSHA, h.commentID); err != nil {
 			return err
 		}
-	}
-	if h.branch == "" {
-		return nil
-	}
-	if ok, err := deleteReviewLockBranchIfCurrent(ctx, repoSvc, h.branch, h.state.BranchSHA); err != nil {
-		return fmt.Errorf("deleting review lock branch %s: %w", h.branch, err)
-	} else if !ok {
-		return nil
 	}
 	return nil
 }
