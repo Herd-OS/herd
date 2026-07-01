@@ -255,6 +255,7 @@ type mockRepoService struct {
 	markerCommitSeq int
 	deletedBranch   string
 	deletedBranches []string
+	onDeleteIfSHA   func(name, expectedSHA string)
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
@@ -293,6 +294,19 @@ func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 		delete(m.branchSHAs, name)
 	}
 	return nil
+}
+func (m *mockRepoService) DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error) {
+	if m.onDeleteIfSHA != nil {
+		m.onDeleteIfSHA(name, expectedSHA)
+	}
+	currentSHA, err := m.GetBranchSHA(ctx, name)
+	if err != nil {
+		return true, nil
+	}
+	if currentSHA != expectedSHA {
+		return false, nil
+	}
+	return true, m.DeleteBranch(ctx, name)
 }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
 	if m.branchExists != nil {

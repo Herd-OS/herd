@@ -365,6 +365,16 @@ func (s *statefulRepoService) DeleteBranch(_ context.Context, name string) error
 	delete(s.branches, name)
 	return nil
 }
+func (s *statefulRepoService) DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error) {
+	currentSHA, err := s.GetBranchSHA(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	if currentSHA != expectedSHA {
+		return false, nil
+	}
+	return true, s.DeleteBranch(ctx, name)
+}
 func (s *statefulRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
 	if sha, ok := s.branches[name]; ok {
 		return sha, nil

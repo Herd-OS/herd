@@ -37,6 +37,10 @@ type reviewLockCommitRepository interface {
 	CreateBranchWithCommit(ctx context.Context, name, parentSHA, message string) (string, error)
 }
 
+type reviewLockCompareDeleteRepository interface {
+	DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error)
+}
+
 func acquireReviewLock(ctx context.Context, issueSvc platform.IssueService, repoSvc platform.RepositoryService, prNumber int, batchNumber int, runID int64, lockFromSHA string, now time.Time) (*reviewLockHandle, bool, error) {
 	comments, err := issueSvc.ListComments(ctx, prNumber)
 	if err != nil {
@@ -216,16 +220,11 @@ func createOrphanedReviewLockBranchComment(ctx context.Context, issueSvc platfor
 
 func deleteReviewLockBranchIfCurrent(ctx context.Context, repoSvc platform.RepositoryService, branch string, expectedSHA string) (bool, error) {
 	if expectedSHA != "" {
-		currentSHA, err := repoSvc.GetBranchSHA(ctx, branch)
-		if err != nil {
-			if isNotFoundLikeError(err) {
-				return true, nil
-			}
-			return false, err
+		repo, ok := repoSvc.(reviewLockCompareDeleteRepository)
+		if !ok {
+			return false, fmt.Errorf("repository service does not support leased review lock branch deletion")
 		}
-		if currentSHA != expectedSHA {
-			return false, nil
-		}
+		return repo.DeleteBranchIfSHA(ctx, branch, expectedSHA)
 	}
 	if err := repoSvc.DeleteBranch(ctx, branch); err != nil {
 		if isNotFoundLikeError(err) {

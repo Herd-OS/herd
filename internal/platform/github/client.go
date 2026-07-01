@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -161,6 +162,56 @@ func (s *repositoryService) DeleteBranch(ctx context.Context, name string) error
 		return fmt.Errorf("deleting branch %s: %w", name, err)
 	}
 	return nil
+}
+
+func (s *repositoryService) DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error) {
+	refURL := gitRefAPIPath(s.c.owner, s.c.repo, "heads/"+name)
+	refReq, err := s.c.gh.NewRequest(http.MethodGet, refURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("creating branch lookup request for %s: %w", name, err)
+	}
+	ref := new(gh.Reference)
+	resp, err := s.c.gh.Do(ctx, refReq, ref)
+	if err != nil {
+		if isGitHubNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("getting branch %s before leased delete: %w", name, err)
+	}
+	if ref.GetObject().GetSHA() != expectedSHA {
+		return false, nil
+	}
+	if resp == nil || resp.Response == nil {
+		return false, fmt.Errorf("getting branch %s before leased delete: missing response metadata", name)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		return false, fmt.Errorf("getting branch %s before leased delete: missing ETag", name)
+	}
+	deleteReq, err := s.c.gh.NewRequest(http.MethodDelete, refURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("creating leased delete request for branch %s: %w", name, err)
+	}
+	deleteReq.Header.Set("If-Match", etag)
+	_, err = s.c.gh.Do(ctx, deleteReq, nil)
+	if err != nil {
+		if isGitHubNotFound(err) {
+			return true, nil
+		}
+		if isGitHubPreconditionFailed(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("deleting branch %s with lease at %s: %w", name, expectedSHA, err)
+	}
+	return true, nil
+}
+
+func gitRefAPIPath(owner, repo, ref string) string {
+	parts := strings.Split(ref, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return fmt.Sprintf("repos/%s/%s/git/refs/%s", owner, repo, strings.Join(parts, "/"))
 }
 
 func (s *repositoryService) GetBranchSHA(ctx context.Context, name string) (string, error) {

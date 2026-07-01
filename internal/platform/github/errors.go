@@ -2,6 +2,7 @@ package github
 
 import (
 	"errors"
+	"net/http"
 
 	gh "github.com/google/go-github/v68/github"
 )
@@ -24,4 +25,23 @@ func IsMilestoneAlreadyExists(err error) bool {
 		}
 	}
 	return false
+}
+
+func isGitHubNotFound(err error) bool {
+	return isGitHubStatus(err, http.StatusNotFound)
+}
+
+func isGitHubPreconditionFailed(err error) bool {
+	return isGitHubStatus(err, http.StatusPreconditionFailed)
+}
+
+func isGitHubStatus(err error, status int) bool {
+	if err == nil {
+		return false
+	}
+	var gerr *gh.ErrorResponse
+	if !errors.As(err, &gerr) || gerr.Response == nil {
+		return false
+	}
+	return gerr.Response.StatusCode == status
 }

@@ -232,6 +232,16 @@ func (m *testRepoService) DeleteBranch(_ context.Context, name string) error {
 	delete(m.branches, name)
 	return nil
 }
+func (m *testRepoService) DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error) {
+	currentSHA, err := m.GetBranchSHA(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	if currentSHA != expectedSHA {
+		return false, nil
+	}
+	return true, m.DeleteBranch(ctx, name)
+}
 func (m *testRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
 	if sha, ok := m.branches[name]; ok {
 		return sha, nil
