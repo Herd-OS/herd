@@ -15,154 +15,225 @@ import (
 const reviewLockMarkerPrefix = "<!-- herd:review-lock "
 const reviewLockMarkerSuffix = " -->"
 const reviewLockExpiry = 2 * time.Hour
-const reviewLockOrphanBranchGrace = 10 * time.Minute
+const reviewLockMaxAttempts = 6
 
 type reviewLockState struct {
-	PRNumber    int       `json:"pr_number"`
-	BatchNumber int       `json:"batch_number"`
-	RunID       int64     `json:"run_id,omitempty"`
-	Owner       string    `json:"owner"`
-	BranchSHA   string    `json:"branch_sha,omitempty"`
-	AcquiredAt  time.Time `json:"acquired_at"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	Kind           string     `json:"kind"`
+	Version        int        `json:"version"`
+	Status         string     `json:"status"`
+	LockID         string     `json:"lock_id,omitempty"`
+	PRNumber       int        `json:"pr_number"`
+	BatchNumber    int        `json:"batch_number"`
+	RunID          int64      `json:"run_id,omitempty"`
+	Owner          string     `json:"owner,omitempty"`
+	BatchBranchSHA string     `json:"batch_branch_sha,omitempty"`
+	AcquiredAt     *time.Time `json:"acquired_at,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	ReleasedLockID string     `json:"released_lock_id,omitempty"`
+	ReleasedAt     *time.Time `json:"released_at,omitempty"`
+
+	// BranchSHA is retained only so legacy diagnostic comments can still be
+	// parsed and filtered from review context.
+	BranchSHA string `json:"branch_sha,omitempty"`
 }
 
 type reviewLockHandle struct {
-	commentID int64
-	branch    string
-	state     reviewLockState
+	branch string
+	state  reviewLockState
 }
 
-type reviewLockCommitRepository interface {
+type reviewLockRepository interface {
 	CreateBranchWithCommit(ctx context.Context, name, parentSHA, message string) (string, error)
+	CreateCommit(ctx context.Context, parentSHA, message string) (string, error)
+	GetCommitMessage(ctx context.Context, sha string) (string, error)
+	UpdateBranchToCommit(ctx context.Context, name, sha string, force bool) error
 }
 
-type reviewLockCompareDeleteRepository interface {
-	DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error)
-}
-
-func acquireReviewLock(ctx context.Context, issueSvc platform.IssueService, repoSvc platform.RepositoryService, prNumber int, batchNumber int, runID int64, lockFromSHA string, now time.Time) (*reviewLockHandle, bool, error) {
-	comments, err := issueSvc.ListComments(ctx, prNumber)
-	if err != nil {
-		return nil, false, fmt.Errorf("listing review lock comments for PR #%d: %w", prNumber, err)
+func acquireReviewLock(ctx context.Context, _ platform.IssueService, repoSvc platform.RepositoryService, prNumber int, batchNumber int, runID int64, lockFromSHA string, now time.Time) (*reviewLockHandle, bool, error) {
+	repo, ok := repoSvc.(reviewLockRepository)
+	if !ok {
+		return nil, false, fmt.Errorf("repository service does not support append-only review locks")
 	}
 	lockBranch := reviewLockBranch(prNumber)
-	for _, c := range comments {
-		state, ok := parseReviewLockComment(c.Body)
-		if !ok || state.PRNumber != prNumber {
-			continue
-		}
-		if state.ExpiresAt.After(now) {
-			return nil, false, nil
-		}
-		if state.BranchSHA == "" {
-			if err := issueSvc.DeleteComment(ctx, c.ID); err != nil && !isNotFoundLikeError(err) {
-				return nil, false, fmt.Errorf("deleting stale review lock comment %d: %w", c.ID, err)
-			}
-			continue
-		}
-		if ok, err := deleteReviewLockBranchIfCurrent(ctx, repoSvc, lockBranch, state.BranchSHA); err != nil {
-			return nil, false, fmt.Errorf("deleting stale review lock branch %s: %w", lockBranch, err)
-		} else if !ok {
-			return nil, false, nil
-		}
-		if err := issueSvc.DeleteComment(ctx, c.ID); err != nil && !isNotFoundLikeError(err) {
-			return nil, false, fmt.Errorf("deleting stale review lock comment %d: %w", c.ID, err)
-		}
-	}
-
-	owner := reviewLockOwner(batchNumber, runID)
-	lockToken, err := newReviewLockToken()
-	if err != nil {
+	if err := ensureReviewLockBranch(ctx, repoSvc, repo, lockBranch, prNumber, batchNumber, lockFromSHA, now); err != nil {
 		return nil, false, err
 	}
-	lockCommitMessage := fmt.Sprintf("Herd review lock\n\npr: %d\nbatch: %d\nowner: %s\nacquired_at: %s\ntoken: %s\n", prNumber, batchNumber, owner, now.UTC().Format(time.RFC3339Nano), lockToken)
-	lockSHA, err := createReviewLockBranch(ctx, repoSvc, lockBranch, lockFromSHA, lockCommitMessage)
-	if err != nil {
-		if isAlreadyExistsLikeError(err) {
-			if err := createOrphanedReviewLockBranchComment(ctx, issueSvc, repoSvc, prNumber, batchNumber, lockBranch, now); err != nil {
-				return nil, false, err
-			}
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("creating review lock branch %s: %w", lockBranch, err)
-	}
 
-	state := reviewLockState{
-		PRNumber:    prNumber,
-		BatchNumber: batchNumber,
-		RunID:       runID,
-		Owner:       owner,
-		BranchSHA:   lockSHA,
-		AcquiredAt:  now.UTC(),
-		ExpiresAt:   now.Add(reviewLockExpiry).UTC(),
-	}
-	body, err := buildReviewLockComment(state)
-	if err != nil {
-		return nil, false, err
-	}
-	commentID, err := issueSvc.AddCommentReturningID(ctx, prNumber, body)
-	if err != nil {
-		_, _ = deleteReviewLockBranchIfCurrent(ctx, repoSvc, lockBranch, lockSHA)
-		return nil, false, fmt.Errorf("creating review lock comment for PR #%d: %w", prNumber, err)
-	}
-	currentSHA, err := repoSvc.GetBranchSHA(ctx, lockBranch)
-	if err != nil {
-		_ = issueSvc.DeleteComment(ctx, commentID)
-		if isNotFoundLikeError(err) {
+	for attempt := 0; attempt < reviewLockMaxAttempts; attempt++ {
+		headSHA, state, stateOK, err := readReviewLockHead(ctx, repoSvc, repo, lockBranch)
+		if err != nil {
+			return nil, false, err
+		}
+		if !stateOK || state.PRNumber != prNumber {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("validating review lock branch %s: %w", lockBranch, err)
+		if state.Status == "locked" && state.ExpiresAt != nil && state.ExpiresAt.After(now) {
+			return nil, false, nil
+		}
+		if state.Status == "locked" && state.ExpiresAt == nil {
+			return nil, false, nil
+		}
+
+		lockID, err := newReviewLockToken()
+		if err != nil {
+			return nil, false, err
+		}
+		lockedState := lockedReviewLockState(prNumber, batchNumber, runID, lockFromSHA, lockID, now)
+		message, err := buildReviewLockCommitMessage(lockedState)
+		if err != nil {
+			return nil, false, err
+		}
+		commitSHA, err := repo.CreateCommit(ctx, headSHA, message)
+		if err != nil {
+			return nil, false, fmt.Errorf("creating review lock marker commit for %s: %w", lockBranch, err)
+		}
+		if err := repo.UpdateBranchToCommit(ctx, lockBranch, commitSHA, false); err != nil {
+			if platform.IsRefUpdateConflict(err) {
+				continue
+			}
+			return nil, false, fmt.Errorf("updating review lock branch %s: %w", lockBranch, err)
+		}
+		return &reviewLockHandle{branch: lockBranch, state: lockedState}, true, nil
 	}
-	if currentSHA != lockSHA {
-		_ = issueSvc.DeleteComment(ctx, commentID)
-		return nil, false, nil
-	}
-	return &reviewLockHandle{commentID: commentID, branch: lockBranch, state: state}, true, nil
+	return nil, false, nil
 }
 
-func releaseReviewLock(ctx context.Context, issueSvc platform.IssueService, repoSvc platform.RepositoryService, h *reviewLockHandle) error {
-	if h == nil {
+func releaseReviewLock(ctx context.Context, _ platform.IssueService, repoSvc platform.RepositoryService, h *reviewLockHandle) error {
+	if h == nil || h.branch == "" || h.state.LockID == "" {
 		return nil
 	}
-	if h.commentID != 0 {
-		if err := issueSvc.DeleteComment(ctx, h.commentID); err != nil {
-			if !isNotFoundLikeError(err) {
-				return fmt.Errorf("deleting review lock comment %d: %w", h.commentID, err)
+	repo, ok := repoSvc.(reviewLockRepository)
+	if !ok {
+		return fmt.Errorf("repository service does not support append-only review locks")
+	}
+	for attempt := 0; attempt < reviewLockMaxAttempts; attempt++ {
+		headSHA, state, stateOK, err := readReviewLockHead(ctx, repoSvc, repo, h.branch)
+		if err != nil {
+			if isNotFoundLikeError(err) {
+				return nil
 			}
-		}
-	}
-	if h.branch != "" {
-		if _, err := deleteReviewLockBranchIfCurrent(ctx, repoSvc, h.branch, h.state.BranchSHA); err != nil {
-			return fmt.Errorf("deleting review lock branch %s: %w", h.branch, err)
-		}
-	}
-	if h.state.BranchSHA != "" && h.state.PRNumber != 0 {
-		if err := deleteReviewLockCommentsForBranchSHA(ctx, issueSvc, h.state.PRNumber, h.state.BranchSHA, h.commentID); err != nil {
 			return err
 		}
+		if !stateOK || state.Status != "locked" || state.LockID != h.state.LockID {
+			return nil
+		}
+
+		releasedAt := time.Now().UTC()
+		unlockedState := reviewLockState{
+			Kind:           "herd-review-lock",
+			Version:        1,
+			Status:         "unlocked",
+			PRNumber:       state.PRNumber,
+			BatchNumber:    state.BatchNumber,
+			ReleasedLockID: h.state.LockID,
+			ReleasedAt:     &releasedAt,
+		}
+		message, err := buildReviewLockCommitMessage(unlockedState)
+		if err != nil {
+			return err
+		}
+		commitSHA, err := repo.CreateCommit(ctx, headSHA, message)
+		if err != nil {
+			return fmt.Errorf("creating review unlock marker commit for %s: %w", h.branch, err)
+		}
+		if err := repo.UpdateBranchToCommit(ctx, h.branch, commitSHA, false); err != nil {
+			if platform.IsRefUpdateConflict(err) {
+				continue
+			}
+			return fmt.Errorf("updating review lock branch %s: %w", h.branch, err)
+		}
+		return nil
 	}
 	return nil
 }
 
-func deleteReviewLockCommentsForBranchSHA(ctx context.Context, issueSvc platform.IssueService, prNumber int, branchSHA string, skipCommentID int64) error {
-	comments, err := issueSvc.ListComments(ctx, prNumber)
-	if err != nil {
-		return fmt.Errorf("listing review lock comments for PR #%d: %w", prNumber, err)
+func ensureReviewLockBranch(ctx context.Context, repoSvc platform.RepositoryService, repo reviewLockRepository, branch string, prNumber int, batchNumber int, lockFromSHA string, now time.Time) error {
+	releasedAt := now.UTC()
+	initialState := reviewLockState{
+		Kind:        "herd-review-lock",
+		Version:     1,
+		Status:      "unlocked",
+		PRNumber:    prNumber,
+		BatchNumber: batchNumber,
+		ReleasedAt:  &releasedAt,
 	}
-	for _, c := range comments {
-		if c.ID == skipCommentID {
-			continue
+	message, err := buildReviewLockCommitMessage(initialState)
+	if err != nil {
+		return err
+	}
+	if _, err := repo.CreateBranchWithCommit(ctx, branch, lockFromSHA, message); err != nil {
+		if isAlreadyExistsLikeError(err) {
+			return nil
 		}
-		state, ok := parseReviewLockComment(c.Body)
-		if !ok || state.PRNumber != prNumber || state.BranchSHA != branchSHA {
-			continue
-		}
-		if err := issueSvc.DeleteComment(ctx, c.ID); err != nil && !isNotFoundLikeError(err) {
-			return fmt.Errorf("deleting review lock comment %d: %w", c.ID, err)
-		}
+		return fmt.Errorf("creating review lock branch %s: %w", branch, err)
+	}
+	_, err = repoSvc.GetBranchSHA(ctx, branch)
+	if err != nil {
+		return fmt.Errorf("validating review lock branch %s: %w", branch, err)
 	}
 	return nil
+}
+
+func readReviewLockHead(ctx context.Context, repoSvc platform.RepositoryService, repo reviewLockRepository, branch string) (string, reviewLockState, bool, error) {
+	headSHA, err := repoSvc.GetBranchSHA(ctx, branch)
+	if err != nil {
+		return "", reviewLockState{}, false, fmt.Errorf("getting review lock branch %s: %w", branch, err)
+	}
+	message, err := repo.GetCommitMessage(ctx, headSHA)
+	if err != nil {
+		return "", reviewLockState{}, false, fmt.Errorf("getting review lock commit %s: %w", headSHA, err)
+	}
+	state, ok := parseReviewLockCommitMessage(message)
+	return headSHA, state, ok, nil
+}
+
+func lockedReviewLockState(prNumber int, batchNumber int, runID int64, batchBranchSHA string, lockID string, now time.Time) reviewLockState {
+	acquiredAt := now.UTC()
+	expiresAt := now.Add(reviewLockExpiry).UTC()
+	return reviewLockState{
+		Kind:           "herd-review-lock",
+		Version:        1,
+		Status:         "locked",
+		LockID:         lockID,
+		PRNumber:       prNumber,
+		BatchNumber:    batchNumber,
+		RunID:          runID,
+		Owner:          reviewLockOwner(batchNumber, runID),
+		BatchBranchSHA: batchBranchSHA,
+		AcquiredAt:     &acquiredAt,
+		ExpiresAt:      &expiresAt,
+	}
+}
+
+func parseReviewLockCommitMessage(message string) (reviewLockState, bool) {
+	var state reviewLockState
+	if err := json.Unmarshal([]byte(strings.TrimSpace(message)), &state); err != nil {
+		return reviewLockState{}, false
+	}
+	if state.Kind != "herd-review-lock" || state.Version != 1 {
+		return reviewLockState{}, false
+	}
+	switch state.Status {
+	case "locked":
+		if state.LockID == "" || state.PRNumber == 0 {
+			return reviewLockState{}, false
+		}
+	case "unlocked":
+		if state.PRNumber == 0 {
+			return reviewLockState{}, false
+		}
+	default:
+		return reviewLockState{}, false
+	}
+	return state, true
+}
+
+func buildReviewLockCommitMessage(state reviewLockState) (string, error) {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return "", fmt.Errorf("marshaling review lock state: %w", err)
+	}
+	return string(data), nil
 }
 
 func parseReviewLockComment(body string) (reviewLockState, bool) {
@@ -202,72 +273,12 @@ func reviewLockBranch(prNumber int) string {
 	return fmt.Sprintf("herd/review-lock/pr-%d", prNumber)
 }
 
-func createReviewLockBranch(ctx context.Context, repoSvc platform.RepositoryService, branch string, lockFromSHA string, message string) (string, error) {
-	if repo, ok := repoSvc.(reviewLockCommitRepository); ok {
-		return repo.CreateBranchWithCommit(ctx, branch, lockFromSHA, message)
-	}
-	return "", fmt.Errorf("repository service does not support review lock marker commits")
-}
-
 func newReviewLockToken() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("generating review lock token: %w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
-}
-
-func createOrphanedReviewLockBranchComment(ctx context.Context, issueSvc platform.IssueService, repoSvc platform.RepositoryService, prNumber int, batchNumber int, lockBranch string, now time.Time) error {
-	branchSHA, err := repoSvc.GetBranchSHA(ctx, lockBranch)
-	if err != nil {
-		if isNotFoundLikeError(err) {
-			return nil
-		}
-		return fmt.Errorf("getting orphaned review lock branch SHA for %s: %w", lockBranch, err)
-	}
-	body, err := buildReviewLockComment(reviewLockState{
-		PRNumber:    prNumber,
-		BatchNumber: batchNumber,
-		Owner:       "orphaned-branch",
-		BranchSHA:   branchSHA,
-		AcquiredAt:  now.UTC(),
-		ExpiresAt:   now.Add(reviewLockOrphanBranchGrace).UTC(),
-	})
-	if err != nil {
-		return err
-	}
-	if _, err := issueSvc.AddCommentReturningID(ctx, prNumber, body); err != nil {
-		return fmt.Errorf("creating orphaned review lock branch comment for PR #%d: %w", prNumber, err)
-	}
-	currentSHA, err := repoSvc.GetBranchSHA(ctx, lockBranch)
-	if err != nil {
-		if isNotFoundLikeError(err) {
-			_ = deleteReviewLockCommentsForBranchSHA(ctx, issueSvc, prNumber, branchSHA, 0)
-			return nil
-		}
-		return fmt.Errorf("validating orphaned review lock branch %s: %w", lockBranch, err)
-	}
-	if currentSHA != branchSHA {
-		_ = deleteReviewLockCommentsForBranchSHA(ctx, issueSvc, prNumber, branchSHA, 0)
-	}
-	return nil
-}
-
-func deleteReviewLockBranchIfCurrent(ctx context.Context, repoSvc platform.RepositoryService, branch string, expectedSHA string) (bool, error) {
-	if expectedSHA == "" {
-		if _, err := repoSvc.GetBranchSHA(ctx, branch); err != nil {
-			if isNotFoundLikeError(err) {
-				return true, nil
-			}
-			return false, err
-		}
-		return false, nil
-	}
-	repo, ok := repoSvc.(reviewLockCompareDeleteRepository)
-	if !ok {
-		return false, fmt.Errorf("repository service does not support leased review lock branch deletion")
-	}
-	return repo.DeleteBranchIfSHA(ctx, branch, expectedSHA)
 }
 
 func filterReviewLockComments(comments []*platform.Comment) []*platform.Comment {
@@ -294,7 +305,8 @@ func isAlreadyExistsLikeError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "422") ||
+	return strings.Contains(msg, "409") ||
+		strings.Contains(msg, "422") ||
 		strings.Contains(msg, "already exists") ||
 		strings.Contains(msg, "reference already exists")
 }

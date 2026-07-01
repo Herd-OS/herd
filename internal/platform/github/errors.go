@@ -27,12 +27,8 @@ func IsMilestoneAlreadyExists(err error) bool {
 	return false
 }
 
-func isGitHubNotFound(err error) bool {
-	return isGitHubStatus(err, http.StatusNotFound)
-}
-
-func isGitHubPreconditionFailed(err error) bool {
-	return isGitHubStatus(err, http.StatusPreconditionFailed)
+func isGitHubRefUpdateConflict(err error) bool {
+	return isGitHubStatus(err, http.StatusConflict) || isGitHubStatus(err, http.StatusUnprocessableEntity)
 }
 
 func isGitHubStatus(err error, status int) bool {

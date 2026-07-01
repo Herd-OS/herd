@@ -252,11 +252,14 @@ type mockRepoService struct {
 	defaultBranch   string
 	branchExists    map[string]bool
 	branchSHAs      map[string]string
+	commitMessages  map[string]string
+	commitParents   map[string]string
 	markerCommitSeq int
 	deletedBranch   string
 	deletedBranches []string
-	onDeleteIfSHA   func(name, expectedSHA string)
 	onGetBranchSHA  func(name string)
+	onUpdateBranch  func(name, sha string)
+	updateConflicts int
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
@@ -277,13 +280,57 @@ func (m *mockRepoService) CreateBranch(_ context.Context, name, sha string) erro
 	m.branchSHAs[name] = sha
 	return nil
 }
-func (m *mockRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, _ string) (string, error) {
-	m.markerCommitSeq++
-	markerSHA := fmt.Sprintf("%s-lock-%d", sha, m.markerCommitSeq)
+func (m *mockRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, message string) (string, error) {
+	markerSHA, err := m.CreateCommit(ctx, sha, message)
+	if err != nil {
+		return "", err
+	}
 	if err := m.CreateBranch(ctx, name, markerSHA); err != nil {
 		return "", err
 	}
 	return markerSHA, nil
+}
+func (m *mockRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	m.markerCommitSeq++
+	markerSHA := fmt.Sprintf("%s-lock-%d", parentSHA, m.markerCommitSeq)
+	if m.commitMessages == nil {
+		m.commitMessages = make(map[string]string)
+	}
+	if m.commitParents == nil {
+		m.commitParents = make(map[string]string)
+	}
+	m.commitMessages[markerSHA] = message
+	m.commitParents[markerSHA] = parentSHA
+	return markerSHA, nil
+}
+func (m *mockRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if m.commitMessages != nil {
+		if msg, ok := m.commitMessages[sha]; ok {
+			return msg, nil
+		}
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (m *mockRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if m.onUpdateBranch != nil {
+		m.onUpdateBranch(name, sha)
+	}
+	if m.updateConflicts > 0 {
+		m.updateConflicts--
+		return platform.ErrRefUpdateConflict
+	}
+	if m.branchExists == nil {
+		m.branchExists = make(map[string]bool)
+	}
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if !m.branchExists[name] || m.branchSHAs[name] != m.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
+	m.branchExists[name] = true
+	m.branchSHAs[name] = sha
+	return nil
 }
 func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 	m.deletedBranch = name
@@ -295,19 +342,6 @@ func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 		delete(m.branchSHAs, name)
 	}
 	return nil
-}
-func (m *mockRepoService) DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error) {
-	if m.onDeleteIfSHA != nil {
-		m.onDeleteIfSHA(name, expectedSHA)
-	}
-	currentSHA, err := m.GetBranchSHA(ctx, name)
-	if err != nil {
-		return true, nil
-	}
-	if currentSHA != expectedSHA {
-		return false, nil
-	}
-	return true, m.DeleteBranch(ctx, name)
 }
 func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
 	if m.onGetBranchSHA != nil {

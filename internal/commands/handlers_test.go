@@ -209,6 +209,8 @@ type testRepoService struct {
 	defaultBranch    string
 	defaultBranchErr error
 	branches         map[string]string
+	commitMessages   map[string]string
+	commitParents    map[string]string
 	markerSeq        int
 }
 
@@ -220,27 +222,51 @@ func (m *testRepoService) CreateBranch(_ context.Context, name, sha string) erro
 	if m.branches == nil {
 		m.branches = make(map[string]string)
 	}
+	if _, ok := m.branches[name]; ok {
+		return fmt.Errorf("reference already exists")
+	}
 	m.branches[name] = sha
 	return nil
 }
-func (m *testRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, _ string) (string, error) {
-	m.markerSeq++
-	markerSHA := fmt.Sprintf("%s-lock-%d", sha, m.markerSeq)
+func (m *testRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, message string) (string, error) {
+	markerSHA, err := m.CreateCommit(ctx, sha, message)
+	if err != nil {
+		return "", err
+	}
 	return markerSHA, m.CreateBranch(ctx, name, markerSHA)
+}
+func (m *testRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	m.markerSeq++
+	markerSHA := fmt.Sprintf("%s-lock-%d", parentSHA, m.markerSeq)
+	if m.commitMessages == nil {
+		m.commitMessages = make(map[string]string)
+	}
+	if m.commitParents == nil {
+		m.commitParents = make(map[string]string)
+	}
+	m.commitMessages[markerSHA] = message
+	m.commitParents[markerSHA] = parentSHA
+	return markerSHA, nil
+}
+func (m *testRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if msg, ok := m.commitMessages[sha]; ok {
+		return msg, nil
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (m *testRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if m.branches == nil {
+		m.branches = make(map[string]string)
+	}
+	if m.branches[name] != m.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
+	m.branches[name] = sha
+	return nil
 }
 func (m *testRepoService) DeleteBranch(_ context.Context, name string) error {
 	delete(m.branches, name)
 	return nil
-}
-func (m *testRepoService) DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error) {
-	currentSHA, err := m.GetBranchSHA(ctx, name)
-	if err != nil {
-		return false, err
-	}
-	if currentSHA != expectedSHA {
-		return false, nil
-	}
-	return true, m.DeleteBranch(ctx, name)
 }
 func (m *testRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
 	if sha, ok := m.branches[name]; ok {

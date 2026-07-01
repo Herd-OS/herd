@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -128,13 +127,24 @@ func (s *repositoryService) CreateBranch(ctx context.Context, name, fromSHA stri
 }
 
 func (s *repositoryService) CreateBranchWithCommit(ctx context.Context, name, parentSHA, message string) (string, error) {
+	sha, err := s.CreateCommit(ctx, parentSHA, message)
+	if err != nil {
+		return "", err
+	}
+	if err := s.CreateBranch(ctx, name, sha); err != nil {
+		return "", err
+	}
+	return sha, nil
+}
+
+func (s *repositoryService) CreateCommit(ctx context.Context, parentSHA, message string) (string, error) {
 	parent, _, err := s.c.gh.Git.GetCommit(ctx, s.c.owner, s.c.repo, parentSHA)
 	if err != nil {
-		return "", fmt.Errorf("getting parent commit %s for branch %s: %w", parentSHA, name, err)
+		return "", fmt.Errorf("getting parent commit %s: %w", parentSHA, err)
 	}
 	tree := parent.GetTree()
 	if tree == nil || tree.GetSHA() == "" {
-		return "", fmt.Errorf("getting parent commit %s tree for branch %s: missing tree", parentSHA, name)
+		return "", fmt.Errorf("getting parent commit %s tree: missing tree", parentSHA)
 	}
 	commit, _, err := s.c.gh.Git.CreateCommit(ctx, s.c.owner, s.c.repo, &gh.Commit{
 		Message: gh.Ptr(message),
@@ -144,14 +154,11 @@ func (s *repositoryService) CreateBranchWithCommit(ctx context.Context, name, pa
 		},
 	}, nil)
 	if err != nil {
-		return "", fmt.Errorf("creating marker commit for branch %s: %w", name, err)
+		return "", fmt.Errorf("creating marker commit: %w", err)
 	}
 	sha := commit.GetSHA()
 	if sha == "" {
-		return "", fmt.Errorf("creating marker commit for branch %s: empty SHA", name)
-	}
-	if err := s.CreateBranch(ctx, name, sha); err != nil {
-		return "", err
+		return "", fmt.Errorf("creating marker commit: empty SHA")
 	}
 	return sha, nil
 }
@@ -164,60 +171,33 @@ func (s *repositoryService) DeleteBranch(ctx context.Context, name string) error
 	return nil
 }
 
-func (s *repositoryService) DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error) {
-	refURL := gitRefAPIPath(s.c.owner, s.c.repo, "heads/"+name)
-	refReq, err := s.c.gh.NewRequest(http.MethodGet, refURL, nil)
-	if err != nil {
-		return false, fmt.Errorf("creating branch lookup request for %s: %w", name, err)
-	}
-	ref := new(gh.Reference)
-	resp, err := s.c.gh.Do(ctx, refReq, ref)
-	if err != nil {
-		if isGitHubNotFound(err) {
-			return true, nil
-		}
-		return false, fmt.Errorf("getting branch %s before leased delete: %w", name, err)
-	}
-	if ref.GetObject().GetSHA() != expectedSHA {
-		return false, nil
-	}
-	if resp == nil || resp.Response == nil {
-		return false, fmt.Errorf("getting branch %s before leased delete: missing response metadata", name)
-	}
-	etag := resp.Header.Get("ETag")
-	if etag == "" {
-		return false, fmt.Errorf("getting branch %s before leased delete: missing ETag", name)
-	}
-	deleteReq, err := s.c.gh.NewRequest(http.MethodDelete, refURL, nil)
-	if err != nil {
-		return false, fmt.Errorf("creating leased delete request for branch %s: %w", name, err)
-	}
-	deleteReq.Header.Set("If-Match", etag)
-	_, err = s.c.gh.Do(ctx, deleteReq, nil)
-	if err != nil {
-		if isGitHubNotFound(err) {
-			return true, nil
-		}
-		if isGitHubPreconditionFailed(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("deleting branch %s with lease at %s: %w", name, expectedSHA, err)
-	}
-	return true, nil
-}
-
-func gitRefAPIPath(owner, repo, ref string) string {
-	parts := strings.Split(ref, "/")
-	for i, part := range parts {
-		parts[i] = url.PathEscape(part)
-	}
-	return fmt.Sprintf("repos/%s/%s/git/refs/%s", owner, repo, strings.Join(parts, "/"))
-}
-
 func (s *repositoryService) GetBranchSHA(ctx context.Context, name string) (string, error) {
 	ref, _, err := s.c.gh.Git.GetRef(ctx, s.c.owner, s.c.repo, "refs/heads/"+name)
 	if err != nil {
 		return "", fmt.Errorf("getting branch SHA for %s: %w", name, err)
 	}
 	return ref.GetObject().GetSHA(), nil
+}
+
+func (s *repositoryService) GetCommitMessage(ctx context.Context, sha string) (string, error) {
+	commit, _, err := s.c.gh.Git.GetCommit(ctx, s.c.owner, s.c.repo, sha)
+	if err != nil {
+		return "", fmt.Errorf("getting commit %s: %w", sha, err)
+	}
+	return commit.GetMessage(), nil
+}
+
+func (s *repositoryService) UpdateBranchToCommit(ctx context.Context, name, sha string, force bool) error {
+	ref := &gh.Reference{
+		Ref:    gh.Ptr("refs/heads/" + name),
+		Object: &gh.GitObject{SHA: gh.Ptr(sha)},
+	}
+	_, _, err := s.c.gh.Git.UpdateRef(ctx, s.c.owner, s.c.repo, ref, force)
+	if err != nil {
+		if isGitHubRefUpdateConflict(err) {
+			return fmt.Errorf("updating branch %s to %s: %w", name, sha, platform.ErrRefUpdateConflict)
+		}
+		return fmt.Errorf("updating branch %s to %s: %w", name, sha, err)
+	}
+	return nil
 }

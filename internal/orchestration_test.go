@@ -334,16 +334,20 @@ func (s *statefulWorkflowService) addRun(issueNumber int, conclusion string) int
 // --- Stateful Repo Service ---
 
 type statefulRepoService struct {
-	defaultBranch string
-	branches      map[string]string // name → SHA
-	markerSeq     int
-	deletedBranch string
+	defaultBranch  string
+	branches       map[string]string // name → SHA
+	commitMessages map[string]string
+	commitParents  map[string]string
+	markerSeq      int
+	deletedBranch  string
 }
 
 func newStatefulRepoService() *statefulRepoService {
 	return &statefulRepoService{
-		defaultBranch: "main",
-		branches:      make(map[string]string),
+		defaultBranch:  "main",
+		branches:       make(map[string]string),
+		commitMessages: make(map[string]string),
+		commitParents:  make(map[string]string),
 	}
 }
 
@@ -352,28 +356,43 @@ func (s *statefulRepoService) GetDefaultBranch(_ context.Context) (string, error
 	return s.defaultBranch, nil
 }
 func (s *statefulRepoService) CreateBranch(_ context.Context, name, sha string) error {
+	if _, ok := s.branches[name]; ok {
+		return fmt.Errorf("reference already exists")
+	}
 	s.branches[name] = sha
 	return nil
 }
-func (s *statefulRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, _ string) (string, error) {
-	s.markerSeq++
-	markerSHA := fmt.Sprintf("%s-lock-%d", sha, s.markerSeq)
+func (s *statefulRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, message string) (string, error) {
+	markerSHA, err := s.CreateCommit(ctx, sha, message)
+	if err != nil {
+		return "", err
+	}
 	return markerSHA, s.CreateBranch(ctx, name, markerSHA)
+}
+func (s *statefulRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	s.markerSeq++
+	markerSHA := fmt.Sprintf("%s-lock-%d", parentSHA, s.markerSeq)
+	s.commitMessages[markerSHA] = message
+	s.commitParents[markerSHA] = parentSHA
+	return markerSHA, nil
+}
+func (s *statefulRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if msg, ok := s.commitMessages[sha]; ok {
+		return msg, nil
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (s *statefulRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if s.branches[name] != s.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
+	s.branches[name] = sha
+	return nil
 }
 func (s *statefulRepoService) DeleteBranch(_ context.Context, name string) error {
 	s.deletedBranch = name
 	delete(s.branches, name)
 	return nil
-}
-func (s *statefulRepoService) DeleteBranchIfSHA(ctx context.Context, name, expectedSHA string) (bool, error) {
-	currentSHA, err := s.GetBranchSHA(ctx, name)
-	if err != nil {
-		return false, err
-	}
-	if currentSHA != expectedSHA {
-		return false, nil
-	}
-	return true, s.DeleteBranch(ctx, name)
 }
 func (s *statefulRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
 	if sha, ok := s.branches[name]; ok {
