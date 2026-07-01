@@ -238,7 +238,8 @@ func TestAcquireReviewLock_OrphanedBranchGetsExpiringCommentAndCanBeReclaimed(t 
 	require.True(t, acquired)
 	require.NotNil(t, handle)
 	assert.True(t, repoSvc.branchExists[lockBranch])
-	assert.Equal(t, "new-sha", repoSvc.branchSHAs[lockBranch])
+	assert.NotEqual(t, "new-sha", repoSvc.branchSHAs[lockBranch])
+	assert.Equal(t, handle.state.BranchSHA, repoSvc.branchSHAs[lockBranch])
 	assert.Equal(t, 1, reviewLockCommentCount(issueSvc.storedComments[50], 50))
 	assert.Equal(t, []string{lockBranch}, repoSvc.deletedBranches)
 }
@@ -269,6 +270,46 @@ func TestAcquireReviewLock_StaleCleanupDoesNotDeleteBranchWithDifferentSHA(t *te
 	assert.Equal(t, "fresh-sha", repoSvc.branchSHAs[lockBranch])
 	assert.Empty(t, repoSvc.deletedBranches)
 	assert.Equal(t, 1, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+}
+
+func TestAcquireReviewLock_StaleCleanupDoesNotDeleteFreshLockAtSameBatchSHA(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	staleState := reviewLockState{
+		PRNumber:    50,
+		BatchNumber: 1,
+		Owner:       "stale",
+		BranchSHA:   "batch-sha-lock-1",
+		AcquiredAt:  now.Add(-reviewLockExpiry),
+		ExpiresAt:   now.Add(-time.Second),
+	}
+
+	firstIssueSvc := newMockIssueService()
+	_, err := firstIssueSvc.AddCommentReturningID(context.Background(), 50, mustReviewLockComment(t, staleState))
+	require.NoError(t, err)
+	secondIssueSvc := newMockIssueService()
+	_, err = secondIssueSvc.AddCommentReturningID(context.Background(), 50, mustReviewLockComment(t, staleState))
+	require.NoError(t, err)
+	repoSvc := &mockRepoService{
+		branchExists:    map[string]bool{lockBranch: true},
+		branchSHAs:      map[string]string{lockBranch: staleState.BranchSHA},
+		markerCommitSeq: 1,
+	}
+
+	first, acquired, err := acquireReviewLock(context.Background(), firstIssueSvc, repoSvc, 50, 1, 100, "batch-sha", now)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, first)
+	require.True(t, repoSvc.branchExists[lockBranch])
+	require.Equal(t, "batch-sha-lock-2", repoSvc.branchSHAs[lockBranch])
+
+	second, acquired, err := acquireReviewLock(context.Background(), secondIssueSvc, repoSvc, 50, 1, 101, "batch-sha", now)
+	require.NoError(t, err)
+	assert.False(t, acquired)
+	assert.Nil(t, second)
+	assert.True(t, repoSvc.branchExists[lockBranch])
+	assert.Equal(t, first.state.BranchSHA, repoSvc.branchSHAs[lockBranch])
+	assert.Equal(t, []string{lockBranch}, repoSvc.deletedBranches)
 }
 
 func TestReview_SkipsWhenReviewLockActive(t *testing.T) {

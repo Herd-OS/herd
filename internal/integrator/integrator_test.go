@@ -252,6 +252,7 @@ type mockRepoService struct {
 	defaultBranch   string
 	branchExists    map[string]bool
 	branchSHAs      map[string]string
+	markerCommitSeq int
 	deletedBranch   string
 	deletedBranches []string
 }
@@ -268,10 +269,19 @@ func (m *mockRepoService) CreateBranch(_ context.Context, name, sha string) erro
 		return fmt.Errorf("reference already exists")
 	}
 	m.branchExists[name] = true
-	if m.branchSHAs != nil {
-		m.branchSHAs[name] = sha
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
 	}
+	m.branchSHAs[name] = sha
 	return nil
+}
+func (m *mockRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, _ string) (string, error) {
+	m.markerCommitSeq++
+	markerSHA := fmt.Sprintf("%s-lock-%d", sha, m.markerCommitSeq)
+	if err := m.CreateBranch(ctx, name, markerSHA); err != nil {
+		return "", err
+	}
+	return markerSHA, nil
 }
 func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 	m.deletedBranch = name

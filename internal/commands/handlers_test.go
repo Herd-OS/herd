@@ -208,15 +208,34 @@ func (m *testWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*pl
 type testRepoService struct {
 	defaultBranch    string
 	defaultBranchErr error
+	branches         map[string]string
+	markerSeq        int
 }
 
 func (m *testRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
 func (m *testRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, m.defaultBranchErr
 }
-func (m *testRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
-func (m *testRepoService) DeleteBranch(_ context.Context, _ string) error    { return nil }
-func (m *testRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
+func (m *testRepoService) CreateBranch(_ context.Context, name, sha string) error {
+	if m.branches == nil {
+		m.branches = make(map[string]string)
+	}
+	m.branches[name] = sha
+	return nil
+}
+func (m *testRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, _ string) (string, error) {
+	m.markerSeq++
+	markerSHA := fmt.Sprintf("%s-lock-%d", sha, m.markerSeq)
+	return markerSHA, m.CreateBranch(ctx, name, markerSHA)
+}
+func (m *testRepoService) DeleteBranch(_ context.Context, name string) error {
+	delete(m.branches, name)
+	return nil
+}
+func (m *testRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
+	if sha, ok := m.branches[name]; ok {
+		return sha, nil
+	}
 	return "abc123", nil
 }
 

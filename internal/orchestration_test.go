@@ -336,6 +336,7 @@ func (s *statefulWorkflowService) addRun(issueNumber int, conclusion string) int
 type statefulRepoService struct {
 	defaultBranch string
 	branches      map[string]string // name → SHA
+	markerSeq     int
 	deletedBranch string
 }
 
@@ -353,6 +354,11 @@ func (s *statefulRepoService) GetDefaultBranch(_ context.Context) (string, error
 func (s *statefulRepoService) CreateBranch(_ context.Context, name, sha string) error {
 	s.branches[name] = sha
 	return nil
+}
+func (s *statefulRepoService) CreateBranchWithCommit(ctx context.Context, name, sha, _ string) (string, error) {
+	s.markerSeq++
+	markerSHA := fmt.Sprintf("%s-lock-%d", sha, s.markerSeq)
+	return markerSHA, s.CreateBranch(ctx, name, markerSHA)
 }
 func (s *statefulRepoService) DeleteBranch(_ context.Context, name string) error {
 	s.deletedBranch = name
