@@ -153,13 +153,15 @@ func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ s
 }
 
 type mockPRService struct {
-	listResult  []*platform.PullRequest
-	getResult   map[int]*platform.PullRequest
-	created     *platform.PullRequest
-	merged      bool
-	diffResult  string
-	comments    map[int][]string
-	onCreateErr error // if set, Create returns this error
+	listResult   []*platform.PullRequest
+	getResult    map[int]*platform.PullRequest
+	created      *platform.PullRequest
+	merged       bool
+	mergedNumber int
+	mergeMethod  platform.MergeMethod
+	diffResult   string
+	comments     map[int][]string
+	onCreateErr  error // if set, Create returns this error
 }
 
 func (m *mockPRService) Create(_ context.Context, title, body, head, base string) (*platform.PullRequest, error) {
@@ -183,8 +185,10 @@ func (m *mockPRService) List(_ context.Context, _ platform.PRFilters) ([]*platfo
 func (m *mockPRService) Update(_ context.Context, _ int, _, _ *string) (*platform.PullRequest, error) {
 	return nil, nil
 }
-func (m *mockPRService) Merge(_ context.Context, _ int, _ platform.MergeMethod) (*platform.MergeResult, error) {
+func (m *mockPRService) Merge(_ context.Context, number int, method platform.MergeMethod) (*platform.MergeResult, error) {
 	m.merged = true
+	m.mergedNumber = number
+	m.mergeMethod = method
 	return &platform.MergeResult{Merged: true}, nil
 }
 func (m *mockPRService) UpdateBranch(_ context.Context, _ int) error { return nil }
