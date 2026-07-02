@@ -360,7 +360,12 @@ func (m *mockRepoService) DeleteBranch(_ context.Context, name string) error {
 	}
 	return nil
 }
-func (m *mockRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
+func (m *mockRepoService) GetBranchSHA(ctx context.Context, name string) (string, error) {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
 	if m.onGetBranchSHA != nil {
 		m.onGetBranchSHA(name)
 	}

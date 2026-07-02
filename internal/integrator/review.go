@@ -266,7 +266,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		}, nil
 	}
 
-	currentHeadSHA, err := p.Repository().GetBranchSHA(ctx, batchBranch)
+	postReviewHeadCtx, postReviewHeadCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	currentHeadSHA, err := p.Repository().GetBranchSHA(postReviewHeadCtx, batchBranch)
+	postReviewHeadCancel()
 	if err != nil {
 		return nil, fmt.Errorf("getting current branch SHA after review for %s: %w", batchBranch, err)
 	}
