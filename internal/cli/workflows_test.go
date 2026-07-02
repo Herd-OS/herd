@@ -148,8 +148,11 @@ func TestIntegratorWorkflow_RendersConfiguredCIWorkflows(t *testing.T) {
 	assert.Contains(t, s, "check-ci-workflow-completion:")
 	assert.Contains(t, s, "github.event.workflow_run.path == '.github/workflows/herd-worker.yml'")
 	assert.Contains(t, s, "github.event.workflow_run.path != '.github/workflows/herd-worker.yml'")
-	assert.Contains(t, s, "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
-	assert.Contains(t, s, "herd integrator review --batch \"$BATCH\"")
+	checkCIIndex := strings.Index(s, "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
+	reviewIndex := strings.Index(s, "herd integrator review --batch \"$BATCH\"")
+	require.NotEqual(t, -1, checkCIIndex)
+	require.NotEqual(t, -1, reviewIndex)
+	assert.Less(t, checkCIIndex, reviewIndex)
 }
 
 func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T) {
@@ -213,8 +216,11 @@ func TestIntegratorWorkflow_ConfiguredCIReviewRetrySharesWorkerCompletionConcurr
 	assert.NotContains(t, checkCIWorkflowCompletion.Concurrency.Group, "herd-check-ci")
 	assert.Contains(t, checkCIWorkflowCompletion.Concurrency.Group, "github.event.workflow_run.head_branch")
 	assert.True(t, jobInvokesIntegratorReview(checkCIWorkflowCompletion))
-	assert.Contains(t, string(rendered), "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
-	assert.Contains(t, string(rendered), "herd integrator review --batch \"$BATCH\"")
+	checkCIIndex := strings.Index(string(rendered), "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
+	reviewIndex := strings.Index(string(rendered), "herd integrator review --batch \"$BATCH\"")
+	require.NotEqual(t, -1, checkCIIndex)
+	require.NotEqual(t, -1, reviewIndex)
+	assert.Less(t, checkCIIndex, reviewIndex)
 }
 
 func jobInvokesIntegratorReview(job githubActionsJob) bool {
