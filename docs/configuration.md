@@ -240,6 +240,12 @@ When you see that comment, run `/herd review` (optionally with a focus area) on 
 
 Review retries and manual `/herd review` commands are serialized per batch PR by an application-level GitHub-backed review lock. If another review is already running, the duplicate trigger is skipped instead of launching another agent. Manual review still bypasses stable-disagreement suspension, but it respects the active-review lock. Existing active-fix guards still prevent duplicate fix cycles after review findings have already created fix issues.
 
+When a batch review starts, HerdOS records the batch PR head SHA, then checks the current PR head again before applying the agent result. If the head changed while the agent was running, HerdOS discards that result, posts a comment on the batch PR, and leaves the updated diff for the next automatic trigger or manual `/herd review`.
+
+If a manual `/herd review` is skipped because another review is active, HerdOS posts diagnostic lock metadata when available: owner, acquired time, expiry time, recorded head SHA, and current head SHA. A recorded head SHA that differs from the current PR head on an unexpired lock is diagnostic only; it does not allow a second concurrent review. Review lock expiry or release controls recovery.
+
+Review-lock metadata is not merge approval. Merge approval uses the batch PR metadata and does not merge, approve, or consult `herd/review-lock/pr-N` branches.
+
 ## CI Fix Loop
 
 `integrator.require_ci` enables CI failure detection on the batch branch. `integrator.ci_max_fix_cycles` caps how many CI-failure fix cycles the Integrator will dispatch (0 = unlimited).
