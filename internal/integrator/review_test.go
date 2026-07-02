@@ -823,6 +823,13 @@ func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
 
 func TestReview_ReleasesLockWithFreshContextWhenParentContextCancelled(t *testing.T) {
 	issueSvc := newMockIssueService()
+	issueSvc.respectCanceledContext = true
+	prSvc := &mockPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+		},
+		respectCanceledContext: true,
+	}
 	repoSvc := &mockRepoService{
 		defaultBranch:          "main",
 		branchExists:           map[string]bool{"herd/batch/1-batch": true},
@@ -837,6 +844,7 @@ func TestReview_ReleasesLockWithFreshContextWhenParentContextCancelled(t *testin
 
 	dir, g := initTestRepo(t)
 	mock := newReviewLockTestPlatform(issueSvc)
+	mock.prs = prSvc
 	mock.repo = repoSvc
 	result, err := Review(ctx, mock, ag, g, &config.Config{
 		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
@@ -845,6 +853,68 @@ func TestReview_ReleasesLockWithFreshContextWhenParentContextCancelled(t *testin
 	require.NoError(t, err)
 	assert.True(t, result.Approved)
 	assert.Equal(t, 1, ag.calls)
+	require.Len(t, prSvc.comments[50], 1)
+	assert.Contains(t, prSvc.comments[50][0], "LGTM")
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewApprove, prSvc.reviews[0].event)
+	assertReviewLockUnlocked(t, repoSvc)
+}
+
+func TestReview_CreatesFixIssueWithFreshContextWhenParentContextCancelled(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.respectCanceledContext = true
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+	prSvc := &mockPRService{
+		getResult: map[int]*platform.PullRequest{
+			50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+		},
+		respectCanceledContext: true,
+	}
+	wf := &mockWorkflowService{respectCanceledContext: true}
+	repoSvc := &mockRepoService{
+		defaultBranch:          "main",
+		branchExists:           map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:             map[string]string{"herd/batch/1-batch": "sha-current"},
+		respectCanceledContext: true,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Missing validation"},
+			},
+		},
+		onReview: cancel,
+	}
+
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(mockCreate)
+	mock.prs = prSvc
+	mock.repo = repoSvc
+	mock.workflows = wf
+
+	result, err := Review(ctx, mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Equal(t, 1, ag.calls)
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "100", wf.dispatched[0]["issue_number"])
+	require.Len(t, prSvc.comments[50], 1)
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
 	assertReviewLockUnlocked(t, repoSvc)
 }
 
@@ -1933,7 +2003,12 @@ type mockIssueServiceWithCreate struct {
 	onCreate func(title, body string, labels []string, milestone *int) (*platform.Issue, error)
 }
 
-func (m *mockIssueServiceWithCreate) Create(_ context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+func (m *mockIssueServiceWithCreate) Create(ctx context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if m.onCreate != nil {
 		return m.onCreate(title, body, labels, milestone)
 	}

@@ -37,19 +37,20 @@ func (m *mockPlatform) Repository() platform.RepositoryService    { return m.rep
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 type mockIssueService struct {
-	getResult          map[int]*platform.Issue
-	listResult         []*platform.Issue
-	addedLabels        map[int][]string
-	removedLabels      map[int][]string
-	updatedIssues      map[int]platform.IssueUpdate
-	comments           map[int][]string
-	storedComments     map[int][]*platform.Comment
-	nextCommentID      int64
-	listCommentsResult []*platform.Comment
-	createResult       *platform.Issue
-	createErr          error
-	createdTitle       string
-	createdBody        string
+	getResult              map[int]*platform.Issue
+	listResult             []*platform.Issue
+	addedLabels            map[int][]string
+	removedLabels          map[int][]string
+	updatedIssues          map[int]platform.IssueUpdate
+	comments               map[int][]string
+	storedComments         map[int][]*platform.Comment
+	nextCommentID          int64
+	listCommentsResult     []*platform.Comment
+	createResult           *platform.Issue
+	createErr              error
+	createdTitle           string
+	createdBody            string
+	respectCanceledContext bool
 }
 
 func newMockIssueService() *mockIssueService {
@@ -64,7 +65,12 @@ func newMockIssueService() *mockIssueService {
 	}
 }
 
-func (m *mockIssueService) Create(_ context.Context, title, body string, _ []string, _ *int) (*platform.Issue, error) {
+func (m *mockIssueService) Create(ctx context.Context, title, body string, _ []string, _ *int) (*platform.Issue, error) {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	m.createdTitle = title
 	m.createdBody = body
 	if m.createErr != nil {
@@ -88,7 +94,12 @@ func (m *mockIssueService) Update(_ context.Context, number int, update platform
 	m.updatedIssues[number] = update
 	return nil, nil
 }
-func (m *mockIssueService) AddLabels(_ context.Context, number int, labels []string) error {
+func (m *mockIssueService) AddLabels(ctx context.Context, number int, labels []string) error {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	m.addedLabels[number] = append(m.addedLabels[number], labels...)
 	return nil
 }
@@ -96,11 +107,21 @@ func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []
 	m.removedLabels[number] = append(m.removedLabels[number], labels...)
 	return nil
 }
-func (m *mockIssueService) AddComment(_ context.Context, number int, body string) error {
+func (m *mockIssueService) AddComment(ctx context.Context, number int, body string) error {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	m.comments[number] = append(m.comments[number], body)
 	return nil
 }
-func (m *mockIssueService) AddCommentReturningID(_ context.Context, number int, body string) (int64, error) {
+func (m *mockIssueService) AddCommentReturningID(ctx context.Context, number int, body string) (int64, error) {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
 	id := m.nextCommentID
 	m.nextCommentID++
 	m.comments[number] = append(m.comments[number], body)
@@ -153,16 +174,17 @@ func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ s
 }
 
 type mockPRService struct {
-	listResult   []*platform.PullRequest
-	getResult    map[int]*platform.PullRequest
-	created      *platform.PullRequest
-	merged       bool
-	mergedNumber int
-	mergeMethod  platform.MergeMethod
-	diffResult   string
-	comments     map[int][]string
-	reviews      []capturedReview
-	onCreateErr  error // if set, Create returns this error
+	listResult             []*platform.PullRequest
+	getResult              map[int]*platform.PullRequest
+	created                *platform.PullRequest
+	merged                 bool
+	mergedNumber           int
+	mergeMethod            platform.MergeMethod
+	diffResult             string
+	comments               map[int][]string
+	reviews                []capturedReview
+	onCreateErr            error // if set, Create returns this error
+	respectCanceledContext bool
 }
 
 func (m *mockPRService) Create(_ context.Context, title, body, head, base string) (*platform.PullRequest, error) {
@@ -186,14 +208,24 @@ func (m *mockPRService) List(_ context.Context, _ platform.PRFilters) ([]*platfo
 func (m *mockPRService) Update(_ context.Context, _ int, _, _ *string) (*platform.PullRequest, error) {
 	return nil, nil
 }
-func (m *mockPRService) Merge(_ context.Context, number int, method platform.MergeMethod) (*platform.MergeResult, error) {
+func (m *mockPRService) Merge(ctx context.Context, number int, method platform.MergeMethod) (*platform.MergeResult, error) {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	m.merged = true
 	m.mergedNumber = number
 	m.mergeMethod = method
 	return &platform.MergeResult{Merged: true}, nil
 }
 func (m *mockPRService) UpdateBranch(_ context.Context, _ int) error { return nil }
-func (m *mockPRService) AddComment(_ context.Context, number int, body string) error {
+func (m *mockPRService) AddComment(ctx context.Context, number int, body string) error {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	if m.comments == nil {
 		m.comments = map[int][]string{}
 	}
@@ -209,7 +241,12 @@ func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	}
 	return "diff --git a/file.go b/file.go\n", nil
 }
-func (m *mockPRService) CreateReview(_ context.Context, _ int, body string, event platform.ReviewEvent) error {
+func (m *mockPRService) CreateReview(ctx context.Context, _ int, body string, event platform.ReviewEvent) error {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	m.reviews = append(m.reviews, capturedReview{body: body, event: event})
 	return nil
 }
@@ -218,17 +255,23 @@ func (m *mockPRService) Close(_ context.Context, _ int) error {
 }
 
 type mockWorkflowService struct {
-	runs               map[int64]*platform.Run
-	listResult         []*platform.Run
-	listResultByStatus map[string][]*platform.Run // optional: keyed by RunFilters.Status
-	dispatched         []map[string]string
-	onDispatch         func() // optional; called before recording each dispatch
-	lastListRunFilter  platform.RunFilters
-	listRunFilters     []platform.RunFilters
+	runs                   map[int64]*platform.Run
+	listResult             []*platform.Run
+	listResultByStatus     map[string][]*platform.Run // optional: keyed by RunFilters.Status
+	dispatched             []map[string]string
+	onDispatch             func() // optional; called before recording each dispatch
+	lastListRunFilter      platform.RunFilters
+	listRunFilters         []platform.RunFilters
+	respectCanceledContext bool
 }
 
 func (m *mockWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) { return 0, nil }
-func (m *mockWorkflowService) Dispatch(_ context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
+func (m *mockWorkflowService) Dispatch(ctx context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if m.onDispatch != nil {
 		m.onDispatch()
 	}
@@ -270,7 +313,12 @@ type mockRepoService struct {
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
-func (m *mockRepoService) GetDefaultBranch(_ context.Context) (string, error) {
+func (m *mockRepoService) GetDefaultBranch(ctx context.Context) (string, error) {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
 	return m.defaultBranch, nil
 }
 func (m *mockRepoService) CreateBranch(_ context.Context, name, sha string) error {
