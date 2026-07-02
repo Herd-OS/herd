@@ -148,6 +148,21 @@ func releaseReviewLock(ctx context.Context, _ platform.IssueService, repoSvc pla
 	return nil
 }
 
+func describeReviewLock(ctx context.Context, repoSvc platform.RepositoryService, prNumber int) (reviewLockState, bool, error) {
+	repo, ok := repoSvc.(reviewLockRepository)
+	if !ok {
+		return reviewLockState{}, false, fmt.Errorf("repository service does not support append-only review locks")
+	}
+	_, state, stateOK, err := readReviewLockHead(ctx, repoSvc, repo, reviewLockBranch(prNumber))
+	if err != nil {
+		if isNotFoundLikeError(err) {
+			return reviewLockState{}, false, nil
+		}
+		return reviewLockState{}, false, err
+	}
+	return state, stateOK, nil
+}
+
 func ensureReviewLockBranch(ctx context.Context, repoSvc platform.RepositoryService, repo reviewLockRepository, branch string, prNumber int, batchNumber int, lockFromSHA string, now time.Time) error {
 	releasedAt := now.UTC()
 	initialState := reviewLockState{

@@ -159,6 +159,7 @@ type mockPRService struct {
 	merged      bool
 	diffResult  string
 	comments    map[int][]string
+	reviews     []capturedReview
 	onCreateErr error // if set, Create returns this error
 }
 
@@ -204,7 +205,8 @@ func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	}
 	return "diff --git a/file.go b/file.go\n", nil
 }
-func (m *mockPRService) CreateReview(_ context.Context, _ int, _ string, _ platform.ReviewEvent) error {
+func (m *mockPRService) CreateReview(_ context.Context, _ int, body string, event platform.ReviewEvent) error {
+	m.reviews = append(m.reviews, capturedReview{body: body, event: event})
 	return nil
 }
 func (m *mockPRService) Close(_ context.Context, _ int) error {
@@ -249,17 +251,18 @@ func (m *mockWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*pl
 }
 
 type mockRepoService struct {
-	defaultBranch   string
-	branchExists    map[string]bool
-	branchSHAs      map[string]string
-	commitMessages  map[string]string
-	commitParents   map[string]string
-	markerCommitSeq int
-	deletedBranch   string
-	deletedBranches []string
-	onGetBranchSHA  func(name string)
-	onUpdateBranch  func(name, sha string)
-	updateConflicts int
+	defaultBranch          string
+	branchExists           map[string]bool
+	branchSHAs             map[string]string
+	commitMessages         map[string]string
+	commitParents          map[string]string
+	markerCommitSeq        int
+	deletedBranch          string
+	deletedBranches        []string
+	onGetBranchSHA         func(name string)
+	onUpdateBranch         func(name, sha string)
+	updateConflicts        int
+	respectCanceledContext bool
 }
 
 func (m *mockRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) { return nil, nil }
@@ -290,7 +293,12 @@ func (m *mockRepoService) CreateBranchWithCommit(ctx context.Context, name, sha,
 	}
 	return markerSHA, nil
 }
-func (m *mockRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+func (m *mockRepoService) CreateCommit(ctx context.Context, parentSHA, message string) (string, error) {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
 	m.markerCommitSeq++
 	markerSHA := fmt.Sprintf("%s-lock-%d", parentSHA, m.markerCommitSeq)
 	if m.commitMessages == nil {
@@ -311,7 +319,12 @@ func (m *mockRepoService) GetCommitMessage(_ context.Context, sha string) (strin
 	}
 	return "", fmt.Errorf("commit %s not found", sha)
 }
-func (m *mockRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+func (m *mockRepoService) UpdateBranchToCommit(ctx context.Context, name, sha string, _ bool) error {
+	if m.respectCanceledContext {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	if m.onUpdateBranch != nil {
 		m.onUpdateBranch(name, sha)
 	}
