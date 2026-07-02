@@ -160,6 +160,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 		comments, commentErr := p.Issues().ListComments(ctx, pr.Number)
 		if commentErr != nil {
+			if !params.Manual {
+				return nil, fmt.Errorf("listing PR comments for review idempotency: %w", commentErr)
+			}
 			fmt.Printf("Warning: failed to list PR comments for review idempotency: %s\n", commentErr)
 		} else {
 			prComments = comments
@@ -167,7 +170,6 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			if !params.Manual {
 				if marker, ok := latestReviewResultMarker(prComments, pr.Number, ms.Number, reviewedHeadSHA); ok && marker.Status == reviewResultStatusApproved {
 					reason := duplicateApprovedReviewSkipReason(pr.Number, reviewedHeadSHA)
-					fmt.Println(reason)
 					return &ReviewResult{
 						BatchPRNumber:                pr.Number,
 						SkippedDuplicateApprovedHead: true,

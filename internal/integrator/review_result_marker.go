@@ -57,11 +57,20 @@ func parseReviewResultMarker(body string) (reviewResultMarker, bool) {
 		marker.PRNumber == 0 ||
 		marker.BatchNumber == 0 ||
 		marker.HeadSHA == "" ||
-		marker.Status == "" ||
+		!validReviewResultStatus(marker.Status) ||
 		marker.CreatedAt.IsZero() {
 		return reviewResultMarker{}, false
 	}
 	return marker, true
+}
+
+func validReviewResultStatus(status string) bool {
+	switch status {
+	case reviewResultStatusApproved, reviewResultStatusChangesRequested, reviewResultStatusMaxCyclesHit:
+		return true
+	default:
+		return false
+	}
 }
 
 func latestReviewResultMarker(comments []*platform.Comment, prNumber, batchNumber int, headSHA string) (reviewResultMarker, bool) {

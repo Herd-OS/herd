@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +114,30 @@ func TestReviewResultMessage(t *testing.T) {
 			assert.Equal(t, tt.want, reviewResultMessage(tt.result))
 		})
 	}
+}
+
+func TestIntegratorReviewCmd_DuplicateSkipReasonPrintedOnce(t *testing.T) {
+	reason := "Skipping agent review for PR #50: head abc123 already has an approved Herd review result."
+	result := &integrator.ReviewResult{
+		SkippedDuplicateApprovedHead: true,
+		SkipReason:                   reason,
+	}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	printReviewResultMessage(result)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, err = buf.ReadFrom(r)
+	require.NoError(t, err)
+	assert.Equal(t, reason+"\n", buf.String())
+	assert.Equal(t, 1, strings.Count(buf.String(), reason))
 }
 
 func TestRunWasSuccessful(t *testing.T) {

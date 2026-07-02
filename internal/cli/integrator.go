@@ -248,9 +248,7 @@ func newIntegratorReviewCmd() *cobra.Command {
 				return err
 			}
 
-			if msg := reviewResultMessage(result); msg != "" {
-				fmt.Println(msg)
-			}
+			printReviewResultMessage(result)
 			return nil
 		},
 	}
@@ -259,6 +257,12 @@ func newIntegratorReviewCmd() *cobra.Command {
 	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number")
 	cmd.Flags().IntVar(&batchNum, "batch", 0, "Batch/milestone number")
 	return cmd
+}
+
+func printReviewResultMessage(result *integrator.ReviewResult) {
+	if msg := reviewResultMessage(result); msg != "" {
+		fmt.Println(msg)
+	}
 }
 
 func reviewResultMessage(result *integrator.ReviewResult) string {

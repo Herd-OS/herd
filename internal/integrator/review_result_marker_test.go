@@ -27,11 +27,14 @@ func TestParseReviewResultMarker(t *testing.T) {
 	validBody := mustReviewResultMarker(t, valid)
 
 	tests := []struct {
-		name string
-		body string
-		want bool
+		name       string
+		body       string
+		want       bool
+		wantStatus string
 	}{
-		{name: "valid marker", body: validBody, want: true},
+		{name: "valid marker", body: validBody, want: true, wantStatus: reviewResultStatusApproved},
+		{name: "valid changes requested marker", body: mustReviewResultMarker(t, newReviewResultMarker(50, 1, "head-sha", reviewResultStatusChangesRequested, 2, 3, now)), want: true, wantStatus: reviewResultStatusChangesRequested},
+		{name: "valid max cycles marker", body: mustReviewResultMarker(t, newReviewResultMarker(50, 1, "head-sha", reviewResultStatusMaxCyclesHit, 3, 4, now)), want: true, wantStatus: reviewResultStatusMaxCyclesHit},
 		{name: "malformed JSON", body: reviewResultMarkerPrefix + `{"version":` + reviewResultMarkerSuffix, want: false},
 		{name: "missing suffix", body: reviewResultMarkerPrefix + `{}`, want: false},
 		{name: "wrong version", body: mustReviewResultMarker(t, reviewResultMarker{Version: 2, PRNumber: 50, BatchNumber: 1, HeadSHA: "head-sha", Status: reviewResultStatusApproved, CreatedAt: now}), want: false},
@@ -39,8 +42,10 @@ func TestParseReviewResultMarker(t *testing.T) {
 		{name: "zero batch number", body: mustReviewResultMarker(t, reviewResultMarker{Version: 1, PRNumber: 50, HeadSHA: "head-sha", Status: reviewResultStatusApproved, CreatedAt: now}), want: false},
 		{name: "empty head SHA", body: mustReviewResultMarker(t, reviewResultMarker{Version: 1, PRNumber: 50, BatchNumber: 1, Status: reviewResultStatusApproved, CreatedAt: now}), want: false},
 		{name: "empty status", body: mustReviewResultMarker(t, reviewResultMarker{Version: 1, PRNumber: 50, BatchNumber: 1, HeadSHA: "head-sha", CreatedAt: now}), want: false},
+		{name: "unknown status", body: mustReviewResultMarker(t, reviewResultMarker{Version: 1, PRNumber: 50, BatchNumber: 1, HeadSHA: "head-sha", Status: "approved_with_notes", CreatedAt: now}), want: false},
+		{name: "whitespace polluted status", body: mustReviewResultMarker(t, reviewResultMarker{Version: 1, PRNumber: 50, BatchNumber: 1, HeadSHA: "head-sha", Status: reviewResultStatusApproved + " ", CreatedAt: now}), want: false},
 		{name: "zero created_at", body: mustReviewResultMarker(t, reviewResultMarker{Version: 1, PRNumber: 50, BatchNumber: 1, HeadSHA: "head-sha", Status: reviewResultStatusApproved}), want: false},
-		{name: "marker embedded after visible comment text", body: "Visible text\n\n" + validBody, want: true},
+		{name: "marker embedded after visible comment text", body: "Visible text\n\n" + validBody, want: true, wantStatus: reviewResultStatusApproved},
 	}
 
 	for _, tt := range tests {
@@ -51,7 +56,7 @@ func TestParseReviewResultMarker(t *testing.T) {
 				assert.Equal(t, valid.PRNumber, got.PRNumber)
 				assert.Equal(t, valid.BatchNumber, got.BatchNumber)
 				assert.Equal(t, valid.HeadSHA, got.HeadSHA)
-				assert.Equal(t, valid.Status, got.Status)
+				assert.Equal(t, tt.wantStatus, got.Status)
 			}
 		})
 	}
@@ -77,6 +82,32 @@ func TestLatestReviewResultMarker(t *testing.T) {
 	assert.Equal(t, reviewResultStatusChangesRequested, got.Status)
 	assert.Equal(t, 3, got.FindingsCount)
 	assert.Equal(t, newMatch.CreatedAt, got.CreatedAt)
+}
+
+func TestLatestReviewResultMarker_IgnoresNewerInvalidStatus(t *testing.T) {
+	base := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	oldValid := newReviewResultMarker(50, 1, "head-sha", reviewResultStatusApproved, 1, 0, base)
+	newInvalid := reviewResultMarker{
+		Version:       1,
+		PRNumber:      50,
+		BatchNumber:   1,
+		HeadSHA:       "head-sha",
+		Status:        "approved ",
+		Cycle:         2,
+		FindingsCount: 0,
+		CreatedAt:     base.Add(time.Hour),
+	}
+
+	comments := []*platform.Comment{
+		{Body: mustReviewResultMarker(t, oldValid)},
+		{Body: mustReviewResultMarker(t, newInvalid)},
+	}
+
+	got, ok := latestReviewResultMarker(comments, 50, 1, "head-sha")
+
+	require.True(t, ok)
+	assert.Equal(t, reviewResultStatusApproved, got.Status)
+	assert.Equal(t, oldValid.CreatedAt, got.CreatedAt)
 }
 
 func TestReview_ApprovedCommentContainsReviewResultMarker(t *testing.T) {

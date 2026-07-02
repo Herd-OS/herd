@@ -1054,6 +1054,28 @@ func TestReview_AutomaticSkipDoesNotPostAnotherApprovalComment(t *testing.T) {
 	assert.Empty(t, fx.prSvc.reviews)
 }
 
+func TestReview_AutomaticCommentListingFailureFailsClosed(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	fx.addReviewResultMarkerComment(t, 50, 1, "sha-current", reviewResultStatusApproved)
+	fx.issueSvc.listCommentsErr = fmt.Errorf("comments unavailable")
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "should not run"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "listing PR comments for review idempotency")
+	assert.Equal(t, 0, ag.calls)
+	assert.Empty(t, fx.prSvc.comments)
+	assert.Empty(t, fx.prSvc.reviews)
+	assert.Equal(t, 0, fx.createdIssues)
+	assert.Empty(t, fx.wf.dispatched)
+	assertReviewLockUnlocked(t, fx.repoSvc)
+}
+
 func TestReview_ManualRunsDespiteApprovedMarkerForCurrentHead(t *testing.T) {
 	fx := newReviewIdempotencyFixture(t, "sha-current")
 	fx.addReviewResultMarkerComment(t, 50, 1, "sha-current", reviewResultStatusApproved)

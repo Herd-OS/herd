@@ -46,6 +46,7 @@ type mockIssueService struct {
 	storedComments         map[int][]*platform.Comment
 	nextCommentID          int64
 	listCommentsResult     []*platform.Comment
+	listCommentsErr        error
 	createResult           *platform.Issue
 	createErr              error
 	createdTitle           string
@@ -165,6 +166,9 @@ func (m *mockIssueService) DeleteComment(_ context.Context, commentID int64) err
 	return nil
 }
 func (m *mockIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	if m.listCommentsErr != nil {
+		return nil, m.listCommentsErr
+	}
 	result := append([]*platform.Comment{}, m.storedComments[number]...)
 	result = append(result, m.listCommentsResult...)
 	return result, nil
