@@ -127,6 +127,19 @@ func TestLatestReviewResultMarker_IgnoresUntrustedHumanComment(t *testing.T) {
 	assert.Equal(t, botMarker.CreatedAt, got.CreatedAt)
 }
 
+func TestLatestReviewResultMarker_TrustsAuthenticatedHumanComment(t *testing.T) {
+	base := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	marker := newReviewResultMarker(50, 1, "head-sha", reviewResultStatusApproved, 1, 0, base)
+
+	got, ok := latestReviewResultMarker([]*platform.Comment{
+		{AuthorLogin: "jfturcot", AuthorAssociation: "MEMBER", Body: mustReviewResultMarker(t, marker)},
+	}, 50, 1, "head-sha", "jfturcot")
+
+	require.True(t, ok)
+	assert.Equal(t, reviewResultStatusApproved, got.Status)
+	assert.Equal(t, marker.CreatedAt, got.CreatedAt)
+}
+
 func TestLatestReviewResultMarker_TrustsBotComment(t *testing.T) {
 	base := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	marker := newReviewResultMarker(50, 1, "head-sha", reviewResultStatusApproved, 1, 0, base)
@@ -151,11 +164,13 @@ func TestIsTrustedReviewResultMarkerComment(t *testing.T) {
 		{name: "human member", comment: &platform.Comment{AuthorLogin: "alice", AuthorAssociation: "MEMBER"}, want: false},
 		{name: "trusted bot", comment: &platform.Comment{AuthorLogin: "github-actions[bot]", AuthorAssociation: "NONE"}, want: true},
 		{name: "herd bot", comment: &platform.Comment{AuthorLogin: "herd-os[bot]", AuthorAssociation: "MEMBER"}, want: true},
+		{name: "authenticated human", comment: &platform.Comment{AuthorLogin: "jfturcot", AuthorAssociation: "MEMBER"}, want: true},
+		{name: "different human", comment: &platform.Comment{AuthorLogin: "alice", AuthorAssociation: "MEMBER"}, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isTrustedReviewResultMarkerComment(tt.comment))
+			assert.Equal(t, tt.want, isTrustedReviewResultMarkerComment(tt.comment, "jfturcot"))
 		})
 	}
 }

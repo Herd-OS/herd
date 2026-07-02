@@ -73,11 +73,11 @@ func validReviewResultStatus(status string) bool {
 	}
 }
 
-func latestReviewResultMarker(comments []*platform.Comment, prNumber, batchNumber int, headSHA string) (reviewResultMarker, bool) {
+func latestReviewResultMarker(comments []*platform.Comment, prNumber, batchNumber int, headSHA string, trustedHumanLogins ...string) (reviewResultMarker, bool) {
 	var latest reviewResultMarker
 	found := false
 	for _, comment := range comments {
-		if !isTrustedReviewResultMarkerComment(comment) {
+		if !isTrustedReviewResultMarkerComment(comment, trustedHumanLogins...) {
 			continue
 		}
 		marker, ok := parseReviewResultMarker(comment.Body)
@@ -95,11 +95,19 @@ func latestReviewResultMarker(comments []*platform.Comment, prNumber, batchNumbe
 	return latest, found
 }
 
-func isTrustedReviewResultMarkerComment(comment *platform.Comment) bool {
+func isTrustedReviewResultMarkerComment(comment *platform.Comment, trustedHumanLogins ...string) bool {
 	if comment == nil {
 		return false
 	}
-	return strings.HasSuffix(comment.AuthorLogin, "[bot]")
+	if strings.HasSuffix(comment.AuthorLogin, "[bot]") {
+		return true
+	}
+	for _, login := range trustedHumanLogins {
+		if login != "" && comment.AuthorLogin == login {
+			return true
+		}
+	}
+	return false
 }
 
 func appendReviewResultMarker(comment string, marker reviewResultMarker) (string, error) {

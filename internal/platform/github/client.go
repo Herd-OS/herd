@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	gh "github.com/google/go-github/v68/github"
@@ -20,6 +21,8 @@ type Client struct {
 	owner      string
 	repo       string
 	httpClient *http.Client
+	authMu     sync.Mutex
+	authLogin  string
 }
 
 // Compile-time check that Client implements platform.Platform.
@@ -88,6 +91,31 @@ func (c *Client) Milestones() platform.MilestoneService     { return &milestoneS
 func (c *Client) Runners() platform.RunnerService           { return &runnerService{c} }
 func (c *Client) Repository() platform.RepositoryService    { return &repositoryService{c} }
 func (c *Client) Checks() platform.CheckService             { return &checkService{c} }
+
+// AuthenticatedLogin returns the login for the token used by this client.
+func (c *Client) AuthenticatedLogin(ctx context.Context) (string, error) {
+	c.authMu.Lock()
+	if c.authLogin != "" {
+		login := c.authLogin
+		c.authMu.Unlock()
+		return login, nil
+	}
+	c.authMu.Unlock()
+
+	user, _, err := c.gh.Users.Get(ctx, "")
+	if err != nil {
+		return "", fmt.Errorf("getting authenticated user: %w", err)
+	}
+	login := user.GetLogin()
+	if login == "" {
+		return "", fmt.Errorf("getting authenticated user: empty login")
+	}
+
+	c.authMu.Lock()
+	c.authLogin = login
+	c.authMu.Unlock()
+	return login, nil
+}
 
 // repositoryService implements platform.RepositoryService.
 type repositoryService struct{ c *Client }

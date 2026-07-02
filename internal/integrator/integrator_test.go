@@ -20,11 +20,13 @@ import (
 // --- Mock Platform ---
 
 type mockPlatform struct {
-	issues     platform.IssueService
-	prs        platform.PullRequestService
-	workflows  *mockWorkflowService
-	repo       *mockRepoService
-	milestones *mockMilestoneService
+	issues             platform.IssueService
+	prs                platform.PullRequestService
+	workflows          *mockWorkflowService
+	repo               *mockRepoService
+	milestones         *mockMilestoneService
+	authenticatedLogin string
+	authenticatedErr   error
 }
 
 func (m *mockPlatform) Issues() platform.IssueService             { return m.issues }
@@ -35,6 +37,9 @@ func (m *mockPlatform) Milestones() platform.MilestoneService     { return m.mil
 func (m *mockPlatform) Runners() platform.RunnerService           { return nil }
 func (m *mockPlatform) Repository() platform.RepositoryService    { return m.repo }
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
+func (m *mockPlatform) AuthenticatedLogin(_ context.Context) (string, error) {
+	return m.authenticatedLogin, m.authenticatedErr
+}
 
 type mockIssueService struct {
 	getResult              map[int]*platform.Issue

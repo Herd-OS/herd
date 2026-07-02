@@ -1075,6 +1075,52 @@ func TestReview_AutomaticIgnoresHumanApprovedMarkerForCurrentHead(t *testing.T) 
 	assertReviewLockUnlocked(t, fx.repoSvc)
 }
 
+func TestReview_AutomaticSkipsAuthenticatedHumanApprovedMarkerForCurrentHead(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	fx.mock.authenticatedLogin = "jfturcot"
+	fx.addReviewResultMarkerCommentFrom(t, 50, 1, "sha-current", reviewResultStatusApproved, "jfturcot", "MEMBER")
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "should not run"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.SkippedDuplicateApprovedHead)
+	assert.Equal(t, 0, ag.calls)
+	assert.Empty(t, fx.prSvc.comments)
+	assert.Empty(t, fx.prSvc.reviews)
+	assert.Equal(t, 0, fx.createdIssues)
+	assert.Empty(t, fx.wf.dispatched)
+	assertReviewLockUnlocked(t, fx.repoSvc)
+}
+
+func TestReview_AutomaticIgnoresDifferentHumanApprovedMarkerForCurrentHead(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	fx.mock.authenticatedLogin = "jfturcot"
+	fx.addReviewResultMarkerCommentFrom(t, 50, 1, "sha-current", reviewResultStatusApproved, "alice", "MEMBER")
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, ag.calls)
+	assert.True(t, result.Approved)
+	assert.False(t, result.SkippedDuplicateApprovedHead)
+	require.Len(t, fx.prSvc.comments, 1)
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewApprove, fx.prSvc.reviews[0].event)
+	assert.Equal(t, 0, fx.createdIssues)
+	assert.Empty(t, fx.wf.dispatched)
+	assertReviewLockUnlocked(t, fx.repoSvc)
+}
+
 func TestReview_AutomaticSkipsTrustedBotApprovedMarkerForCurrentHead(t *testing.T) {
 	fx := newReviewIdempotencyFixture(t, "sha-current")
 	fx.addReviewResultMarkerCommentFrom(t, 50, 1, "sha-current", reviewResultStatusApproved, "herd-os[bot]", "NONE")

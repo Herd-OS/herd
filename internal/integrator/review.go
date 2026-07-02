@@ -19,6 +19,10 @@ import (
 
 const safetyValveLimit = 10
 
+type authenticatedLoginProvider interface {
+	AuthenticatedLogin(ctx context.Context) (string, error)
+}
+
 func duplicateApprovedReviewSkipReason(prNumber int, headSHA string) string {
 	return fmt.Sprintf("Skipping agent review for PR #%d: head %s already has an approved Herd review result.", prNumber, headSHA)
 }
@@ -168,7 +172,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			prComments = comments
 			prCommentsLoaded = true
 			if !params.Manual {
-				if marker, ok := latestReviewResultMarker(prComments, pr.Number, ms.Number, reviewedHeadSHA); ok && marker.Status == reviewResultStatusApproved {
+				if marker, ok := latestReviewResultMarker(prComments, pr.Number, ms.Number, reviewedHeadSHA, trustedReviewResultMarkerHumanLogins(ctx, p)...); ok && marker.Status == reviewResultStatusApproved {
 					reason := duplicateApprovedReviewSkipReason(pr.Number, reviewedHeadSHA)
 					return &ReviewResult{
 						BatchPRNumber:                pr.Number,
@@ -520,6 +524,22 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		FixCycle:      nextCycle,
 		BatchPRNumber: pr.Number,
 	}, nil
+}
+
+func trustedReviewResultMarkerHumanLogins(ctx context.Context, p platform.Platform) []string {
+	provider, ok := p.(authenticatedLoginProvider)
+	if !ok {
+		return nil
+	}
+	login, err := provider.AuthenticatedLogin(ctx)
+	if err != nil {
+		fmt.Printf("Warning: failed to get authenticated GitHub login for review-result marker trust: %s\n", err)
+		return nil
+	}
+	if strings.TrimSpace(login) == "" {
+		return nil
+	}
+	return []string{login}
 }
 
 // ReviewStandalone runs an agent review on a non-batch PR.
