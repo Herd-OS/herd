@@ -103,21 +103,43 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
 
+	var reviewedHeadSHA string
 	if cfg.Integrator.Review {
-		lockFromSHA, err := p.Repository().GetBranchSHA(ctx, batchBranch)
+		var err error
+		reviewedHeadSHA, err = p.Repository().GetBranchSHA(ctx, batchBranch)
 		if err != nil {
 			return nil, fmt.Errorf("getting branch SHA for review lock on %s: %w", batchBranch, err)
 		}
-		reviewLock, acquired, err := acquireReviewLock(ctx, p.Issues(), p.Repository(), pr.Number, ms.Number, params.RunID, lockFromSHA, time.Now())
+		reviewLock, acquired, err := acquireReviewLock(ctx, p.Issues(), p.Repository(), pr.Number, ms.Number, params.RunID, reviewedHeadSHA, time.Now())
 		if err != nil {
 			return nil, fmt.Errorf("acquiring review lock for PR #%d: %w", pr.Number, err)
 		}
 		if !acquired {
-			fmt.Printf("Review already in progress for PR #%d; skipping duplicate review trigger.\n", pr.Number)
+			currentHeadSHA, currentErr := p.Repository().GetBranchSHA(ctx, batchBranch)
+			if currentErr != nil {
+				fmt.Printf("Warning: failed to get current branch SHA for active review lock diagnostics on %s: %s\n", batchBranch, currentErr)
+			}
+			state, ok, describeErr := describeReviewLock(ctx, p.Repository(), pr.Number)
+			if describeErr != nil {
+				fmt.Printf("Warning: failed to describe active review lock for PR #%d: %s\n", pr.Number, describeErr)
+			}
+			if ok {
+				fmt.Printf("Review already in progress for PR #%d; skipping duplicate review trigger. lock_status=%s lock_id=%s owner=%s acquired_at=%s expires_at=%s recorded_head_sha=%s current_head_sha=%s\n",
+					pr.Number, state.Status, state.LockID, state.Owner, formatReviewLockTime(state.AcquiredAt), formatReviewLockTime(state.ExpiresAt), state.BatchBranchSHA, currentHeadSHA)
+				if params.Manual {
+					if err := p.PullRequests().AddComment(ctx, pr.Number, buildActiveReviewLockSkipComment(state, currentHeadSHA)); err != nil {
+						fmt.Printf("Warning: failed to post active review lock skip comment for PR #%d: %s\n", pr.Number, err)
+					}
+				}
+			} else {
+				fmt.Printf("Review already in progress for PR #%d; skipping duplicate review trigger. current_head_sha=%s\n", pr.Number, currentHeadSHA)
+			}
 			return &ReviewResult{BatchPRNumber: pr.Number}, nil
 		}
 		defer func() {
-			if err := releaseReviewLock(ctx, p.Issues(), p.Repository(), reviewLock); err != nil {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := releaseReviewLock(releaseCtx, p.Issues(), p.Repository(), reviewLock); err != nil {
 				fmt.Printf("Warning: failed to release review lock for PR #%d: %s\n", pr.Number, err)
 			}
 		}()
@@ -244,19 +266,33 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		}, nil
 	}
 
+	postReviewCtx, postReviewCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer postReviewCancel()
+	currentHeadSHA, err := p.Repository().GetBranchSHA(postReviewCtx, batchBranch)
+	if err != nil {
+		return nil, fmt.Errorf("getting current branch SHA after review for %s: %w", batchBranch, err)
+	}
+	if currentHeadSHA != reviewedHeadSHA {
+		if err := p.PullRequests().AddComment(postReviewCtx, pr.Number, buildStaleReviewResultComment(reviewedHeadSHA, currentHeadSHA)); err != nil {
+			fmt.Printf("Warning: failed to post stale review result comment for PR #%d: %s\n", pr.Number, err)
+		}
+		fmt.Printf("Discarded stale review result for PR #%d because head SHA changed while review was running: reviewed_head_sha=%s current_head_sha=%s\n", pr.Number, reviewedHeadSHA, currentHeadSHA)
+		return &ReviewResult{BatchPRNumber: pr.Number}, nil
+	}
+
 	// Partition findings by severity
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
 
 	// Handle approved
 	if reviewResult.Approved {
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
-		_ = p.PullRequests().AddComment(ctx, pr.Number, summaryComment)
-		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
+		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, summaryComment)
+		_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "", platform.ReviewApprove)
 		if cfg.PullRequests.AutoMerge {
-			if _, err := p.PullRequests().Merge(ctx, pr.Number, platform.MergeMethod(cfg.Integrator.Strategy)); err != nil {
+			if _, err := p.PullRequests().Merge(postReviewCtx, pr.Number, platform.MergeMethod(cfg.Integrator.Strategy)); err != nil {
 				return nil, fmt.Errorf("auto-merging batch PR #%d: %w", pr.Number, err)
 			}
-			if err := postMergeCleanup(ctx, p, ms.Number, batchBranch); err != nil {
+			if err := postMergeCleanup(postReviewCtx, p, ms.Number, batchBranch); err != nil {
 				return nil, fmt.Errorf("post-merge cleanup: %w", err)
 			}
 		}
@@ -272,7 +308,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		for _, f := range reviewResult.Findings {
 			comment += fmt.Sprintf("- **%s** %s\n", f.Severity, f.Description)
 		}
-		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
@@ -281,7 +317,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found %d high-severity issues in a single pass. "+
 			"This exceeds the safety limit (%d). Creating fix workers was skipped to prevent runaway agent invocations.",
 			len(highFindings), safetyValveLimit)
-		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
@@ -302,10 +338,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// No actionable findings — approve with informational comment and batch summary
 	if len(actionableFindings) == 0 {
 		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
-		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
-		_ = p.PullRequests().AddComment(ctx, pr.Number, summaryComment)
-		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
+		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, summaryComment)
+		_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "", platform.ReviewApprove)
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
@@ -320,8 +356,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		// any previous REQUEST_CHANGES review and post an informational comment.
 		fmt.Println("All actionable findings are duplicates of existing fix issues, approving.")
 		comment := "✅ **HerdOS Agent Review**\n\nAll findings are already covered by existing fix workers. Approving to unblock the PR."
-		_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
-		_ = p.PullRequests().CreateReview(ctx, pr.Number, "", platform.ReviewApprove)
+		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+		_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "", platform.ReviewApprove)
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
@@ -332,9 +368,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if len(workerNoOpVerdicts) > 0 {
 		blocked, _, verdictIdx := stableDisagreementBlocked(actionableFindings, workerNoOpVerdicts)
 		if len(blocked) > 0 {
-			_ = p.Issues().AddLabels(ctx, pr.Number, []string{issues.StableDisagreement})
+			_ = p.Issues().AddLabels(postReviewCtx, pr.Number, []string{issues.StableDisagreement})
 			comment := buildStableDisagreementComment(blocked, verdictIdx, workerNoOpVerdicts)
-			_ = p.PullRequests().AddComment(ctx, pr.Number, comment)
+			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 			return &ReviewResult{
 				BatchPRNumber:      pr.Number,
 				StableDisagreement: true,
@@ -366,23 +402,23 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	fixTitle := fmt.Sprintf("Review fixes (cycle %d)", nextCycle)
 
-	defaultBranchForDispatch, _ := p.Repository().GetDefaultBranch(ctx)
+	defaultBranchForDispatch, _ := p.Repository().GetDefaultBranch(postReviewCtx)
 
 	truncatedBody, overflow := issues.TruncateIssueBody(fixBody)
-	fixIssue, err := p.Issues().Create(ctx, fixTitle, truncatedBody,
+	fixIssue, err := p.Issues().Create(postReviewCtx, fixTitle, truncatedBody,
 		[]string{issues.TypeFix, issues.StatusInProgress}, &ms.Number)
 	if err != nil {
 		// Failed to create the fix issue
 		return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: len(actionableFindings)}, nil
 	}
 	for _, comment := range issues.SplitOverflowComments(overflow) {
-		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
+		if cerr := p.Issues().AddComment(postReviewCtx, fixIssue.Number, comment); cerr != nil {
 			fmt.Printf("Warning: failed to post overflow comment on fix issue #%d: %v\n", fixIssue.Number, cerr)
 		}
 	}
 
 	// Dispatch single fix worker
-	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
+	_, _ = p.Workflows().Dispatch(postReviewCtx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
 		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
 		"batch_branch":    batchBranch,
 		"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
@@ -393,11 +429,11 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// Post structured findings comment
 	findingsComment := buildReviewCycleComment(nextCycle, cfg.Integrator.ReviewMaxFixCycles, fixIssueNums, highFindings, mediumFindings, lowFindings, criteriaFindings)
-	_ = p.PullRequests().AddComment(ctx, pr.Number, findingsComment)
+	_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, findingsComment)
 
 	// Block merge with Request Changes review
 	reviewBody := fmt.Sprintf("Found %d actionable issues. Fix worker dispatched → #%d.", len(actionableFindings), fixIssue.Number)
-	_ = p.PullRequests().CreateReview(ctx, pr.Number, reviewBody, platform.ReviewRequestChanges)
+	_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, reviewBody, platform.ReviewRequestChanges)
 
 	return &ReviewResult{
 		FixIssues:     fixIssueNums,
@@ -785,6 +821,41 @@ func buildBatchSummaryComment(allIssues []*platform.Issue, reviewSummary string)
 	b.WriteString(fmt.Sprintf("- Total issues: %d\n", len(allIssues)))
 
 	return b.String()
+}
+
+func buildStaleReviewResultComment(reviewedHeadSHA, currentHeadSHA string) string {
+	return fmt.Sprintf("⚠️ **HerdOS Agent Review**\n\nHerdOS discarded this review result because the PR head changed while the review was running.\n\nReviewed head SHA: `%s`\nCurrent head SHA: `%s`\n\nThe updated diff will be reviewed on a later trigger, or you can run `/herd review` manually.",
+		reviewedHeadSHA, currentHeadSHA)
+}
+
+func buildActiveReviewLockSkipComment(state reviewLockState, currentHeadSHA string) string {
+	var b strings.Builder
+	b.WriteString("⚠️ **HerdOS Agent Review**\n\n")
+	b.WriteString("`/herd review` was skipped because another review lock is active.\n\n")
+	if state.Owner != "" {
+		b.WriteString(fmt.Sprintf("- Owner: `%s`\n", state.Owner))
+	}
+	if state.AcquiredAt != nil {
+		b.WriteString(fmt.Sprintf("- Acquired at: `%s`\n", formatReviewLockTime(state.AcquiredAt)))
+	}
+	if state.ExpiresAt != nil {
+		b.WriteString(fmt.Sprintf("- Expires at: `%s`\n", formatReviewLockTime(state.ExpiresAt)))
+	}
+	if state.BatchBranchSHA != "" {
+		b.WriteString(fmt.Sprintf("- Recorded head SHA: `%s`\n", state.BatchBranchSHA))
+	}
+	if currentHeadSHA != "" {
+		b.WriteString(fmt.Sprintf("- Current head SHA: `%s`\n", currentHeadSHA))
+	}
+	b.WriteString("\nWait for the active review to finish or for the lock to expire before retrying.")
+	return b.String()
+}
+
+func formatReviewLockTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // buildReviewCycleComment creates a structured PR comment for a review cycle.

@@ -3,6 +3,7 @@ package integrator
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/issues"
@@ -13,12 +14,12 @@ import (
 
 func TestMergeApproved(t *testing.T) {
 	tests := []struct {
-		name           string
-		pr             *platform.PullRequest
-		expectMerged   bool
-		expectSkipped  bool
-		expectReason   string
-		expectCleanup  bool
+		name          string
+		pr            *platform.PullRequest
+		expectMerged  bool
+		expectSkipped bool
+		expectReason  string
+		expectCleanup bool
 	}{
 		{
 			name: "success — merges and cleans up",
@@ -130,6 +131,69 @@ func TestMergeApproved_MergeFailure(t *testing.T) {
 	_, err := MergeApproved(context.Background(), mock, cfg, MergeApprovedParams{PRNumber: 100})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "merging batch PR")
+}
+
+func TestMergeApproved_IgnoresReviewLockBranch(t *testing.T) {
+	const (
+		prNumber    = 100
+		batchBranch = "herd/batch/5-add-auth"
+	)
+	lockBranch := reviewLockBranch(prNumber)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	prSvc := &mockPRService{
+		getResult: map[int]*platform.PullRequest{
+			prNumber: {
+				Number: prNumber,
+				Title:  "[herd] Batch",
+				State:  "open",
+				Head:   batchBranch,
+				Base:   "main",
+			},
+		},
+	}
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Task", Labels: []string{issues.StatusDone}},
+	}
+	lockMessage := mustReviewLockCommitMessage(t, lockedReviewLockState(prNumber, 5, 200, "batch-sha", "lock-1", now))
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			batchBranch: true,
+			lockBranch:  true,
+		},
+		branchSHAs: map[string]string{
+			batchBranch: "batch-sha",
+			lockBranch:  "lock-sha",
+		},
+		commitMessages: map[string]string{
+			"lock-sha": lockMessage,
+		},
+	}
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		repo:   repoSvc,
+		milestones: &mockMilestoneService{
+			getResult: map[int]*platform.Milestone{5: {Number: 5, Title: "Add auth"}},
+		},
+	}
+	cfg := &config.Config{Integrator: config.Integrator{Strategy: "squash"}}
+
+	result, err := MergeApproved(context.Background(), mock, cfg, MergeApprovedParams{PRNumber: prNumber})
+	require.NoError(t, err)
+
+	assert.True(t, result.Merged)
+	assert.False(t, result.Skipped)
+	assert.True(t, prSvc.merged)
+	assert.Equal(t, prNumber, prSvc.mergedNumber)
+	assert.Equal(t, platform.MergeMethod("squash"), prSvc.mergeMethod)
+	assert.Equal(t, batchBranch, repoSvc.deletedBranch)
+	assert.NotContains(t, repoSvc.deletedBranches, lockBranch)
+	assert.False(t, repoSvc.branchExists[batchBranch])
+	assert.True(t, repoSvc.branchExists[lockBranch])
+	assert.Equal(t, "lock-sha", repoSvc.branchSHAs[lockBranch])
 }
 
 func TestCleanupClosed(t *testing.T) {
