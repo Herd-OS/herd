@@ -279,6 +279,14 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		fmt.Printf("Discarded stale review result for PR #%d because head SHA changed while review was running: reviewed_head_sha=%s current_head_sha=%s\n", pr.Number, reviewedHeadSHA, currentHeadSHA)
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
+	markReviewResult := func(comment, status string, cycle, findingsCount int) (string, error) {
+		marker := newReviewResultMarker(pr.Number, ms.Number, currentHeadSHA, status, cycle, findingsCount, time.Now())
+		markedComment, markerErr := appendReviewResultMarker(comment, marker)
+		if markerErr != nil {
+			return "", fmt.Errorf("appending review result marker: %w", markerErr)
+		}
+		return markedComment, nil
+	}
 
 	// Partition findings by severity
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
@@ -286,6 +294,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// Handle approved
 	if reviewResult.Approved {
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
+		summaryComment, err = markReviewResult(summaryComment, reviewResultStatusApproved, findMaxFixCycle(allIssues), 0)
+		if err != nil {
+			return nil, err
+		}
 		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, summaryComment)
 		_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "", platform.ReviewApprove)
 		if cfg.PullRequests.AutoMerge {
@@ -308,6 +320,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		for _, f := range reviewResult.Findings {
 			comment += fmt.Sprintf("- **%s** %s\n", f.Severity, f.Description)
 		}
+		comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, len(reviewResult.Findings))
+		if err != nil {
+			return nil, err
+		}
 		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
@@ -317,6 +333,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found %d high-severity issues in a single pass. "+
 			"This exceeds the safety limit (%d). Creating fix workers was skipped to prevent runaway agent invocations.",
 			len(highFindings), safetyValveLimit)
+		comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, len(highFindings))
+		if err != nil {
+			return nil, err
+		}
 		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
@@ -338,8 +358,16 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// No actionable findings — approve with informational comment and batch summary
 	if len(actionableFindings) == 0 {
 		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
+		comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
+		if err != nil {
+			return nil, err
+		}
 		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
+		summaryComment, err = markReviewResult(summaryComment, reviewResultStatusApproved, currentCycle, 0)
+		if err != nil {
+			return nil, err
+		}
 		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, summaryComment)
 		_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "", platform.ReviewApprove)
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
@@ -356,6 +384,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		// any previous REQUEST_CHANGES review and post an informational comment.
 		fmt.Println("All actionable findings are duplicates of existing fix issues, approving.")
 		comment := "✅ **HerdOS Agent Review**\n\nAll findings are already covered by existing fix workers. Approving to unblock the PR."
+		comment, err = markReviewResult(comment, reviewResultStatusApproved, currentCycle, 0)
+		if err != nil {
+			return nil, err
+		}
 		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "", platform.ReviewApprove)
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
@@ -370,6 +402,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		if len(blocked) > 0 {
 			_ = p.Issues().AddLabels(postReviewCtx, pr.Number, []string{issues.StableDisagreement})
 			comment := buildStableDisagreementComment(blocked, verdictIdx, workerNoOpVerdicts)
+			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(blocked))
+			if err != nil {
+				return nil, err
+			}
 			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 			return &ReviewResult{
 				BatchPRNumber:      pr.Number,
@@ -429,6 +465,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// Post structured findings comment
 	findingsComment := buildReviewCycleComment(nextCycle, cfg.Integrator.ReviewMaxFixCycles, fixIssueNums, highFindings, mediumFindings, lowFindings, criteriaFindings)
+	findingsComment, err = markReviewResult(findingsComment, reviewResultStatusChangesRequested, nextCycle, len(actionableFindings))
+	if err != nil {
+		return nil, err
+	}
 	_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, findingsComment)
 
 	// Block merge with Request Changes review
