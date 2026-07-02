@@ -77,6 +77,9 @@ func latestReviewResultMarker(comments []*platform.Comment, prNumber, batchNumbe
 	var latest reviewResultMarker
 	found := false
 	for _, comment := range comments {
+		if !isTrustedReviewResultMarkerComment(comment) {
+			continue
+		}
 		marker, ok := parseReviewResultMarker(comment.Body)
 		if !ok {
 			continue
@@ -90,6 +93,13 @@ func latestReviewResultMarker(comments []*platform.Comment, prNumber, batchNumbe
 		}
 	}
 	return latest, found
+}
+
+func isTrustedReviewResultMarkerComment(comment *platform.Comment) bool {
+	if comment == nil {
+		return false
+	}
+	return strings.HasSuffix(comment.AuthorLogin, "[bot]")
 }
 
 func appendReviewResultMarker(comment string, marker reviewResultMarker) (string, error) {

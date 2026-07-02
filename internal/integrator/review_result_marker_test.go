@@ -68,12 +68,12 @@ func TestLatestReviewResultMarker(t *testing.T) {
 	newMatch := newReviewResultMarker(50, 1, "head-sha", reviewResultStatusChangesRequested, 2, 3, base.Add(time.Hour))
 
 	comments := []*platform.Comment{
-		{Body: reviewResultMarkerPrefix + `{"version":` + reviewResultMarkerSuffix},
-		{Body: mustReviewResultMarker(t, newReviewResultMarker(51, 1, "head-sha", reviewResultStatusChangesRequested, 1, 1, base.Add(2*time.Hour)))},
-		{Body: mustReviewResultMarker(t, newReviewResultMarker(50, 2, "head-sha", reviewResultStatusChangesRequested, 1, 1, base.Add(3*time.Hour)))},
-		{Body: mustReviewResultMarker(t, newReviewResultMarker(50, 1, "other-sha", reviewResultStatusChangesRequested, 1, 1, base.Add(4*time.Hour)))},
-		{Body: mustReviewResultMarker(t, oldMatch)},
-		{Body: mustReviewResultMarker(t, newMatch)},
+		{AuthorLogin: "github-actions[bot]", Body: reviewResultMarkerPrefix + `{"version":` + reviewResultMarkerSuffix},
+		{AuthorLogin: "github-actions[bot]", Body: mustReviewResultMarker(t, newReviewResultMarker(51, 1, "head-sha", reviewResultStatusChangesRequested, 1, 1, base.Add(2*time.Hour)))},
+		{AuthorLogin: "github-actions[bot]", Body: mustReviewResultMarker(t, newReviewResultMarker(50, 2, "head-sha", reviewResultStatusChangesRequested, 1, 1, base.Add(3*time.Hour)))},
+		{AuthorLogin: "github-actions[bot]", Body: mustReviewResultMarker(t, newReviewResultMarker(50, 1, "other-sha", reviewResultStatusChangesRequested, 1, 1, base.Add(4*time.Hour)))},
+		{AuthorLogin: "github-actions[bot]", Body: mustReviewResultMarker(t, oldMatch)},
+		{AuthorLogin: "github-actions[bot]", Body: mustReviewResultMarker(t, newMatch)},
 	}
 
 	got, ok := latestReviewResultMarker(comments, 50, 1, "head-sha")
@@ -99,8 +99,8 @@ func TestLatestReviewResultMarker_IgnoresNewerInvalidStatus(t *testing.T) {
 	}
 
 	comments := []*platform.Comment{
-		{Body: mustReviewResultMarker(t, oldValid)},
-		{Body: mustReviewResultMarker(t, newInvalid)},
+		{AuthorLogin: "github-actions[bot]", Body: mustReviewResultMarker(t, oldValid)},
+		{AuthorLogin: "github-actions[bot]", Body: mustReviewResultMarker(t, newInvalid)},
 	}
 
 	got, ok := latestReviewResultMarker(comments, 50, 1, "head-sha")
@@ -108,6 +108,56 @@ func TestLatestReviewResultMarker_IgnoresNewerInvalidStatus(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, reviewResultStatusApproved, got.Status)
 	assert.Equal(t, oldValid.CreatedAt, got.CreatedAt)
+}
+
+func TestLatestReviewResultMarker_IgnoresUntrustedHumanComment(t *testing.T) {
+	base := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	humanMarker := newReviewResultMarker(50, 1, "head-sha", reviewResultStatusApproved, 1, 0, base)
+	botMarker := newReviewResultMarker(50, 1, "head-sha", reviewResultStatusChangesRequested, 2, 1, base.Add(-time.Hour))
+
+	comments := []*platform.Comment{
+		{AuthorLogin: "github-actions[bot]", Body: mustReviewResultMarker(t, botMarker)},
+		{AuthorLogin: "alice", AuthorAssociation: "MEMBER", Body: mustReviewResultMarker(t, humanMarker)},
+	}
+
+	got, ok := latestReviewResultMarker(comments, 50, 1, "head-sha")
+
+	require.True(t, ok)
+	assert.Equal(t, reviewResultStatusChangesRequested, got.Status)
+	assert.Equal(t, botMarker.CreatedAt, got.CreatedAt)
+}
+
+func TestLatestReviewResultMarker_TrustsBotComment(t *testing.T) {
+	base := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	marker := newReviewResultMarker(50, 1, "head-sha", reviewResultStatusApproved, 1, 0, base)
+
+	got, ok := latestReviewResultMarker([]*platform.Comment{
+		{AuthorLogin: "herd-os[bot]", Body: mustReviewResultMarker(t, marker)},
+	}, 50, 1, "head-sha")
+
+	require.True(t, ok)
+	assert.Equal(t, reviewResultStatusApproved, got.Status)
+	assert.Equal(t, marker.CreatedAt, got.CreatedAt)
+}
+
+func TestIsTrustedReviewResultMarkerComment(t *testing.T) {
+	tests := []struct {
+		name    string
+		comment *platform.Comment
+		want    bool
+	}{
+		{name: "nil comment", comment: nil, want: false},
+		{name: "empty author", comment: &platform.Comment{}, want: false},
+		{name: "human member", comment: &platform.Comment{AuthorLogin: "alice", AuthorAssociation: "MEMBER"}, want: false},
+		{name: "trusted bot", comment: &platform.Comment{AuthorLogin: "github-actions[bot]", AuthorAssociation: "NONE"}, want: true},
+		{name: "herd bot", comment: &platform.Comment{AuthorLogin: "herd-os[bot]", AuthorAssociation: "MEMBER"}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isTrustedReviewResultMarkerComment(tt.comment))
+		})
+	}
 }
 
 func TestReview_ApprovedCommentContainsReviewResultMarker(t *testing.T) {

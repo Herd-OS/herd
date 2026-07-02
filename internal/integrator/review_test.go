@@ -1006,11 +1006,26 @@ func newReviewIdempotencyFixture(t *testing.T, headSHA string) *reviewIdempotenc
 }
 
 func (fx *reviewIdempotencyFixture) addReviewResultMarkerComment(t *testing.T, prNumber, batchNumber int, headSHA, status string) {
+	fx.addReviewResultMarkerCommentFrom(t, prNumber, batchNumber, headSHA, status, "github-actions[bot]", "NONE")
+}
+
+func (fx *reviewIdempotencyFixture) addReviewResultMarkerCommentFrom(t *testing.T, prNumber, batchNumber int, headSHA, status, authorLogin, authorAssociation string) {
 	t.Helper()
 	body, err := appendReviewResultMarker("✅ **HerdOS Agent Review**\n\nPrior result", newReviewResultMarker(prNumber, batchNumber, headSHA, status, 1, 0, time.Now()))
 	require.NoError(t, err)
-	_, err = fx.issueSvc.AddCommentReturningID(context.Background(), prNumber, body)
-	require.NoError(t, err)
+	fx.addCommentFrom(prNumber, body, authorLogin, authorAssociation)
+}
+
+func (fx *reviewIdempotencyFixture) addCommentFrom(prNumber int, body, authorLogin, authorAssociation string) {
+	id := fx.issueSvc.nextCommentID
+	fx.issueSvc.nextCommentID++
+	fx.issueSvc.comments[prNumber] = append(fx.issueSvc.comments[prNumber], body)
+	fx.issueSvc.storedComments[prNumber] = append(fx.issueSvc.storedComments[prNumber], &platform.Comment{
+		ID:                id,
+		Body:              body,
+		AuthorLogin:       authorLogin,
+		AuthorAssociation: authorAssociation,
+	})
 }
 
 func TestReview_AutomaticSkipsApprovedMarkerForCurrentHead(t *testing.T) {
@@ -1029,6 +1044,50 @@ func TestReview_AutomaticSkipsApprovedMarkerForCurrentHead(t *testing.T) {
 	assert.Contains(t, result.SkipReason, "PR #50")
 	assert.Contains(t, result.SkipReason, "sha-current")
 	assert.Equal(t, "sha-current", result.HeadSHA)
+	assert.Equal(t, 0, ag.calls)
+	assert.Empty(t, fx.prSvc.comments)
+	assert.Empty(t, fx.prSvc.reviews)
+	assert.Equal(t, 0, fx.createdIssues)
+	assert.Empty(t, fx.wf.dispatched)
+	assertReviewLockUnlocked(t, fx.repoSvc)
+}
+
+func TestReview_AutomaticIgnoresHumanApprovedMarkerForCurrentHead(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	fx.addReviewResultMarkerCommentFrom(t, 50, 1, "sha-current", reviewResultStatusApproved, "alice", "MEMBER")
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, ag.calls)
+	assert.True(t, result.Approved)
+	assert.False(t, result.SkippedDuplicateApprovedHead)
+	require.Len(t, fx.prSvc.comments, 1)
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewApprove, fx.prSvc.reviews[0].event)
+	assert.Equal(t, 0, fx.createdIssues)
+	assert.Empty(t, fx.wf.dispatched)
+	assertReviewLockUnlocked(t, fx.repoSvc)
+}
+
+func TestReview_AutomaticSkipsTrustedBotApprovedMarkerForCurrentHead(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	fx.addReviewResultMarkerCommentFrom(t, 50, 1, "sha-current", reviewResultStatusApproved, "herd-os[bot]", "NONE")
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "should not run"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.SkippedDuplicateApprovedHead)
 	assert.Equal(t, 0, ag.calls)
 	assert.Empty(t, fx.prSvc.comments)
 	assert.Empty(t, fx.prSvc.reviews)
@@ -1148,8 +1207,7 @@ func TestReview_SecondSerializedInvocationSkipsAfterFirstApproval(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, firstResult.Approved)
 	require.Len(t, fx.prSvc.comments, 1)
-	_, err = fx.issueSvc.AddCommentReturningID(context.Background(), 50, fx.prSvc.comments[0])
-	require.NoError(t, err)
+	fx.addCommentFrom(50, fx.prSvc.comments[0], "github-actions[bot]", "NONE")
 
 	secondAg := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "second should not run"}}
 	secondResult, err := Review(context.Background(), fx.mock, secondAg, fx.g, cfg, ReviewParams{PRNumber: 50, RepoRoot: fx.dir})
@@ -1167,8 +1225,7 @@ func TestReview_SecondSerializedInvocationSkipsAfterFirstApproval(t *testing.T) 
 
 func TestReview_MalformedReviewResultMarkersDoNotBlock(t *testing.T) {
 	fx := newReviewIdempotencyFixture(t, "sha-current")
-	_, err := fx.issueSvc.AddCommentReturningID(context.Background(), 50, reviewResultMarkerPrefix+`{"version":`+reviewResultMarkerSuffix)
-	require.NoError(t, err)
+	fx.addCommentFrom(50, reviewResultMarkerPrefix+`{"version":`+reviewResultMarkerSuffix, "github-actions[bot]", "NONE")
 	fx.addReviewResultMarkerComment(t, 51, 1, "sha-current", reviewResultStatusApproved)
 	fx.addReviewResultMarkerComment(t, 50, 2, "sha-current", reviewResultStatusApproved)
 	fx.addReviewResultMarkerComment(t, 50, 1, "sha-other", reviewResultStatusApproved)
