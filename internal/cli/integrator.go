@@ -248,15 +248,7 @@ func newIntegratorReviewCmd() *cobra.Command {
 				return err
 			}
 
-			if result.Approved {
-				fmt.Println("Batch PR approved by agent review.")
-			} else if result.MaxCyclesHit {
-				fmt.Println("Max fix cycles reached. Manual intervention needed.")
-			} else if len(result.FixIssues) > 0 {
-				fmt.Printf("Created %d fix issues and dispatched workers.\n", len(result.FixIssues))
-			} else if result.AllCreatesFailed {
-				fmt.Printf("Review found %d issues but all fix-issue creations failed.\n", result.FindingsCount)
-			}
+			printReviewResultMessage(result)
 			return nil
 		},
 	}
@@ -265,6 +257,37 @@ func newIntegratorReviewCmd() *cobra.Command {
 	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number")
 	cmd.Flags().IntVar(&batchNum, "batch", 0, "Batch/milestone number")
 	return cmd
+}
+
+func printReviewResultMessage(result *integrator.ReviewResult) {
+	if msg := reviewResultMessage(result); msg != "" {
+		fmt.Println(msg)
+	}
+}
+
+func reviewResultMessage(result *integrator.ReviewResult) string {
+	if result == nil {
+		return ""
+	}
+	if result.SkippedDuplicateApprovedHead {
+		if result.SkipReason != "" {
+			return result.SkipReason
+		}
+		return "Skipped duplicate approved-head review."
+	}
+	if result.Approved {
+		return "Batch PR approved by agent review."
+	}
+	if result.MaxCyclesHit {
+		return "Max fix cycles reached. Manual intervention needed."
+	}
+	if len(result.FixIssues) > 0 {
+		return fmt.Sprintf("Created %d fix issues and dispatched workers.", len(result.FixIssues))
+	}
+	if result.AllCreatesFailed {
+		return fmt.Sprintf("Review found %d issues but all fix-issue creations failed.", result.FindingsCount)
+	}
+	return ""
 }
 
 func newIntegratorMergeCmd() *cobra.Command {

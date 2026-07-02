@@ -50,8 +50,8 @@ type AdvanceResult struct {
 // ReviewParams holds the parameters for reviewing a batch PR.
 type ReviewParams struct {
 	RunID             int64
-	PRNumber          int    // Alternative to RunID — used by pull_request_review trigger
-	BatchNumber       int    // Alternative to RunID — used by advance-on-close
+	PRNumber          int // Alternative to RunID — used by pull_request_review trigger
+	BatchNumber       int // Alternative to RunID — used by advance-on-close
 	RepoRoot          string
 	ExtraInstructions string // Optional extra instructions appended to the review system prompt
 	// Manual is true when this review was triggered by a /herd review or
@@ -62,13 +62,20 @@ type ReviewParams struct {
 
 // ReviewResult holds the result of a batch PR review.
 type ReviewResult struct {
-	Approved        bool
-	FixIssues       []int
-	FixCycle        int
-	MaxCyclesHit    bool
-	BatchPRNumber   int
+	Approved         bool
+	FixIssues        []int
+	FixCycle         int
+	MaxCyclesHit     bool
+	BatchPRNumber    int
 	AllCreatesFailed bool // true when issues were found but every fix-issue Create call failed
 	FindingsCount    int  // number of review findings (agent comments); set when AllCreatesFailed is true
+	// SkippedDuplicateApprovedHead is true when an automatic review was skipped
+	// because the current PR head SHA already has an approved Herd review result.
+	SkippedDuplicateApprovedHead bool
+	// SkipReason is a human-readable reason for a skipped review that the CLI can print.
+	SkipReason string
+	// HeadSHA is the PR head SHA considered by the review, set for duplicate-skip diagnostics when available.
+	HeadSHA string
 	// ManualInterventionNeeded is true when the agent produced
 	// unparseable output on every attempt and the integrator gave up.
 	// The user has been told to re-run `/herd review` manually.

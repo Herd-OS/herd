@@ -143,7 +143,7 @@ Comment posted     -> issue_comment.created   -> handle-comment parses and execu
 ### Event Types
 
 - **workflow_dispatch** -- primary dispatch mechanism. Only users with write access can trigger it (enforced by GitHub). The `ref` parameter points to the branch containing the workflow YAML, not the branch the worker checks out.
-- **workflow_run** -- triggers the Integrator when a worker completes (success or failure).
+- **workflow_run** -- triggers the Integrator when a worker completes (success or failure). When `integrator.ci_workflows` is configured, CI workflow completions still run `herd integrator check-ci --ci-run-id` for each configured workflow completion; only the follow-up automatic review can skip cheaply if the current PR head SHA already has an approved Herd review-result marker.
 - **check_run** -- triggers the Integrator when an individual CI check completes on a batch branch. Unlike `check_suite`, `check_run` fires per individual check completion and is more reliable across external CI providers. The job fires multiple times (once per check_run completion) but is idempotent: it calls `GetCombinedStatus` which returns "pending" if other checks are still running (no-op), "success" if all passed (no-op), or "failure" if all done with failures (dispatches fix workers up to `ci_max_fix_cycles`). CheckCI also pauses dispatching a new CI fix worker if any fix-type worker — review fix, CI fix, or conflict resolution — is still in progress in the same batch milestone; the next `workflow_run` trigger when that worker completes re-runs CheckCI. The integrate job no longer runs `check-ci` inline, as it executed immediately after consolidation when CI hadn't started yet and always saw "pending". The Monitor patrol remains as a fallback, checking CI status on open batch PRs every 15 minutes.
 - **issues** -- triggers the Integrator when an issue is closed. Used for manual task completion — the Integrator advances the tier and runs agent review if all tiers are done.
 - **pull_request_review** -- triggers the Integrator to merge batch PRs after human approval + CI pass.
@@ -193,6 +193,8 @@ Multiple workers can complete near-simultaneously, triggering concurrent Integra
 
 **General rule:** All operations are idempotent. Labeling an already-labeled issue, dispatching an already-in-progress issue, and merging an already-merged branch are all detected and skipped.
 
+Review has two separate protections: review locks serialize active review attempts, while review-result markers make automatic review idempotent after Herd has approved an exact PR head SHA.
+
 #### Workflow Concurrency Groups
 
 All integrator workflow jobs use GitHub Actions [concurrency groups](https://docs.github.com/en/actions/using-jobs/using-concurrency) as defense-in-depth to reduce obvious overlap. Without these, two workers completing close together (or a `/herd integrate` comment firing at the same time as a `workflow_run` trigger) can cause duplicate fix issues, duplicate worker dispatches, and duplicate review attempts.
@@ -228,6 +230,14 @@ Stale locks expire conservatively after their recorded expiry window so a dead A
 Pre-append-only lock branches from older HerdOS versions are migrated only when their old marker commit is recognizable as a Herd review lock and is stale according to its acquisition timestamp. Unknown or fresh legacy state fails closed rather than risking duplicate reviews.
 
 Hidden PR comments are not authoritative for locking. If diagnostic lock comments exist, HerdOS filters them out of review context and never uses them to decide whether a lock is active; the GitHub-backed lock state is authoritative.
+
+#### Review Result Idempotency
+
+Every batch Herd review result comment includes a hidden `herd:review-result` marker with `version`, `pr_number`, `batch_number`, `head_sha`, `status`, `cycle`, `findings_count`, and `created_at`. This marker records the review outcome for the exact PR head SHA that was reviewed; it is separate from the active-review lock and is not used to decide whether another review is currently running.
+
+Automatic review triggers skip the agent when the current PR head SHA already has an approved Herd review-result marker. The skip is logged instead of posted as another PR comment, so repeated automatic triggers do not add PR noise. Manual `/herd review` intentionally forces a fresh review for the current head SHA, even if an approved marker already exists.
+
+A new commit changes the PR head SHA and invalidates prior approved-head idempotency, so the updated diff can be reviewed. `changes_requested` and `max_cycles_hit` markers do not suppress review as approved; existing fix-worker gates, max-cycle rules, stable-disagreement rules, and stale-head checks still govern those flows.
 
 ## 4. Runners
 

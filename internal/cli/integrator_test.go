@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,6 +56,88 @@ func TestIntegratorReviewCmd_MutuallyExclusive(t *testing.T) {
 	err := root.Execute()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+func TestReviewResultMessage(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *integrator.ReviewResult
+		want   string
+	}{
+		{
+			name:   "approved review",
+			result: &integrator.ReviewResult{Approved: true},
+			want:   "Batch PR approved by agent review.",
+		},
+		{
+			name: "duplicate automatic skip with reason",
+			result: &integrator.ReviewResult{
+				SkippedDuplicateApprovedHead: true,
+				SkipReason:                   "Skipping agent review for PR #50: head abc123 already has an approved Herd review result.",
+			},
+			want: "Skipping agent review for PR #50: head abc123 already has an approved Herd review result.",
+		},
+		{
+			name:   "duplicate automatic skip without reason",
+			result: &integrator.ReviewResult{SkippedDuplicateApprovedHead: true},
+			want:   "Skipped duplicate approved-head review.",
+		},
+		{
+			name:   "max cycles",
+			result: &integrator.ReviewResult{MaxCyclesHit: true},
+			want:   "Max fix cycles reached. Manual intervention needed.",
+		},
+		{
+			name:   "fix issues",
+			result: &integrator.ReviewResult{FixIssues: []int{101, 102}},
+			want:   "Created 2 fix issues and dispatched workers.",
+		},
+		{
+			name:   "all creates failed",
+			result: &integrator.ReviewResult{AllCreatesFailed: true, FindingsCount: 3},
+			want:   "Review found 3 issues but all fix-issue creations failed.",
+		},
+		{
+			name:   "neutral",
+			result: &integrator.ReviewResult{},
+			want:   "",
+		},
+		{
+			name:   "nil",
+			result: nil,
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, reviewResultMessage(tt.result))
+		})
+	}
+}
+
+func TestIntegratorReviewCmd_DuplicateSkipReasonPrintedOnce(t *testing.T) {
+	reason := "Skipping agent review for PR #50: head abc123 already has an approved Herd review result."
+	result := &integrator.ReviewResult{
+		SkippedDuplicateApprovedHead: true,
+		SkipReason:                   reason,
+	}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+
+	printReviewResultMessage(result)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, err = buf.ReadFrom(r)
+	require.NoError(t, err)
+	assert.Equal(t, reason+"\n", buf.String())
+	assert.Equal(t, 1, strings.Count(buf.String(), reason))
 }
 
 func TestRunWasSuccessful(t *testing.T) {

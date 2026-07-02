@@ -20,11 +20,13 @@ import (
 // --- Mock Platform ---
 
 type mockPlatform struct {
-	issues     platform.IssueService
-	prs        platform.PullRequestService
-	workflows  *mockWorkflowService
-	repo       *mockRepoService
-	milestones *mockMilestoneService
+	issues             platform.IssueService
+	prs                platform.PullRequestService
+	workflows          *mockWorkflowService
+	repo               *mockRepoService
+	milestones         *mockMilestoneService
+	authenticatedLogin string
+	authenticatedErr   error
 }
 
 func (m *mockPlatform) Issues() platform.IssueService             { return m.issues }
@@ -35,6 +37,9 @@ func (m *mockPlatform) Milestones() platform.MilestoneService     { return m.mil
 func (m *mockPlatform) Runners() platform.RunnerService           { return nil }
 func (m *mockPlatform) Repository() platform.RepositoryService    { return m.repo }
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
+func (m *mockPlatform) AuthenticatedLogin(_ context.Context) (string, error) {
+	return m.authenticatedLogin, m.authenticatedErr
+}
 
 type mockIssueService struct {
 	getResult              map[int]*platform.Issue
@@ -46,6 +51,7 @@ type mockIssueService struct {
 	storedComments         map[int][]*platform.Comment
 	nextCommentID          int64
 	listCommentsResult     []*platform.Comment
+	listCommentsErr        error
 	createResult           *platform.Issue
 	createErr              error
 	createdTitle           string
@@ -165,6 +171,9 @@ func (m *mockIssueService) DeleteComment(_ context.Context, commentID int64) err
 	return nil
 }
 func (m *mockIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	if m.listCommentsErr != nil {
+		return nil, m.listCommentsErr
+	}
 	result := append([]*platform.Comment{}, m.storedComments[number]...)
 	result = append(result, m.listCommentsResult...)
 	return result, nil
