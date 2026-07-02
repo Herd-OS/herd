@@ -19,6 +19,10 @@ import (
 
 const safetyValveLimit = 10
 
+func duplicateApprovedReviewSkipReason(prNumber int, headSHA string) string {
+	return fmt.Sprintf("Skipping agent review for PR #%d: head %s already has an approved Herd review result.", prNumber, headSHA)
+}
+
 // Review runs an agent review on the batch PR.
 // If approved, it optionally auto-merges. If changes are requested,
 // it creates fix issues and dispatches fix workers.
@@ -26,6 +30,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	var pr *platform.PullRequest
 	var ms *platform.Milestone
 	var batchBranch string
+	var prComments []*platform.Comment
+	prCommentsLoaded := false
 
 	if params.PRNumber > 0 {
 		// Direct PR lookup — used by pull_request_review trigger
@@ -143,6 +149,34 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				fmt.Printf("Warning: failed to release review lock for PR #%d: %s\n", pr.Number, err)
 			}
 		}()
+
+		currentHeadSHA, err := p.Repository().GetBranchSHA(ctx, batchBranch)
+		if err != nil {
+			return nil, fmt.Errorf("getting current branch SHA for review idempotency on %s: %w", batchBranch, err)
+		}
+		if currentHeadSHA != reviewedHeadSHA {
+			reviewedHeadSHA = currentHeadSHA
+		}
+
+		comments, commentErr := p.Issues().ListComments(ctx, pr.Number)
+		if commentErr != nil {
+			fmt.Printf("Warning: failed to list PR comments for review idempotency: %s\n", commentErr)
+		} else {
+			prComments = comments
+			prCommentsLoaded = true
+			if !params.Manual {
+				if marker, ok := latestReviewResultMarker(prComments, pr.Number, ms.Number, reviewedHeadSHA); ok && marker.Status == reviewResultStatusApproved {
+					reason := duplicateApprovedReviewSkipReason(pr.Number, reviewedHeadSHA)
+					fmt.Println(reason)
+					return &ReviewResult{
+						BatchPRNumber:                pr.Number,
+						SkippedDuplicateApprovedHead: true,
+						SkipReason:                   reason,
+						HeadSHA:                      reviewedHeadSHA,
+					}, nil
+				}
+			}
+		}
 	}
 
 	// Stable-disagreement circuit breaker: once the integrator has detected
@@ -213,9 +247,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 
 	// Fetch PR comments once for fix requests and prior review context
-	prComments, commentErr := p.Issues().ListComments(ctx, pr.Number)
-	if commentErr != nil {
-		fmt.Printf("Warning: failed to list PR comments: %s\n", commentErr)
+	if !prCommentsLoaded {
+		comments, commentErr := p.Issues().ListComments(ctx, pr.Number)
+		if commentErr != nil {
+			fmt.Printf("Warning: failed to list PR comments: %s\n", commentErr)
+		} else {
+			prComments = comments
+		}
 	}
 	prComments = filterReviewLockComments(prComments)
 	for _, fix := range collectFixRequestsFromComments(prComments) {

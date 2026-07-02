@@ -958,6 +958,213 @@ func assertReviewLockUnlocked(t *testing.T, repoSvc *mockRepoService) {
 	assert.Equal(t, "unlocked", state.Status)
 }
 
+type reviewIdempotencyFixture struct {
+	mock          *mockPlatform
+	issueSvc      *mockIssueService
+	prSvc         *mockCapturingPRService
+	wf            *mockWorkflowService
+	repoSvc       *mockRepoService
+	createdIssues int
+	dir           string
+	g             *git.Git
+}
+
+func newReviewIdempotencyFixture(t *testing.T, headSHA string) *reviewIdempotencyFixture {
+	t.Helper()
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+
+	fx := &reviewIdempotencyFixture{issueSvc: issueSvc}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			fx.createdIssues++
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+	fx.prSvc = &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	fx.wf = &mockWorkflowService{}
+	fx.repoSvc = &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": headSHA},
+	}
+	fx.mock = newReviewLockTestPlatform(mockCreate)
+	fx.mock.prs = fx.prSvc
+	fx.mock.workflows = fx.wf
+	fx.mock.repo = fx.repoSvc
+	fx.dir, fx.g = initTestRepo(t)
+	return fx
+}
+
+func (fx *reviewIdempotencyFixture) addReviewResultMarkerComment(t *testing.T, prNumber, batchNumber int, headSHA, status string) {
+	t.Helper()
+	body, err := appendReviewResultMarker("✅ **HerdOS Agent Review**\n\nPrior result", newReviewResultMarker(prNumber, batchNumber, headSHA, status, 1, 0, time.Now()))
+	require.NoError(t, err)
+	_, err = fx.issueSvc.AddCommentReturningID(context.Background(), prNumber, body)
+	require.NoError(t, err)
+}
+
+func TestReview_AutomaticSkipsApprovedMarkerForCurrentHead(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	fx.addReviewResultMarkerComment(t, 50, 1, "sha-current", reviewResultStatusApproved)
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "should not run"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.SkippedDuplicateApprovedHead)
+	assert.Contains(t, result.SkipReason, "PR #50")
+	assert.Contains(t, result.SkipReason, "sha-current")
+	assert.Equal(t, "sha-current", result.HeadSHA)
+	assert.Equal(t, 0, ag.calls)
+	assert.Empty(t, fx.prSvc.comments)
+	assert.Empty(t, fx.prSvc.reviews)
+	assert.Equal(t, 0, fx.createdIssues)
+	assert.Empty(t, fx.wf.dispatched)
+	assertReviewLockUnlocked(t, fx.repoSvc)
+}
+
+func TestReview_AutomaticSkipDoesNotPostAnotherApprovalComment(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	fx.addReviewResultMarkerComment(t, 50, 1, "sha-current", reviewResultStatusApproved)
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "should not run"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.SkippedDuplicateApprovedHead)
+	assert.Equal(t, 0, ag.calls)
+	assert.Empty(t, fx.prSvc.comments)
+	assert.Empty(t, fx.prSvc.reviews)
+}
+
+func TestReview_ManualRunsDespiteApprovedMarkerForCurrentHead(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	fx.addReviewResultMarkerComment(t, 50, 1, "sha-current", reviewResultStatusApproved)
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: true})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, ag.calls)
+	assert.True(t, result.Approved)
+	assert.False(t, result.SkippedDuplicateApprovedHead)
+	require.Len(t, fx.prSvc.comments, 1)
+	assert.Contains(t, fx.prSvc.comments[0], reviewResultMarkerPrefix)
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewApprove, fx.prSvc.reviews[0].event)
+}
+
+func TestReview_HeadChangeInvalidatesApprovedMarker(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-new")
+	fx.addReviewResultMarkerComment(t, 50, 1, "sha-old", reviewResultStatusApproved)
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, ag.calls)
+	assert.True(t, result.Approved)
+	assert.False(t, result.SkippedDuplicateApprovedHead)
+	require.Len(t, fx.prSvc.comments, 1)
+	require.Len(t, fx.prSvc.reviews, 1)
+}
+
+func TestReview_ChangesRequestedMarkerDoesNotSuppressAutomaticReview(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	fx.addReviewResultMarkerComment(t, 50, 1, "sha-current", reviewResultStatusChangesRequested)
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Findings: []agent.ReviewFinding{{Severity: "HIGH", Description: "Missing validation"}},
+		},
+	}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, ag.calls)
+	assert.False(t, result.SkippedDuplicateApprovedHead)
+	assert.Equal(t, 1, fx.createdIssues)
+	require.Len(t, fx.wf.dispatched, 1)
+	require.Len(t, fx.prSvc.comments, 1)
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, fx.prSvc.reviews[0].event)
+}
+
+func TestReview_SecondSerializedInvocationSkipsAfterFirstApproval(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	cfg := &config.Config{Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3}}
+	firstAg := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	firstResult, err := Review(context.Background(), fx.mock, firstAg, fx.g, cfg, ReviewParams{PRNumber: 50, RepoRoot: fx.dir})
+	require.NoError(t, err)
+	require.True(t, firstResult.Approved)
+	require.Len(t, fx.prSvc.comments, 1)
+	_, err = fx.issueSvc.AddCommentReturningID(context.Background(), 50, fx.prSvc.comments[0])
+	require.NoError(t, err)
+
+	secondAg := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "second should not run"}}
+	secondResult, err := Review(context.Background(), fx.mock, secondAg, fx.g, cfg, ReviewParams{PRNumber: 50, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, secondResult)
+	assert.Equal(t, 1, firstAg.calls)
+	assert.Equal(t, 0, secondAg.calls)
+	assert.True(t, secondResult.SkippedDuplicateApprovedHead)
+	assert.Equal(t, "sha-current", secondResult.HeadSHA)
+	assert.Len(t, fx.prSvc.comments, 1)
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewApprove, fx.prSvc.reviews[0].event)
+}
+
+func TestReview_MalformedReviewResultMarkersDoNotBlock(t *testing.T) {
+	fx := newReviewIdempotencyFixture(t, "sha-current")
+	_, err := fx.issueSvc.AddCommentReturningID(context.Background(), 50, reviewResultMarkerPrefix+`{"version":`+reviewResultMarkerSuffix)
+	require.NoError(t, err)
+	fx.addReviewResultMarkerComment(t, 51, 1, "sha-current", reviewResultStatusApproved)
+	fx.addReviewResultMarkerComment(t, 50, 2, "sha-current", reviewResultStatusApproved)
+	fx.addReviewResultMarkerComment(t, 50, 1, "sha-other", reviewResultStatusApproved)
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	result, err := Review(context.Background(), fx.mock, ag, fx.g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: fx.dir, Manual: false})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, ag.calls)
+	assert.True(t, result.Approved)
+	assert.False(t, result.SkippedDuplicateApprovedHead)
+	require.Len(t, fx.prSvc.comments, 1)
+	require.Len(t, fx.prSvc.reviews, 1)
+}
+
 func TestReview_StaleReviewLockIsReplacedAndReviewRuns(t *testing.T) {
 	issueSvc := newMockIssueService()
 	now := time.Now().UTC()
