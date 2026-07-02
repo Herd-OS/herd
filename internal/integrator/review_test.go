@@ -549,13 +549,59 @@ func TestFilterReviewLockCommentsRemovesDiagnosticLockState(t *testing.T) {
 	assert.Equal(t, int64(1), got[0].ID)
 }
 
-func TestReview_SkipsWhenReviewLockActive(t *testing.T) {
+func TestReview_ManualActiveLockSkipCommentsWithDiagnostics(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	lockBranch := reviewLockBranch(50)
+	active := lockedReviewLockState(50, 1, 99, "sha-recorded", "active-lock", now)
+	active.Owner = "review-owner"
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-current", lockBranch: "active-sha"},
+		commitMessages: map[string]string{
+			"active-sha": mustReviewLockCommitMessage(t, active),
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+	mock.prs = prSvc
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir, Manual: true})
+
+	require.NoError(t, err)
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.Equal(t, 0, ag.calls)
+	require.Len(t, prSvc.comments, 1)
+	comment := prSvc.comments[0]
+	assert.Contains(t, strings.ToLower(comment), "skipped")
+	assert.Contains(t, strings.ToLower(comment), "active")
+	assert.Contains(t, comment, "review-owner")
+	assert.Contains(t, comment, formatReviewLockTime(active.AcquiredAt))
+	assert.Contains(t, comment, formatReviewLockTime(active.ExpiresAt))
+	assert.Contains(t, comment, "sha-recorded")
+	assert.Contains(t, comment, "sha-current")
+}
+
+func TestReview_AutomaticActiveLockSkipOnlyLogsOrAtLeastDoesNotComment(t *testing.T) {
 	tests := []struct {
-		name   string
-		manual bool
+		name      string
+		manual    bool
+		wantCount int
 	}{
-		{name: "automatic review", manual: false},
-		{name: "manual review", manual: true},
+		{name: "automatic review", manual: false, wantCount: 0},
+		{name: "manual review", manual: true, wantCount: 1},
 	}
 
 	for _, tt := range tests {
@@ -567,9 +613,16 @@ func TestReview_SkipsWhenReviewLockActive(t *testing.T) {
 			repoSvc := &mockRepoService{
 				defaultBranch: "main",
 				branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
-				branchSHAs:    map[string]string{lockBranch: "active-sha"},
+				branchSHAs:    map[string]string{"herd/batch/1-batch": "current-sha", lockBranch: "active-sha"},
 				commitMessages: map[string]string{
 					"active-sha": mustReviewLockCommitMessage(t, active),
+				},
+			}
+			prSvc := &mockCapturingPRService{
+				mockPRService: &mockPRService{
+					getResult: map[int]*platform.PullRequest{
+						50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+					},
 				},
 			}
 
@@ -577,6 +630,7 @@ func TestReview_SkipsWhenReviewLockActive(t *testing.T) {
 			dir, g := initTestRepo(t)
 			mock := newReviewLockTestPlatform(issueSvc)
 			mock.repo = repoSvc
+			mock.prs = prSvc
 			result, err := Review(context.Background(), mock, ag, g, &config.Config{
 				Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
 			}, ReviewParams{PRNumber: 50, RepoRoot: dir, Manual: tt.manual})
@@ -584,9 +638,164 @@ func TestReview_SkipsWhenReviewLockActive(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, 50, result.BatchPRNumber)
 			assert.Equal(t, 0, ag.calls)
-			assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+			assert.Len(t, prSvc.comments, tt.wantCount)
 		})
 	}
+}
+
+func TestReview_DiscardsReviewResultWhenHeadAdvances(t *testing.T) {
+	issueSvc := newMockIssueService()
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return issueSvc.Create(context.Background(), title, body, labels, milestone)
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-old"},
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		onReview: func() {
+			repoSvc.branchSHAs["herd/batch/1-batch"] = "sha-new"
+		},
+	}
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(mockCreate)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = repoSvc
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.False(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.Empty(t, prSvc.reviews)
+	assert.Equal(t, 0, createdIssues)
+	assert.Empty(t, wf.dispatched)
+	assert.False(t, prSvc.merged)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "sha-old")
+	assert.Contains(t, prSvc.comments[0], "sha-new")
+	assert.Contains(t, strings.ToLower(prSvc.comments[0]), "discarded")
+	assert.Contains(t, strings.ToLower(prSvc.comments[0]), "changed")
+	assertReviewLockUnlocked(t, repoSvc)
+}
+
+func TestReview_DiscardsFindingsWhenHeadAdvances(t *testing.T) {
+	issueSvc := newMockIssueService()
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return issueSvc.Create(context.Background(), title, body, labels, milestone)
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-old"},
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Missing validation"},
+				{Severity: "MEDIUM", Description: "Missing test"},
+			},
+		},
+		onReview: func() {
+			repoSvc.branchSHAs["herd/batch/1-batch"] = "sha-new"
+		},
+	}
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(mockCreate)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = repoSvc
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 0, createdIssues)
+	assert.Empty(t, wf.dispatched)
+	assert.Empty(t, prSvc.reviews)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "sha-old")
+	assert.Contains(t, prSvc.comments[0], "sha-new")
+	assertReviewLockUnlocked(t, repoSvc)
+}
+
+func TestReview_AutoMergeDoesNotRunWhenHeadAdvances(t *testing.T) {
+	issueSvc := newMockIssueService()
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-old"},
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		onReview: func() {
+			repoSvc.branchSHAs["herd/batch/1-batch"] = "sha-new"
+		},
+	}
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.prs = prSvc
+	mock.repo = repoSvc
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator:   config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		PullRequests: config.PullRequests{AutoMerge: true},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.False(t, prSvc.merged)
+	assert.NotContains(t, repoSvc.deletedBranches, "herd/batch/1-batch")
+	assert.Empty(t, prSvc.reviews)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "sha-old")
+	assert.Contains(t, prSvc.comments[0], "sha-new")
+	assertReviewLockUnlocked(t, repoSvc)
 }
 
 func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
@@ -610,6 +819,33 @@ func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
 	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
 	require.True(t, ok)
 	assert.Equal(t, "unlocked", state.Status)
+}
+
+func TestReview_ReleasesLockWithFreshContextWhenParentContextCancelled(t *testing.T) {
+	issueSvc := newMockIssueService()
+	repoSvc := &mockRepoService{
+		defaultBranch:          "main",
+		branchExists:           map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:             map[string]string{"herd/batch/1-batch": "sha-current"},
+		respectCanceledContext: true,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		onReview:     cancel,
+	}
+
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+	result, err := Review(ctx, mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assertReviewLockUnlocked(t, repoSvc)
 }
 
 func TestReview_ReleasesReviewLockAfterCreatingFixIssue(t *testing.T) {
@@ -641,6 +877,15 @@ func TestReview_ReleasesReviewLockAfterCreatingFixIssue(t *testing.T) {
 	assert.Equal(t, 1, createdIssues)
 	assert.Equal(t, []int{100}, result.FixIssues)
 	assert.Equal(t, 0, reviewLockCommentCount(issueSvc.storedComments[50], 50))
+}
+
+func assertReviewLockUnlocked(t *testing.T, repoSvc *mockRepoService) {
+	t.Helper()
+	lockBranch := reviewLockBranch(50)
+	require.True(t, repoSvc.branchExists[lockBranch])
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "unlocked", state.Status)
 }
 
 func TestReview_StaleReviewLockIsReplacedAndReviewRuns(t *testing.T) {
