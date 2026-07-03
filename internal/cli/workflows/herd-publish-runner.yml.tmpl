@@ -41,7 +41,10 @@ jobs:
           registry: ghcr.io
           username: ${{`{{`}} github.actor {{`}}`}}
           password: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
-      - name: Build and push customized runner image
+      - name: Build and push customized runner image{{ if gt (len .ImagePublish.BuildSecrets) 0 }}
+        env:
+{{ range .ImagePublish.BuildSecrets }}          {{ . }}: ${{`{{`}} secrets.{{ . }} {{`}}`}}
+{{ end }}{{ end }}
         run: |
           OWNER=$(echo "${{`{{`}} github.repository_owner {{`}}`}}" | tr '[:upper:]' '[:lower:]')
           REPO=$(echo "${{`{{`}} github.event.repository.name {{`}}`}}" | tr '[:upper:]' '[:lower:]')
@@ -50,9 +53,18 @@ jobs:
           docker buildx build \
             --platform {{ joinPlatforms .ImagePublish.Platforms }} \
             -f Dockerfile.herd_runner \
-            -t ${IMAGE}:latest \
+{{ range buildSecretTemplateDataFor .ImagePublish.BuildSecrets }}            --secret id={{ .ID }},env={{ .Name }} \
+{{ end }}            -t ${IMAGE}:latest \
             --push .
 {{- else }}
+{{- if gt (len .ImagePublish.BuildSecrets) 0 }}
+          docker build \
+            --platform {{ index .ImagePublish.Platforms 0 }} \
+            -f Dockerfile.herd_runner \
+{{ range buildSecretTemplateDataFor .ImagePublish.BuildSecrets }}            --secret id={{ .ID }},env={{ .Name }} \
+{{ end }}            -t ${IMAGE}:latest .
+{{- else }}
           docker build --platform {{ index .ImagePublish.Platforms 0 }} -f Dockerfile.herd_runner -t ${IMAGE}:latest .
+{{- end }}
           docker push ${IMAGE}:latest
 {{- end }}

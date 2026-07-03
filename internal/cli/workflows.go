@@ -23,6 +23,11 @@ type workflowFile struct {
 	Template bool
 }
 
+type buildSecretTemplateData struct {
+	Name string
+	ID   string
+}
+
 func workflowFiles() []workflowFile {
 	return []workflowFile{
 		{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true},
@@ -53,9 +58,12 @@ func RenderWorkflow(wf workflowFile, cfg *config.Config) ([]byte, error) {
 		return raw, nil
 	}
 	tmpl, err := template.New(wf.SrcName).Funcs(template.FuncMap{
-		"joinPlatforms": joinPlatforms,
-		"yamlQuote":     strconv.Quote,
-		"yamlScalar":    yamlScalar,
+		"buildSecretID":              config.BuildSecretID,
+		"buildSecretIDs":             config.BuildSecretIDs,
+		"buildSecretTemplateDataFor": buildSecretTemplateDataFor,
+		"joinPlatforms":              joinPlatforms,
+		"yamlQuote":                  strconv.Quote,
+		"yamlScalar":                 yamlScalar,
 	}).Parse(string(raw))
 	if err != nil {
 		return nil, fmt.Errorf("parsing workflow template %s: %w", wf.SrcName, err)
@@ -76,4 +84,20 @@ func yamlScalar(value string) string {
 
 func joinPlatforms(platforms []string) string {
 	return strings.Join(platforms, ",")
+}
+
+func buildSecretTemplateDataFor(names []string) ([]buildSecretTemplateData, error) {
+	ids, err := config.BuildSecretIDs(names)
+	if err != nil {
+		return nil, err
+	}
+
+	secrets := make([]buildSecretTemplateData, 0, len(names))
+	for i, name := range names {
+		secrets = append(secrets, buildSecretTemplateData{
+			Name: name,
+			ID:   ids[i],
+		})
+	}
+	return secrets, nil
 }
