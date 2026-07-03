@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/herd-os/herd/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -75,9 +76,38 @@ func withWorkdir(t *testing.T, dir string) {
 	t.Cleanup(func() { _ = os.Chdir(orig) })
 }
 
-func TestImageBuild_InvokesDocker(t *testing.T) {
+func writeImageBuildConfig(t *testing.T, dir string, buildSecrets []string) {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Platform.Owner = "Herd-OS"
+	cfg.Platform.Repo = "Herd"
+	cfg.ImagePublish.BuildSecrets = buildSecrets
+	require.NoError(t, config.Save(dir, cfg))
+}
+
+func setupImageBuildRepo(t *testing.T, buildSecrets []string) string {
+	t.Helper()
 	dir := setupTestGitRepo(t, "git@github.com:Herd-OS/Herd.git")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), []byte("FROM herd-runner-base"), 0644))
+	writeImageBuildConfig(t, dir, buildSecrets)
+	return dir
+}
+
+func unsetEnvForTest(t *testing.T, name string) {
+	t.Helper()
+	old, ok := os.LookupEnv(name)
+	require.NoError(t, os.Unsetenv(name))
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv(name, old)
+			return
+		}
+		_ = os.Unsetenv(name)
+	})
+}
+
+func TestImageBuild_InvokesDocker(t *testing.T) {
+	dir := setupImageBuildRepo(t, nil)
 	withWorkdir(t, dir)
 
 	recorded := installRecorder(t)
@@ -94,8 +124,7 @@ func TestImageBuild_InvokesDocker(t *testing.T) {
 }
 
 func TestImageBuild_TagOverride(t *testing.T) {
-	dir := setupTestGitRepo(t, "git@github.com:Herd-OS/Herd.git")
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), []byte("FROM herd-runner-base"), 0644))
+	dir := setupImageBuildRepo(t, nil)
 	withWorkdir(t, dir)
 
 	recorded := installRecorder(t)
@@ -109,8 +138,152 @@ func TestImageBuild_TagOverride(t *testing.T) {
 	assert.Equal(t, []string{"build", "-f", "Dockerfile.herd_runner", "-t", want, "."}, (*recorded)[0].args)
 }
 
+func TestImageBuild_BuildSecrets(t *testing.T) {
+	tests := []struct {
+		name         string
+		buildSecrets []string
+		env          map[string]string
+		wantSecrets  []string
+	}{
+		{
+			name:         "single configured build secret",
+			buildSecrets: []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM"},
+			env: map[string]string{
+				"BUNDLE_RUBYGEMS__PKG__GITHUB__COM": "token",
+			},
+			wantSecrets: []string{"id=bundle_rubygems_pkg_github_com,env=BUNDLE_RUBYGEMS__PKG__GITHUB__COM"},
+		},
+		{
+			name:         "multiple configured build secrets preserve order",
+			buildSecrets: []string{"NPM_TOKEN", "GIT_AUTH_TOKEN", "BUNDLE_RUBYGEMS__PKG__GITHUB__COM"},
+			env: map[string]string{
+				"NPM_TOKEN":                         "npm",
+				"GIT_AUTH_TOKEN":                    "git",
+				"BUNDLE_RUBYGEMS__PKG__GITHUB__COM": "bundle",
+			},
+			wantSecrets: []string{
+				"id=npm_token,env=NPM_TOKEN",
+				"id=git_auth_token,env=GIT_AUTH_TOKEN",
+				"id=bundle_rubygems_pkg_github_com,env=BUNDLE_RUBYGEMS__PKG__GITHUB__COM",
+			},
+		},
+		{
+			name:         "empty but present env var is allowed",
+			buildSecrets: []string{"EMPTY_SECRET"},
+			env: map[string]string{
+				"EMPTY_SECRET": "",
+			},
+			wantSecrets: []string{"id=empty_secret,env=EMPTY_SECRET"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupImageBuildRepo(t, tt.buildSecrets)
+			withWorkdir(t, dir)
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+			recorded := installRecorder(t)
+
+			tag := "v1.2.3"
+			cmd := newImageBuildCmd(&tag)
+			require.NoError(t, cmd.RunE(cmd, nil))
+
+			require.Len(t, *recorded, 1)
+			want := consumerRunnerImage("Herd-OS", "Herd", "v1.2.3")
+			wantArgs := []string{"build", "-f", "Dockerfile.herd_runner"}
+			for _, secret := range tt.wantSecrets {
+				wantArgs = append(wantArgs, "--secret", secret)
+			}
+			wantArgs = append(wantArgs, "-t", want, ".")
+			assert.Equal(t, wantArgs, (*recorded)[0].args)
+		})
+	}
+}
+
+func TestImageBuild_MissingBuildSecretEnvVars(t *testing.T) {
+	tests := []struct {
+		name         string
+		buildSecrets []string
+		env          map[string]string
+		unset        []string
+		wantMissing  []string
+	}{
+		{
+			name:         "single missing build secret",
+			buildSecrets: []string{"NPM_TOKEN"},
+			unset:        []string{"NPM_TOKEN"},
+			wantMissing:  []string{"NPM_TOKEN"},
+		},
+		{
+			name:         "multiple missing build secrets",
+			buildSecrets: []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM", "NPM_TOKEN", "GIT_AUTH_TOKEN"},
+			env: map[string]string{
+				"GIT_AUTH_TOKEN": "git",
+			},
+			unset:       []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM", "NPM_TOKEN"},
+			wantMissing: []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM", "NPM_TOKEN"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupImageBuildRepo(t, tt.buildSecrets)
+			withWorkdir(t, dir)
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+			for _, name := range tt.unset {
+				unsetEnvForTest(t, name)
+			}
+			recorded := installRecorder(t)
+
+			tag := ""
+			cmd := newImageBuildCmd(&tag)
+			err := cmd.RunE(cmd, nil)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "missing build secret environment variable(s)")
+			for _, name := range tt.wantMissing {
+				assert.Contains(t, err.Error(), name)
+			}
+			assert.Empty(t, *recorded)
+		})
+	}
+}
+
+func TestImageBuild_MissingConfig(t *testing.T) {
+	dir := setupTestGitRepo(t, "git@github.com:Herd-OS/Herd.git")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Dockerfile.herd_runner"), []byte("FROM herd-runner-base"), 0644))
+	withWorkdir(t, dir)
+
+	recorded := installRecorder(t)
+
+	tag := ""
+	cmd := newImageBuildCmd(&tag)
+	err := cmd.RunE(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "run 'herd init' first")
+	assert.Empty(t, *recorded)
+}
+
+func TestImageBuild_InvalidConfig(t *testing.T) {
+	dir := setupImageBuildRepo(t, []string{"1INVALID"})
+	withWorkdir(t, dir)
+
+	recorded := installRecorder(t)
+
+	tag := ""
+	cmd := newImageBuildCmd(&tag)
+	err := cmd.RunE(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid config")
+	assert.Contains(t, err.Error(), "image_publish.build_secrets[0]")
+	assert.Empty(t, *recorded)
+}
+
 func TestImageBuild_MissingDockerfile(t *testing.T) {
 	dir := setupTestGitRepo(t, "git@github.com:Herd-OS/Herd.git")
+	writeImageBuildConfig(t, dir, nil)
 	withWorkdir(t, dir)
 
 	recorded := installRecorder(t)

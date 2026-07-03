@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/herd-os/herd/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -69,11 +70,32 @@ func newImageBuildCmd(tag *string) *cobra.Command {
 				//nolint:staticcheck // ST1005: "Dockerfile.herd_runner" is a literal filename used as the sentence subject; lowercasing it ("dockerfile.herd_runner not found...") would be misleading.
 				return fmt.Errorf("Dockerfile.herd_runner not found — run `herd init` first")
 			}
+			cfg, err := config.Load(dir)
+			if err != nil {
+				return err
+			}
+			if ve := config.Validate(cfg); ve != nil {
+				return fmt.Errorf("invalid config: %w", ve)
+			}
+			var missing []string
+			for _, name := range cfg.ImagePublish.BuildSecrets {
+				if _, ok := os.LookupEnv(name); !ok {
+					missing = append(missing, name)
+				}
+			}
+			if len(missing) > 0 {
+				return fmt.Errorf("missing build secret environment variable(s): %s", strings.Join(missing, ", "))
+			}
 			ref, err := resolveImageRef(dir, *tag)
 			if err != nil {
 				return err
 			}
-			if err := runCommand(dir, "docker", "build", "-f", "Dockerfile.herd_runner", "-t", ref, "."); err != nil {
+			dockerArgs := []string{"build", "-f", "Dockerfile.herd_runner"}
+			for _, name := range cfg.ImagePublish.BuildSecrets {
+				dockerArgs = append(dockerArgs, "--secret", fmt.Sprintf("id=%s,env=%s", config.BuildSecretID(name), name))
+			}
+			dockerArgs = append(dockerArgs, "-t", ref, ".")
+			if err := runCommand(dir, "docker", dockerArgs...); err != nil {
 				return fmt.Errorf("docker build: %w", err)
 			}
 			fmt.Println("Built " + ref)
