@@ -1097,6 +1097,36 @@ func TestRunValidation_NoGoMod_IgnoresContext(t *testing.T) {
 	assert.True(t, result.allPassed())
 }
 
+func TestGoValidationArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{
+			name:    "build disables VCS stamping",
+			command: "build",
+			want:    []string{"build", "-buildvcs=false", "./..."},
+		},
+		{
+			name:    "test disables VCS stamping",
+			command: "test",
+			want:    []string{"test", "-buildvcs=false", "./..."},
+		},
+		{
+			name:    "vet uses existing args",
+			command: "vet",
+			want:    []string{"vet", "./..."},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, goValidationArgs(tt.command))
+		})
+	}
+}
+
 func TestValidationResult_StatusString(t *testing.T) {
 	tests := []struct {
 		name     string
