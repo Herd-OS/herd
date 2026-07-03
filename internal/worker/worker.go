@@ -640,7 +640,7 @@ func runValidation(ctx context.Context, repoRoot string) *validationResult {
 	var errors strings.Builder
 
 	// go build
-	cmd := exec.CommandContext(ctx, "go", "build", "./...")
+	cmd := exec.CommandContext(ctx, "go", goValidationArgs("build")...)
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		result.BuildOK = false
@@ -650,7 +650,7 @@ func runValidation(ctx context.Context, repoRoot string) *validationResult {
 	}
 
 	// go test
-	cmd = exec.CommandContext(ctx, "go", "test", "./...")
+	cmd = exec.CommandContext(ctx, "go", goValidationArgs("test")...)
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		result.TestOK = false
@@ -660,7 +660,7 @@ func runValidation(ctx context.Context, repoRoot string) *validationResult {
 	}
 
 	// go vet
-	cmd = exec.CommandContext(ctx, "go", "vet", "./...")
+	cmd = exec.CommandContext(ctx, "go", goValidationArgs("vet")...)
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		result.VetOK = false
@@ -686,6 +686,15 @@ func runValidation(ctx context.Context, repoRoot string) *validationResult {
 
 	result.Errors = errors.String()
 	return result
+}
+
+func goValidationArgs(command string) []string {
+	switch command {
+	case "build", "test":
+		return []string{command, "-buildvcs=false", "./..."}
+	default:
+		return []string{command, "./..."}
+	}
 }
 
 func (v *validationResult) allPassed() bool {
