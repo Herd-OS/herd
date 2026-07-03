@@ -2,8 +2,11 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+var buildSecretNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // ValidationError holds one or more validation errors.
 type ValidationError struct {
@@ -82,6 +85,32 @@ func Validate(cfg *Config) *ValidationError {
 			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.platforms[%d] duplicates image_publish.platforms[%d] (%q)", i, first, platform))
 		}
 		seenPlatforms[platform] = i
+	}
+	seenBuildSecrets := map[string]int{}
+	seenBuildSecretIDs := map[string]int{}
+	for i, name := range cfg.ImagePublish.BuildSecrets {
+		if strings.TrimSpace(name) == "" {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.build_secrets[%d] must be a non-empty secret/env name", i))
+			continue
+		}
+		if !buildSecretNameRE.MatchString(name) {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.build_secrets[%d] must match ^[A-Za-z_][A-Za-z0-9_]*$ — got %q", i, name))
+			continue
+		}
+		if first, ok := seenBuildSecrets[name]; ok {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.build_secrets[%d] duplicates image_publish.build_secrets[%d] (%q)", i, first, name))
+		}
+		seenBuildSecrets[name] = i
+
+		id := BuildSecretID(name)
+		if id == "" {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.build_secrets[%d] normalizes to empty BuildKit secret id", i))
+			continue
+		}
+		if first, ok := seenBuildSecretIDs[id]; ok {
+			ve.Errors = append(ve.Errors, fmt.Sprintf("image_publish.build_secrets[%d] normalizes to duplicate BuildKit secret id %q from image_publish.build_secrets[%d]", i, id, first))
+		}
+		seenBuildSecretIDs[id] = i
 	}
 
 	// Integrator

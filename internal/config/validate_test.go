@@ -160,6 +160,92 @@ func TestValidate_ImagePublishPlatforms(t *testing.T) {
 	}
 }
 
+func TestValidate_ImagePublishBuildSecrets(t *testing.T) {
+	tests := []struct {
+		name         string
+		buildSecrets []string
+		wantError    bool
+		errSubstr    string
+	}{
+		{"nil list valid", nil, false, ""},
+		{"empty list valid", []string{}, false, ""},
+		{"valid examples", []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM", "NPM_TOKEN", "GIT_AUTH_TOKEN"}, false, ""},
+		{"empty string invalid", []string{""}, true, "image_publish.build_secrets[0] must be a non-empty secret/env name"},
+		{"whitespace string invalid", []string{" \t\n"}, true, "image_publish.build_secrets[0] must be a non-empty secret/env name"},
+		{"starts with digit invalid", []string{"1TOKEN"}, true, `image_publish.build_secrets[0] must match ^[A-Za-z_][A-Za-z0-9_]*$ — got "1TOKEN"`},
+		{"hyphen invalid", []string{"TOKEN-NAME"}, true, `image_publish.build_secrets[0] must match ^[A-Za-z_][A-Za-z0-9_]*$ — got "TOKEN-NAME"`},
+		{"dot invalid", []string{"TOKEN.NAME"}, true, `image_publish.build_secrets[0] must match ^[A-Za-z_][A-Za-z0-9_]*$ — got "TOKEN.NAME"`},
+		{"duplicate configured names invalid", []string{"NPM_TOKEN", "NPM_TOKEN"}, true, `image_publish.build_secrets[1] duplicates image_publish.build_secrets[0] ("NPM_TOKEN")`},
+		{"duplicate normalized ids invalid", []string{"FOO__BAR", "FOO_BAR"}, true, `image_publish.build_secrets[1] normalizes to duplicate BuildKit secret id "foo_bar" from image_publish.build_secrets[0]`},
+		{"empty normalized id invalid", []string{"_"}, true, "image_publish.build_secrets[0] normalizes to empty BuildKit secret id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			cfg.ImagePublish.BuildSecrets = tt.buildSecrets
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
+func TestBuildSecretID(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"npm token", "NPM_TOKEN", "npm_token"},
+		{"git auth token", "GIT_AUTH_TOKEN", "git_auth_token"},
+		{"bundle rubygems package github", "BUNDLE_RUBYGEMS__PKG__GITHUB__COM", "bundle_rubygems_pkg_github_com"},
+		{"trims separators", "__NPM_TOKEN__", "npm_token"},
+		{"collapses separator runs", "FOO---BAR...BAZ", "foo_bar_baz"},
+		{"ascii only lowercasing", "Ä_TOKEN", "token"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, BuildSecretID(tt.in))
+		})
+	}
+}
+
+func TestBuildSecretIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        []string
+		want      []string
+		wantError string
+	}{
+		{"preserves order", []string{"NPM_TOKEN", "GIT_AUTH_TOKEN"}, []string{"npm_token", "git_auth_token"}, ""},
+		{"empty normalized id invalid", []string{"_"}, nil, `image_publish.build_secrets[0] ("_") normalizes to empty BuildKit secret id`},
+		{"duplicate normalized id invalid", []string{"FOO__BAR", "FOO_BAR"}, nil, `image_publish.build_secrets[1] ("FOO_BAR") normalizes to duplicate BuildKit secret id "foo_bar" from image_publish.build_secrets[0] ("FOO__BAR")`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := BuildSecretIDs(tt.in)
+			if tt.wantError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantError)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestValidate_AgentProvider(t *testing.T) {
 	tests := []struct {
 		name      string

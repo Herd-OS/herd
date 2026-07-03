@@ -33,6 +33,8 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, false, cfg.PullRequests.AutoMerge)
 	assert.Equal(t, []string{"ubuntu-latest"}, cfg.ImagePublish.RunsOn)
 	assert.Equal(t, []string{"linux/amd64", "linux/arm64"}, cfg.ImagePublish.Platforms)
+	assert.NotNil(t, cfg.ImagePublish.BuildSecrets)
+	assert.Empty(t, cfg.ImagePublish.BuildSecrets)
 }
 
 func TestLoad(t *testing.T) {
@@ -73,6 +75,9 @@ image_publish:
   runs_on: ["self-hosted", "linux x64", "gpu:large"]
   platforms:
     - linux/amd64
+  build_secrets:
+    - BUNDLE_RUBYGEMS__PKG__GITHUB__COM
+    - NPM_TOKEN
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
 
@@ -94,6 +99,7 @@ image_publish:
 	assert.Equal(t, true, cfg.PullRequests.AutoMerge)
 	assert.Equal(t, []string{"self-hosted", "linux x64", "gpu:large"}, cfg.ImagePublish.RunsOn)
 	assert.Equal(t, []string{"linux/amd64"}, cfg.ImagePublish.Platforms)
+	assert.Equal(t, []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM", "NPM_TOKEN"}, cfg.ImagePublish.BuildSecrets)
 }
 
 func TestLoadAgentExecFields(t *testing.T) {
@@ -218,6 +224,9 @@ platform:
 	assert.Nil(t, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
 	assert.Equal(t, []string{"ubuntu-latest"}, cfg.ImagePublish.RunsOn)
+	assert.Equal(t, []string{"linux/amd64", "linux/arm64"}, cfg.ImagePublish.Platforms)
+	assert.NotNil(t, cfg.ImagePublish.BuildSecrets)
+	assert.Empty(t, cfg.ImagePublish.BuildSecrets)
 }
 
 func TestEnvOverrides(t *testing.T) {
