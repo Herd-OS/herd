@@ -56,7 +56,7 @@ Each review cycle creates at most one batch fix issue containing all HIGH findin
 
 After Herd has posted an approved review result for a PR head SHA, later automatic review triggers for that same head skip the agent; a new commit or manual `/herd review` requests a fresh pass.
 
-Workers run pre-push validation before pushing changes. For Go repositories, this includes `go build`, `go test`, `go vet`, and `golangci-lint` (if available). If validation fails, the agent is retried once with the error output. Workers post structured reports on their issues with files changed, a summary of work done, and validation results.
+Workers run pre-push validation before pushing changes. For Go repositories, this includes `go build`, `go test`, `go vet`, and `golangci-lint` (if available); build and test disable Go VCS stamping. If validation fails, the agent is retried once with the error output. Workers post structured reports on their issues with files changed, a summary of work done, and validation results.
 
 When the Integrator processes commands (Consolidate, Advance, AdvanceByBatch, CheckCI), it skips batches whose milestones are already closed, avoiding redundant work on completed batches.
 

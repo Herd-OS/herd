@@ -89,8 +89,8 @@ worker's system prompt. Convention-based, no configuration needed.
 ### Pre-Push Validation
 
 Before pushing changes, workers run validation commands:
-1. `go build ./...`
-2. `go test ./...`
+1. `go build -buildvcs=false ./...`
+2. `go test -buildvcs=false ./...`
 3. `go vet ./...`
 4. `golangci-lint run ./...` (if available)
 
