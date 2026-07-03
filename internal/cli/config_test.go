@@ -31,6 +31,10 @@ func TestGetConfigValue(t *testing.T) {
 	val, err = getConfigValue(cfg, "image_publish.platforms")
 	require.NoError(t, err)
 	assert.Equal(t, "[linux/amd64, linux/arm64]", val)
+
+	val, err = getConfigValue(cfg, "image_publish.build_secrets")
+	require.NoError(t, err)
+	assert.Equal(t, "[]", val)
 }
 
 func TestGetConfigValueImagePublishRunsOn(t *testing.T) {
@@ -49,6 +53,15 @@ func TestGetConfigValueImagePublishPlatforms(t *testing.T) {
 	val, err := getConfigValue(cfg, "image_publish.platforms")
 	require.NoError(t, err)
 	assert.Equal(t, "[linux/amd64]", val)
+}
+
+func TestGetConfigValueImagePublishBuildSecrets(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImagePublish.BuildSecrets = []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM", "NPM_TOKEN"}
+
+	val, err := getConfigValue(cfg, "image_publish.build_secrets")
+	require.NoError(t, err)
+	assert.Equal(t, "[BUNDLE_RUBYGEMS__PKG__GITHUB__COM, NPM_TOKEN]", val)
 }
 
 func TestGetConfigValueUnknownKey(t *testing.T) {
@@ -147,6 +160,10 @@ func TestSetConfigValueSliceField(t *testing.T) {
 		{
 			name: "image publish platforms",
 			key:  "image_publish.platforms",
+		},
+		{
+			name: "image publish build secrets",
+			key:  "image_publish.build_secrets",
 		},
 	}
 
@@ -306,6 +323,7 @@ func TestFlattenConfig(t *testing.T) {
 	got := keyValueMap(kvs)
 	assert.Equal(t, "[ubuntu-latest]", got["image_publish.runs_on"])
 	assert.Equal(t, "[linux/amd64, linux/arm64]", got["image_publish.platforms"])
+	assert.Equal(t, "[]", got["image_publish.build_secrets"])
 
 	// Verify all keys are dotted
 	for _, kv := range kvs {

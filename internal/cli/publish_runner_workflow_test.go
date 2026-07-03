@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/config"
@@ -43,6 +44,8 @@ func TestPublishRunnerWorkflow_Rendered(t *testing.T) {
 	// be dead weight even if it worked.
 	assert.NotContains(t, rendered, "types: [published]", "broken release trigger should not be present")
 	assert.NotContains(t, rendered, "release:", "broken release trigger should not be present")
+	assert.NotContains(t, rendered, "env:", "default publish workflow should not render build secret env mappings")
+	assert.NotContains(t, rendered, "--secret", "default publish workflow should not render BuildKit secrets")
 
 	// The push-on-Dockerfile.herd_runner trigger MUST be present.
 	// Without it, consumer repos that merge an `Update HerdOS to <tag>`
@@ -130,6 +133,136 @@ func TestPublishRunnerWorkflow_RunsOn(t *testing.T) {
 	}
 }
 
+func TestPublishRunnerWorkflow_BuildSecrets(t *testing.T) {
+	tests := []struct {
+		name              string
+		platforms         []string
+		buildSecrets      []string
+		wantBuildCommand  string
+		wantPushCommand   string
+		notWant           []string
+		wantMultilineBase []string
+	}{
+		{
+			name:             "multi-platform buildx with one secret",
+			buildSecrets:     []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM"},
+			wantBuildCommand: "docker buildx build",
+			notWant: []string{
+				"docker build --platform",
+				"docker push ${IMAGE}:latest",
+			},
+			wantMultilineBase: []string{
+				"            --platform linux/amd64,linux/arm64 \\",
+				"            -f Dockerfile.herd_runner \\",
+				"            -t ${IMAGE}:latest \\",
+				"            --push .",
+			},
+		},
+		{
+			name:             "multi-platform buildx with multiple secrets preserves order",
+			buildSecrets:     []string{"NPM_TOKEN", "GIT_AUTH_TOKEN", "BUNDLE_RUBYGEMS__PKG__GITHUB__COM"},
+			wantBuildCommand: "docker buildx build",
+			notWant: []string{
+				"docker build --platform",
+				"docker push ${IMAGE}:latest",
+			},
+			wantMultilineBase: []string{
+				"            --platform linux/amd64,linux/arm64 \\",
+				"            -f Dockerfile.herd_runner \\",
+				"            -t ${IMAGE}:latest \\",
+				"            --push .",
+			},
+		},
+		{
+			name:             "single linux amd64 docker build with secrets",
+			platforms:        []string{"linux/amd64"},
+			buildSecrets:     []string{"NPM_TOKEN", "BUNDLE_RUBYGEMS__PKG__GITHUB__COM"},
+			wantBuildCommand: "docker build \\",
+			wantPushCommand:  "docker push ${IMAGE}:latest",
+			notWant: []string{
+				"docker buildx build",
+				"--push .",
+			},
+			wantMultilineBase: []string{
+				"            --platform linux/amd64 \\",
+				"            -f Dockerfile.herd_runner \\",
+				"            -t ${IMAGE}:latest .",
+			},
+		},
+		{
+			name:             "single linux arm64 docker build with secrets",
+			platforms:        []string{"linux/arm64"},
+			buildSecrets:     []string{"GIT_AUTH_TOKEN"},
+			wantBuildCommand: "docker build \\",
+			wantPushCommand:  "docker push ${IMAGE}:latest",
+			notWant: []string{
+				"docker buildx build",
+				"--push .",
+			},
+			wantMultilineBase: []string{
+				"            --platform linux/arm64 \\",
+				"            -f Dockerfile.herd_runner \\",
+				"            -t ${IMAGE}:latest .",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			if tt.platforms != nil {
+				cfg.ImagePublish.Platforms = tt.platforms
+			}
+			cfg.ImagePublish.BuildSecrets = tt.buildSecrets
+
+			rendered := string(renderPublishRunnerWorkflow(t, cfg))
+
+			assert.Contains(t, rendered, "        env:\n")
+			assert.Contains(t, rendered, tt.wantBuildCommand)
+			if tt.wantPushCommand != "" {
+				assert.Contains(t, rendered, tt.wantPushCommand)
+			}
+			for _, want := range tt.wantMultilineBase {
+				assert.Contains(t, rendered, want)
+			}
+			for _, notWant := range tt.notWant {
+				assert.NotContains(t, rendered, notWant)
+			}
+			assert.NotContains(t, rendered, "--build-arg")
+			assert.NotContains(t, rendered, "super-secret-local-value")
+
+			wantEnvLines := make([]string, 0, len(tt.buildSecrets))
+			wantSecretLines := make([]string, 0, len(tt.buildSecrets))
+			for _, name := range tt.buildSecrets {
+				id := config.BuildSecretID(name)
+				wantEnvLines = append(wantEnvLines, "          "+name+": ${{ secrets."+name+" }}")
+				wantSecretLines = append(wantSecretLines, "            --secret id="+id+",env="+name+" \\")
+			}
+			assertLinesInOrder(t, rendered, wantEnvLines)
+			assertLinesInOrder(t, rendered, wantSecretLines)
+			for _, want := range append(wantEnvLines, wantSecretLines...) {
+				assert.Equal(t, 1, strings.Count(rendered, want), "%q should render exactly once", want)
+			}
+		})
+	}
+}
+
+func TestPublishRunnerWorkflow_BuildSecretsTemplateError(t *testing.T) {
+	cfg := config.Default()
+	cfg.ImagePublish.BuildSecrets = []string{"NPM_TOKEN", "NPM__TOKEN"}
+
+	wf := workflowFile{
+		SrcName:  "herd-publish-runner.yml.tmpl",
+		DestName: "herd-publish-runner.yml",
+		Template: true,
+	}
+
+	_, err := RenderWorkflow(wf, cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "executing workflow template herd-publish-runner.yml.tmpl")
+	assert.Contains(t, err.Error(), "duplicate BuildKit secret id")
+}
+
 func TestPublishRunnerWorkflow_Platforms(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -212,6 +345,49 @@ func TestPublishRunnerWorkflow_Platforms(t *testing.T) {
 	}
 }
 
+func TestBuildSecretTemplateDataFor(t *testing.T) {
+	tests := []struct {
+		name    string
+		names   []string
+		want    []buildSecretTemplateData
+		wantErr string
+	}{
+		{
+			name:  "empty",
+			names: []string{},
+			want:  []buildSecretTemplateData{},
+		},
+		{
+			name:  "normalizes and preserves order",
+			names: []string{"NPM_TOKEN", "GIT_AUTH_TOKEN", "BUNDLE_RUBYGEMS__PKG__GITHUB__COM"},
+			want: []buildSecretTemplateData{
+				{Name: "NPM_TOKEN", ID: "npm_token"},
+				{Name: "GIT_AUTH_TOKEN", ID: "git_auth_token"},
+				{Name: "BUNDLE_RUBYGEMS__PKG__GITHUB__COM", ID: "bundle_rubygems_pkg_github_com"},
+			},
+		},
+		{
+			name:    "propagates duplicate normalized id error",
+			names:   []string{"NPM_TOKEN", "NPM__TOKEN"},
+			wantErr: "duplicate BuildKit secret id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildSecretTemplateDataFor(tt.names)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestYAMLScalar(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -254,6 +430,18 @@ func TestYAMLScalar(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, yamlScalar(tt.value))
 		})
+	}
+}
+
+func assertLinesInOrder(t *testing.T, rendered string, wantLines []string) {
+	t.Helper()
+
+	last := -1
+	for _, want := range wantLines {
+		idx := strings.Index(rendered, want)
+		require.NotEqual(t, -1, idx, "rendered workflow should contain %q", want)
+		assert.Greater(t, idx, last, "%q should render in config order", want)
+		last = idx
 	}
 }
 

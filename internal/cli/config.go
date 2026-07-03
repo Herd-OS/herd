@@ -179,6 +179,7 @@ func flattenConfig(cfg *config.Config) []keyValue {
 	kvs = append(kvs, keyValue{"monitor.notify_users", formatStringSlice(cfg.Monitor.NotifyUsers)})
 	kvs = append(kvs, keyValue{"image_publish.runs_on", formatStringSlice(cfg.ImagePublish.RunsOn)})
 	kvs = append(kvs, keyValue{"image_publish.platforms", formatStringSlice(cfg.ImagePublish.Platforms)})
+	kvs = append(kvs, keyValue{"image_publish.build_secrets", formatStringSlice(cfg.ImagePublish.BuildSecrets)})
 	kvs = append(kvs, keyValue{"pull_requests.auto_merge", btoa(cfg.PullRequests.AutoMerge)})
 	kvs = append(kvs, keyValue{"pull_requests.co_author_email", displayValue(cfg.PullRequests.CoAuthorEmail)})
 	return kvs
