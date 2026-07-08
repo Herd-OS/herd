@@ -49,7 +49,7 @@ HerdOS is the spiritual successor to Gastown, carrying forward its proven ideas 
 
 - **Not a full operating system.** The "OS" in HerdOS is aspirational, not literal. It's an orchestration platform.
 - **Not a replacement for GitHub.** HerdOS is a layer on top of GitHub. If GitHub adds native agent orchestration, HerdOS adapts or becomes unnecessary.
-- **Not agent-specific.** Ships with Claude Code support first, with more agents coming soon. The architecture supports any agent that can read a task and produce code changes.
+- **Not agent-specific.** Currently supports Claude Code, OpenCode, and Codex. The architecture supports any agent that can read a task and produce code changes.
 - **Not enterprise-first.** Start simple, for individuals. Complexity comes later.
 - **Not a hosted service.** HerdOS runs locally and uses your GitHub account. No SaaS, no vendor lock-in beyond GitHub itself.
 

@@ -156,7 +156,7 @@ graph TD
         PI["Platform Interface"]
     end
     subgraph Bottom["v1.0 Implementations"]
-        CC["Claude Code<br>(Codex, etc. coming soon)"]
+        CC["Claude Code<br>OpenCode<br>Codex"]
         GH["GitHub<br>(GitLab, Gitea — later)"]
     end
     Top --> AI
@@ -165,4 +165,4 @@ graph TD
     PI --> GH
 ```
 
-The CLI does not hardcode GitHub API calls or Claude Code invocations. All platform interactions go through a Platform interface. All agent interactions go through an Agent interface. v1.0 ships with GitHub and Claude Code implementations. Other implementations can be added later without touching core logic.
+The CLI does not hardcode GitHub API calls or agent invocations. All platform interactions go through a Platform interface. All agent interactions go through an Agent interface. Current implementations support GitHub plus Claude Code, OpenCode, and Codex agent providers. Other implementations can be added later without touching core logic.
