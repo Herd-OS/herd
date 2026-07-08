@@ -5,7 +5,7 @@ Terms and naming conventions used throughout HerdOS.
 ## Core Concepts
 
 ### Agent
-The AI coding tool that does the actual work. HerdOS ships with Claude Code support first, with more agents (Codex, Cursor, Gemini CLI, OpenCode) coming soon. Agents run in headless mode -- they read a task description, produce code changes, and commit. The agent is configured in `.herdos.yml` and abstracted behind an interface so agents are swappable.
+The AI coding tool that does the actual work. HerdOS currently supports Claude Code, OpenCode, and Codex. Agents run in headless mode -- they read a task description, produce code changes, and commit. The agent is configured in `.herdos.yml` and abstracted behind an interface so agents are swappable.
 
 ### Planner
 The local planner/orchestrator. Runs on your machine as part of the `herd` CLI. Uses the configured agent to decompose feature requests into discrete tasks (issues). Creates issues, labels, and milestones. Dispatches work.

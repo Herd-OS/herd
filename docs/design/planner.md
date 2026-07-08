@@ -24,7 +24,7 @@ Use `--skip-preflight` to bypass all checks (e.g., when intentionally planning f
 
 ## Planning Modes
 
-`herd plan` always launches an interactive agent session. The configured agent (Claude Code, Codex, Cursor, Gemini CLI, OpenCode) is started in interactive mode with a planning-focused system prompt and repository context.
+`herd plan` always launches an interactive agent session. The configured agent (Claude Code, OpenCode, or Codex) is started in interactive mode with a planning-focused system prompt and repository context.
 
 **Interactive mode** (`herd plan`): Opens a conversational session where the user and agent collaborate on decomposition from scratch. The agent can read the codebase, ask clarifying questions, and propose alternatives before committing to a plan.
 

@@ -14,7 +14,7 @@ platform:
   repo: "my-project"             # repo name — auto-detected from git remote
 
 agent:
-  provider: "claude"             # claude | opencode | codex (cursor, gemini coming soon)
+  provider: "claude"             # claude | opencode | codex
   binary: ""                     # path to agent binary (auto-detect if empty)
   model: ""                      # model override (optional, agent-specific)
   codex_reasoning_effort: "medium" # minimal | low | medium | high (codex provider only)
