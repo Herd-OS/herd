@@ -18,6 +18,8 @@ type Store interface {
 	Close() error
 
 	RecordWebhookDelivery(ctx context.Context, d WebhookDelivery) (created bool, err error)
+	GetWebhookDelivery(ctx context.Context, deliveryID string) (WebhookDelivery, error)
+	UpdateWebhookDeliveryStatus(ctx context.Context, deliveryID string, status string, errorMessage string, processedAt *time.Time) error
 	UpsertInstallation(ctx context.Context, i Installation) error
 	UpsertRepository(ctx context.Context, r Repository) (Repository, error)
 	GetRepository(ctx context.Context, owner string, name string) (Repository, error)

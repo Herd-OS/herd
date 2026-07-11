@@ -31,6 +31,8 @@ var (
 
 type Store interface {
 	RecordWebhookDelivery(ctx context.Context, d store.WebhookDelivery) (created bool, err error)
+	GetWebhookDelivery(ctx context.Context, deliveryID string) (store.WebhookDelivery, error)
+	UpdateWebhookDeliveryStatus(ctx context.Context, deliveryID string, status string, errorMessage string, processedAt *time.Time) error
 	UpsertInstallation(ctx context.Context, i store.Installation) error
 	UpsertRepository(ctx context.Context, r store.Repository) (store.Repository, error)
 }
@@ -39,6 +41,7 @@ type Handler struct {
 	secret                string
 	store                 Store
 	logger                *log.Logger
+	appLogin              string
 	issueCommentCommander IssueCommentCommandHandler
 }
 
@@ -54,14 +57,21 @@ func WithIssueCommentCommandHandler(handler IssueCommentCommandHandler) Option {
 	}
 }
 
+func WithAppLogin(appLogin string) Option {
+	return func(h *Handler) {
+		h.appLogin = appLogin
+	}
+}
+
 func NewHandler(secret string, store Store, logger *log.Logger, opts ...Option) http.Handler {
 	if logger == nil {
 		logger = log.Default()
 	}
 	handler := Handler{
-		secret: secret,
-		store:  store,
-		logger: logger,
+		secret:   secret,
+		store:    store,
+		logger:   logger,
+		appLogin: "herd-os",
 	}
 	for _, opt := range opts {
 		opt(&handler)
@@ -140,12 +150,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	action := PayloadAction(payload)
+	hash := payloadHash(payload)
 	created, err := h.store.RecordWebhookDelivery(r.Context(), store.WebhookDelivery{
 		DeliveryID:  deliveryID,
 		Event:       eventName,
 		Action:      action,
-		PayloadHash: payloadHash(payload),
-		Status:      "accepted",
+		PayloadHash: hash,
+		Status:      "processing",
 		Metadata:    mustJSON(map[string]string{"event": eventName, "action": action}),
 		ReceivedAt:  time.Now().UTC(),
 	})
@@ -156,8 +167,27 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !created {
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "duplicate"})
-		return
+		existing, err := h.store.GetWebhookDelivery(r.Context(), deliveryID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "read webhook delivery: storage unavailable",
+			})
+			return
+		}
+		if existing.PayloadHash != "" && existing.PayloadHash != hash {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "webhook delivery payload hash mismatch"})
+			return
+		}
+		if existing.Status == "processed" {
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "duplicate"})
+			return
+		}
+		if err := h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "processing", "", nil); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "update webhook delivery: storage unavailable",
+			})
+			return
+		}
 	}
 
 	event, err := ParseEvent(eventName, payload)
@@ -169,19 +199,37 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if event == nil {
 		h.logger.Printf("accepted unsupported GitHub webhook event delivery=%s event=%s action=%s", deliveryID, eventName, action)
+		if err := h.markDeliveryProcessed(r.Context(), deliveryID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "update webhook delivery: storage unavailable",
+			})
+			return
+		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 		return
 	}
 
 	if err := h.processEvent(r.Context(), event); err != nil {
 		h.logger.Printf("process GitHub webhook delivery=%s event=%s action=%s: %v", deliveryID, eventName, action, err)
+		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "failed", err.Error(), nil)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "process webhook event: storage unavailable",
 		})
 		return
 	}
 
+	if err := h.markDeliveryProcessed(r.Context(), deliveryID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "update webhook delivery: storage unavailable",
+		})
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+func (h Handler) markDeliveryProcessed(ctx context.Context, deliveryID string) error {
+	now := time.Now().UTC()
+	return h.store.UpdateWebhookDeliveryStatus(ctx, deliveryID, "processed", "", &now)
 }
 
 func (h Handler) processEvent(ctx context.Context, event Event) error {
@@ -198,10 +246,7 @@ func (h Handler) processEvent(ctx context.Context, event Event) error {
 }
 
 func (h Handler) processIssueComment(ctx context.Context, e IssueCommentEvent) error {
-	if h.issueCommentCommander == nil {
-		return nil
-	}
-	_, err := h.issueCommentCommander.HandleIssueComment(ctx, commands.IssueComment{
+	event := commands.IssueComment{
 		Action:            e.Action,
 		Owner:             e.Repository.Owner,
 		Repo:              e.Repository.Name,
@@ -212,8 +257,16 @@ func (h Handler) processIssueComment(ctx context.Context, e IssueCommentEvent) e
 		CommentAuthorType: firstNonEmpty(e.CommentAuthorType, e.SenderType),
 		SenderLogin:       e.SenderLogin,
 		AuthorAssociation: e.CommentAuthorAssociation,
-	})
-	return err
+	}
+	queueStore, ok := h.store.(commands.QueueStore)
+	if !ok {
+		return fmt.Errorf("command queue storage is not configured")
+	}
+	if err := commands.EnqueueIssueCommentCommand(ctx, queueStore, h.appLogin, event); err != nil {
+		return err
+	}
+	_ = h.issueCommentCommander
+	return nil
 }
 
 func (h Handler) processInstallation(ctx context.Context, e InstallationEvent) error {

@@ -33,9 +33,8 @@ func TestEnsureProductionControlPlaneAuth(t *testing.T) {
 			wantErr: "cannot use GITHUB_TOKEN, GH_TOKEN, or HERD_GITHUB_TOKEN",
 		},
 		{
-			name:    "runner rejects implicit gh fallback",
-			env:     map[string]string{"HERD_RUNNER": "true"},
-			wantErr: "local gh/PAT fallback is disabled",
+			name: "runner without legacy token is allowed",
+			env:  map[string]string{"HERD_RUNNER": "true"},
 		},
 		{
 			name: "explicit local override allows",

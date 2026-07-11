@@ -172,16 +172,113 @@ func TestJWKSValidatorFailure(t *testing.T) {
 }
 
 func TestExpectedIdentityFromJob(t *testing.T) {
-	metadata := json.RawMessage(`{"ref":"refs/heads/main","workflow_file":"worker.yml","workflow_run_id":123}`)
+	tests := []struct {
+		name     string
+		metadata json.RawMessage
+		want     ExpectedOIDCIdentity
+	}{
+		{
+			name:     "canonical ref",
+			metadata: json.RawMessage(`{"ref":"refs/heads/main","workflow_file":"worker.yml","workflow_run_id":123}`),
+			want: ExpectedOIDCIdentity{
+				Repository: "acme/widgets",
+				Ref:        "refs/heads/main",
+				Workflow:   "worker.yml",
+				RunID:      "123",
+			},
+		},
+		{
+			name:     "branch name ref",
+			metadata: json.RawMessage(`{"ref":"main","workflow_file":"worker.yml","workflow_run_id":123}`),
+			want: ExpectedOIDCIdentity{
+				Repository: "acme/widgets",
+				Ref:        "refs/heads/main",
+				Workflow:   "worker.yml",
+				RunID:      "123",
+			},
+		},
+		{
+			name:     "self hosted branch name ref",
+			metadata: json.RawMessage(`{"ref":"feature/self-hosted","workflow_file":".github/workflows/herd-worker.yml","workflow_run_id":"456"}`),
+			want: ExpectedOIDCIdentity{
+				Repository: "acme/widgets",
+				Ref:        "refs/heads/feature/self-hosted",
+				Workflow:   ".github/workflows/herd-worker.yml",
+				RunID:      "456",
+			},
+		},
+	}
 
-	expected := ExpectedIdentityFromJob(store.Job{Metadata: metadata}, "acme/widgets")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expected := ExpectedIdentityFromJob(store.Job{Metadata: tt.metadata}, "acme/widgets")
 
-	assert.Equal(t, ExpectedOIDCIdentity{
+			assert.Equal(t, tt.want, expected)
+		})
+	}
+}
+
+func TestValidateOIDCClaimsAcceptsNormalizedExpectedBranchRef(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	claims := OIDCClaims{
+		Issuer:      GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "acme/widgets",
+		Ref:         "refs/heads/main",
+		Workflow:    "worker.yml",
+		WorkflowRef: "acme/widgets/.github/workflows/worker.yml@refs/heads/main",
+		RunID:       "123",
+		ExpiresAt:   now.Add(time.Hour),
+	}
+	expected := ExpectedIdentityFromJob(store.Job{Metadata: json.RawMessage(`{"ref":"main","workflow_file":"worker.yml","workflow_run_id":123}`)}, "acme/widgets")
+
+	err := ValidateOIDCClaims(claims, expected, OIDCOptions{Now: func() time.Time { return now }})
+
+	require.NoError(t, err)
+}
+
+func TestValidateOIDCClaimsRejectsWrongIdentityFields(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	base := OIDCClaims{
+		Issuer:      GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "acme/widgets",
+		Ref:         "refs/heads/main",
+		Workflow:    "worker.yml",
+		WorkflowRef: "acme/widgets/.github/workflows/worker.yml@refs/heads/main",
+		RunID:       "123",
+		ExpiresAt:   now.Add(time.Hour),
+	}
+	expected := ExpectedOIDCIdentity{
 		Repository: "acme/widgets",
 		Ref:        "refs/heads/main",
 		Workflow:   "worker.yml",
 		RunID:      "123",
-	}, expected)
+	}
+	tests := []struct {
+		name   string
+		claims OIDCClaims
+		want   string
+	}{
+		{name: "wrong repository", claims: func() OIDCClaims { c := base; c.Repository = "acme/other"; return c }(), want: "invalid OIDC repository"},
+		{name: "wrong ref", claims: func() OIDCClaims { c := base; c.Ref = "refs/heads/other"; return c }(), want: "invalid OIDC ref"},
+		{name: "wrong workflow", claims: func() OIDCClaims {
+			c := base
+			c.Workflow = "other.yml"
+			c.WorkflowRef = "acme/widgets/.github/workflows/other.yml@refs/heads/main"
+			return c
+		}(), want: "invalid OIDC workflow"},
+		{name: "wrong run id", claims: func() OIDCClaims { c := base; c.RunID = "999"; return c }(), want: "invalid OIDC run ID"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateOIDCClaims(tt.claims, expected, OIDCOptions{Now: func() time.Time { return now }})
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
 }
 
 func signedOIDCToken(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]any) string {

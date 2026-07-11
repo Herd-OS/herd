@@ -81,6 +81,35 @@ func (s *PostgresStore) RecordWebhookDelivery(ctx context.Context, d WebhookDeli
 	return createdFromResult(result, err)
 }
 
+func (s *PostgresStore) GetWebhookDelivery(ctx context.Context, deliveryID string) (WebhookDelivery, error) {
+	var d WebhookDelivery
+	var metadata []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, delivery_id, event, action, payload_hash, status, error, metadata, received_at, processed_at
+		FROM webhook_deliveries
+		WHERE delivery_id = $1`, deliveryID).Scan(
+		&d.ID, &d.DeliveryID, &d.Event, &d.Action, &d.PayloadHash, &d.Status, &d.Error, &metadata, &d.ReceivedAt, &d.ProcessedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WebhookDelivery{}, ErrNotFound
+	}
+	if err != nil {
+		return WebhookDelivery{}, err
+	}
+	d.Metadata = json.RawMessage(metadata)
+	return d, nil
+}
+
+func (s *PostgresStore) UpdateWebhookDeliveryStatus(ctx context.Context, deliveryID string, status string, errorMessage string, processedAt *time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE webhook_deliveries
+		SET status = $2, error = $3, processed_at = $4
+		WHERE delivery_id = $1`, deliveryID, status, errorMessage, processedAt)
+	if err != nil {
+		return err
+	}
+	return requireAffected(result)
+}
+
 func (s *PostgresStore) UpsertInstallation(ctx context.Context, i Installation) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO app_installations (id, account_login, account_id, target_type, permissions, events, created_at, updated_at)

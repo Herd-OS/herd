@@ -72,7 +72,7 @@ func TestPostgresConstraintBackedIdempotency(t *testing.T) {
 			Event:       "issue_comment",
 			Action:      "created",
 			PayloadHash: "sha256:payload",
-			Status:      "accepted",
+			Status:      "processing",
 		}
 		created, err := store.RecordWebhookDelivery(ctx, delivery)
 		require.NoError(t, err)
@@ -81,6 +81,17 @@ func TestPostgresConstraintBackedIdempotency(t *testing.T) {
 		created, err = store.RecordWebhookDelivery(ctx, delivery)
 		require.NoError(t, err)
 		assert.False(t, created)
+
+		got, err := store.GetWebhookDelivery(ctx, "delivery-1")
+		require.NoError(t, err)
+		assert.Equal(t, "processing", got.Status)
+
+		processedAt := time.Now().UTC()
+		require.NoError(t, store.UpdateWebhookDeliveryStatus(ctx, "delivery-1", "processed", "", &processedAt))
+		got, err = store.GetWebhookDelivery(ctx, "delivery-1")
+		require.NoError(t, err)
+		assert.Equal(t, "processed", got.Status)
+		require.NotNil(t, got.ProcessedAt)
 	})
 
 	t.Run("command repo comment command key", func(t *testing.T) {
@@ -279,6 +290,11 @@ func TestMemoryStore(t *testing.T) {
 	created, err = s.RecordWebhookDelivery(ctx, WebhookDelivery{DeliveryID: "d1"})
 	require.NoError(t, err)
 	assert.False(t, created)
+	require.NoError(t, s.UpdateWebhookDeliveryStatus(ctx, "d1", "failed", "boom", nil))
+	delivery, err := s.GetWebhookDelivery(ctx, "d1")
+	require.NoError(t, err)
+	assert.Equal(t, "failed", delivery.Status)
+	assert.Equal(t, "boom", delivery.Error)
 
 	require.NoError(t, s.UpsertInstallation(ctx, Installation{ID: 1, AccountLogin: "octo"}))
 	repo, err := s.UpsertRepository(ctx, Repository{Owner: "octo", Name: "repo"})

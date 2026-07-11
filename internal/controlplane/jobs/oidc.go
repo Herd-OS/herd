@@ -86,7 +86,8 @@ func ValidateOIDCClaims(claims OIDCClaims, expected ExpectedOIDCIdentity, opts O
 	if !claims.ExpiresAt.After(now()) {
 		return fmt.Errorf("OIDC token has expired")
 	}
-	if expected.Ref != "" && claims.Ref != expected.Ref {
+	expectedRef := normalizeExpectedRef(expected.Ref)
+	if expectedRef != "" && claims.Ref != expectedRef {
 		return fmt.Errorf("invalid OIDC ref")
 	}
 	if expected.Workflow != "" && !workflowMatches(claims, expected.Workflow) {
@@ -104,7 +105,7 @@ func ExpectedIdentityFromJob(job store.Job, repository string) ExpectedOIDCIdent
 	if len(job.Metadata) == 0 || json.Unmarshal(job.Metadata, &metadata) != nil {
 		return expected
 	}
-	expected.Ref = firstMetadataString(metadata, "ref", "github_ref")
+	expected.Ref = normalizeExpectedRef(firstMetadataString(metadata, "github_ref", "ref"))
 	expected.Workflow = firstMetadataString(metadata, "workflow", "workflow_file", "workflow_ref")
 	expected.RunID = firstMetadataString(metadata, "run_id", "workflow_run_id", "github_run_id")
 	if expected.Repository == "" {
@@ -118,6 +119,14 @@ func ExpectedIdentityFromJob(job store.Job, repository string) ExpectedOIDCIdent
 		}
 	}
 	return expected
+}
+
+func normalizeExpectedRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || strings.HasPrefix(ref, "refs/") {
+		return ref
+	}
+	return "refs/heads/" + ref
 }
 
 type JWKSValidator struct {

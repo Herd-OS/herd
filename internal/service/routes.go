@@ -12,7 +12,7 @@ import (
 )
 
 func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
-	webhookOptions := []cpgithub.Option{}
+	webhookOptions := []cpgithub.Option{cpgithub.WithAppLogin(cfg.AppLogin)}
 	if deps.IssueCommentCommandHandler != nil {
 		webhookOptions = append(webhookOptions, cpgithub.WithIssueCommentCommandHandler(deps.IssueCommentCommandHandler))
 	}

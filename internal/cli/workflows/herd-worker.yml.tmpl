@@ -123,8 +123,27 @@ jobs:
               patch_artifact: "worker-branch",
               status: $status
             }' \
-            | curl -fsSL -X POST \
+            > /tmp/herd-job-result.json
+          attempt=1
+          delay=1
+          while true; do
+            if curl -fsSL -X POST \
               -H "Authorization: Bearer $OIDC_TOKEN" \
               -H "Content-Type: application/json" \
-              --data-binary @- \
-              "$HERD_CONTROL_PLANE_URL/api/v1/jobs/$HERD_JOB_ID/results"
+              --data-binary @/tmp/herd-job-result.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/jobs/$HERD_JOB_ID/results"; then
+              echo "Submitted HerdOS job result after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS job result after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS job result callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done

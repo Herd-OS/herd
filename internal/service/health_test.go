@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
@@ -101,6 +102,14 @@ func (healthyStore) RecordWebhookDelivery(context.Context, store.WebhookDelivery
 	return true, nil
 }
 
+func (healthyStore) GetWebhookDelivery(context.Context, string) (store.WebhookDelivery, error) {
+	return store.WebhookDelivery{}, store.ErrNotFound
+}
+
+func (healthyStore) UpdateWebhookDeliveryStatus(context.Context, string, string, string, *time.Time) error {
+	return nil
+}
+
 func (healthyStore) UpsertInstallation(context.Context, store.Installation) error {
 	return nil
 }
@@ -119,6 +128,14 @@ func (s unhealthyStore) Health(context.Context) error {
 
 func (s unhealthyStore) RecordWebhookDelivery(context.Context, store.WebhookDelivery) (bool, error) {
 	return true, nil
+}
+
+func (s unhealthyStore) GetWebhookDelivery(context.Context, string) (store.WebhookDelivery, error) {
+	return store.WebhookDelivery{}, store.ErrNotFound
+}
+
+func (s unhealthyStore) UpdateWebhookDeliveryStatus(context.Context, string, string, string, *time.Time) error {
+	return nil
 }
 
 func (s unhealthyStore) UpsertInstallation(context.Context, store.Installation) error {

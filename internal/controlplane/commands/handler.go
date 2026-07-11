@@ -22,6 +22,11 @@ type Store interface {
 	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
 }
 
+type QueueStore interface {
+	GetRepository(ctx context.Context, owner string, name string) (store.Repository, error)
+	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
+}
+
 type AppGitHub interface {
 	AddIssueComment(ctx context.Context, owner, repo string, issueNumber int, body string) (commentID int64, err error)
 }
@@ -152,6 +157,68 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 	return Result{Status: StatusAcknowledged, Command: cmd}, nil
 }
 
+func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin string, event IssueComment) error {
+	if st == nil {
+		return fmt.Errorf("command store is not configured")
+	}
+	if isBotComment(appLogin, event) {
+		return nil
+	}
+	if event.Action != "created" && event.Action != "edited" {
+		return nil
+	}
+	if isLegacyHerdCommand(event.CommentBody) {
+		if !isAuthorized(event.AuthorAssociation) {
+			return nil
+		}
+		return recordQueuedCommand(ctx, st, event, "migration", "migration", nil)
+	}
+	cmd, ok, err := ParseMentionCommand(appLogin, event.CommentBody)
+	if err != nil {
+		if ok && !isAuthorized(event.AuthorAssociation) {
+			return nil
+		}
+		return err
+	}
+	if !ok || !isAuthorized(event.AuthorAssociation) {
+		return nil
+	}
+	metadata, err := json.Marshal(map[string]any{
+		"args":               cmd.Args,
+		"raw":                cmd.Raw,
+		"author_association": event.AuthorAssociation,
+		"action":             event.Action,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal command metadata: %w", err)
+	}
+	return recordQueuedCommand(ctx, st, event, string(cmd.Kind), string(cmd.Kind), metadata)
+}
+
+func recordQueuedCommand(ctx context.Context, st QueueStore, event IssueComment, commandKey, commandName string, metadata json.RawMessage) error {
+	repo, err := st.GetRepository(ctx, event.Owner, event.Repo)
+	if err != nil {
+		return fmt.Errorf("get repository: %w", err)
+	}
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
+	_, err = st.RecordCommand(ctx, store.CommandRecord{
+		RepositoryID: repo.ID,
+		CommentID:    event.CommentID,
+		CommandKey:   commandKey,
+		CommandName:  commandName,
+		Actor:        event.SenderLogin,
+		Status:       StatusAcknowledged,
+		Metadata:     metadata,
+		CreatedAt:    time.Now().UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf("record command: %w", err)
+	}
+	return nil
+}
+
 func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKey, ackBody string, record store.CommandRecord) (store.Repository, bool, error) {
 	repo, err := h.Store.GetRepository(ctx, event.Owner, event.Repo)
 	if err != nil {
@@ -208,10 +275,14 @@ func isAuthorized(association string) bool {
 }
 
 func (h Handler) isBotComment(event IssueComment) bool {
+	return isBotComment(h.AppLogin, event)
+}
+
+func isBotComment(appLogin string, event IssueComment) bool {
 	if strings.EqualFold(event.CommentAuthorType, "Bot") {
 		return true
 	}
-	if strings.EqualFold(event.SenderLogin, h.AppLogin+"[bot]") || strings.EqualFold(event.SenderLogin, h.AppLogin) {
+	if strings.EqualFold(event.SenderLogin, appLogin+"[bot]") || strings.EqualFold(event.SenderLogin, appLogin) {
 		return true
 	}
 	return false

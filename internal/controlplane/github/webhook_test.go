@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/commands"
 	"github.com/herd-os/herd/internal/controlplane/store"
@@ -247,7 +248,11 @@ func TestHandlerIssueCommentCommandSink(t *testing.T) {
 		"comment":{"id":123,"body":"@herd-os review","author_association":"OWNER","user":{"login":"mona","type":"User"}},
 		"sender":{"login":"mona","type":"User"}
 	}`)
-	store := &fakeStore{}
+	store := &fakeStore{
+		repositoriesByName: map[string]store.Repository{
+			"octo-org/herd": {ID: 10, Owner: "octo-org", Name: "herd", InstallationID: 42},
+		},
+	}
 	commander := &fakeIssueCommentCommander{}
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
 	req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-command")
@@ -258,17 +263,15 @@ func TestHandlerIssueCommentCommandSink(t *testing.T) {
 	NewHandler("secret", store, log.New(io.Discard, "", 0), WithIssueCommentCommandHandler(commander)).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
-	require.Len(t, commander.events, 1)
-	event := commander.events[0]
-	assert.Equal(t, "created", event.Action)
-	assert.Equal(t, "octo-org", event.Owner)
-	assert.Equal(t, "herd", event.Repo)
-	assert.Equal(t, 7, event.IssueNumber)
-	assert.Equal(t, int64(123), event.CommentID)
-	assert.Equal(t, "@herd-os review", event.CommentBody)
-	assert.Equal(t, "OWNER", event.AuthorAssociation)
-	assert.Equal(t, "User", event.CommentAuthorType)
-	assert.Equal(t, "mona", event.SenderLogin)
+	require.Empty(t, commander.events)
+	require.Len(t, store.commands, 1)
+	command := store.commands[0]
+	assert.Equal(t, int64(10), command.RepositoryID)
+	assert.Equal(t, int64(123), command.CommentID)
+	assert.Equal(t, "review", command.CommandKey)
+	assert.Equal(t, "review", command.CommandName)
+	assert.Equal(t, commands.StatusAcknowledged, command.Status)
+	assert.Equal(t, "mona", command.Actor)
 }
 
 func TestHandlerUpsertFailureReturnsServerError(t *testing.T) {
@@ -288,6 +291,42 @@ func TestHandlerUpsertFailureReturnsServerError(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Len(t, store.deliveries, 1)
+	assert.Equal(t, "failed", store.deliveries[0].Status)
+}
+
+func TestHandlerRetriesFailedDeliveryOnRedelivery(t *testing.T) {
+	payload := []byte(`{
+		"action":"created",
+		"installation":{"id":42,"account":{"login":"octo-org","id":100,"type":"Organization"}},
+		"repositories":[{"id":99,"name":"herd","owner":{"login":"octo-org"}}]
+	}`)
+	store := &fakeStore{upsertRepoErr: errors.New("database unavailable")}
+	handler := NewHandler("secret", store, log.New(io.Discard, "", 0))
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Delivery", "delivery-redeliver-after-failure")
+	req.Header.Set("X-GitHub-Event", EventInstallation)
+	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Len(t, store.repositories, 0)
+	require.Len(t, store.deliveries, 1)
+	assert.Equal(t, "failed", store.deliveries[0].Status)
+
+	store.upsertRepoErr = nil
+	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Delivery", "delivery-redeliver-after-failure")
+	req.Header.Set("X-GitHub-Event", EventInstallation)
+	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Len(t, store.repositories, 1)
+	require.Len(t, store.deliveries, 2)
+	assert.Equal(t, "processed", store.deliveries[0].Status)
 }
 
 func sign(secret string, payload []byte) string {
@@ -309,6 +348,9 @@ type fakeStore struct {
 	deliveries    []store.WebhookDelivery
 	installations []store.Installation
 	repositories  []store.Repository
+	commands      []store.CommandRecord
+
+	repositoriesByName map[string]store.Repository
 }
 
 func (s *fakeStore) RecordWebhookDelivery(_ context.Context, d store.WebhookDelivery) (bool, error) {
@@ -317,9 +359,38 @@ func (s *fakeStore) RecordWebhookDelivery(_ context.Context, d store.WebhookDeli
 		return false, s.recordErr
 	}
 	if s.recordCreated != nil {
+		if !*s.recordCreated {
+			s.deliveries[len(s.deliveries)-1].Status = "processed"
+		}
 		return *s.recordCreated, nil
 	}
+	for _, existing := range s.deliveries {
+		if existing.DeliveryID == d.DeliveryID {
+			return false, nil
+		}
+	}
 	return true, nil
+}
+
+func (s *fakeStore) GetWebhookDelivery(_ context.Context, deliveryID string) (store.WebhookDelivery, error) {
+	for _, delivery := range s.deliveries {
+		if delivery.DeliveryID == deliveryID {
+			return delivery, nil
+		}
+	}
+	return store.WebhookDelivery{}, store.ErrNotFound
+}
+
+func (s *fakeStore) UpdateWebhookDeliveryStatus(_ context.Context, deliveryID string, status string, errorMessage string, processedAt *time.Time) error {
+	for i := range s.deliveries {
+		if s.deliveries[i].DeliveryID == deliveryID {
+			s.deliveries[i].Status = status
+			s.deliveries[i].Error = errorMessage
+			s.deliveries[i].ProcessedAt = processedAt
+			return nil
+		}
+	}
+	return store.ErrNotFound
 }
 
 func (s *fakeStore) UpsertInstallation(_ context.Context, i store.Installation) error {
@@ -336,6 +407,30 @@ func (s *fakeStore) UpsertRepository(_ context.Context, r store.Repository) (sto
 	}
 	s.repositories = append(s.repositories, r)
 	return r, nil
+}
+
+func (s *fakeStore) GetRepository(_ context.Context, owner string, name string) (store.Repository, error) {
+	if s.repositoriesByName != nil {
+		if repo, ok := s.repositoriesByName[owner+"/"+name]; ok {
+			return repo, nil
+		}
+	}
+	for _, repo := range s.repositories {
+		if repo.Owner == owner && repo.Name == name {
+			return repo, nil
+		}
+	}
+	return store.Repository{}, store.ErrNotFound
+}
+
+func (s *fakeStore) RecordCommand(_ context.Context, c store.CommandRecord) (bool, error) {
+	for _, existing := range s.commands {
+		if existing.RepositoryID == c.RepositoryID && existing.CommentID == c.CommentID && existing.CommandKey == c.CommandKey {
+			return false, nil
+		}
+	}
+	s.commands = append(s.commands, c)
+	return true, nil
 }
 
 type fakeIssueCommentCommander struct {

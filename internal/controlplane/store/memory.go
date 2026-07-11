@@ -77,6 +77,30 @@ func (s *MemoryStore) RecordWebhookDelivery(_ context.Context, d WebhookDelivery
 	return true, nil
 }
 
+func (s *MemoryStore) GetWebhookDelivery(_ context.Context, deliveryID string) (WebhookDelivery, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delivery, ok := s.webhookDeliveries[deliveryID]
+	if !ok {
+		return WebhookDelivery{}, ErrNotFound
+	}
+	return delivery, nil
+}
+
+func (s *MemoryStore) UpdateWebhookDeliveryStatus(_ context.Context, deliveryID string, status string, errorMessage string, processedAt *time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delivery, ok := s.webhookDeliveries[deliveryID]
+	if !ok {
+		return ErrNotFound
+	}
+	delivery.Status = status
+	delivery.Error = errorMessage
+	delivery.ProcessedAt = processedAt
+	s.webhookDeliveries[deliveryID] = delivery
+	return nil
+}
+
 func (s *MemoryStore) UpsertInstallation(_ context.Context, i Installation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

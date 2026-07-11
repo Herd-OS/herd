@@ -95,7 +95,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 			Issuer:     jobs.GitHubActionsIssuer,
 			Audience:   []string{"herd-control-plane"},
 			Repository: "octo-org/herd",
-			Ref:        "main",
+			Ref:        "refs/heads/main",
 			Workflow:   "herd-review.yml",
 			ExpiresAt:  now.Add(time.Hour),
 		}},
@@ -148,6 +148,19 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 	sendIssueCommentWebhook(t, handler, "delivery-review", "@herd-os review", 123)
 	sendIssueCommentWebhook(t, handler, "delivery-review", "@herd-os review", 123)
 	sendIssueCommentWebhook(t, handler, "delivery-review-command-replay", "@herd-os review", 123)
+	_, err = commandHandler.HandleIssueComment(ctx, commands.IssueComment{
+		Action:            "created",
+		Owner:             "octo-org",
+		Repo:              "herd",
+		IssueNumber:       7,
+		PullRequestURL:    "https://api.github.com/repos/octo-org/herd/pulls/7",
+		CommentID:         123,
+		CommentBody:       "@herd-os review",
+		CommentAuthorType: "User",
+		SenderLogin:       "mona",
+		AuthorAssociation: "OWNER",
+	})
+	require.NoError(t, err)
 	require.Len(t, gh.issueComments, 1)
 	assert.Contains(t, gh.issueComments[0], "Acknowledged `@herd-os review`.")
 	require.Len(t, workflows.dispatches, 1)
@@ -185,6 +198,19 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 	assert.Len(t, gh.statuses, 2)
 
 	sendIssueCommentWebhook(t, handler, "delivery-legacy", "/herd review", 456)
+	_, err = commandHandler.HandleIssueComment(ctx, commands.IssueComment{
+		Action:            "created",
+		Owner:             "octo-org",
+		Repo:              "herd",
+		IssueNumber:       7,
+		PullRequestURL:    "https://api.github.com/repos/octo-org/herd/pulls/7",
+		CommentID:         456,
+		CommentBody:       "/herd review",
+		CommentAuthorType: "User",
+		SenderLogin:       "mona",
+		AuthorAssociation: "OWNER",
+	})
+	require.NoError(t, err)
 	require.Len(t, gh.issueComments, 2)
 	assert.Contains(t, gh.issueComments[1], "@herd-os <command>")
 	assert.Len(t, workflows.dispatches, 1, "legacy slash command must not dispatch production work")

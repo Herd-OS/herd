@@ -51,6 +51,49 @@ func TestHandlerAuthorization(t *testing.T) {
 	}
 }
 
+func TestEnqueueIssueCommentCommand(t *testing.T) {
+	tests := []struct {
+		name      string
+		event     IssueComment
+		wantCount int
+		wantKey   string
+		wantErr   string
+	}{
+		{name: "valid command", event: validComment("OWNER", "@herd-os review"), wantCount: 1, wantKey: "review"},
+		{name: "legacy migration command", event: validComment("OWNER", "/herd review"), wantCount: 1, wantKey: "migration"},
+		{name: "unauthorized ignored", event: validComment("CONTRIBUTOR", "@herd-os review")},
+		{name: "non command ignored", event: validComment("OWNER", "hello")},
+		{name: "bot ignored", event: func() IssueComment {
+			e := validComment("OWNER", "@herd-os review")
+			e.CommentAuthorType = "Bot"
+			return e
+		}()},
+		{name: "bad mention command errors", event: validComment("OWNER", "@herd-os nope"), wantErr: "unknown herd-os command"},
+		{name: "edited command accepted", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "edited"; return e }(), wantCount: 1, wantKey: "fix"},
+		{name: "deleted command ignored", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "deleted"; return e }()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+
+			err := EnqueueIssueCommentCommand(context.Background(), st, "herd-os", tt.event)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, st.commandRecords, tt.wantCount)
+			if tt.wantCount > 0 {
+				assert.Equal(t, tt.wantKey, st.commandRecords[0].CommandKey)
+				assert.Equal(t, StatusAcknowledged, st.commandRecords[0].Status)
+			}
+		})
+	}
+}
+
 func TestHandlerIgnoresBotAuthoredComments(t *testing.T) {
 	tests := []IssueComment{
 		func() IssueComment {

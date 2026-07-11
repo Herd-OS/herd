@@ -309,8 +309,19 @@ func TestWorkerWorkflowTemplate_ExcludesProviderAuthEnv(t *testing.T) {
 	assert.Contains(t, s, "repository:", "worker workflow must accept repository identity")
 	assert.Contains(t, s, "expected_head_sha:", "worker workflow must accept expected head SHA")
 	assert.Contains(t, s, "/api/v1/jobs/$HERD_JOB_ID/results", "worker workflow must report results to the control plane")
+	assert.Contains(t, s, "while true; do", "worker workflow must retry result callbacks")
+	assert.Contains(t, s, "Failed to submit HerdOS job result after ${attempt} attempt(s).", "worker workflow must log final callback failure")
+	assert.Contains(t, s, "delay=$((delay * 2))", "worker workflow must use bounded backoff")
 	assert.Contains(t, s, "ISSUE_NUMBER: ${{ inputs.issue_number }}", "ISSUE_NUMBER input must remain")
 	assert.Contains(t, s, "HERD_WORKER_MODE: ${{ inputs.mode }}", "HERD_WORKER_MODE input must remain")
+}
+
+func TestRunnerEnvExampleHasSingleBootstrapToken(t *testing.T) {
+	env, err := os.ReadFile(filepath.Join("runner", ".env.herd.example"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, strings.Count(string(env), "HERD_RUNNER_BOOTSTRAP_TOKEN="))
+	assert.Equal(t, 1, strings.Count(string(env), "HERD_CONTROL_PLANE_URL="))
 }
 
 func TestGeneratedWorkflowsDoNotUseLegacyPATOrCommentDispatch(t *testing.T) {

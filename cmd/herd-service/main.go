@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/reconciler"
+	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/service"
 )
 
@@ -19,8 +22,38 @@ func main() {
 	if err != nil {
 		logger.Fatalf("load config: %v", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		logger.Fatalf("validate config: %v", err)
+	}
 
-	handler, err := service.NewServer(cfg, service.Dependencies{Logger: logger})
+	ctx := context.Background()
+	st, err := store.OpenPostgresStore(ctx, cfg.DatabaseURL)
+	if err != nil {
+		logger.Fatalf("open postgres store: %v", err)
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			logger.Printf("close store: %v", err)
+		}
+	}()
+
+	deps := service.Dependencies{
+		Logger: logger,
+		Store:  st,
+	}
+	if cfg.ReconcilerEnabled {
+		deps.Reconciler = &reconciler.Reconciler{Store: st}
+	}
+	stopReconciler, started := service.StartReconcilerLoop(ctx, cfg, deps)
+	if started {
+		defer func() {
+			if err := stopReconciler(); err != nil {
+				logger.Printf("stop reconciler: %v", err)
+			}
+		}()
+	}
+
+	handler, err := service.NewServer(cfg, deps)
 	if err != nil {
 		logger.Fatalf("create server: %v", err)
 	}
