@@ -59,15 +59,16 @@ func TestFromPlatformFilesMapsMetadataAndPatches(t *testing.T) {
 	}
 }
 
-func TestFromPlatformFilesMarksUnavailableBinaryGeneratedAndLarge(t *testing.T) {
+func TestFromPlatformFilesMarksUnavailableMetadataGeneratedAndLarge(t *testing.T) {
 	largePatch := strings.Repeat("+lock\n", LargeLockfileDiffBytes/5+1)
 	diff := FromPlatformFiles(7, "base", "head", []*platform.PullRequestFile{
 		{
-			Path:      "image.png",
-			Status:    "added",
-			Additions: 0,
-			Deletions: 0,
-			Changes:   0,
+			Path:         "new/name.go",
+			PreviousPath: "old/name.go",
+			Status:       "renamed",
+			Additions:    0,
+			Deletions:    0,
+			Changes:      0,
 		},
 		{
 			Path:      "src/huge.go",
@@ -89,9 +90,11 @@ func TestFromPlatformFilesMarksUnavailableBinaryGeneratedAndLarge(t *testing.T) 
 	})
 
 	require.Len(t, diff.Files, 4)
-	assert.True(t, diff.Files[0].Binary)
+	assert.False(t, diff.Files[0].Binary)
 	assert.True(t, diff.Files[0].Omitted)
-	assert.Equal(t, "binary file", diff.Files[0].OmitReason)
+	assert.Equal(t, ChangeRenamed, diff.Files[0].Status)
+	assert.Equal(t, "old/name.go", diff.Files[0].OldPath)
+	assert.Equal(t, "metadata-only change", diff.Files[0].OmitReason)
 	assert.True(t, diff.Files[1].Omitted)
 	assert.Equal(t, "patch unavailable from GitHub files API", diff.Files[1].OmitReason)
 	assert.True(t, diff.Files[2].Generated)
@@ -104,7 +107,7 @@ func TestFromPlatformFilesMarksUnavailableBinaryGeneratedAndLarge(t *testing.T) 
 		MaxOmittedSummaryEntries: 10,
 	})
 	require.True(t, result.WasLimited)
-	assert.Contains(t, result.Text, "image.png (added, +0/-0, reason: binary file)")
+	assert.Contains(t, result.Text, "new/name.go (renamed, old path: old/name.go, +0/-0, reason: metadata-only change)")
 	assert.Contains(t, result.Text, "src/huge.go (modified, +1000/-1000, reason: patch unavailable from GitHub files API)")
 	assert.Contains(t, result.Text, "dist/app.js (modified, +0/-0, reason: generated file)")
 	assert.Contains(t, result.Text, "package-lock.json (modified, +0/-0, reason: large lockfile diff)")

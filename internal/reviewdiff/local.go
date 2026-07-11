@@ -112,19 +112,18 @@ func (c LocalCollector) resolveRef(sha, ref, remote string, prNumber int) (strin
 		if sha != "" && c.hasCommit(sha) {
 			return sha, nil
 		}
-		for _, candidate := range []string{"refs/remotes/" + remote + "/" + ref, ref} {
-			if resolved, err := c.Git.RevParse(candidate + "^{commit}"); err == nil {
-				return resolved, nil
-			}
+		remoteCandidate := "refs/remotes/" + remote + "/" + ref
+		if resolved, err := c.Git.RevParse(remoteCandidate + "^{commit}"); err == nil {
+			return resolved, nil
 		}
 	}
 	if prNumber > 0 {
-		_ = c.Git.FetchRef(remote, fmt.Sprintf("pull/%d/head:refs/remotes/%s/pr/%d", prNumber, remote, prNumber))
-		if sha != "" && c.hasCommit(sha) {
-			return sha, nil
+		if resolved, ok := c.resolvePullRequestHead(sha, remote, prNumber); ok {
+			return resolved, nil
 		}
-		candidate := fmt.Sprintf("refs/remotes/%s/pr/%d^{commit}", remote, prNumber)
-		if resolved, err := c.Git.RevParse(candidate); err == nil {
+	}
+	if ref != "" {
+		if resolved, err := c.Git.RevParse(ref + "^{commit}"); err == nil {
 			return resolved, nil
 		}
 	}
@@ -135,6 +134,18 @@ func (c LocalCollector) resolveRef(sha, ref, remote string, prNumber int) (strin
 		return ref, nil
 	}
 	return "", fmt.Errorf("missing SHA or ref")
+}
+
+func (c LocalCollector) resolvePullRequestHead(sha, remote string, prNumber int) (string, bool) {
+	_ = c.Git.FetchRef(remote, fmt.Sprintf("pull/%d/head:refs/remotes/%s/pr/%d", prNumber, remote, prNumber))
+	if sha != "" && c.hasCommit(sha) {
+		return sha, true
+	}
+	candidate := fmt.Sprintf("refs/remotes/%s/pr/%d^{commit}", remote, prNumber)
+	if resolved, err := c.Git.RevParse(candidate); err == nil {
+		return resolved, true
+	}
+	return "", false
 }
 
 func (c LocalCollector) hasCommit(ref string) bool {

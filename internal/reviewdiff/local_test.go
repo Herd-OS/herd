@@ -90,6 +90,55 @@ func TestLocalCollectorCollectsChangedFiles(t *testing.T) {
 	assert.True(t, files["large.txt"].Large)
 }
 
+func TestLocalCollectorPrefersPullRequestHeadBeforeLocalBranchFallback(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	runLocalGit(t, "", "init", "--bare", origin)
+
+	seed := t.TempDir()
+	runLocalGit(t, seed, "init", "-b", "main")
+	runLocalGit(t, seed, "config", "user.email", "test@test.com")
+	runLocalGit(t, seed, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(seed, "base.txt"), []byte("base\n"), 0644))
+	runLocalGit(t, seed, "add", "base.txt")
+	runLocalGit(t, seed, "commit", "-m", "base")
+	runLocalGit(t, seed, "remote", "add", "origin", origin)
+	runLocalGit(t, seed, "push", "origin", "main")
+
+	work := filepath.Join(t.TempDir(), "work")
+	runLocalGit(t, "", "clone", origin, work)
+	runLocalGit(t, work, "checkout", "-B", "main", "origin/main")
+	runLocalGit(t, work, "config", "user.email", "test@test.com")
+	runLocalGit(t, work, "config", "user.name", "Test")
+	baseSHA := gitOutput(t, work, "rev-parse", "HEAD")
+
+	runLocalGit(t, work, "checkout", "-b", "feature", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(work, "stale-local.txt"), []byte("stale\n"), 0644))
+	runLocalGit(t, work, "add", "stale-local.txt")
+	runLocalGit(t, work, "commit", "-m", "stale local feature")
+
+	runLocalGit(t, work, "checkout", "-b", "pr-head", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(work, "actual-pr.txt"), []byte("actual\n"), 0644))
+	runLocalGit(t, work, "add", "actual-pr.txt")
+	runLocalGit(t, work, "commit", "-m", "actual pr head")
+	prHeadSHA := gitOutput(t, work, "rev-parse", "HEAD")
+	runLocalGit(t, work, "push", "origin", "HEAD:refs/pull/42/head")
+
+	diff, err := LocalCollector{Git: git.New(work)}.Collect(context.Background(), CollectRequest{
+		PRNumber: 42,
+		BaseRef:  "main",
+		HeadRef:  "feature",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, LocalGitSource, diff.Source)
+	assert.Equal(t, baseSHA, diff.BaseSHA)
+	assert.Equal(t, prHeadSHA, diff.HeadSHA)
+	files := filesByPath(diff.Files)
+	require.Contains(t, files, "actual-pr.txt")
+	assert.Contains(t, files["actual-pr.txt"].Patch, "+actual")
+	assert.NotContains(t, files, "stale-local.txt")
+}
+
 func TestLocalCollectorWarnsForPathDiffFailure(t *testing.T) {
 	withFakeGit(t, `#!/bin/sh
 if [ "$1" = "rev-parse" ]; then

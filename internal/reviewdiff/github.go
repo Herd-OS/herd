@@ -26,9 +26,8 @@ func FromPlatformFiles(prNumber int, baseSHA string, headSHA string, files []*pl
 		if changed.Patch == "" {
 			switch {
 			case changed.Additions == 0 && changed.Deletions == 0:
-				changed.Binary = true
 				changed.Omitted = true
-				changed.OmitReason = "binary file"
+				changed.OmitReason = "metadata-only change"
 			case changed.Changes != 0:
 				changed.Omitted = true
 				changed.OmitReason = "patch unavailable from GitHub files API"
