@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/herd-os/herd/internal/controlplane"
 )
@@ -20,6 +21,8 @@ const (
 	envEnv                 = "HERD_ENV"
 	envGitHubAppLogin      = "HERD_GITHUB_APP_LOGIN"
 	envOIDCAudience        = "HERD_OIDC_AUDIENCE"
+	envReconcilerEnabled   = "HERD_RECONCILER_ENABLED"
+	envReconcilerInterval  = "HERD_RECONCILER_INTERVAL"
 
 	defaultEnv            = "production"
 	defaultGitHubAppLogin = "herd-os"
@@ -34,6 +37,8 @@ type Config struct {
 	Env                 string
 	AppLogin            string
 	OIDCAudience        string
+	ReconcilerEnabled   bool
+	ReconcilerInterval  string
 }
 
 func LoadConfigFromEnv() (Config, error) {
@@ -45,6 +50,7 @@ func LoadConfigFromEnv() (Config, error) {
 		Env:                 envOrDefault(envEnv, defaultEnv),
 		AppLogin:            envOrDefault(envGitHubAppLogin, defaultGitHubAppLogin),
 		OIDCAudience:        envOrDefault(envOIDCAudience, controlplane.DefaultOIDCAudience),
+		ReconcilerInterval:  os.Getenv(envReconcilerInterval),
 	}
 
 	appID := os.Getenv(envGitHubAppID)
@@ -54,6 +60,13 @@ func LoadConfigFromEnv() (Config, error) {
 			return Config{}, fmt.Errorf("%s must be a positive integer", envGitHubAppID)
 		}
 		cfg.GitHubAppID = parsed
+	}
+	if enabled := os.Getenv(envReconcilerEnabled); enabled != "" {
+		parsed, err := strconv.ParseBool(enabled)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s must be a boolean", envReconcilerEnabled)
+		}
+		cfg.ReconcilerEnabled = parsed
 	}
 
 	return cfg, nil
@@ -65,6 +78,11 @@ func (cfg Config) Validate() error {
 	if strings.TrimSpace(cfg.PublicURL) != "" {
 		if err := validatePublicURL(cfg.PublicURL); err != nil {
 			validationErrs = append(validationErrs, err)
+		}
+	}
+	if strings.TrimSpace(cfg.ReconcilerInterval) != "" {
+		if _, err := time.ParseDuration(cfg.ReconcilerInterval); err != nil {
+			validationErrs = append(validationErrs, fmt.Errorf("%s must be a valid duration", envReconcilerInterval))
 		}
 	}
 

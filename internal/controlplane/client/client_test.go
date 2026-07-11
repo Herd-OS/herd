@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,6 +40,83 @@ func TestRegisterRepository(t *testing.T) {
 	assert.Equal(t, int64(10), resp.RepositoryID)
 	assert.Equal(t, "gho_setup", got.SetupToken)
 	assert.Equal(t, "herd-os", got.AppLogin)
+}
+
+func TestSubmitJobResultWithRetryRetriesTransientFailures(t *testing.T) {
+	attempts := 0
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		gotAuth = r.Header.Get("Authorization")
+		assert.Equal(t, "/api/v1/jobs/job-1/results", r.URL.Path)
+		if attempts < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("try later"))
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, srv.Client())
+	require.NoError(t, err)
+	var sleeps []time.Duration
+
+	err = c.SubmitJobResultWithRetry(context.Background(), "job-1", []byte(`{"ok":true}`), "token", RetryOptions{
+		MaxAttempts:    4,
+		InitialBackoff: time.Second,
+		MaxBackoff:     3 * time.Second,
+		Sleep: func(_ context.Context, d time.Duration) error {
+			sleeps = append(sleeps, d)
+			return nil
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, attempts)
+	assert.Equal(t, "Bearer token", gotAuth)
+	assert.Equal(t, []time.Duration{time.Second, 2 * time.Second}, sleeps)
+}
+
+func TestSubmitJobResultWithRetryDoesNotRetryBadRequest(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte("stale head"))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, srv.Client())
+	require.NoError(t, err)
+
+	err = c.SubmitJobResultWithRetry(context.Background(), "job-1", []byte(`{"ok":true}`), "", RetryOptions{
+		MaxAttempts:    3,
+		InitialBackoff: time.Millisecond,
+		Sleep: func(context.Context, time.Duration) error {
+			require.Fail(t, "sleep should not be called for non-retryable status")
+			return nil
+		},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stale head")
+	assert.Equal(t, 1, attempts)
+}
+
+func TestBoundedExponentialBackoffCapsDelay(t *testing.T) {
+	tests := []struct {
+		name    string
+		attempt int
+		want    time.Duration
+	}{
+		{name: "first retry", attempt: 1, want: time.Second},
+		{name: "doubles", attempt: 3, want: 4 * time.Second},
+		{name: "caps", attempt: 6, want: 5 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, BoundedExponentialBackoff(tt.attempt, time.Second, 5*time.Second))
+		})
+	}
 }
 
 func TestRegisterRepositoryErrors(t *testing.T) {

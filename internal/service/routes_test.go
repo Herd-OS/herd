@@ -1,10 +1,14 @@
 package service
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/reconciler"
+	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,4 +74,25 @@ func TestJobResultsRouteCanBeInjected(t *testing.T) {
 
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 	assert.JSONEq(t, `{"job_id":"job-123"}`, rec.Body.String())
+}
+
+func TestStartReconcilerLoopStartsAndStopsWithContext(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	r := &reconciler.Reconciler{
+		Store: st,
+		Now:   func() time.Time { return time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC) },
+		Config: reconciler.Config{
+			Interval:        time.Hour,
+			JobTimeout:      time.Minute,
+			CommandTimeout:  time.Minute,
+			CallbackTimeout: time.Minute,
+		},
+	}
+
+	stop, started := StartReconcilerLoop(ctx, Config{ReconcilerEnabled: true}, Dependencies{Reconciler: r})
+	require.True(t, started)
+	require.NoError(t, stop())
+
+	assert.False(t, r.LastReport().StartedAt.IsZero())
 }

@@ -5,8 +5,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	cpgithub "github.com/herd-os/herd/internal/controlplane/github"
+	"github.com/herd-os/herd/internal/controlplane/reconciler"
 )
 
 type Dependencies struct {
@@ -15,6 +17,7 @@ type Dependencies struct {
 	RegisterRepositoryRoute      http.Handler
 	RunnerRegistrationTokenRoute http.Handler
 	JobResultsRoute              http.Handler
+	Reconciler                   *reconciler.Reconciler
 }
 
 type Store interface {
@@ -32,4 +35,34 @@ func NewServer(cfg Config, deps Dependencies) (http.Handler, error) {
 	registerAPIRoutes(mux, cfg, deps)
 
 	return mux, nil
+}
+
+func StartReconcilerLoop(ctx context.Context, cfg Config, deps Dependencies) (func() error, bool) {
+	if !cfg.ReconcilerEnabled || deps.Reconciler == nil {
+		return func() error { return nil }, false
+	}
+	interval := time.Duration(0)
+	if cfg.ReconcilerInterval != "" {
+		parsed, err := time.ParseDuration(cfg.ReconcilerInterval)
+		if err != nil {
+			return func() error { return err }, false
+		}
+		interval = parsed
+	}
+	if interval > 0 {
+		deps.Reconciler.Config.Interval = interval
+	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		err := deps.Reconciler.Run(loopCtx)
+		if err == context.Canceled {
+			err = nil
+		}
+		done <- err
+	}()
+	return func() error {
+		cancel()
+		return <-done
+	}, true
 }

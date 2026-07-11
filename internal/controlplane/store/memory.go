@@ -215,6 +215,44 @@ func (s *MemoryStore) RecordJobResult(_ context.Context, r JobResult) (bool, err
 	return true, nil
 }
 
+func (s *MemoryStore) ListReconcileJobs(_ context.Context, updatedBefore time.Time, limit int) ([]ReconcileJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []ReconcileJob
+	for _, job := range s.jobs {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		if !job.UpdatedAt.IsZero() && !job.UpdatedAt.Before(updatedBefore) {
+			continue
+		}
+		if !reconcileJobStatus(job.Status) {
+			continue
+		}
+		repo := s.repositoryByID(job.RepositoryID)
+		out = append(out, ReconcileJob{
+			Job:         job,
+			Repository:  repo,
+			ResultCount: s.jobResultCount(job.JobID),
+		})
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateJobStatus(_ context.Context, jobID string, status string, metadata json.RawMessage, updatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return ErrNotFound
+	}
+	job.Status = status
+	job.Metadata = metadataOrEmpty(metadata)
+	job.UpdatedAt = timeOrNow(updatedAt)
+	s.jobs[jobID] = job
+	return nil
+}
+
 func (s *MemoryStore) AcquireIdempotencyKey(_ context.Context, key IdempotencyKey) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -248,6 +286,25 @@ func (s *MemoryStore) CompleteIdempotencyKey(_ context.Context, key string, resu
 	record.CompletedAt = &now
 	s.idempotencyKeys[key] = record
 	return nil
+}
+
+func (s *MemoryStore) ListStartedIdempotencyKeys(_ context.Context, scope string, createdBefore time.Time, limit int) ([]IdempotencyKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []IdempotencyKey
+	for _, record := range s.idempotencyKeys {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		if record.Scope != scope || record.Status != "started" {
+			continue
+		}
+		if !record.CreatedAt.IsZero() && !record.CreatedAt.Before(createdBefore) {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) RecordGitHubMutationAttempt(_ context.Context, a GitHubMutationAttempt) error {
@@ -284,11 +341,50 @@ func (s *MemoryStore) CompleteGitHubMutationAttempt(_ context.Context, idempoten
 	return nil
 }
 
+func (s *MemoryStore) ListStartedGitHubMutationAttempts(_ context.Context, createdBefore time.Time, limit int) ([]GitHubMutationAttempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []GitHubMutationAttempt
+	for _, attempt := range s.mutationAttempts {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		if attempt.Status != "started" {
+			continue
+		}
+		if !attempt.CreatedAt.IsZero() && !attempt.CreatedAt.Before(createdBefore) {
+			continue
+		}
+		out = append(out, attempt)
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) SetReviewState(_ context.Context, state ReviewState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reviewStates[reviewStateKey(state.RepositoryID, state.PRNumber, state.HeadSHA)] = state
 	return nil
+}
+
+func (s *MemoryStore) ListReconcileReviewStates(_ context.Context, updatedBefore time.Time, limit int) ([]ReconcileReviewState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []ReconcileReviewState
+	for _, state := range s.reviewStates {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		if !state.UpdatedAt.IsZero() && !state.UpdatedAt.Before(updatedBefore) {
+			continue
+		}
+		if state.Status == "abandoned" {
+			continue
+		}
+		repo := s.repositoryByID(state.RepositoryID)
+		out = append(out, ReconcileReviewState{State: state, Repository: repo})
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) GetReviewState(_ context.Context, repoID int64, prNumber int, headSHA string) (ReviewState, error) {
@@ -312,6 +408,48 @@ func (s *MemoryStore) RecordCommand(_ context.Context, c CommandRecord) (bool, e
 	return true, nil
 }
 
+func (s *MemoryStore) ListReconcileCommands(_ context.Context, createdBefore time.Time, limit int) ([]ReconcileCommand, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []ReconcileCommand
+	for _, command := range s.commandRecords {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		if command.Status != "acknowledged" && command.Status != "retry_needed" {
+			continue
+		}
+		if !command.CreatedAt.IsZero() && !command.CreatedAt.Before(createdBefore) {
+			continue
+		}
+		repo := s.repositoryByID(command.RepositoryID)
+		key := fmt.Sprintf("repo:%d:comment:%d:command:%s", command.RepositoryID, command.CommentID, command.CommandKey)
+		record, seen := s.idempotencyKeys[key]
+		out = append(out, ReconcileCommand{
+			Command:         command,
+			Repository:      repo,
+			IdempotencyKey:  key,
+			Idempotency:     record,
+			IdempotencySeen: seen,
+		})
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpdateCommandStatus(_ context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := commandKeyFunc(repoID, commentID, commandKey)
+	command, ok := s.commandRecords[key]
+	if !ok {
+		return ErrNotFound
+	}
+	command.Status = status
+	command.Metadata = metadataOrEmpty(metadata)
+	s.commandRecords[key] = command
+	return nil
+}
+
 func (s *MemoryStore) AcquireReviewLock(_ context.Context, lock ReviewLock) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -332,5 +470,38 @@ func reviewStateKey(repoID int64, prNumber int, headSHA string) string {
 }
 
 func commandKey(repoID, commentID int64, key string) string {
+	return commandKeyFunc(repoID, commentID, key)
+}
+
+func commandKeyFunc(repoID, commentID int64, key string) string {
 	return fmt.Sprintf("%d/%d/%s", repoID, commentID, key)
+}
+
+func reconcileJobStatus(status string) bool {
+	switch status {
+	case "dispatching", "dispatched", "queued", "in_progress", "started":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *MemoryStore) repositoryByID(id int64) Repository {
+	for _, repo := range s.repositories {
+		if repo.ID == id {
+			return repo
+		}
+	}
+	return Repository{}
+}
+
+func (s *MemoryStore) jobResultCount(jobID string) int {
+	count := 0
+	prefix := jobID + "\x00"
+	for key := range s.jobResults {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			count++
+		}
+	}
+	return count
 }

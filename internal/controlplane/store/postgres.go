@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/lib/pq"
@@ -252,6 +253,56 @@ func (s *PostgresStore) RecordJobResult(ctx context.Context, r JobResult) (bool,
 	return createdFromResult(result, err)
 }
 
+func (s *PostgresStore) ListReconcileJobs(ctx context.Context, updatedBefore time.Time, limit int) ([]ReconcileJob, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT j.id, j.job_id, j.repository_id, j.installation_id, j.pr_number, j.head_sha, j.base_sha, j.status, j.worker_branch, j.metadata, j.created_at, j.updated_at,
+		       r.id, r.github_id, r.installation_id, r.owner, r.name, r.default_branch, r.private, r.registered_at, r.updated_at, r.metadata,
+		       COUNT(jr.id)
+		FROM jobs j
+		JOIN repositories r ON r.id = j.repository_id
+		LEFT JOIN job_results jr ON jr.job_id = j.job_id
+		WHERE j.status IN ('dispatching', 'dispatched', 'queued', 'in_progress', 'started')
+		  AND j.updated_at < $1
+		GROUP BY j.id, r.id
+		ORDER BY j.updated_at ASC
+		LIMIT $2`, updatedBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ReconcileJob
+	for rows.Next() {
+		var item ReconcileJob
+		var jobMetadata, repoMetadata []byte
+		if err := rows.Scan(
+			&item.Job.ID, &item.Job.JobID, &item.Job.RepositoryID, &item.Job.InstallationID, &item.Job.PRNumber, &item.Job.HeadSHA, &item.Job.BaseSHA, &item.Job.Status, &item.Job.WorkerBranch, &jobMetadata, &item.Job.CreatedAt, &item.Job.UpdatedAt,
+			&item.Repository.ID, &item.Repository.GitHubID, &item.Repository.InstallationID, &item.Repository.Owner, &item.Repository.Name, &item.Repository.DefaultBranch, &item.Repository.Private, &item.Repository.RegisteredAt, &item.Repository.UpdatedAt, &repoMetadata,
+			&item.ResultCount,
+		); err != nil {
+			return nil, err
+		}
+		item.Job.Metadata = json.RawMessage(jobMetadata)
+		item.Repository.Metadata = json.RawMessage(repoMetadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) UpdateJobStatus(ctx context.Context, jobID string, status string, metadata json.RawMessage, updatedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = $2, metadata = $3, updated_at = $4
+		WHERE job_id = $1`, jobID, status, metadataOrEmpty(metadata), timeOrNow(updatedAt))
+	if err != nil {
+		return err
+	}
+	return requireAffected(result)
+}
+
 func (s *PostgresStore) AcquireIdempotencyKey(ctx context.Context, key IdempotencyKey) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO idempotency_keys (key, scope, status, result_ref, expires_at, metadata, created_at, completed_at)
@@ -290,6 +341,33 @@ func (s *PostgresStore) CompleteIdempotencyKey(ctx context.Context, key string, 
 	return requireAffected(result)
 }
 
+func (s *PostgresStore) ListStartedIdempotencyKeys(ctx context.Context, scope string, createdBefore time.Time, limit int) ([]IdempotencyKey, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT key, scope, status, result_ref, expires_at, metadata, created_at, completed_at
+		FROM idempotency_keys
+		WHERE scope = $1 AND status = 'started' AND created_at < $2
+		ORDER BY created_at ASC
+		LIMIT $3`, scope, createdBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []IdempotencyKey
+	for rows.Next() {
+		var record IdempotencyKey
+		var metadata []byte
+		if err := rows.Scan(&record.Key, &record.Scope, &record.Status, &record.ResultRef, &record.ExpiresAt, &metadata, &record.CreatedAt, &record.CompletedAt); err != nil {
+			return nil, err
+		}
+		record.Metadata = json.RawMessage(metadata)
+		out = append(out, record)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresStore) RecordGitHubMutationAttempt(ctx context.Context, a GitHubMutationAttempt) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO github_mutation_attempts (idempotency_key, repository_id, mutation_type, status, request, response, error, created_at, completed_at)
@@ -309,6 +387,34 @@ func (s *PostgresStore) CompleteGitHubMutationAttempt(ctx context.Context, idemp
 		return err
 	}
 	return requireAffected(result)
+}
+
+func (s *PostgresStore) ListStartedGitHubMutationAttempts(ctx context.Context, createdBefore time.Time, limit int) ([]GitHubMutationAttempt, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, idempotency_key, COALESCE(repository_id, 0), mutation_type, status, request, response, error, created_at, completed_at
+		FROM github_mutation_attempts
+		WHERE status = 'started' AND created_at < $1
+		ORDER BY created_at ASC
+		LIMIT $2`, createdBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []GitHubMutationAttempt
+	for rows.Next() {
+		var attempt GitHubMutationAttempt
+		var request, response []byte
+		if err := rows.Scan(&attempt.ID, &attempt.IdempotencyKey, &attempt.RepositoryID, &attempt.MutationType, &attempt.Status, &request, &response, &attempt.Error, &attempt.CreatedAt, &attempt.CompletedAt); err != nil {
+			return nil, err
+		}
+		attempt.Request = json.RawMessage(request)
+		attempt.Response = json.RawMessage(response)
+		out = append(out, attempt)
+	}
+	return out, rows.Err()
 }
 
 func (s *PostgresStore) SetReviewState(ctx context.Context, state ReviewState) error {
@@ -342,6 +448,39 @@ func (s *PostgresStore) GetReviewState(ctx context.Context, repoID int64, prNumb
 	return state, nil
 }
 
+func (s *PostgresStore) ListReconcileReviewStates(ctx context.Context, updatedBefore time.Time, limit int) ([]ReconcileReviewState, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT rs.id, rs.repository_id, rs.pr_number, rs.head_sha, rs.status, rs.last_job_id, rs.metadata, rs.updated_at,
+		       r.id, r.github_id, r.installation_id, r.owner, r.name, r.default_branch, r.private, r.registered_at, r.updated_at, r.metadata
+		FROM review_states rs
+		JOIN repositories r ON r.id = rs.repository_id
+		WHERE rs.status <> 'abandoned' AND rs.updated_at < $1
+		ORDER BY rs.updated_at ASC
+		LIMIT $2`, updatedBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ReconcileReviewState
+	for rows.Next() {
+		var item ReconcileReviewState
+		var stateMetadata, repoMetadata []byte
+		if err := rows.Scan(
+			&item.State.ID, &item.State.RepositoryID, &item.State.PRNumber, &item.State.HeadSHA, &item.State.Status, &item.State.LastJobID, &stateMetadata, &item.State.UpdatedAt,
+			&item.Repository.ID, &item.Repository.GitHubID, &item.Repository.InstallationID, &item.Repository.Owner, &item.Repository.Name, &item.Repository.DefaultBranch, &item.Repository.Private, &item.Repository.RegisteredAt, &item.Repository.UpdatedAt, &repoMetadata,
+		); err != nil {
+			return nil, err
+		}
+		item.State.Metadata = json.RawMessage(stateMetadata)
+		item.Repository.Metadata = json.RawMessage(repoMetadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 // RecordCommand records a command once per repository, comment, and command key.
 func (s *PostgresStore) RecordCommand(ctx context.Context, c CommandRecord) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `
@@ -350,6 +489,77 @@ func (s *PostgresStore) RecordCommand(ctx context.Context, c CommandRecord) (boo
 		ON CONFLICT (repository_id, comment_id, command_key) DO NOTHING`,
 		c.RepositoryID, c.CommentID, c.CommandKey, c.CommandName, c.Actor, c.Status, metadataOrEmpty(c.Metadata), timeOrNow(c.CreatedAt))
 	return createdFromResult(result, err)
+}
+
+func (s *PostgresStore) ListReconcileCommands(ctx context.Context, createdBefore time.Time, limit int) ([]ReconcileCommand, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id, c.repository_id, c.comment_id, c.command_key, c.command_name, c.actor, c.status, c.metadata, c.created_at,
+		       r.id, r.github_id, r.installation_id, r.owner, r.name, r.default_branch, r.private, r.registered_at, r.updated_at, r.metadata,
+		       ik.key, ik.scope, ik.status, ik.result_ref, ik.expires_at, ik.metadata, ik.created_at, ik.completed_at
+		FROM command_records c
+		JOIN repositories r ON r.id = c.repository_id
+		LEFT JOIN idempotency_keys ik ON ik.key = ('repo:' || c.repository_id || ':comment:' || c.comment_id || ':command:' || c.command_key)
+		WHERE c.status IN ('acknowledged', 'retry_needed') AND c.created_at < $1
+		ORDER BY c.created_at ASC
+		LIMIT $2`, createdBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ReconcileCommand
+	for rows.Next() {
+		var item ReconcileCommand
+		var commandMetadata, repoMetadata []byte
+		var key, scope, keyStatus, resultRef sql.NullString
+		var expiresAt, keyCreatedAt, completedAt sql.NullTime
+		var keyMetadata []byte
+		if err := rows.Scan(
+			&item.Command.ID, &item.Command.RepositoryID, &item.Command.CommentID, &item.Command.CommandKey, &item.Command.CommandName, &item.Command.Actor, &item.Command.Status, &commandMetadata, &item.Command.CreatedAt,
+			&item.Repository.ID, &item.Repository.GitHubID, &item.Repository.InstallationID, &item.Repository.Owner, &item.Repository.Name, &item.Repository.DefaultBranch, &item.Repository.Private, &item.Repository.RegisteredAt, &item.Repository.UpdatedAt, &repoMetadata,
+			&key, &scope, &keyStatus, &resultRef, &expiresAt, &keyMetadata, &keyCreatedAt, &completedAt,
+		); err != nil {
+			return nil, err
+		}
+		item.Command.Metadata = json.RawMessage(commandMetadata)
+		item.Repository.Metadata = json.RawMessage(repoMetadata)
+		item.IdempotencyKey = commandIdempotencyKey(item.Command.RepositoryID, item.Command.CommentID, item.Command.CommandKey)
+		if key.Valid {
+			item.IdempotencySeen = true
+			item.Idempotency = IdempotencyKey{
+				Key:       key.String,
+				Scope:     scope.String,
+				Status:    keyStatus.String,
+				ResultRef: resultRef.String,
+				Metadata:  json.RawMessage(keyMetadata),
+			}
+			if expiresAt.Valid {
+				item.Idempotency.ExpiresAt = &expiresAt.Time
+			}
+			if keyCreatedAt.Valid {
+				item.Idempotency.CreatedAt = keyCreatedAt.Time
+			}
+			if completedAt.Valid {
+				item.Idempotency.CompletedAt = &completedAt.Time
+			}
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE command_records
+		SET status = $4, metadata = $5
+		WHERE repository_id = $1 AND comment_id = $2 AND command_key = $3`,
+		repoID, commentID, commandKey, status, metadataOrEmpty(metadata))
+	if err != nil {
+		return err
+	}
+	return requireAffected(result)
 }
 
 // AcquireReviewLock creates an active lock for a repository, PR, and head SHA.
@@ -396,4 +606,8 @@ func defaultString(v string, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func commandIdempotencyKey(repoID int64, commentID int64, commandKey string) string {
+	return "repo:" + strconv.FormatInt(repoID, 10) + ":comment:" + strconv.FormatInt(commentID, 10) + ":command:" + commandKey
 }
