@@ -98,11 +98,11 @@ if [ "$1" = "rev-parse" ]; then
     head*) echo head; exit 0 ;;
   esac
 fi
-if [ "$1" = "diff" ] && [ "$2" = "--name-status" ]; then
+if [ "$1" = "diff" ] && [ "$2" = "--name-status" ] && [ "$3" = "-M" ]; then
   printf 'M\tbroken.go\n'
   exit 0
 fi
-if [ "$1" = "diff" ] && [ "$2" = "--numstat" ]; then
+if [ "$1" = "diff" ] && [ "$2" = "--numstat" ] && [ "$3" = "-M" ]; then
   printf '1\t1\tbroken.go\n'
   exit 0
 fi
@@ -132,7 +132,7 @@ if [ "$1" = "rev-parse" ]; then
   echo "$2"
   exit 0
 fi
-if [ "$1" = "diff" ] && [ "$2" = "--name-status" ]; then
+if [ "$1" = "diff" ] && [ "$2" = "--name-status" ] && [ "$3" = "-M" ]; then
   echo name status failed >&2
   exit 1
 fi
@@ -153,7 +153,6 @@ func initLocalCollectorRepo(t *testing.T) (string, *git.Git) {
 	runLocalGit(t, dir, "init", "-b", "main")
 	runLocalGit(t, dir, "config", "user.email", "test@test.com")
 	runLocalGit(t, dir, "config", "user.name", "Test")
-	runLocalGit(t, dir, "config", "diff.renames", "true")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "modified.txt"), []byte("old\n"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "deleted.txt"), []byte("delete me\n"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "rename_old.txt"), []byte("rename me\n"), 0644))

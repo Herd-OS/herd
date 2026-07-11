@@ -88,7 +88,7 @@ func (g *Git) Diff(base, head string) (string, error) {
 }
 
 func (g *Git) DiffNameStatus(base, head string) ([]NameStatusEntry, error) {
-	out, err := g.output("diff", "--name-status", base+"..."+head)
+	out, err := g.output("diff", "--name-status", "-M", base+"..."+head)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func (g *Git) DiffPath(base, head, path string) (string, error) {
 }
 
 func (g *Git) DiffNumStat(base, head string) (map[string][2]int, error) {
-	out, err := g.output("diff", "--numstat", base+"..."+head)
+	out, err := g.output("diff", "--numstat", "-M", base+"..."+head)
 	if err != nil {
 		return nil, err
 	}
