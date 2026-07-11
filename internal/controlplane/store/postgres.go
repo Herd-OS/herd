@@ -290,6 +290,27 @@ func (s *PostgresStore) CompleteIdempotencyKey(ctx context.Context, key string, 
 	return requireAffected(result)
 }
 
+func (s *PostgresStore) RecordGitHubMutationAttempt(ctx context.Context, a GitHubMutationAttempt) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO github_mutation_attempts (idempotency_key, repository_id, mutation_type, status, request, response, error, created_at, completed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (idempotency_key) DO NOTHING`,
+		a.IdempotencyKey, nullableInt64(a.RepositoryID), a.MutationType, defaultString(a.Status, "started"), metadataOrEmpty(a.Request), metadataOrEmpty(a.Response), a.Error, timeOrNow(a.CreatedAt), a.CompletedAt)
+	return err
+}
+
+func (s *PostgresStore) CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE github_mutation_attempts
+		SET status = $2, response = $3, error = $4, completed_at = $5
+		WHERE idempotency_key = $1`,
+		idempotencyKey, status, metadataOrEmpty(response), errorMessage, timeOrNow(completedAt))
+	if err != nil {
+		return err
+	}
+	return requireAffected(result)
+}
+
 func (s *PostgresStore) SetReviewState(ctx context.Context, state ReviewState) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO review_states (repository_id, pr_number, head_sha, status, last_job_id, metadata, updated_at)
@@ -366,6 +387,13 @@ func requireAffected(result sql.Result) error {
 func nullableInt64(v int64) any {
 	if v == 0 {
 		return nil
+	}
+	return v
+}
+
+func defaultString(v string, fallback string) string {
+	if v == "" {
+		return fallback
 	}
 	return v
 }

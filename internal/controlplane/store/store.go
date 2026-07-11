@@ -142,6 +142,20 @@ type IdempotencyKey struct {
 	CompletedAt *time.Time
 }
 
+// GitHubMutationAttempt stores an outbound GitHub API mutation attempt.
+type GitHubMutationAttempt struct {
+	ID             int64
+	IdempotencyKey string
+	RepositoryID   int64
+	MutationType   string
+	Status         string
+	Request        json.RawMessage
+	Response       json.RawMessage
+	Error          string
+	CreatedAt      time.Time
+	CompletedAt    *time.Time
+}
+
 // ReviewState stores the latest review state for a repo, PR, and head SHA.
 type ReviewState struct {
 	ID           int64

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ type MemoryStore struct {
 	jobs              map[string]Job
 	jobResults        map[string]JobResult
 	idempotencyKeys   map[string]IdempotencyKey
+	mutationAttempts  map[string]GitHubMutationAttempt
 	reviewStates      map[string]ReviewState
 	commandRecords    map[string]CommandRecord
 	reviewLocks       map[string]ReviewLock
@@ -40,6 +42,7 @@ func NewMemoryStore() *MemoryStore {
 		jobs:              map[string]Job{},
 		jobResults:        map[string]JobResult{},
 		idempotencyKeys:   map[string]IdempotencyKey{},
+		mutationAttempts:  map[string]GitHubMutationAttempt{},
 		reviewStates:      map[string]ReviewState{},
 		commandRecords:    map[string]CommandRecord{},
 		reviewLocks:       map[string]ReviewLock{},
@@ -244,6 +247,40 @@ func (s *MemoryStore) CompleteIdempotencyKey(_ context.Context, key string, resu
 	record.ResultRef = resultRef
 	record.CompletedAt = &now
 	s.idempotencyKeys[key] = record
+	return nil
+}
+
+func (s *MemoryStore) RecordGitHubMutationAttempt(_ context.Context, a GitHubMutationAttempt) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.mutationAttempts[a.IdempotencyKey]; ok {
+		return nil
+	}
+	if a.Status == "" {
+		a.Status = "started"
+	}
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = time.Now().UTC()
+	}
+	s.mutationAttempts[a.IdempotencyKey] = a
+	return nil
+}
+
+func (s *MemoryStore) CompleteGitHubMutationAttempt(_ context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attempt, ok := s.mutationAttempts[idempotencyKey]
+	if !ok {
+		return ErrNotFound
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	attempt.Status = status
+	attempt.Response = metadataOrEmpty(response)
+	attempt.Error = errorMessage
+	attempt.CompletedAt = &completedAt
+	s.mutationAttempts[idempotencyKey] = attempt
 	return nil
 }
 

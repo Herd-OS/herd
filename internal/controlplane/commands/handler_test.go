@@ -29,7 +29,8 @@ func TestHandlerAuthorization(t *testing.T) {
 		t.Run(tt.association, func(t *testing.T) {
 			st := newFakeStore()
 			gh := &fakeGitHub{}
-			h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh}
+			dispatcher := &fakeDispatcher{}
+			h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
 
 			result, err := h.HandleIssueComment(context.Background(), validComment(tt.association, "@herd-os review"))
 
@@ -39,6 +40,7 @@ func TestHandlerAuthorization(t *testing.T) {
 				assert.Len(t, gh.comments, 1)
 				assert.Len(t, st.commandRecords, 1)
 				assert.Len(t, st.idempotencyKeys, 1)
+				assert.Len(t, dispatcher.dispatched, 1)
 				return
 			}
 			assert.Equal(t, StatusIgnored, result.Status)
@@ -128,13 +130,17 @@ func TestHandlerIdempotencyDuplicateCommentAndCommand(t *testing.T) {
 	assert.Len(t, gh.comments, 1)
 	assert.Len(t, st.commandRecords, 1)
 	assert.Len(t, st.idempotencyKeys, 1)
-	assert.Empty(t, dispatcher.dispatched)
+	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Equal(t, int64(42), dispatcher.dispatched[0].RepositoryID)
+	assert.Equal(t, int64(77), dispatcher.dispatched[0].InstallationID)
+	assert.Equal(t, 7, dispatcher.dispatched[0].PRNumber)
 }
 
 func TestHandlerEditedCommentIdempotent(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeGitHub{}
-	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
 	event := validComment("OWNER", "@herd-os review")
 
 	_, err := h.HandleIssueComment(context.Background(), event)
@@ -145,6 +151,50 @@ func TestHandlerEditedCommentIdempotent(t *testing.T) {
 
 	assert.Len(t, gh.comments, 1)
 	assert.Len(t, st.commandRecords, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+}
+
+func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
+	tests := []struct {
+		body string
+		kind CommandKind
+	}{
+		{body: "@herd-os review", kind: CommandReview},
+		{body: "@herd-os fix", kind: CommandFix},
+		{body: "@herd-os fix-ci", kind: CommandFixCI},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.kind), func(t *testing.T) {
+			st := newFakeStore()
+			gh := &fakeGitHub{}
+			dispatcher := &fakeDispatcher{}
+			h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+
+			result, err := h.HandleIssueComment(context.Background(), validComment("OWNER", tt.body))
+
+			require.NoError(t, err)
+			assert.Equal(t, StatusAcknowledged, result.Status)
+			require.Len(t, gh.comments, 1)
+			require.Len(t, dispatcher.dispatched, 1)
+			assert.Equal(t, tt.kind, dispatcher.dispatched[0].Command.Kind)
+		})
+	}
+}
+
+func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{err: errors.New("dispatch down")}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+
+	_, err := h.HandleIssueComment(context.Background(), validComment("OWNER", "@herd-os review"))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dispatch command")
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, st.commandRecords, 1)
+	assert.Len(t, st.idempotencyKeys, 1)
 }
 
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {
@@ -254,9 +304,10 @@ type fakeStore struct {
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		repo: store.Repository{
-			ID:    42,
-			Owner: "octo-org",
-			Name:  "herd",
+			ID:             42,
+			InstallationID: 77,
+			Owner:          "octo-org",
+			Name:           "herd",
 		},
 		idempotencyKeys: map[string]store.IdempotencyKey{},
 	}
@@ -334,9 +385,13 @@ func (g *fakeGitHub) AddIssueComment(_ context.Context, owner, repo string, issu
 
 type fakeDispatcher struct {
 	dispatched []DispatchCommand
+	err        error
 }
 
 func (d *fakeDispatcher) DispatchCommand(_ context.Context, cmd DispatchCommand) error {
+	if d.err != nil {
+		return d.err
+	}
 	d.dispatched = append(d.dispatched, cmd)
 	return nil
 }

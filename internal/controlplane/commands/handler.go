@@ -31,13 +31,15 @@ type CommandDispatcher interface {
 }
 
 type DispatchCommand struct {
-	RepositoryID int64
-	Owner        string
-	Repo         string
-	IssueNumber  int
-	CommentID    int64
-	Actor        string
-	Command      ParsedCommand
+	RepositoryID   int64
+	InstallationID int64
+	Owner          string
+	Repo           string
+	IssueNumber    int
+	PRNumber       int
+	CommentID      int64
+	Actor          string
+	Command        ParsedCommand
 }
 
 type Handler struct {
@@ -83,7 +85,7 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		if h.GitHub == nil {
 			return Result{}, fmt.Errorf("command GitHub client is not configured")
 		}
-		if err := h.recordAndAck(ctx, event, "migration", migrationResponse(h.AppLogin), store.CommandRecord{
+		if _, _, err := h.recordAndAck(ctx, event, "migration", migrationResponse(h.AppLogin), store.CommandRecord{
 			CommandName: "migration",
 			Status:      StatusAcknowledged,
 		}); err != nil {
@@ -125,16 +127,35 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		Status:      StatusAcknowledged,
 		Metadata:    metadata,
 	}
-	if err := h.recordAndAck(ctx, event, string(cmd.Kind), acknowledgement(cmd), record); err != nil {
+	repo, dispatched, err := h.recordAndAck(ctx, event, string(cmd.Kind), acknowledgement(cmd), record)
+	if err != nil {
 		return Result{}, err
+	}
+	if dispatched && shouldDispatch(cmd.Kind) {
+		if h.Dispatcher == nil {
+			return Result{}, fmt.Errorf("command dispatcher is not configured")
+		}
+		if err := h.Dispatcher.DispatchCommand(ctx, DispatchCommand{
+			RepositoryID:   repo.ID,
+			InstallationID: repo.InstallationID,
+			Owner:          event.Owner,
+			Repo:           event.Repo,
+			IssueNumber:    event.IssueNumber,
+			PRNumber:       event.IssueNumber,
+			CommentID:      event.CommentID,
+			Actor:          event.SenderLogin,
+			Command:        cmd,
+		}); err != nil {
+			return Result{}, fmt.Errorf("dispatch command: %w", err)
+		}
 	}
 	return Result{Status: StatusAcknowledged, Command: cmd}, nil
 }
 
-func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKey, ackBody string, record store.CommandRecord) error {
+func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKey, ackBody string, record store.CommandRecord) (store.Repository, bool, error) {
 	repo, err := h.Store.GetRepository(ctx, event.Owner, event.Repo)
 	if err != nil {
-		return fmt.Errorf("get repository: %w", err)
+		return store.Repository{}, false, fmt.Errorf("get repository: %w", err)
 	}
 
 	idempotencyKey := fmt.Sprintf("repo:%d:comment:%d:command:%s", repo.ID, event.CommentID, commandKey)
@@ -145,15 +166,15 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 		CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
-		return fmt.Errorf("acquire command idempotency key: %w", err)
+		return store.Repository{}, false, fmt.Errorf("acquire command idempotency key: %w", err)
 	}
 	if !created {
-		return nil
+		return repo, false, nil
 	}
 
 	ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)
 	if err != nil {
-		return fmt.Errorf("add acknowledgement comment: %w", err)
+		return store.Repository{}, false, fmt.Errorf("add acknowledgement comment: %w", err)
 	}
 
 	record.RepositoryID = repo.ID
@@ -169,12 +190,12 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 		record.Metadata = json.RawMessage(`{}`)
 	}
 	if _, err := h.Store.RecordCommand(ctx, record); err != nil {
-		return fmt.Errorf("record command: %w", err)
+		return store.Repository{}, false, fmt.Errorf("record command: %w", err)
 	}
 	if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, fmt.Sprintf("issue_comment:%d", ackID)); err != nil {
-		return fmt.Errorf("complete command idempotency key: %w", err)
+		return store.Repository{}, false, fmt.Errorf("complete command idempotency key: %w", err)
 	}
-	return nil
+	return repo, true, nil
 }
 
 func isAuthorized(association string) bool {
@@ -203,6 +224,15 @@ func isLegacyHerdCommand(body string) bool {
 
 func acknowledgement(cmd ParsedCommand) string {
 	return fmt.Sprintf("Acknowledged `@herd-os %s`.", cmd.Kind)
+}
+
+func shouldDispatch(kind CommandKind) bool {
+	switch kind {
+	case CommandReview, CommandFix, CommandFixCI:
+		return true
+	default:
+		return false
+	}
 }
 
 func migrationResponse(appLogin string) string {
