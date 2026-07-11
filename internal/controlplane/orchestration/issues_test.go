@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -78,4 +79,39 @@ func TestEnsureTaskIssue_RejectsMissingMilestone(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "milestone")
+}
+
+func TestEnsureReviewFixIssueAndDispatchAreIdempotentByFingerprint(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	dispatcher := &fakeDispatcher{}
+	svc := newTestService(fake, st, dispatcher)
+	repo := review.Repository{ID: 123, InstallationID: 456, Owner: "owner", Name: "repo", DefaultBranch: "main"}
+	result := review.ReviewCompletedResult{
+		BatchNumber: 9,
+		PRNumber:    42,
+		BatchBranch: "herd/batch/9-demo",
+		HeadSHA:     "head",
+		FixCycle:    1,
+	}
+	finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
+
+	firstIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+	require.NoError(t, err)
+	assert.True(t, created)
+	firstDispatch, err := svc.DispatchReviewFixWorker(ctx, repo, result, firstIssue)
+	require.NoError(t, err)
+	secondIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+	require.NoError(t, err)
+	assert.False(t, created)
+	secondDispatch, err := svc.DispatchReviewFixWorker(ctx, repo, result, secondIssue)
+	require.NoError(t, err)
+
+	assert.Equal(t, firstIssue, secondIssue)
+	assert.True(t, firstDispatch)
+	assert.False(t, secondDispatch)
+	assert.Len(t, fake.issues.created, 1)
+	assert.Len(t, dispatcher.requests, 1)
+	assert.Equal(t, "head", dispatcher.requests[0].ExpectedHeadSHA)
 }

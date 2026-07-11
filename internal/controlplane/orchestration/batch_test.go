@@ -206,14 +206,24 @@ func (s *fakeStore) RecordJobResult(_ context.Context, r store.JobResult) (bool,
 type fakeDispatcher struct {
 	requests []cpdispatch.DispatchRequest
 	err      error
+	seen     map[string]string
 }
 
 func (d *fakeDispatcher) Dispatch(_ context.Context, req cpdispatch.DispatchRequest) (cpdispatch.DispatchResult, error) {
+	if d.seen == nil {
+		d.seen = map[string]string{}
+	}
+	key := cpdispatch.IdempotencyKey(req)
+	if jobID, ok := d.seen[key]; ok {
+		return cpdispatch.DispatchResult{JobID: jobID, Created: false}, nil
+	}
 	d.requests = append(d.requests, req)
 	if d.err != nil {
 		return cpdispatch.DispatchResult{}, d.err
 	}
-	return cpdispatch.DispatchResult{JobID: fmt.Sprintf("job-%d", len(d.requests)), Created: true}, nil
+	jobID := fmt.Sprintf("job-%d", len(d.requests))
+	d.seen[key] = jobID
+	return cpdispatch.DispatchResult{JobID: jobID, Created: true}, nil
 }
 
 type fakePlatform struct {

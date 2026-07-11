@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
 )
 
@@ -22,10 +25,40 @@ type ReviewCompletedResult struct {
 	JobID       string
 	BatchNumber int
 	PRNumber    int
+	BatchBranch string
 	HeadSHA     string
 	Status      string
 	Summary     string
 	TargetURL   string
+	FixCycle    int
+	Findings    []Finding
+}
+
+type Finding struct {
+	Fingerprint string
+	Severity    string
+	Description string
+}
+
+type DispatchReviewRequest struct {
+	BatchNumber     int
+	PRNumber        int
+	BatchBranch     string
+	HeadSHA         string
+	WorkflowFile    string
+	Ref             string
+	RunnerLabel     string
+	TimeoutMinutes  int
+	ControlPlaneURL string
+	Reason          string
+	LockTTL         time.Duration
+}
+
+type ReviewDispatchResult struct {
+	Locked     bool
+	Dispatched bool
+	JobID      string
+	TargetURL  string
 }
 
 type PullRequestClient interface {
@@ -34,13 +67,104 @@ type PullRequestClient interface {
 	AddPullRequestComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) error
 }
 
+type LockStore interface {
+	AcquireReviewLock(ctx context.Context, lock store.ReviewLock) (created bool, err error)
+	ReleaseReviewLock(ctx context.Context, repoID int64, prNumber int, headSHA string, holder string, releasedAt time.Time) error
+}
+
+type Dispatcher interface {
+	Dispatch(ctx context.Context, req cpdispatch.DispatchRequest) (cpdispatch.DispatchResult, error)
+}
+
+type FixCoordinator interface {
+	EnsureReviewFixIssue(ctx context.Context, repo Repository, result ReviewCompletedResult, finding Finding) (int, bool, error)
+	DispatchReviewFixWorker(ctx context.Context, repo Repository, result ReviewCompletedResult, issueNumber int) (bool, error)
+}
+
 type ReviewService struct {
-	Status StatusService
-	GitHub PullRequestClient
+	Status     StatusService
+	GitHub     PullRequestClient
+	Locks      LockStore
+	Dispatcher Dispatcher
+	Fixes      FixCoordinator
+	Now        func() time.Time
 }
 
 func (s ReviewService) MarkReviewPending(ctx context.Context, repo Repository, prNumber int, headSHA string, description, targetURL string) error {
 	return s.Status.SetHerdReviewStatus(ctx, repo, prNumber, headSHA, ReviewStatusPending, description, targetURL)
+}
+
+func (s ReviewService) DispatchReview(ctx context.Context, repo Repository, req DispatchReviewRequest) (ReviewDispatchResult, error) {
+	if !repo.ReviewEnabled {
+		return ReviewDispatchResult{}, nil
+	}
+	if s.Locks == nil {
+		return ReviewDispatchResult{}, fmt.Errorf("review lock store is required")
+	}
+	if s.Dispatcher == nil {
+		return ReviewDispatchResult{}, fmt.Errorf("review dispatcher is required")
+	}
+	if err := validateReviewDispatch(repo, req); err != nil {
+		return ReviewDispatchResult{}, err
+	}
+	now := s.now()
+	ttl := req.LockTTL
+	if ttl <= 0 {
+		ttl = 2 * time.Hour
+	}
+	holder := reviewLockHolder(repo.ID, req.PRNumber, req.HeadSHA)
+	locked, err := s.Locks.AcquireReviewLock(ctx, store.ReviewLock{
+		RepositoryID: repo.ID,
+		PRNumber:     req.PRNumber,
+		HeadSHA:      req.HeadSHA,
+		Holder:       holder,
+		ExpiresAt:    now.Add(ttl),
+		AcquiredAt:   now,
+	})
+	if err != nil {
+		return ReviewDispatchResult{}, fmt.Errorf("acquire review lock: %w", err)
+	}
+	if !locked {
+		return ReviewDispatchResult{Locked: false}, nil
+	}
+	if err := s.MarkReviewPending(ctx, repo, req.PRNumber, req.HeadSHA, "Herd Review is running on a self-hosted worker", ""); err != nil {
+		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
+		return ReviewDispatchResult{}, err
+	}
+	workflowFile := strings.TrimSpace(req.WorkflowFile)
+	if workflowFile == "" {
+		workflowFile = "herd-review.yml"
+	}
+	ref := strings.TrimSpace(req.Ref)
+	if ref == "" {
+		ref = firstNonEmpty(repo.DefaultBranch, "main")
+	}
+	dispatched, err := s.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
+		RepoID:          repo.ID,
+		Owner:           repo.Owner,
+		Repo:            repo.Name,
+		InstallationID:  repo.InstallationID,
+		Kind:            cpdispatch.JobKindReview,
+		WorkflowFile:    workflowFile,
+		Ref:             ref,
+		BatchNumber:     req.BatchNumber,
+		PRNumber:        req.PRNumber,
+		BatchBranch:     req.BatchBranch,
+		HeadSHA:         req.HeadSHA,
+		ExpectedHeadSHA: req.HeadSHA,
+		RunnerLabel:     req.RunnerLabel,
+		TimeoutMinutes:  req.TimeoutMinutes,
+		ControlPlaneURL: req.ControlPlaneURL,
+		Reason:          req.Reason,
+	})
+	if err != nil {
+		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
+		return ReviewDispatchResult{}, fmt.Errorf("dispatch review workflow: %w", err)
+	}
+	if !dispatched.Created {
+		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
+	}
+	return ReviewDispatchResult{Locked: true, Dispatched: dispatched.Created, JobID: dispatched.JobID, TargetURL: dispatched.URL}, nil
 }
 
 func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, result ReviewCompletedResult) error {
@@ -60,6 +184,11 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 	if current.HeadSHA != "" && current.HeadSHA != result.HeadSHA {
 		return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, current.HeadSHA, ReviewStatusPending, "Herd Review pending for the latest PR head", targetURL(result, current.URL))
 	}
+	defer s.releaseReviewLock(ctx, repo, result.PRNumber, result.HeadSHA)
+
+	if result.Status == ResultStatusChangesRequested && repo.ReviewFixEnabled && s.Fixes != nil {
+		return s.handleChangesWithFixes(ctx, repo, result, current)
+	}
 
 	event, state, description := reviewEventAndStatus(result)
 	if event != "" {
@@ -78,6 +207,33 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 	return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, state, description, targetURL(result, current.URL))
 }
 
+func (s ReviewService) handleChangesWithFixes(ctx context.Context, repo Repository, result ReviewCompletedResult, current *platform.PullRequest) error {
+	if repo.ReviewMaxFixCycles > 0 && result.FixCycle >= repo.ReviewMaxFixCycles {
+		return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review reached the maximum fix cycles", targetURL(result, current.URL))
+	}
+	findings := actionableFindings(result.Findings, repo.ReviewFixSeverity)
+	if len(findings) == 0 {
+		return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review requested changes but returned no actionable fix findings", targetURL(result, current.URL))
+	}
+	for _, finding := range findings {
+		issueNumber, _, err := s.Fixes.EnsureReviewFixIssue(ctx, repo, result, finding)
+		if err != nil {
+			return fmt.Errorf("ensure review fix issue: %w", err)
+		}
+		if _, err := s.Fixes.DispatchReviewFixWorker(ctx, repo, result, issueNumber); err != nil {
+			return fmt.Errorf("dispatch review fix worker: %w", err)
+		}
+	}
+	return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusPending, "Herd Review requested changes; fix workers are running", targetURL(result, current.URL))
+}
+
+func (s ReviewService) releaseReviewLock(ctx context.Context, repo Repository, prNumber int, headSHA string) {
+	if s.Locks == nil {
+		return
+	}
+	_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, prNumber, headSHA, reviewLockHolder(repo.ID, prNumber, headSHA), s.now())
+}
+
 func validateReviewResult(result ReviewCompletedResult) error {
 	if result.PRNumber <= 0 {
 		return fmt.Errorf("PR number is required")
@@ -94,6 +250,16 @@ func validateReviewResult(result ReviewCompletedResult) error {
 	default:
 		return fmt.Errorf("unsupported review result status %q", result.Status)
 	}
+}
+
+func validateReviewDispatch(repo Repository, req DispatchReviewRequest) error {
+	if err := validateStatusInput(repo, req.PRNumber, req.HeadSHA, ReviewStatusPending); err != nil {
+		return err
+	}
+	if req.BatchNumber <= 0 {
+		return fmt.Errorf("batch number is required")
+	}
+	return nil
 }
 
 func reviewEventAndStatus(result ReviewCompletedResult) (platform.ReviewEvent, ReviewStatusState, string) {
@@ -130,4 +296,54 @@ func targetURL(result ReviewCompletedResult, prURL string) string {
 		return strings.TrimSpace(result.TargetURL)
 	}
 	return strings.TrimSpace(prURL)
+}
+
+func (s ReviewService) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func reviewLockHolder(repoID int64, prNumber int, headSHA string) string {
+	return fmt.Sprintf("herd-review:%d:%d:%s", repoID, prNumber, headSHA)
+}
+
+func actionableFindings(findings []Finding, minSeverity string) []Finding {
+	min := severityRank(minSeverity)
+	if min == 0 {
+		min = severityRank("medium")
+	}
+	out := make([]Finding, 0, len(findings))
+	for _, finding := range findings {
+		if strings.TrimSpace(finding.Fingerprint) == "" || strings.TrimSpace(finding.Description) == "" {
+			continue
+		}
+		if severityRank(finding.Severity) >= min {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+func severityRank(severity string) int {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "low":
+		return 1
+	case "medium":
+		return 2
+	case "high":
+		return 3
+	default:
+		return 0
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

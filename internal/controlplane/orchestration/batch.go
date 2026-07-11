@@ -286,6 +286,10 @@ func (s Service) withIdempotency(ctx context.Context, key string, mutationType s
 		}
 		return record.ResultRef, nil
 	}
+	return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
+}
+
+func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutationType string, fn func() (string, error)) (string, error) {
 	if err := s.Store.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
 		IdempotencyKey: key,
 		RepositoryID:   s.Repo.ID,

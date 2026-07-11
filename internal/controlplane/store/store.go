@@ -36,6 +36,8 @@ type Store interface {
 	RecordCommand(ctx context.Context, c CommandRecord) (created bool, err error)
 	SetReviewState(ctx context.Context, s ReviewState) error
 	GetReviewState(ctx context.Context, repoID int64, prNumber int, headSHA string) (ReviewState, error)
+	AcquireReviewLock(ctx context.Context, lock ReviewLock) (created bool, err error)
+	ReleaseReviewLock(ctx context.Context, repoID int64, prNumber int, headSHA string, holder string, releasedAt time.Time) error
 }
 
 // Installation mirrors a GitHub App installation in app_installations.

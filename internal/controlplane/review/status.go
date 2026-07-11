@@ -22,11 +22,15 @@ const (
 )
 
 type Repository struct {
-	ID             int64
-	InstallationID int64
-	Owner          string
-	Name           string
-	ReviewEnabled  bool
+	ID                 int64
+	InstallationID     int64
+	Owner              string
+	Name               string
+	DefaultBranch      string
+	ReviewEnabled      bool
+	ReviewFixEnabled   bool
+	ReviewMaxFixCycles int
+	ReviewFixSeverity  string
 }
 
 type StatusStore interface {

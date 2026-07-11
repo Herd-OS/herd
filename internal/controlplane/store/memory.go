@@ -316,11 +316,29 @@ func (s *MemoryStore) AcquireReviewLock(_ context.Context, lock ReviewLock) (boo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := reviewStateKey(lock.RepositoryID, lock.PRNumber, lock.HeadSHA)
-	if _, ok := s.reviewLocks[key]; ok {
-		return false, nil
+	if active, ok := s.reviewLocks[key]; ok {
+		now := timeOrNow(lock.AcquiredAt)
+		if active.ExpiresAt.IsZero() || active.ExpiresAt.After(now) {
+			return false, nil
+		}
 	}
 	s.reviewLocks[key] = lock
 	return true, nil
+}
+
+func (s *MemoryStore) ReleaseReviewLock(_ context.Context, repoID int64, prNumber int, headSHA string, holder string, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := reviewStateKey(repoID, prNumber, headSHA)
+	active, ok := s.reviewLocks[key]
+	if !ok {
+		return ErrNotFound
+	}
+	if active.Holder != holder {
+		return ErrNotFound
+	}
+	delete(s.reviewLocks, key)
+	return nil
 }
 
 func repoKey(owner, name string) string {

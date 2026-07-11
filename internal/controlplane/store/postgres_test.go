@@ -121,12 +121,14 @@ func TestPostgresConstraintBackedIdempotency(t *testing.T) {
 	})
 
 	t.Run("active review lock uniqueness", func(t *testing.T) {
+		now := time.Now().UTC()
 		lock := ReviewLock{
 			RepositoryID: repoID,
 			PRNumber:     42,
 			HeadSHA:      "abc123",
 			Holder:       "worker-a",
-			ExpiresAt:    time.Now().UTC().Add(time.Hour),
+			AcquiredAt:   now,
+			ExpiresAt:    now.Add(time.Hour),
 		}
 		created, err := store.AcquireReviewLock(ctx, lock)
 		require.NoError(t, err)
@@ -136,6 +138,35 @@ func TestPostgresConstraintBackedIdempotency(t *testing.T) {
 		created, err = store.AcquireReviewLock(ctx, lock)
 		require.NoError(t, err)
 		assert.False(t, created)
+	})
+
+	t.Run("expired review lock is reclaimed and can be released", func(t *testing.T) {
+		past := time.Now().UTC().Add(-2 * time.Hour)
+		lock := ReviewLock{
+			RepositoryID: repoID,
+			PRNumber:     43,
+			HeadSHA:      "def456",
+			Holder:       "worker-a",
+			AcquiredAt:   past,
+			ExpiresAt:    past.Add(time.Hour),
+		}
+		created, err := store.AcquireReviewLock(ctx, lock)
+		require.NoError(t, err)
+		assert.True(t, created)
+
+		now := time.Now().UTC()
+		lock.Holder = "worker-b"
+		lock.AcquiredAt = now
+		lock.ExpiresAt = now.Add(time.Hour)
+		created, err = store.AcquireReviewLock(ctx, lock)
+		require.NoError(t, err)
+		assert.True(t, created)
+		require.NoError(t, store.ReleaseReviewLock(ctx, repoID, 43, "def456", "worker-b", now.Add(time.Minute)))
+
+		lock.Holder = "worker-c"
+		created, err = store.AcquireReviewLock(ctx, lock)
+		require.NoError(t, err)
+		assert.True(t, created)
 	})
 
 	t.Run("runner token revocation permits hash reuse", func(t *testing.T) {
@@ -316,6 +347,17 @@ func TestMemoryStore(t *testing.T) {
 	created, err = s.AcquireReviewLock(ctx, ReviewLock{RepositoryID: 2, PRNumber: 3, HeadSHA: "sha"})
 	require.NoError(t, err)
 	assert.False(t, created)
+	expiredAt := time.Now().UTC().Add(-time.Hour)
+	created, err = s.AcquireReviewLock(ctx, ReviewLock{RepositoryID: 2, PRNumber: 4, HeadSHA: "sha", Holder: "old", ExpiresAt: expiredAt, AcquiredAt: expiredAt.Add(-time.Hour)})
+	require.NoError(t, err)
+	assert.True(t, created)
+	created, err = s.AcquireReviewLock(ctx, ReviewLock{RepositoryID: 2, PRNumber: 4, HeadSHA: "sha", Holder: "new", ExpiresAt: time.Now().UTC().Add(time.Hour), AcquiredAt: time.Now().UTC()})
+	require.NoError(t, err)
+	assert.True(t, created)
+	require.NoError(t, s.ReleaseReviewLock(ctx, 2, 4, "sha", "new", time.Now().UTC()))
+	created, err = s.AcquireReviewLock(ctx, ReviewLock{RepositoryID: 2, PRNumber: 4, HeadSHA: "sha", Holder: "after-release"})
+	require.NoError(t, err)
+	assert.True(t, created)
 
 	require.NoError(t, s.Close())
 	require.Error(t, s.Health(ctx))

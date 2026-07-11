@@ -354,12 +354,40 @@ func (s *PostgresStore) RecordCommand(ctx context.Context, c CommandRecord) (boo
 
 // AcquireReviewLock creates an active lock for a repository, PR, and head SHA.
 func (s *PostgresStore) AcquireReviewLock(ctx context.Context, lock ReviewLock) (bool, error) {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE review_locks
+		SET released_at = $4
+		WHERE repository_id = $1
+			AND pr_number = $2
+			AND head_sha = $3
+			AND released_at IS NULL
+			AND expires_at <= $4`,
+		lock.RepositoryID, lock.PRNumber, lock.HeadSHA, timeOrNow(lock.AcquiredAt))
+	if err != nil {
+		return false, err
+	}
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO review_locks (repository_id, pr_number, head_sha, holder, expires_at, acquired_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (repository_id, pr_number, head_sha) WHERE released_at IS NULL DO NOTHING`,
 		lock.RepositoryID, lock.PRNumber, lock.HeadSHA, lock.Holder, lock.ExpiresAt, timeOrNow(lock.AcquiredAt))
 	return createdFromResult(result, err)
+}
+
+func (s *PostgresStore) ReleaseReviewLock(ctx context.Context, repoID int64, prNumber int, headSHA string, holder string, releasedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE review_locks
+		SET released_at = $5
+		WHERE repository_id = $1
+			AND pr_number = $2
+			AND head_sha = $3
+			AND holder = $4
+			AND released_at IS NULL`,
+		repoID, prNumber, headSHA, holder, timeOrNow(releasedAt))
+	if err != nil {
+		return err
+	}
+	return requireAffected(result)
 }
 
 func createdFromResult(result sql.Result, err error) (bool, error) {

@@ -47,15 +47,23 @@ type WorkerCompletedResult struct {
 }
 
 type ReviewCompletedResult struct {
-	Version     int    `json:"version"`
-	Kind        string `json:"kind"`
-	Repository  string `json:"repository"`
-	JobID       string `json:"job_id"`
-	BatchNumber int    `json:"batch_number"`
-	PRNumber    int    `json:"pr_number"`
-	HeadSHA     string `json:"head_sha"`
-	Status      string `json:"status"`
-	Summary     string `json:"summary"`
+	Version     int             `json:"version"`
+	Kind        string          `json:"kind"`
+	Repository  string          `json:"repository"`
+	JobID       string          `json:"job_id"`
+	BatchNumber int             `json:"batch_number"`
+	PRNumber    int             `json:"pr_number"`
+	HeadSHA     string          `json:"head_sha"`
+	Status      string          `json:"status"`
+	Summary     string          `json:"summary"`
+	FixCycle    int             `json:"fix_cycle,omitempty"`
+	Findings    []ReviewFinding `json:"findings,omitempty"`
+}
+
+type ReviewFinding struct {
+	Fingerprint string `json:"fingerprint"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
 }
 
 type Result interface {

@@ -227,16 +227,22 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		JobID:       reviewResult.JobID,
 		BatchNumber: reviewResult.BatchNumber,
 		PRNumber:    reviewResult.PRNumber,
+		BatchBranch: job.WorkerBranch,
 		HeadSHA:     reviewResult.HeadSHA,
 		Status:      reviewResult.Status,
 		Summary:     reviewResult.Summary,
 		TargetURL:   targetURL,
+		FixCycle:    reviewResult.FixCycle,
+		Findings:    reviewFindings(reviewResult.Findings),
 	})
 }
 
 func reviewRepositoryFromJob(job store.Job, fullName string) review.Repository {
 	owner, name, _ := strings.Cut(fullName, "/")
 	enabled := true
+	fixEnabled := false
+	maxFixCycles := 0
+	fixSeverity := ""
 	metadata := metadataMap(job.Metadata)
 	if v, ok := metadata["integrator_review"].(bool); ok {
 		enabled = v
@@ -248,14 +254,51 @@ func reviewRepositoryFromJob(job store.Job, fullName string) review.Repository {
 		if v, ok := integrator["review"].(bool); ok {
 			enabled = v
 		}
+		if v, ok := integrator["review_fix_enabled"].(bool); ok {
+			fixEnabled = v
+		}
+		if v, ok := integrator["review_max_fix_cycles"].(float64); ok {
+			maxFixCycles = int(v)
+			fixEnabled = true
+		}
+		if v, ok := integrator["review_fix_severity"].(string); ok {
+			fixSeverity = v
+			fixEnabled = true
+		}
+	}
+	if v, ok := metadata["review_fix_enabled"].(bool); ok {
+		fixEnabled = v
+	}
+	if v, ok := metadata["review_max_fix_cycles"].(float64); ok {
+		maxFixCycles = int(v)
+		fixEnabled = true
+	}
+	if v, ok := metadata["review_fix_severity"].(string); ok {
+		fixSeverity = v
+		fixEnabled = true
 	}
 	return review.Repository{
-		ID:             job.RepositoryID,
-		InstallationID: job.InstallationID,
-		Owner:          owner,
-		Name:           name,
-		ReviewEnabled:  enabled,
+		ID:                 job.RepositoryID,
+		InstallationID:     job.InstallationID,
+		Owner:              owner,
+		Name:               name,
+		ReviewEnabled:      enabled,
+		ReviewFixEnabled:   fixEnabled,
+		ReviewMaxFixCycles: maxFixCycles,
+		ReviewFixSeverity:  fixSeverity,
 	}
+}
+
+func reviewFindings(findings []ReviewFinding) []review.Finding {
+	out := make([]review.Finding, 0, len(findings))
+	for _, finding := range findings {
+		out = append(out, review.Finding{
+			Fingerprint: finding.Fingerprint,
+			Severity:    finding.Severity,
+			Description: finding.Description,
+		})
+	}
+	return out
 }
 
 func validateResultAgainstJob(result Result, job store.Job) error {

@@ -3,8 +3,12 @@ package review
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
+	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -91,11 +95,153 @@ func TestSubmitReviewResultFailureStillSetsStatusAndComment(t *testing.T) {
 	assert.Contains(t, gh.comments[0], "secondary rate limit")
 }
 
+func TestDispatchReviewSetsPendingAndSuppressesDuplicateWithLock(t *testing.T) {
+	locks := newFakeLockStore()
+	dispatcher := &fakeReviewDispatcher{}
+	statusGH := &fakeStatusGitHub{}
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	svc := ReviewService{
+		Status:     StatusService{GitHub: statusGH, Now: func() time.Time { return now }},
+		Locks:      locks,
+		Dispatcher: dispatcher,
+		Now:        func() time.Time { return now },
+	}
+	req := DispatchReviewRequest{
+		BatchNumber: 7,
+		PRNumber:    42,
+		BatchBranch: "herd/batch/7-demo",
+		HeadSHA:     "head",
+		RunnerLabel: "self-hosted",
+	}
+	repo := testRepo(true)
+	repo.DefaultBranch = "main"
+
+	first, err := svc.DispatchReview(context.Background(), repo, req)
+	require.NoError(t, err)
+	second, err := svc.DispatchReview(context.Background(), repo, req)
+	require.NoError(t, err)
+
+	assert.True(t, first.Locked)
+	assert.True(t, first.Dispatched)
+	assert.False(t, second.Locked)
+	assert.False(t, second.Dispatched)
+	require.Len(t, dispatcher.requests, 1)
+	assert.Equal(t, cpdispatch.JobKindReview, dispatcher.requests[0].Kind)
+	assert.Equal(t, "head", dispatcher.requests[0].ExpectedHeadSHA)
+	require.Len(t, statusGH.statuses, 1)
+	assert.Equal(t, "pending", statusGH.statuses[0].status.State)
+}
+
+func TestSubmitReviewResultChangesRequestedWithFixesKeepsPendingAndDispatchesFixes(t *testing.T) {
+	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
+	statusGH := &fakeStatusGitHub{}
+	locks := newFakeLockStore()
+	fixes := &fakeFixCoordinator{}
+	repo := testRepo(true)
+	repo.ReviewFixEnabled = true
+	repo.ReviewMaxFixCycles = 3
+	repo.ReviewFixSeverity = "medium"
+	result := reviewResult(ResultStatusChangesRequested, "head")
+	result.FixCycle = 1
+	result.BatchBranch = "herd/batch/1-demo"
+	result.Findings = []Finding{
+		{Fingerprint: "high-1", Severity: "high", Description: "fix high"},
+		{Fingerprint: "low-1", Severity: "low", Description: "skip low"},
+	}
+	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}, Locks: locks, Fixes: fixes}
+
+	err := svc.SubmitReviewResult(context.Background(), repo, result)
+
+	require.NoError(t, err)
+	assert.Empty(t, gh.reviews)
+	require.Len(t, fixes.ensureCalls, 1)
+	assert.Equal(t, "high-1", fixes.ensureCalls[0].Fingerprint)
+	assert.Equal(t, []int{101}, fixes.dispatched)
+	require.Len(t, statusGH.statuses, 1)
+	assert.Equal(t, "pending", statusGH.statuses[0].status.State)
+}
+
+func TestSubmitReviewResultMaxFixCyclesSetsFailureWithoutDispatch(t *testing.T) {
+	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
+	statusGH := &fakeStatusGitHub{}
+	fixes := &fakeFixCoordinator{}
+	repo := testRepo(true)
+	repo.ReviewFixEnabled = true
+	repo.ReviewMaxFixCycles = 2
+	result := reviewResult(ResultStatusChangesRequested, "head")
+	result.FixCycle = 2
+	result.Findings = []Finding{{Fingerprint: "high-1", Severity: "high", Description: "fix high"}}
+	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}, Fixes: fixes}
+
+	err := svc.SubmitReviewResult(context.Background(), repo, result)
+
+	require.NoError(t, err)
+	assert.Empty(t, fixes.ensureCalls)
+	require.Len(t, statusGH.statuses, 1)
+	assert.Equal(t, "failure", statusGH.statuses[0].status.State)
+	assert.Contains(t, statusGH.statuses[0].status.Description, "maximum fix cycles")
+}
+
 type fakeReviewGitHub struct {
 	pr        *platform.PullRequest
 	reviewErr error
 	reviews   []capturedReview
 	comments  []string
+}
+
+type fakeLockStore struct {
+	locks map[string]store.ReviewLock
+}
+
+func newFakeLockStore() *fakeLockStore {
+	return &fakeLockStore{locks: map[string]store.ReviewLock{}}
+}
+
+func (s *fakeLockStore) AcquireReviewLock(_ context.Context, lock store.ReviewLock) (bool, error) {
+	key := lockKey(lock.RepositoryID, lock.PRNumber, lock.HeadSHA)
+	if active, ok := s.locks[key]; ok && active.ExpiresAt.After(lock.AcquiredAt) {
+		return false, nil
+	}
+	s.locks[key] = lock
+	return true, nil
+}
+
+func (s *fakeLockStore) ReleaseReviewLock(_ context.Context, repoID int64, prNumber int, headSHA string, holder string, _ time.Time) error {
+	key := lockKey(repoID, prNumber, headSHA)
+	active, ok := s.locks[key]
+	if !ok || active.Holder != holder {
+		return store.ErrNotFound
+	}
+	delete(s.locks, key)
+	return nil
+}
+
+func lockKey(repoID int64, prNumber int, headSHA string) string {
+	return fmt.Sprintf("%d/%d/%s", repoID, prNumber, headSHA)
+}
+
+type fakeReviewDispatcher struct {
+	requests []cpdispatch.DispatchRequest
+}
+
+func (d *fakeReviewDispatcher) Dispatch(_ context.Context, req cpdispatch.DispatchRequest) (cpdispatch.DispatchResult, error) {
+	d.requests = append(d.requests, req)
+	return cpdispatch.DispatchResult{JobID: "job-1", URL: "https://github.test/actions", Created: true}, nil
+}
+
+type fakeFixCoordinator struct {
+	ensureCalls []Finding
+	dispatched  []int
+}
+
+func (f *fakeFixCoordinator) EnsureReviewFixIssue(_ context.Context, _ Repository, _ ReviewCompletedResult, finding Finding) (int, bool, error) {
+	f.ensureCalls = append(f.ensureCalls, finding)
+	return 100 + len(f.ensureCalls), true, nil
+}
+
+func (f *fakeFixCoordinator) DispatchReviewFixWorker(_ context.Context, _ Repository, _ ReviewCompletedResult, issueNumber int) (bool, error) {
+	f.dispatched = append(f.dispatched, issueNumber)
+	return true, nil
 }
 
 type capturedReview struct {
