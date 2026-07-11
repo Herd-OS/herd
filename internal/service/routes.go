@@ -5,9 +5,13 @@ import (
 	"net/http"
 )
 
-func registerAPIRoutes(mux *http.ServeMux) {
+func registerAPIRoutes(mux *http.ServeMux, deps Dependencies) {
 	mux.HandleFunc("POST /webhooks/github", notImplementedHandler)
-	mux.HandleFunc("POST /api/v1/github/repositories/register", notImplementedHandler)
+	if deps.RegistrationHandler != nil {
+		mux.Handle("POST /api/v1/github/repositories/register", deps.RegistrationHandler)
+	} else {
+		mux.HandleFunc("POST /api/v1/github/repositories/register", notImplementedHandler)
+	}
 	mux.HandleFunc("POST /api/v1/runners/registration-token", notImplementedHandler)
 	mux.HandleFunc("POST /api/v1/jobs/{job_id}/results", notImplementedHandler)
 }

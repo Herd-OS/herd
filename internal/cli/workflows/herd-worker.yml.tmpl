@@ -50,6 +50,9 @@ jobs:
         env:
           HERD_RUNNER: "true"
           GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
+{{- if .ControlPlaneURL }}
+          HERD_CONTROL_PLANE_URL: {{ yamlScalar .ControlPlaneURL }}
+{{- end }}
 {{- range .Workers.ExtraEnv }}
           {{ . }}: ${{`{{`}} secrets.{{ . }} {{`}}`}}
 {{- end }}

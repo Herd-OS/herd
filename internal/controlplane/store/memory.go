@@ -27,6 +27,7 @@ type MemoryStore struct {
 	reviewLocks       map[string]ReviewLock
 
 	nextTokenID int64
+	nextRepoID  int64
 }
 
 // NewMemoryStore returns an empty in-memory control-plane store.
@@ -43,6 +44,7 @@ func NewMemoryStore() *MemoryStore {
 		commandRecords:    map[string]CommandRecord{},
 		reviewLocks:       map[string]ReviewLock{},
 		nextTokenID:       1,
+		nextRepoID:        1,
 	}
 }
 
@@ -79,11 +81,19 @@ func (s *MemoryStore) UpsertInstallation(_ context.Context, i Installation) erro
 	return nil
 }
 
-func (s *MemoryStore) UpsertRepository(_ context.Context, r Repository) error {
+func (s *MemoryStore) UpsertRepository(_ context.Context, r Repository) (Repository, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.repositories[repoKey(r.Owner, r.Name)] = r
-	return nil
+	key := repoKey(r.Owner, r.Name)
+	if existing, ok := s.repositories[key]; ok && r.ID == 0 {
+		r.ID = existing.ID
+	}
+	if r.ID == 0 {
+		r.ID = s.nextRepoID
+		s.nextRepoID++
+	}
+	s.repositories[key] = r
+	return r, nil
 }
 
 func (s *MemoryStore) CreateRegistrationAttempt(_ context.Context, a RegistrationAttempt) error {

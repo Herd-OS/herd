@@ -19,7 +19,7 @@ type Store interface {
 
 	RecordWebhookDelivery(ctx context.Context, d WebhookDelivery) (created bool, err error)
 	UpsertInstallation(ctx context.Context, i Installation) error
-	UpsertRepository(ctx context.Context, r Repository) error
+	UpsertRepository(ctx context.Context, r Repository) (Repository, error)
 	CreateRegistrationAttempt(ctx context.Context, a RegistrationAttempt) error
 	CreateRunnerBootstrapToken(ctx context.Context, t RunnerBootstrapToken) error
 	RotateRunnerBootstrapToken(ctx context.Context, repoID int64, tokenHash string) (RunnerBootstrapToken, error)

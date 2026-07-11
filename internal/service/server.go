@@ -7,8 +7,9 @@ import (
 )
 
 type Dependencies struct {
-	Logger *log.Logger
-	Store  HealthStore
+	Logger              *log.Logger
+	Store               HealthStore
+	RegistrationHandler http.Handler
 }
 
 func NewServer(cfg Config, deps Dependencies) (http.Handler, error) {
@@ -18,7 +19,7 @@ func NewServer(cfg Config, deps Dependencies) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	registerHealthRoutes(mux, cfg, deps)
-	registerAPIRoutes(mux)
+	registerAPIRoutes(mux, deps)
 
 	return mux, nil
 }
