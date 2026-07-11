@@ -26,6 +26,8 @@ func TestLoadConfigFromEnv(t *testing.T) {
 				envEnv:                 "staging",
 				envGitHubAppLogin:      "custom-login",
 				envOIDCAudience:        "custom-audience",
+				envReconcilerEnabled:   "true",
+				envReconcilerInterval:  "30s",
 			},
 			want: Config{
 				GitHubAppID:         123,
@@ -36,6 +38,8 @@ func TestLoadConfigFromEnv(t *testing.T) {
 				Env:                 "staging",
 				AppLogin:            "custom-login",
 				OIDCAudience:        "custom-audience",
+				ReconcilerEnabled:   true,
+				ReconcilerInterval:  "30s",
 			},
 		},
 		{
@@ -60,6 +64,13 @@ func TestLoadConfigFromEnv(t *testing.T) {
 				envGitHubAppID: "0",
 			},
 			wantErr: envGitHubAppID,
+		},
+		{
+			name: "invalid reconciler enabled",
+			env: map[string]string{
+				envReconcilerEnabled: "sometimes",
+			},
+			wantErr: envReconcilerEnabled,
 		},
 	}
 
@@ -147,6 +158,14 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr: []string{envPublicURL, "host"},
 		},
+		{
+			name: "invalid reconciler interval",
+			cfg: Config{
+				Env:                "development",
+				ReconcilerInterval: "soon",
+			},
+			wantErr: []string{envReconcilerInterval},
+		},
 	}
 
 	for _, tt := range tests {
@@ -182,6 +201,8 @@ func clearConfigEnv(t *testing.T) {
 		envEnv,
 		envGitHubAppLogin,
 		envOIDCAudience,
+		envReconcilerEnabled,
+		envReconcilerInterval,
 	} {
 		t.Setenv(key, "")
 	}

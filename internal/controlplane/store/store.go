@@ -40,6 +40,30 @@ type Store interface {
 	ReleaseReviewLock(ctx context.Context, repoID int64, prNumber int, headSHA string, holder string, releasedAt time.Time) error
 }
 
+// ReconcileJob joins a durable job with repository context and callback state.
+type ReconcileJob struct {
+	Job         Job
+	Repository  Repository
+	ResultCount int
+}
+
+// ReconcileCommand joins a durable command record with repository context and
+// the idempotency state for its acknowledgement/dispatch path.
+type ReconcileCommand struct {
+	Command         CommandRecord
+	Repository      Repository
+	IdempotencyKey  string
+	Idempotency     IdempotencyKey
+	IdempotencySeen bool
+}
+
+// ReconcileReviewState joins the stored Herd Review state with repository
+// context so recovery can compare it with current GitHub state.
+type ReconcileReviewState struct {
+	State      ReviewState
+	Repository Repository
+}
+
 // Installation mirrors a GitHub App installation in app_installations.
 type Installation struct {
 	ID           int64
