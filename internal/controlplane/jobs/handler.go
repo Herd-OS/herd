@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/herd-os/herd/internal/appauth"
 	"github.com/herd-os/herd/internal/controlplane"
+	"github.com/herd-os/herd/internal/controlplane/artifacts"
 	"github.com/herd-os/herd/internal/controlplane/store"
 )
 
@@ -21,18 +23,45 @@ type Store interface {
 	RecordJobResult(ctx context.Context, r store.JobResult) (created bool, err error)
 }
 
+type MutationRecorder interface {
+	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
+	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
+}
+
+type PatchApplier interface {
+	Apply(ctx context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error)
+}
+
+type defaultPatchApplier struct{}
+
+func (defaultPatchApplier) Apply(ctx context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
+	return artifacts.Apply(ctx, req)
+}
+
 type Handler struct {
-	store     Store
-	validator OIDCValidator
-	audience  string
-	now       func() time.Time
+	store          Store
+	validator      OIDCValidator
+	audience       string
+	now            func() time.Time
+	artifactStore  artifacts.Store
+	patchApplier   PatchApplier
+	appTokenSource appauth.TokenSource
+	appLogin       string
+	appEmail       string
+	tempDir        string
 }
 
 type HandlerOptions struct {
-	Store     Store
-	Validator OIDCValidator
-	Audience  string
-	Now       func() time.Time
+	Store          Store
+	Validator      OIDCValidator
+	Audience       string
+	Now            func() time.Time
+	ArtifactStore  artifacts.Store
+	PatchApplier   PatchApplier
+	AppTokenSource appauth.TokenSource
+	AppLogin       string
+	AppEmail       string
+	TempDir        string
 }
 
 func NewHandler(opts HandlerOptions) http.Handler {
@@ -48,11 +77,21 @@ func NewHandler(opts HandlerOptions) http.Handler {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
+	patchApplier := opts.PatchApplier
+	if patchApplier == nil && opts.ArtifactStore != nil {
+		patchApplier = defaultPatchApplier{}
+	}
 	return Handler{
-		store:     opts.Store,
-		validator: validator,
-		audience:  audience,
-		now:       now,
+		store:          opts.Store,
+		validator:      validator,
+		audience:       audience,
+		now:            now,
+		artifactStore:  opts.ArtifactStore,
+		patchApplier:   patchApplier,
+		appTokenSource: opts.AppTokenSource,
+		appLogin:       opts.AppLogin,
+		appEmail:       opts.AppEmail,
+		tempDir:        opts.TempDir,
 	}
 }
 
@@ -118,7 +157,26 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metadata, err := resultMetadata(payload, claims)
+	applyMetadata, applyErr := h.processWorkerPatch(r.Context(), result, job, payload)
+	if applyErr != nil {
+		metadata, metadataErr := resultMetadata(payload, claims, applyMetadata)
+		if metadataErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
+			return
+		}
+		_, _ = h.store.RecordJobResult(r.Context(), store.JobResult{
+			JobID:          envelope.JobID,
+			IdempotencyKey: ResultIdempotencyKey(result, payload),
+			Status:         StatusFailure,
+			ResultRef:      ResultPayloadHash(payload),
+			Metadata:       metadata,
+			CreatedAt:      h.now(),
+		})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
+		return
+	}
+
+	metadata, err := resultMetadata(payload, claims, applyMetadata)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
 		return
@@ -153,15 +211,119 @@ func validateResultAgainstJob(result Result, job store.Job) error {
 	if job.HeadSHA != "" && head != "" && job.HeadSHA != head {
 		return fmt.Errorf("stale head SHA: expected %s, got %s", job.HeadSHA, head)
 	}
+	if worker, ok := result.(WorkerCompletedResult); ok && job.BaseSHA != "" && worker.BaseSHA != "" && job.BaseSHA != worker.BaseSHA {
+		return fmt.Errorf("stale base SHA: expected %s, got %s", job.BaseSHA, worker.BaseSHA)
+	}
 	return nil
 }
 
-func resultMetadata(payload []byte, claims OIDCClaims) (json.RawMessage, error) {
+func (h Handler) processWorkerPatch(ctx context.Context, result Result, job store.Job, payload []byte) (map[string]any, error) {
+	worker, ok := result.(WorkerCompletedResult)
+	if !ok || worker.Status != StatusSuccess || h.artifactStore == nil {
+		return nil, nil
+	}
+	idempotencyKey := "patch_apply:" + ResultPayloadHash(payload)
+	metadata := map[string]any{
+		"patch_artifact": worker.PatchArtifact,
+		"mutation_key":   idempotencyKey,
+	}
+	if recorder, ok := h.store.(MutationRecorder); ok {
+		request, err := json.Marshal(map[string]any{
+			"repository":        worker.Repository,
+			"job_id":            worker.JobID,
+			"target_branch":     worker.TargetBranch,
+			"base_sha":          worker.BaseSHA,
+			"expected_head_sha": worker.ExpectedHeadSHA,
+			"patch_artifact":    worker.PatchArtifact,
+		})
+		if err != nil {
+			return metadata, fmt.Errorf("marshal patch mutation request: %w", err)
+		}
+		if err := recorder.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+			IdempotencyKey: idempotencyKey,
+			RepositoryID:   job.RepositoryID,
+			MutationType:   "patch_apply",
+			Status:         "started",
+			Request:        request,
+			CreatedAt:      h.now(),
+		}); err != nil {
+			return metadata, fmt.Errorf("record patch mutation attempt: %w", err)
+		}
+	}
+	artifact, err := artifacts.Validate(ctx, h.artifactStore, artifacts.ValidationRequest{
+		Repository:       worker.Repository,
+		JobID:            worker.JobID,
+		BaseSHA:          worker.BaseSHA,
+		ExpectedHeadSHA:  worker.ExpectedHeadSHA,
+		MetadataArtifact: worker.PatchArtifact,
+	})
+	if err != nil {
+		h.completePatchMutation(ctx, idempotencyKey, "failed", nil, err)
+		metadata["error"] = err.Error()
+		return metadata, err
+	}
+	metadata["format"] = artifact.Metadata.Format
+	metadata["sha256"] = artifact.Metadata.SHA256
+	if h.patchApplier == nil {
+		return metadata, nil
+	}
+	applyResult, err := h.patchApplier.Apply(ctx, artifacts.ApplyRequest{
+		Repository:      worker.Repository,
+		CloneURL:        "https://github.com/" + worker.Repository + ".git",
+		InstallationID:  job.InstallationID,
+		TargetBranch:    worker.TargetBranch,
+		BaseSHA:         worker.BaseSHA,
+		ExpectedHeadSHA: worker.ExpectedHeadSHA,
+		Artifact:        artifact,
+		Identity:        artifacts.DefaultIdentity(h.appLogin, h.appEmail),
+		Human:           humanAttribution(job.Metadata),
+		TokenSource:     h.appTokenSource,
+		TempDir:         h.tempDir,
+		Now:             h.now,
+	})
+	if err != nil {
+		h.completePatchMutation(ctx, idempotencyKey, "failed", nil, err)
+		metadata["error"] = err.Error()
+		return metadata, err
+	}
+	response, err := json.Marshal(applyResult)
+	if err != nil {
+		return metadata, fmt.Errorf("marshal patch apply result: %w", err)
+	}
+	h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil)
+	metadata["commit_sha"] = applyResult.CommitSHA
+	return metadata, nil
+}
+
+func (h Handler) completePatchMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error) {
+	recorder, ok := h.store.(MutationRecorder)
+	if !ok {
+		return
+	}
+	errorMessage := ""
+	if resultErr != nil {
+		errorMessage = resultErr.Error()
+	}
+	_ = recorder.CompleteGitHubMutationAttempt(ctx, key, status, response, errorMessage, h.now())
+}
+
+func humanAttribution(raw json.RawMessage) artifacts.HumanAttribution {
+	var metadata map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &metadata) != nil {
+		return artifacts.HumanAttribution{}
+	}
+	return artifacts.HumanAttribution{
+		Name:  firstMetadataString(metadata, "requester_name", "actor_name", "sender_name"),
+		Email: firstMetadataString(metadata, "requester_email", "actor_email", "sender_email"),
+	}
+}
+
+func resultMetadata(payload []byte, claims OIDCClaims, extra map[string]any) (json.RawMessage, error) {
 	var raw json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, err
 	}
-	metadata, err := json.Marshal(map[string]any{
+	body := map[string]any{
 		"payload": raw,
 		"oidc": map[string]any{
 			"repository": claims.Repository,
@@ -170,7 +332,11 @@ func resultMetadata(payload []byte, claims OIDCClaims) (json.RawMessage, error) 
 			"run_id":     claims.RunID,
 			"expires_at": claims.ExpiresAt,
 		},
-	})
+	}
+	if extra != nil {
+		body["patch_apply"] = extra
+	}
+	metadata, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}

@@ -35,6 +35,13 @@ func initTestRepo(t *testing.T) string {
 	return dir
 }
 
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return data
+}
+
 func TestConfigureIdentity(t *testing.T) {
 	// Create a repo without user identity
 	dir := t.TempDir()
@@ -212,6 +219,65 @@ func TestDiffStat_ThreeDotSemantics(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, stat, "feature.txt")
 	assert.NotContains(t, stat, "main.txt")
+}
+
+func TestBinaryDiffAndApplyBinaryPatch(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	base, err := g.HeadSHA()
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "binary.bin"), []byte{0x00, 0x01, 0xfe, 0xff}, 0644))
+	require.NoError(t, g.Add("."))
+	require.NoError(t, g.Commit("add binary"))
+	head, err := g.HeadSHA()
+	require.NoError(t, err)
+
+	diff, err := g.BinaryDiff(base, head)
+	require.NoError(t, err)
+	assert.Contains(t, string(diff), "GIT binary patch")
+
+	applyDir := initTestRepo(t)
+	patchFile := filepath.Join(t.TempDir(), "change.patch")
+	require.NoError(t, os.WriteFile(patchFile, diff, 0600))
+	applyGit := New(applyDir)
+	require.NoError(t, applyGit.ApplyBinaryPatch(patchFile))
+	require.NoError(t, applyGit.Commit("apply patch"))
+	assert.Equal(t, []byte{0x00, 0x01, 0xfe, 0xff}, mustReadFile(t, filepath.Join(applyDir, "binary.bin")))
+}
+
+func TestCloneRemoteBranchSHAAndPushHEAD(t *testing.T) {
+	source := initTestRepo(t)
+	sourceGit := New(source)
+	defaultBranch, err := sourceGit.CurrentBranch()
+	require.NoError(t, err)
+	base, err := sourceGit.HeadSHA()
+	require.NoError(t, err)
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	cmd := exec.Command("git", "init", "--bare", remote)
+	require.NoError(t, cmd.Run())
+	runGit(t, source, "remote", "add", "origin", remote)
+	require.NoError(t, sourceGit.Push("origin", defaultBranch))
+
+	clone := filepath.Join(t.TempDir(), "clone")
+	require.NoError(t, Clone(remote, clone))
+	cloneGit := New(clone)
+	gotBase, err := cloneGit.RemoteBranchSHA("origin", defaultBranch)
+	require.NoError(t, err)
+	assert.Equal(t, base, gotBase)
+
+	require.NoError(t, cloneGit.CheckoutDetached(base))
+	require.NoError(t, os.WriteFile(filepath.Join(clone, "new.txt"), []byte("new\n"), 0644))
+	require.NoError(t, cloneGit.Add("."))
+	require.NoError(t, cloneGit.ConfigureIdentity("App", "app@example.com"))
+	require.NoError(t, cloneGit.Commit("new commit"))
+	require.NoError(t, cloneGit.PushHEAD("origin", defaultBranch, base))
+
+	updated, err := sourceGit.output("ls-remote", remote, "refs/heads/"+defaultBranch)
+	require.NoError(t, err)
+	assert.Contains(t, updated, "refs/heads/"+defaultBranch)
+	assert.NotContains(t, updated, base)
 }
 
 func TestRebase(t *testing.T) {

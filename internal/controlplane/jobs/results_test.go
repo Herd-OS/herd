@@ -196,7 +196,7 @@ func TestResultIdempotencyKeyUsesKindAndPayloadHash(t *testing.T) {
 func TestResultMetadataEmbedsPayload(t *testing.T) {
 	payload := []byte(`{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":1,"pr_number":2,"head_sha":"head","status":"approved","summary":"ok"}`)
 
-	metadata, err := resultMetadata(payload, OIDCClaims{Repository: "acme/widgets"})
+	metadata, err := resultMetadata(payload, OIDCClaims{Repository: "acme/widgets"}, nil)
 
 	require.NoError(t, err)
 	var decoded map[string]json.RawMessage

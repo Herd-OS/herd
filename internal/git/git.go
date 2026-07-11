@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,16 @@ type Git struct {
 // New creates a new Git instance for the given working directory.
 func New(workDir string) *Git {
 	return &Git{WorkDir: workDir}
+}
+
+// Clone clones a repository into dst.
+func Clone(repoURL, dst string) error {
+	cmd := exec.Command("git", "clone", repoURL, dst)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git clone: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // ConfigureIdentity sets the local git user identity for commits/merges if not already set.
@@ -37,6 +48,10 @@ func (g *Git) ConfigureIdentity(name, email string) error {
 
 func (g *Git) Checkout(branch string) error {
 	return g.run("checkout", branch)
+}
+
+func (g *Git) CheckoutDetached(ref string) error {
+	return g.run("checkout", "--detach", ref)
 }
 
 // CheckoutReset checks out a branch, resetting it to match the remote tracking branch.
@@ -65,6 +80,14 @@ func (g *Git) Push(remote, branch string) error {
 	return g.run("push", remote, branch)
 }
 
+func (g *Git) PushHEAD(remote, branch, expectedOldSHA string) error {
+	refspec := "HEAD:refs/heads/" + branch
+	if expectedOldSHA != "" {
+		return g.run("push", "--force-with-lease=refs/heads/"+branch+":"+expectedOldSHA, remote, refspec)
+	}
+	return g.run("push", remote, refspec)
+}
+
 func (g *Git) ForcePush(remote, branch string) error {
 	return g.run("push", "--force-with-lease", remote, branch)
 }
@@ -75,6 +98,14 @@ func (g *Git) Pull(remote, branch string) error {
 
 func (g *Git) Diff(base, head string) (string, error) {
 	return g.output("diff", base+"..."+head)
+}
+
+func (g *Git) BinaryDiff(base, head string) ([]byte, error) {
+	return g.outputBytes("diff", "--binary", "--full-index", base, head)
+}
+
+func (g *Git) ApplyBinaryPatch(patchFile string) error {
+	return g.run("apply", "--index", "--binary", patchFile)
 }
 
 // DiffStat returns the --stat output for changes introduced by head since
@@ -216,6 +247,10 @@ func (g *Git) RevParse(ref string) (string, error) {
 	return g.output("rev-parse", ref)
 }
 
+func (g *Git) RemoteBranchSHA(remote, branch string) (string, error) {
+	return g.output("rev-parse", remote+"/"+branch)
+}
+
 func (g *Git) run(args ...string) error {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = g.WorkDir
@@ -237,4 +272,16 @@ func (g *Git) output(args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (g *Git) outputBytes(args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = g.WorkDir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return out, nil
 }
