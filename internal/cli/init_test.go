@@ -17,24 +17,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type fakeInitAuth struct {
+type fakeInitAuthorizer struct {
 	token string
 	err   error
 }
 
-func (a fakeInitAuth) SetupToken(context.Context) (string, error) {
+func (a fakeInitAuthorizer) SetupToken(context.Context) (string, error) {
 	return a.token, a.err
 }
 
 type fakeInitRegistrar struct {
 	resp cpclient.RegisterRepositoryResponse
 	err  error
-	req  cpclient.RegisterRepositoryRequest
+	reqs []cpclient.RegisterRepositoryRequest
 }
 
 func (r *fakeInitRegistrar) RegisterRepository(_ context.Context, req cpclient.RegisterRepositoryRequest) (cpclient.RegisterRepositoryResponse, error) {
-	r.req = req
+	r.reqs = append(r.reqs, req)
 	return r.resp, r.err
+}
+
+func withFakeInitRegistration(t *testing.T, token string, resp cpclient.RegisterRepositoryResponse, err error) *fakeInitRegistrar {
+	t.Helper()
+	oldAuth := newSetupAuthorizer
+	oldRegistrar := newRepositoryRegistrar
+	reg := &fakeInitRegistrar{resp: resp, err: err}
+	newSetupAuthorizer = func() setupAuthorizer {
+		return fakeInitAuthorizer{token: token}
+	}
+	newRepositoryRegistrar = func(string) (repositoryRegistrar, error) {
+		return reg, nil
+	}
+	t.Cleanup(func() {
+		newSetupAuthorizer = oldAuth
+		newRepositoryRegistrar = oldRegistrar
+	})
+	return reg
 }
 
 func TestDetectOwnerRepoSSH(t *testing.T) {
@@ -125,6 +143,43 @@ func TestEnsureGitignoreNoTrailingNewline(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	require.NoError(t, err)
 	assert.Equal(t, "bin/\n.herd/state/\n", string(content))
+}
+
+func TestRegisterRepositoryForInitFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		authErr    error
+		regErr     error
+		wantErrSub string
+	}{
+		{"gh missing", errGHMissing, nil, "gh CLI is not installed"},
+		{"gh unauthenticated", errGHUnauthenticated, nil, "gh CLI is not authenticated"},
+		{"gh empty token", errGHEmptyToken, nil, "empty token"},
+		{"service unavailable", nil, errors.New("503 Service Unavailable"), "control plane"},
+		{"app not installed", nil, errors.New("Herd GitHub App is not installed"), "GitHub App is installed"},
+		{"unauthorized repo", nil, errors.New("admin access"), "admin access"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldAuth := newSetupAuthorizer
+			oldRegistrar := newRepositoryRegistrar
+			newSetupAuthorizer = func() setupAuthorizer {
+				return fakeInitAuthorizer{token: "gho_human", err: tt.authErr}
+			}
+			newRepositoryRegistrar = func(string) (repositoryRegistrar, error) {
+				return &fakeInitRegistrar{err: tt.regErr}, nil
+			}
+			t.Cleanup(func() {
+				newSetupAuthorizer = oldAuth
+				newRepositoryRegistrar = oldRegistrar
+			})
+
+			_, err := registerRepositoryForInit(context.Background(), "octo", "herd", initOptions{ControlPlaneURL: config.DefaultControlPlaneURL, AppLogin: "herd-os"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrSub)
+			assert.NotContains(t, err.Error(), "gho_human")
+		})
+	}
 }
 
 func TestInstallWorkflows(t *testing.T) {
@@ -256,7 +311,8 @@ func TestCreateRunnerFiles(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(dc), "REPO_URL=https://github.com/my-org/my-project")
 	assert.Contains(t, string(dc), "Dockerfile.herd_runner")
-	assert.Contains(t, string(dc), "GITHUB_TOKEN=${GITHUB_TOKEN}")
+	assert.Contains(t, string(dc), "HERD_RUNNER_BOOTSTRAP_TOKEN=${HERD_RUNNER_BOOTSTRAP_TOKEN}")
+	assert.NotContains(t, string(dc), "GITHUB_TOKEN=${GITHUB_TOKEN}")
 	assert.Contains(t, string(dc), "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}")
 	assert.Contains(t, string(dc), "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}")
 	// RUNNER_UID/GID are forwarded so users can remap the in-container runner
@@ -267,7 +323,8 @@ func TestCreateRunnerFiles(t *testing.T) {
 	// .env.herd.example
 	env, err := os.ReadFile(filepath.Join(dir, ".env.herd.example"))
 	require.NoError(t, err)
-	assert.Contains(t, string(env), "GITHUB_TOKEN=")
+	assert.Contains(t, string(env), "HERD_RUNNER_BOOTSTRAP_TOKEN=")
+	assert.NotContains(t, string(env), "GITHUB_TOKEN=")
 	assert.Contains(t, string(env), "CLAUDE_CODE_OAUTH_TOKEN=")
 	assert.Contains(t, string(env), "ANTHROPIC_API_KEY=")
 	// RUNNER_UID / RUNNER_GID must be documented (commented out by default so
@@ -518,10 +575,65 @@ func TestRenderDockerCompose(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, rendered, "https://github.com/test-org/test-repo")
 	assert.Contains(t, rendered, "docker compose -f docker-compose.herd.yml")
-	assert.Contains(t, rendered, "GITHUB_TOKEN=${GITHUB_TOKEN}")
 	assert.Contains(t, rendered, "HERD_RUNNER_BOOTSTRAP_TOKEN=${HERD_RUNNER_BOOTSTRAP_TOKEN}")
+	assert.NotContains(t, rendered, "GITHUB_TOKEN=${GITHUB_TOKEN}")
 	assert.Contains(t, rendered, "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}")
 	assert.Contains(t, rendered, "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}")
+}
+
+func TestCreateRunnerFilesWithBootstrapWritesEnv(t *testing.T) {
+	tests := []struct {
+		name              string
+		controlPlaneURL   string
+		wantControlPlane  bool
+		wantComposeURL    bool
+		existingEnv       string
+		wantPreservedLine string
+	}{
+		{
+			name:              "hosted omits default URL",
+			controlPlaneURL:   config.DefaultControlPlaneURL,
+			existingEnv:       "CLAUDE_CODE_OAUTH_TOKEN=claude\nHERD_CONTROL_PLANE_URL=https://old.example\n",
+			wantPreservedLine: "CLAUDE_CODE_OAUTH_TOKEN=claude",
+		},
+		{
+			name:             "self-hosted persists URL",
+			controlPlaneURL:  "https://herd.example.com",
+			wantControlPlane: true,
+			wantComposeURL:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.existingEnv != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte(tt.existingEnv), 0600))
+			}
+
+			require.NoError(t, createRunnerFilesWithBootstrap(dir, "octo", "herd", "hrb_bootstrap", tt.controlPlaneURL))
+
+			env, err := os.ReadFile(filepath.Join(dir, ".env"))
+			require.NoError(t, err)
+			assert.Contains(t, string(env), "HERD_RUNNER_BOOTSTRAP_TOKEN=hrb_bootstrap")
+			assert.NotContains(t, string(env), "gho_human")
+			if tt.wantPreservedLine != "" {
+				assert.Contains(t, string(env), tt.wantPreservedLine)
+			}
+			if tt.wantControlPlane {
+				assert.Contains(t, string(env), "HERD_CONTROL_PLANE_URL=https://herd.example.com")
+			} else {
+				assert.NotContains(t, string(env), "HERD_CONTROL_PLANE_URL=")
+			}
+
+			compose, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
+			require.NoError(t, err)
+			if tt.wantComposeURL {
+				assert.Contains(t, string(compose), "HERD_CONTROL_PLANE_URL=https://herd.example.com")
+			} else {
+				assert.NotContains(t, string(compose), "HERD_CONTROL_PLANE_URL")
+			}
+		})
+	}
 }
 
 func TestRenderDockerCompose_SingleService(t *testing.T) {
@@ -1076,16 +1188,14 @@ func TestRunInitSkipLabelsEndToEnd(t *testing.T) {
 	defer func() { _ = os.Chdir(oldWd) }()
 	require.NoError(t, os.Chdir(dir))
 
-	require.NoError(t, runInitWithOptions(initOptions{
-		SkipLabels:    true,
-		SkipWorkflows: false,
-		GHAuth:        fakeInitAuth{token: "setup-token"},
-		Registrar: &fakeInitRegistrar{resp: cpclient.RegisterRepositoryResponse{
-			RepositoryID:         1,
-			InstallationID:       2,
-			RunnerBootstrapToken: "bootstrap-token",
-		}},
-	}))
+	reg := withFakeInitRegistration(t, "gho_human", cpclient.RegisterRepositoryResponse{
+		RepositoryID:         10,
+		InstallationID:       20,
+		RunnerBootstrapToken: "hrb_bootstrap",
+	}, nil)
+	require.NoError(t, runInit(true, false))
+	require.Len(t, reg.reqs, 1)
+	assert.Equal(t, "gho_human", reg.reqs[0].SetupToken)
 
 	herdosYml := filepath.Join(dir, ".herdos.yml")
 	info, err := os.Stat(herdosYml)
@@ -1126,10 +1236,17 @@ func TestRunInitSkipLabelsEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(dc), "REPO_URL=https://github.com/test-org/test-repo")
 	assert.NotContains(t, string(dc), "herd-runner-base", "compose should no longer define a herd-runner-base service")
+	assert.NotContains(t, string(dc), "gho_human")
+
+	env, err := os.ReadFile(filepath.Join(dir, ".env"))
+	require.NoError(t, err)
+	assert.Contains(t, string(env), "HERD_RUNNER_BOOTSTRAP_TOKEN=hrb_bootstrap")
+	assert.NotContains(t, string(env), "gho_human")
 
 	envEx, err := os.ReadFile(filepath.Join(dir, ".env.herd.example"))
 	require.NoError(t, err)
-	assert.Contains(t, string(envEx), "GITHUB_TOKEN=")
+	assert.Contains(t, string(envEx), "HERD_RUNNER_BOOTSTRAP_TOKEN=")
+	assert.NotContains(t, string(envEx), "GITHUB_TOKEN=")
 }
 
 // TestRunInitSkipLabelsIdempotent verifies that running runInit twice in the
@@ -1151,16 +1268,12 @@ func TestRunInitSkipLabelsIdempotent(t *testing.T) {
 	defer func() { _ = os.Chdir(oldWd) }()
 	require.NoError(t, os.Chdir(dir))
 
-	require.NoError(t, runInitWithOptions(initOptions{
-		SkipLabels:    true,
-		SkipWorkflows: false,
-		GHAuth:        fakeInitAuth{token: "setup-token"},
-		Registrar: &fakeInitRegistrar{resp: cpclient.RegisterRepositoryResponse{
-			RepositoryID:         1,
-			InstallationID:       2,
-			RunnerBootstrapToken: "bootstrap-token",
-		}},
-	}), "first runInit")
+	withFakeInitRegistration(t, "gho_human", cpclient.RegisterRepositoryResponse{
+		RepositoryID:         10,
+		InstallationID:       20,
+		RunnerBootstrapToken: "hrb_bootstrap",
+	}, nil)
+	require.NoError(t, runInit(true, false), "first runInit")
 
 	herdosFirst, err := os.ReadFile(filepath.Join(dir, ".herdos.yml"))
 	require.NoError(t, err)
@@ -1187,16 +1300,7 @@ func TestRunInitSkipLabelsIdempotent(t *testing.T) {
 		runnerFirst[name] = data
 	}
 
-	require.NoError(t, runInitWithOptions(initOptions{
-		SkipLabels:    true,
-		SkipWorkflows: false,
-		GHAuth:        fakeInitAuth{token: "setup-token"},
-		Registrar: &fakeInitRegistrar{resp: cpclient.RegisterRepositoryResponse{
-			RepositoryID:         1,
-			InstallationID:       2,
-			RunnerBootstrapToken: "bootstrap-token",
-		}},
-	}), "second runInit")
+	require.NoError(t, runInit(true, false), "second runInit")
 
 	herdosSecond, err := os.ReadFile(filepath.Join(dir, ".herdos.yml"))
 	require.NoError(t, err)
@@ -1596,154 +1700,4 @@ func TestComputeManagedDrift_ReturnsRenderedFilesAndDrift(t *testing.T) {
 		}
 	}
 	assert.True(t, foundDrift, "drift should include the tampered workflow")
-}
-
-func TestRegisterRepositoryForInitFailureModes(t *testing.T) {
-	tests := []struct {
-		name       string
-		auth       setupAuthenticator
-		registrar  *fakeInitRegistrar
-		wantSubstr string
-	}{
-		{
-			name:       "gh missing",
-			auth:       fakeInitAuth{err: errGHNotFound},
-			registrar:  &fakeInitRegistrar{},
-			wantSubstr: "gh CLI is not installed",
-		},
-		{
-			name:       "gh unauthenticated",
-			auth:       fakeInitAuth{err: errors.New("run `gh auth login -h github.com`")},
-			registrar:  &fakeInitRegistrar{},
-			wantSubstr: "gh auth login -h github.com",
-		},
-		{
-			name:       "gh empty token",
-			auth:       fakeInitAuth{err: errors.New("empty setup token")},
-			registrar:  &fakeInitRegistrar{},
-			wantSubstr: "empty setup token",
-		},
-		{
-			name:       "service unavailable",
-			auth:       fakeInitAuth{token: "setup-token"},
-			registrar:  &fakeInitRegistrar{err: errors.New("service unavailable")},
-			wantSubstr: "service unavailable",
-		},
-		{
-			name:       "app not installed",
-			auth:       fakeInitAuth{token: "setup-token"},
-			registrar:  &fakeInitRegistrar{err: errors.New("install @herd-os on octo/repo")},
-			wantSubstr: "install @herd-os",
-		},
-		{
-			name:       "unauthorized repo",
-			auth:       fakeInitAuth{token: "setup-token"},
-			registrar:  &fakeInitRegistrar{err: errors.New("admin access required")},
-			wantSubstr: "admin access",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := registerRepositoryForInit(context.Background(), "octo", "repo", config.DefaultControlPlaneURL, initOptions{
-				GHAuth:    tt.auth,
-				Registrar: tt.registrar,
-			})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.wantSubstr)
-		})
-	}
-}
-
-func TestRegisterRepositoryForInitSendsSetupTokenOnlyInRequest(t *testing.T) {
-	registrar := &fakeInitRegistrar{resp: cpclient.RegisterRepositoryResponse{
-		RepositoryID:         1,
-		InstallationID:       2,
-		RunnerBootstrapToken: "bootstrap-token",
-	}}
-
-	resp, err := registerRepositoryForInit(context.Background(), "octo", "repo", config.DefaultControlPlaneURL, initOptions{
-		AppLogin:  "@custom-app",
-		GHAuth:    fakeInitAuth{token: "setup-token"},
-		Registrar: registrar,
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, "bootstrap-token", resp.RunnerBootstrapToken)
-	assert.Equal(t, "setup-token", registrar.req.SetupToken)
-	assert.Equal(t, "custom-app", registrar.req.AppLogin)
-	assert.Equal(t, "octo/repo", registrar.req.Repository)
-}
-
-func TestWriteRunnerEnvFilePersistsBootstrapTokenOnly(t *testing.T) {
-	dir := t.TempDir()
-
-	require.NoError(t, writeRunnerEnvFile(dir, "bootstrap-token", config.DefaultControlPlaneURL))
-
-	env, err := os.ReadFile(filepath.Join(dir, ".env"))
-	require.NoError(t, err)
-	assert.Contains(t, string(env), "HERD_RUNNER_BOOTSTRAP_TOKEN=bootstrap-token")
-	assert.NotContains(t, string(env), "HERD_CONTROL_PLANE_URL=")
-	assert.NotContains(t, string(env), "setup-token")
-}
-
-func TestWriteRunnerEnvFilePersistsSelfHostedURL(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("GITHUB_TOKEN=keep\n"), 0600))
-
-	require.NoError(t, writeRunnerEnvFile(dir, "bootstrap-token", "https://cp.example.com/"))
-
-	env, err := os.ReadFile(filepath.Join(dir, ".env"))
-	require.NoError(t, err)
-	assert.Contains(t, string(env), "GITHUB_TOKEN=keep")
-	assert.Contains(t, string(env), "HERD_RUNNER_BOOTSTRAP_TOKEN=bootstrap-token")
-	assert.Contains(t, string(env), "HERD_CONTROL_PLANE_URL=https://cp.example.com")
-}
-
-func TestConfigHostedDefaultControlPlaneURLOmitted(t *testing.T) {
-	dir := t.TempDir()
-	cfg := config.Default()
-	cfg.Platform.Owner = "octo"
-	cfg.Platform.Repo = "repo"
-
-	require.NoError(t, config.Save(dir, cfg))
-
-	data, err := os.ReadFile(filepath.Join(dir, config.ConfigFile))
-	require.NoError(t, err)
-	assert.NotContains(t, string(data), "control_plane_url")
-	assert.Equal(t, config.DefaultControlPlaneURL, cfg.EffectiveControlPlaneURL())
-}
-
-func TestConfigSelfHostedControlPlaneURLPersisted(t *testing.T) {
-	dir := t.TempDir()
-	cfg := config.Default()
-	cfg.Platform.Owner = "octo"
-	cfg.Platform.Repo = "repo"
-	cfg.ControlPlaneURL = "https://cp.example.com"
-
-	require.NoError(t, config.Save(dir, cfg))
-
-	data, err := os.ReadFile(filepath.Join(dir, config.ConfigFile))
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "control_plane_url: https://cp.example.com")
-}
-
-func TestWorkerWorkflowOmitsHostedDefaultControlPlaneURL(t *testing.T) {
-	cfg := config.Default()
-
-	rendered, err := RenderWorkflow(workflowFile{SrcName: "herd-worker.yml.tmpl", Template: true}, cfg)
-
-	require.NoError(t, err)
-	assert.NotContains(t, string(rendered), "HERD_CONTROL_PLANE_URL")
-	assert.NotContains(t, string(rendered), config.DefaultControlPlaneURL)
-}
-
-func TestWorkerWorkflowIncludesSelfHostedControlPlaneURL(t *testing.T) {
-	cfg := config.Default()
-	cfg.ControlPlaneURL = "https://cp.example.com"
-
-	rendered, err := RenderWorkflow(workflowFile{SrcName: "herd-worker.yml.tmpl", Template: true}, cfg)
-
-	require.NoError(t, err)
-	assert.Contains(t, string(rendered), `HERD_CONTROL_PLANE_URL: "https://cp.example.com"`)
 }

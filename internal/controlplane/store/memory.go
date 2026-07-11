@@ -96,6 +96,16 @@ func (s *MemoryStore) UpsertRepository(_ context.Context, r Repository) (Reposit
 	return r, nil
 }
 
+func (s *MemoryStore) GetRepository(_ context.Context, owner string, name string) (Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	repo, ok := s.repositories[repoKey(owner, name)]
+	if !ok {
+		return Repository{}, ErrNotFound
+	}
+	return repo, nil
+}
+
 func (s *MemoryStore) CreateRegistrationAttempt(_ context.Context, a RegistrationAttempt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

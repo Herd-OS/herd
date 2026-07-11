@@ -4,22 +4,31 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	gh "github.com/google/go-github/v68/github"
+	ghapi "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/appauth"
-	"github.com/herd-os/herd/internal/controlplane/client"
+	cpclient "github.com/herd-os/herd/internal/controlplane/client"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"golang.org/x/oauth2"
 )
 
-const defaultBootstrapTokenTTL = 24 * time.Hour
+const (
+	defaultBootstrapTokenTTL = 24 * time.Hour
+	bootstrapTokenBytes      = 32
+)
+
+var (
+	ErrRepoUnauthorized     = errors.New("repository requires admin access")
+	ErrAppInstallation      = errors.New("GitHub App is not installed for this repository")
+	ErrAppInstallationMatch = errors.New("GitHub App installation does not match requested repository")
+)
 
 type RegistrationStore interface {
 	UpsertInstallation(ctx context.Context, i store.Installation) error
@@ -28,238 +37,273 @@ type RegistrationStore interface {
 	CreateRunnerBootstrapToken(ctx context.Context, t store.RunnerBootstrapToken) error
 }
 
-type SetupVerifier interface {
-	VerifySetupToken(ctx context.Context, setupToken, owner, name string) (SetupRepository, error)
-}
-
-type AppInstallationVerifier interface {
-	VerifyAppInstallation(ctx context.Context, installationID int64, owner, name string) error
-}
-
 type SetupRepository struct {
-	GitHubID       int64
-	InstallationID int64
+	ID             int64
 	Owner          string
 	Name           string
+	FullName       string
 	DefaultBranch  string
 	Private        bool
 	Admin          bool
+	InstallationID int64
+	AccountLogin   string
+	AccountID      int64
+	AccountType    string
 }
 
-type GitHubSetupVerifier struct{}
+type SetupVerifier interface {
+	VerifySetupRepository(ctx context.Context, setupToken string, owner string, name string) (SetupRepository, error)
+}
 
-func (v GitHubSetupVerifier) VerifySetupToken(ctx context.Context, setupToken, owner, name string) (SetupRepository, error) {
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: setupToken})
-	ghClient := gh.NewClient(oauth2.NewClient(ctx, ts))
+type AppInstallationVerifier interface {
+	VerifyAppAccess(ctx context.Context, installationID int64, owner string, name string) error
+}
 
-	repo, _, err := ghClient.Repositories.Get(ctx, owner, name)
+type RegisterHandler struct {
+	store           RegistrationStore
+	setupVerifier   SetupVerifier
+	appVerifier     AppInstallationVerifier
+	appLogin        string
+	controlPlaneURL string
+	now             func() time.Time
+}
+
+type RegisterHandlerOptions struct {
+	Store           RegistrationStore
+	SetupVerifier   SetupVerifier
+	AppVerifier     AppInstallationVerifier
+	AppLogin        string
+	ControlPlaneURL string
+	Now             func() time.Time
+}
+
+func NewRegisterHandler(opts RegisterHandlerOptions) http.Handler {
+	h := RegisterHandler{
+		store:           opts.Store,
+		setupVerifier:   opts.SetupVerifier,
+		appVerifier:     opts.AppVerifier,
+		appLogin:        normalizeAppLogin(opts.AppLogin),
+		controlPlaneURL: strings.TrimSpace(opts.ControlPlaneURL),
+		now:             opts.Now,
+	}
+	if h.now == nil {
+		h.now = func() time.Time { return time.Now().UTC() }
+	}
+	return h
+}
+
+func NewDefaultRegisterHandler(store RegistrationStore, appCfg appauth.AppConfig, appLogin string, controlPlaneURL string) (http.Handler, error) {
+	tokenSource, _, err := appauth.NewGitHubTokenSource(appCfg)
 	if err != nil {
-		return SetupRepository{}, err
+		return nil, err
 	}
-	installation, _, err := ghClient.Apps.FindRepositoryInstallation(ctx, owner, name)
-	if err != nil {
-		return SetupRepository{}, err
-	}
-	perms := repo.GetPermissions()
-	return SetupRepository{
-		GitHubID:       repo.GetID(),
-		InstallationID: installation.GetID(),
-		Owner:          owner,
-		Name:           name,
-		DefaultBranch:  repo.GetDefaultBranch(),
-		Private:        repo.GetPrivate(),
-		Admin:          perms["admin"] || perms["maintain"],
-	}, nil
+	return NewRegisterHandler(RegisterHandlerOptions{
+		Store:           store,
+		SetupVerifier:   githubSetupVerifier{},
+		AppVerifier:     githubAppVerifier{source: tokenSource},
+		AppLogin:        appLogin,
+		ControlPlaneURL: controlPlaneURL,
+	}), nil
 }
 
-type GitHubAppVerifier struct {
-	TokenSource appauth.TokenSource
-}
-
-func (v GitHubAppVerifier) VerifyAppInstallation(ctx context.Context, installationID int64, owner, name string) error {
-	client, _, err := appauth.NewInstallationClient(ctx, v.TokenSource, installationID)
-	if err != nil {
-		return err
-	}
-	if _, _, err := client.Repositories.Get(ctx, owner, name); err != nil {
-		return err
-	}
-	return nil
-}
-
-type Registrar struct {
-	Store       RegistrationStore
-	Setup       SetupVerifier
-	App         AppInstallationVerifier
-	AppLogin    string
-	ControlURL  string
-	Now         func() time.Time
-	TokenSource func() (string, error)
-}
-
-func (r Registrar) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.store == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "repository registration storage is not configured"})
 		return
 	}
-	in, err := decodeRequest(req)
-	resp, status := r.Register(req.Context(), in, err)
-	writeJSON(w, status, resp)
-}
-
-func (r Registrar) Register(ctx context.Context, in client.RegisterRepositoryRequest, decodeErr error) (any, int) {
-	if decodeErr != nil {
-		return errorBody("invalid JSON request body"), http.StatusBadRequest
+	if h.setupVerifier == nil || h.appVerifier == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "repository registration GitHub verification is not configured"})
+		return
 	}
-	owner, name, err := normalizeRegistrationRepository(in)
+
+	var req cpclient.RegisterRepositoryRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPayloadBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON registration request"})
+		return
+	}
+	req.Owner = strings.TrimSpace(req.Owner)
+	req.Name = strings.TrimSpace(req.Name)
+	req.Repository = strings.TrimSpace(req.Repository)
+	if req.Owner == "" || req.Name == "" {
+		parts := strings.Split(req.Repository, "/")
+		if len(parts) == 2 {
+			req.Owner = strings.TrimSpace(parts[0])
+			req.Name = strings.TrimSpace(parts[1])
+		}
+	}
+	if req.Owner == "" || req.Name == "" || strings.TrimSpace(req.SetupToken) == "" {
+		h.recordAttempt(r.Context(), 0, 0, req.Owner, req.Name, "rejected", "missing owner, name, or setup_token")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "owner, name, and setup_token are required"})
+		return
+	}
+	if requestedApp := normalizeAppLogin(req.AppLogin); requestedApp != "" && h.appLogin != "" && requestedApp != h.appLogin {
+		h.recordAttempt(r.Context(), 0, 0, req.Owner, req.Name, "rejected", "requested app_login does not match this Herd control plane")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "app_login does not match this Herd control plane; install the configured Herd GitHub App and retry `herd init`"})
+		return
+	}
+
+	setupRepo, err := h.setupVerifier.VerifySetupRepository(r.Context(), req.SetupToken, req.Owner, req.Name)
 	if err != nil {
-		return errorBody(err.Error()), http.StatusBadRequest
+		h.recordAttempt(r.Context(), 0, 0, req.Owner, req.Name, "rejected", err.Error())
+		status := http.StatusBadGateway
+		msg := "verify GitHub setup credential: run `gh auth login -h github.com` with an account that has admin access to the repository"
+		if errors.Is(err, ErrRepoUnauthorized) {
+			status = http.StatusForbidden
+			msg = "repository registration requires a GitHub account with admin access; run `gh auth login -h github.com` as a repo admin and retry"
+		}
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
 	}
-	if strings.TrimSpace(in.SetupToken) == "" {
-		return errorBody("setup_token is required; run `gh auth login -h github.com` before `herd init`"), http.StatusBadRequest
+	if !setupRepo.Admin {
+		h.recordAttempt(r.Context(), setupRepo.ID, setupRepo.InstallationID, req.Owner, req.Name, "rejected", ErrRepoUnauthorized.Error())
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "repository registration requires admin access; run `gh auth login -h github.com` as a repo admin and retry"})
+		return
 	}
-	if r.Store == nil || r.Setup == nil || r.App == nil {
-		return errorBody("repository registration is not configured on this Herd control plane"), http.StatusServiceUnavailable
+	if setupRepo.InstallationID == 0 {
+		h.recordAttempt(r.Context(), setupRepo.ID, 0, req.Owner, req.Name, "rejected", ErrAppInstallation.Error())
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Herd GitHub App is not installed for this repository; install the App for the repository and retry `herd init`"})
+		return
 	}
-	appLogin := strings.TrimSpace(in.AppLogin)
-	if appLogin == "" {
-		appLogin = strings.TrimSpace(r.AppLogin)
-	}
-	if appLogin == "" {
-		appLogin = "herd-os"
-	}
-
-	repo, err := r.Setup.VerifySetupToken(ctx, in.SetupToken, owner, name)
-	if err != nil {
-		_ = r.recordAttempt(ctx, owner, name, 0, 0, "rejected", err.Error())
-		return errorBody("GitHub setup authorization failed; run `gh auth login -h github.com` with an account that has admin access to " + owner + "/" + name), http.StatusUnauthorized
-	}
-	if !repo.Admin {
-		msg := "GitHub setup credential does not have admin access to " + owner + "/" + name + "; use an admin account or update repository permissions"
-		_ = r.recordAttempt(ctx, owner, name, repo.GitHubID, repo.InstallationID, "rejected", msg)
-		return errorBody(msg), http.StatusForbidden
-	}
-	if repo.InstallationID == 0 {
-		msg := "GitHub App @" + strings.TrimPrefix(appLogin, "@") + " is not installed on " + owner + "/" + name + "; install the App and retry `herd init`"
-		_ = r.recordAttempt(ctx, owner, name, repo.GitHubID, 0, "rejected", msg)
-		return errorBody(msg), http.StatusForbidden
-	}
-	if err := r.App.VerifyAppInstallation(ctx, repo.InstallationID, owner, name); err != nil {
-		msg := "GitHub App @" + strings.TrimPrefix(appLogin, "@") + " cannot access " + owner + "/" + name + "; install or grant repository access to the App and retry `herd init`"
-		_ = r.recordAttempt(ctx, owner, name, repo.GitHubID, repo.InstallationID, "rejected", msg)
-		return errorBody(msg), http.StatusForbidden
+	if err := h.appVerifier.VerifyAppAccess(r.Context(), setupRepo.InstallationID, req.Owner, req.Name); err != nil {
+		h.recordAttempt(r.Context(), setupRepo.ID, setupRepo.InstallationID, req.Owner, req.Name, "rejected", err.Error())
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Herd GitHub App installation cannot access this repository; update the App installation repository selection and retry `herd init`"})
+		return
 	}
 
-	now := time.Now().UTC()
-	if r.Now != nil {
-		now = r.Now().UTC()
-	}
-	if repo.DefaultBranch == "" {
-		repo.DefaultBranch = "main"
-	}
-	if err := r.Store.UpsertInstallation(ctx, store.Installation{
-		ID:           repo.InstallationID,
-		AccountLogin: owner,
-		TargetType:   "Repository",
-		CreatedAt:    now,
+	now := h.now()
+	if err := h.store.UpsertInstallation(r.Context(), store.Installation{
+		ID:           setupRepo.InstallationID,
+		AccountLogin: setupRepo.AccountLogin,
+		AccountID:    setupRepo.AccountID,
+		TargetType:   setupRepo.AccountType,
+		Permissions:  json.RawMessage(`{}`),
 		UpdatedAt:    now,
 	}); err != nil {
-		return errorBody("storing GitHub App installation failed"), http.StatusInternalServerError
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store GitHub App installation: storage unavailable"})
+		return
 	}
-	stored, err := r.Store.UpsertRepository(ctx, store.Repository{
-		GitHubID:       repo.GitHubID,
-		InstallationID: repo.InstallationID,
-		Owner:          owner,
-		Name:           name,
-		DefaultBranch:  repo.DefaultBranch,
-		Private:        repo.Private,
+	repo, err := h.store.UpsertRepository(r.Context(), store.Repository{
+		GitHubID:       setupRepo.ID,
+		InstallationID: setupRepo.InstallationID,
+		Owner:          req.Owner,
+		Name:           req.Name,
+		DefaultBranch:  setupRepo.DefaultBranch,
+		Private:        setupRepo.Private,
 		RegisteredAt:   now,
 		UpdatedAt:      now,
+		Metadata:       mustJSON(map[string]any{"full_name": setupRepo.FullName, "registered_by": "setup"}),
 	})
 	if err != nil {
-		return errorBody("storing repository registration failed"), http.StatusInternalServerError
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store repository registration: storage unavailable"})
+		return
 	}
-	token, err := r.newBootstrapToken()
+	plainToken, tokenHash, err := newBootstrapToken()
 	if err != nil {
-		return errorBody("generating runner bootstrap token failed"), http.StatusInternalServerError
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "generate runner bootstrap token"})
+		return
 	}
-	tokenHash := hashBootstrapToken(token)
-	if err := r.Store.CreateRunnerBootstrapToken(ctx, store.RunnerBootstrapToken{
-		RepositoryID: stored.ID,
+	if err := h.store.CreateRunnerBootstrapToken(r.Context(), store.RunnerBootstrapToken{
+		RepositoryID: repo.ID,
 		TokenHash:    tokenHash,
 		CreatedAt:    now,
 		ExpiresAt:    now.Add(defaultBootstrapTokenTTL),
 	}); err != nil {
-		return errorBody("storing runner bootstrap token failed"), http.StatusInternalServerError
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store runner bootstrap token: storage unavailable"})
+		return
 	}
-	_ = r.recordAttempt(ctx, owner, name, stored.ID, repo.InstallationID, "registered", "")
+	h.recordAttempt(r.Context(), repo.ID, setupRepo.InstallationID, req.Owner, req.Name, "registered", "")
 
-	return client.RegisterRepositoryResponse{
-		RepositoryID:         stored.ID,
-		InstallationID:       repo.InstallationID,
-		RunnerBootstrapToken: token,
-		ControlPlaneURL:      r.ControlURL,
-	}, http.StatusOK
+	writeJSON(w, http.StatusCreated, cpclient.RegisterRepositoryResponse{
+		RepositoryID:         repo.ID,
+		InstallationID:       setupRepo.InstallationID,
+		RunnerBootstrapToken: plainToken,
+		ControlPlaneURL:      h.controlPlaneURL,
+	})
 }
 
-func decodeRequest(req *http.Request) (client.RegisterRepositoryRequest, error) {
-	var in client.RegisterRepositoryRequest
-	err := json.NewDecoder(req.Body).Decode(&in)
-	return in, err
-}
-
-func normalizeRegistrationRepository(in client.RegisterRepositoryRequest) (string, string, error) {
-	owner := strings.TrimSpace(in.Owner)
-	name := strings.TrimSpace(in.Name)
-	if owner == "" || name == "" {
-		repo := strings.Trim(strings.TrimSpace(in.Repository), "/")
-		parts := strings.Split(repo, "/")
-		if len(parts) == 2 {
-			if owner == "" {
-				owner = parts[0]
-			}
-			if name == "" {
-				name = parts[1]
-			}
-		}
+func (h RegisterHandler) recordAttempt(ctx context.Context, repositoryID int64, installationID int64, owner string, name string, status string, msg string) {
+	if h.store == nil {
+		return
 	}
-	if owner == "" || name == "" {
-		return "", "", fmt.Errorf("repository owner and name are required")
-	}
-	return owner, name, nil
-}
-
-func (r Registrar) recordAttempt(ctx context.Context, owner, name string, repoID, installationID int64, status, msg string) error {
-	if r.Store == nil {
-		return nil
-	}
-	return r.Store.CreateRegistrationAttempt(ctx, store.RegistrationAttempt{
-		RepositoryID:   repoID,
+	_ = h.store.CreateRegistrationAttempt(ctx, store.RegistrationAttempt{
+		RepositoryID:   repositoryID,
 		InstallationID: installationID,
 		Owner:          owner,
 		Name:           name,
 		Status:         status,
 		Error:          msg,
-		CreatedAt:      time.Now().UTC(),
+		Metadata:       json.RawMessage(`{}`),
+		CreatedAt:      h.now(),
 	})
 }
 
-func (r Registrar) newBootstrapToken() (string, error) {
-	if r.TokenSource != nil {
-		return r.TokenSource()
+type githubSetupVerifier struct{}
+
+func (githubSetupVerifier) VerifySetupRepository(ctx context.Context, setupToken string, owner string, name string) (SetupRepository, error) {
+	httpClient := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: setupToken}))
+	client := ghapi.NewClient(httpClient)
+	if _, _, err := client.Users.Get(ctx, ""); err != nil {
+		return SetupRepository{}, fmt.Errorf("verify authenticated GitHub user: %w", err)
 	}
-	raw := make([]byte, 32)
+	repo, _, err := client.Repositories.Get(ctx, owner, name)
+	if err != nil {
+		return SetupRepository{}, fmt.Errorf("verify repository access: %w", err)
+	}
+	admin := repo.GetPermissions()["admin"]
+	if !admin {
+		return SetupRepository{}, ErrRepoUnauthorized
+	}
+	installation, _, err := client.Apps.FindRepositoryInstallation(ctx, owner, name)
+	if err != nil {
+		return SetupRepository{}, ErrAppInstallation
+	}
+	out := SetupRepository{
+		ID:             repo.GetID(),
+		Owner:          owner,
+		Name:           name,
+		FullName:       repo.GetFullName(),
+		DefaultBranch:  repo.GetDefaultBranch(),
+		Private:        repo.GetPrivate(),
+		Admin:          true,
+		InstallationID: installation.GetID(),
+	}
+	if installation.GetAccount() != nil {
+		out.AccountLogin = installation.GetAccount().GetLogin()
+		out.AccountID = installation.GetAccount().GetID()
+		out.AccountType = installation.GetAccount().GetType()
+	}
+	return out, nil
+}
+
+type githubAppVerifier struct {
+	source appauth.TokenSource
+}
+
+func (v githubAppVerifier) VerifyAppAccess(ctx context.Context, installationID int64, owner string, name string) error {
+	client, _, err := appauth.NewInstallationClient(ctx, v.source, installationID)
+	if err != nil {
+		return err
+	}
+	repo, _, err := client.Repositories.Get(ctx, owner, name)
+	if err != nil {
+		return ErrAppInstallationMatch
+	}
+	if !strings.EqualFold(repo.GetOwner().GetLogin(), owner) || !strings.EqualFold(repo.GetName(), name) {
+		return ErrAppInstallationMatch
+	}
+	return nil
+}
+
+func newBootstrapToken() (plain string, hash string, err error) {
+	raw := make([]byte, bootstrapTokenBytes)
 	if _, err := rand.Read(raw); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return "hrb_" + base64.RawURLEncoding.EncodeToString(raw), nil
+	plain = "hrb_" + hex.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(plain))
+	return plain, hex.EncodeToString(sum[:]), nil
 }
 
-func hashBootstrapToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
-
-func errorBody(msg string) map[string]string {
-	return map[string]string{"error": msg}
+func normalizeAppLogin(login string) string {
+	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(login)), "@")
 }

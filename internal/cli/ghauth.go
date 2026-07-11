@@ -9,54 +9,66 @@ import (
 	"strings"
 )
 
-var errGHNotFound = errors.New("gh CLI is not installed")
+var (
+	errGHMissing         = errors.New("gh CLI is not installed")
+	errGHUnauthenticated = errors.New("gh CLI is not authenticated for github.com")
+	errGHEmptyToken      = errors.New("gh auth token returned an empty token")
+)
 
-type ghRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
-
-type ghAuthenticator struct {
-	run ghRunner
+type ghCommandRunner interface {
+	LookPath(file string) (string, error)
+	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
-func newGHAuthenticator() ghAuthenticator {
-	return ghAuthenticator{run: runGHCommand}
+type execGHCommandRunner struct{}
+
+func (execGHCommandRunner) LookPath(file string) (string, error) {
+	return exec.LookPath(file)
 }
 
-func (a ghAuthenticator) SetupToken(ctx context.Context) (string, error) {
-	if a.run == nil {
-		a.run = runGHCommand
-	}
-	if _, err := a.run(ctx, "gh", "auth", "status", "-h", "github.com"); err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return "", fmt.Errorf("%w: install GitHub CLI and run `gh auth login -h github.com`", errGHNotFound)
-		}
-		return "", fmt.Errorf("GitHub CLI is not authenticated for github.com: run `gh auth login -h github.com` and ensure the active account can administer this repository: %w", err)
-	}
+func (execGHCommandRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd.CombinedOutput()
+}
 
-	out, err := a.run(ctx, "gh", "auth", "token", "-h", "github.com")
+type ghAuthorizer struct {
+	runner ghCommandRunner
+}
+
+func newGHAuthorizer(runner ghCommandRunner) ghAuthorizer {
+	if runner == nil {
+		runner = execGHCommandRunner{}
+	}
+	return ghAuthorizer{runner: runner}
+}
+
+func (a ghAuthorizer) SetupToken(ctx context.Context) (string, error) {
+	if _, err := a.runner.LookPath("gh"); err != nil {
+		return "", fmt.Errorf("%w: install GitHub CLI and run `gh auth login -h github.com`", errGHMissing)
+	}
+	statusOut, err := a.runner.Run(ctx, "gh", "auth", "status", "-h", "github.com")
 	if err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return "", fmt.Errorf("%w: install GitHub CLI and run `gh auth login -h github.com`", errGHNotFound)
+		msg := strings.TrimSpace(string(statusOut))
+		if msg == "" {
+			msg = err.Error()
 		}
-		return "", fmt.Errorf("could not read GitHub setup token from gh: run `gh auth login -h github.com`: %w", err)
+		return "", fmt.Errorf("%w: run `gh auth login -h github.com` with an account that has admin access to this repository (%s)", errGHUnauthenticated, msg)
 	}
-	token := strings.TrimSpace(string(out))
+	if !bytes.Contains(bytes.ToLower(statusOut), []byte("github.com")) {
+		return "", fmt.Errorf("%w: run `gh auth login -h github.com`; current gh auth status did not report github.com", errGHUnauthenticated)
+	}
+
+	tokenOut, err := a.runner.Run(ctx, "gh", "auth", "token", "-h", "github.com")
+	if err != nil {
+		msg := strings.TrimSpace(string(tokenOut))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("get setup token from gh: run `gh auth login -h github.com` and retry (%s)", msg)
+	}
+	token := strings.TrimSpace(string(tokenOut))
 	if token == "" {
-		return "", fmt.Errorf("GitHub CLI returned an empty setup token: run `gh auth login -h github.com` and retry")
+		return "", fmt.Errorf("%w: run `gh auth login -h github.com` and retry", errGHEmptyToken)
 	}
 	return token, nil
-}
-
-func runGHCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return nil, fmt.Errorf("%w: %s", err, msg)
-		}
-		return nil, err
-	}
-	return out, nil
 }

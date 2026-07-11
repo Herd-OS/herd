@@ -1,43 +1,61 @@
 package github
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/herd-os/herd/internal/controlplane/client"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-type fakeRegistrationStore struct {
+type registerFakeStore struct {
 	installations []store.Installation
-	repositories  []store.Repository
+	repositories  map[string]store.Repository
 	attempts      []store.RegistrationAttempt
 	tokens        []store.RunnerBootstrapToken
+	err           error
 }
 
-func (s *fakeRegistrationStore) UpsertInstallation(_ context.Context, i store.Installation) error {
+func newRegisterFakeStore() *registerFakeStore {
+	return &registerFakeStore{repositories: map[string]store.Repository{}}
+}
+
+func (s *registerFakeStore) UpsertInstallation(_ context.Context, i store.Installation) error {
+	if s.err != nil {
+		return s.err
+	}
 	s.installations = append(s.installations, i)
 	return nil
 }
 
-func (s *fakeRegistrationStore) UpsertRepository(_ context.Context, r store.Repository) (store.Repository, error) {
-	r.ID = 99
-	s.repositories = append(s.repositories, r)
+func (s *registerFakeStore) UpsertRepository(_ context.Context, r store.Repository) (store.Repository, error) {
+	if s.err != nil {
+		return store.Repository{}, s.err
+	}
+	if r.ID == 0 {
+		r.ID = 1234
+	}
+	s.repositories[r.Owner+"/"+r.Name] = r
 	return r, nil
 }
 
-func (s *fakeRegistrationStore) CreateRegistrationAttempt(_ context.Context, a store.RegistrationAttempt) error {
+func (s *registerFakeStore) CreateRegistrationAttempt(_ context.Context, a store.RegistrationAttempt) error {
 	s.attempts = append(s.attempts, a)
 	return nil
 }
 
-func (s *fakeRegistrationStore) CreateRunnerBootstrapToken(_ context.Context, t store.RunnerBootstrapToken) error {
-	s.tokens = append(s.tokens, t)
+func (s *registerFakeStore) CreateRunnerBootstrapToken(_ context.Context, tok store.RunnerBootstrapToken) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.tokens = append(s.tokens, tok)
 	return nil
 }
 
@@ -47,7 +65,7 @@ type fakeSetupVerifier struct {
 	got  string
 }
 
-func (v *fakeSetupVerifier) VerifySetupToken(_ context.Context, setupToken, _, _ string) (SetupRepository, error) {
+func (v *fakeSetupVerifier) VerifySetupRepository(_ context.Context, setupToken string, _ string, _ string) (SetupRepository, error) {
 	v.got = setupToken
 	return v.repo, v.err
 }
@@ -57,137 +75,154 @@ type fakeAppVerifier struct {
 	installationID int64
 }
 
-func (v *fakeAppVerifier) VerifyAppInstallation(_ context.Context, installationID int64, _, _ string) error {
+func (v *fakeAppVerifier) VerifyAppAccess(_ context.Context, installationID int64, _ string, _ string) error {
 	v.installationID = installationID
 	return v.err
 }
 
-func TestRegistrarRegistersAdminRepositoryAndStoresHashedBootstrapToken(t *testing.T) {
-	st := &fakeRegistrationStore{}
-	setup := &fakeSetupVerifier{repo: SetupRepository{
-		GitHubID:       123,
-		InstallationID: 456,
-		Owner:          "octo",
-		Name:           "repo",
-		DefaultBranch:  "main",
-		Admin:          true,
-	}}
+func TestRegisterHandlerValidRegistration(t *testing.T) {
+	st := newRegisterFakeStore()
+	setup := &fakeSetupVerifier{repo: validSetupRepository()}
 	app := &fakeAppVerifier{}
-	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
-	registrar := Registrar{
-		Store:       st,
-		Setup:       setup,
-		App:         app,
-		AppLogin:    "herd-os",
-		ControlURL:  "https://cp.example.com",
-		Now:         func() time.Time { return now },
-		TokenSource: func() (string, error) { return "bootstrap-token", nil },
+	handler := NewRegisterHandler(RegisterHandlerOptions{
+		Store:           st,
+		SetupVerifier:   setup,
+		AppVerifier:     app,
+		AppLogin:        "herd-os",
+		ControlPlaneURL: "https://api.herd-os.com",
+		Now:             func() time.Time { return time.Unix(100, 0).UTC() },
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, registerRequest(`{"repository":"octo/herd","owner":"octo","name":"herd","setup_token":"gho_human","app_login":"@herd-os"}`))
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var resp struct {
+		RepositoryID         int64  `json:"repository_id"`
+		InstallationID       int64  `json:"installation_id"`
+		RunnerBootstrapToken string `json:"runner_bootstrap_token"`
 	}
-
-	body, status := registrar.Register(context.Background(), client.RegisterRepositoryRequest{
-		Repository: "octo/repo",
-		SetupToken: "setup-token",
-	}, nil)
-
-	require.Equal(t, http.StatusOK, status)
-	resp, ok := body.(client.RegisterRepositoryResponse)
-	require.True(t, ok)
-	assert.Equal(t, int64(99), resp.RepositoryID)
-	assert.Equal(t, int64(456), resp.InstallationID)
-	assert.Equal(t, "bootstrap-token", resp.RunnerBootstrapToken)
-	assert.Equal(t, "https://cp.example.com", resp.ControlPlaneURL)
-	assert.Equal(t, "setup-token", setup.got)
-	require.Len(t, st.repositories, 1)
-	assert.Equal(t, int64(123), st.repositories[0].GitHubID)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, int64(1234), resp.RepositoryID)
+	assert.Equal(t, int64(42), resp.InstallationID)
+	assert.NotEmpty(t, resp.RunnerBootstrapToken)
+	assert.Equal(t, "gho_human", setup.got)
+	assert.Equal(t, int64(42), app.installationID)
 	require.Len(t, st.tokens, 1)
-	assert.Equal(t, int64(99), st.tokens[0].RepositoryID)
-	assert.Equal(t, hashBootstrapToken("bootstrap-token"), st.tokens[0].TokenHash)
-	assert.NotEqual(t, "bootstrap-token", st.tokens[0].TokenHash)
+	assert.Equal(t, int64(1234), st.tokens[0].RepositoryID)
+	assert.NotEqual(t, resp.RunnerBootstrapToken, st.tokens[0].TokenHash)
+	assert.NotContains(t, st.tokens[0].TokenHash, "gho_human")
 	require.Len(t, st.attempts, 1)
 	assert.Equal(t, "registered", st.attempts[0].Status)
-	assert.NotContains(t, st.attempts[0].Error, "setup-token")
-}
-
-func TestRegistrarRejectsInsufficientPermissionWithoutPersistingToken(t *testing.T) {
-	st := &fakeRegistrationStore{}
-	registrar := Registrar{
-		Store: st,
-		Setup: &fakeSetupVerifier{repo: SetupRepository{
-			GitHubID:       123,
-			InstallationID: 456,
-			Admin:          false,
-		}},
-		App:      &fakeAppVerifier{},
-		AppLogin: "herd-os",
+	for _, attempt := range st.attempts {
+		assert.NotContains(t, attempt.Error, "gho_human")
+		assert.NotContains(t, string(attempt.Metadata), "gho_human")
 	}
-
-	body, status := registrar.Register(context.Background(), client.RegisterRepositoryRequest{
-		Owner:      "octo",
-		Name:       "repo",
-		SetupToken: "setup-token",
-	}, nil)
-
-	require.Equal(t, http.StatusForbidden, status)
-	assert.Contains(t, body.(map[string]string)["error"], "admin access")
-	assert.Empty(t, st.tokens)
-	require.Len(t, st.attempts, 1)
-	assert.NotContains(t, st.attempts[0].Error, "setup-token")
 }
 
-func TestRegistrarRejectsAppInstallationMismatch(t *testing.T) {
-	st := &fakeRegistrationStore{}
-	registrar := Registrar{
-		Store: st,
-		Setup: &fakeSetupVerifier{repo: SetupRepository{
-			GitHubID:       123,
-			InstallationID: 456,
-			Admin:          true,
-		}},
-		App:      &fakeAppVerifier{err: errors.New("not found")},
-		AppLogin: "herd-os",
-	}
-
-	body, status := registrar.Register(context.Background(), client.RegisterRepositoryRequest{
-		Owner:      "octo",
-		Name:       "repo",
-		SetupToken: "setup-token",
-	}, nil)
-
-	require.Equal(t, http.StatusForbidden, status)
-	assert.Contains(t, body.(map[string]string)["error"], "install or grant repository access")
-	assert.Empty(t, st.tokens)
-	require.Len(t, st.attempts, 1)
-	assert.Equal(t, "rejected", st.attempts[0].Status)
-}
-
-func TestRegistrarValidationErrorsAreActionableJSON(t *testing.T) {
-	registrar := Registrar{Store: &fakeRegistrationStore{}, Setup: &fakeSetupVerifier{}, App: &fakeAppVerifier{}}
-
+func TestRegisterHandlerFailures(t *testing.T) {
 	tests := []struct {
 		name       string
-		req        client.RegisterRepositoryRequest
+		body       string
+		setup      *fakeSetupVerifier
+		app        *fakeAppVerifier
 		wantStatus int
 		wantError  string
 	}{
 		{
-			name:       "missing repo",
-			req:        client.RegisterRepositoryRequest{SetupToken: "token"},
+			name:       "missing setup token",
+			body:       `{"owner":"octo","name":"herd"}`,
+			setup:      &fakeSetupVerifier{repo: validSetupRepository()},
+			app:        &fakeAppVerifier{},
 			wantStatus: http.StatusBadRequest,
-			wantError:  "repository owner and name are required",
+			wantError:  "setup_token",
 		},
 		{
-			name:       "missing setup token",
-			req:        client.RegisterRepositoryRequest{Repository: "octo/repo"},
+			name:       "insufficient permission rejected",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{repo: SetupRepository{ID: 99, Admin: false, InstallationID: 42}},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusForbidden,
+			wantError:  "admin access",
+		},
+		{
+			name:       "setup verifier unauthorized",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{err: ErrRepoUnauthorized},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusForbidden,
+			wantError:  "gh auth login",
+		},
+		{
+			name:       "app not installed",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{repo: SetupRepository{ID: 99, Admin: true}},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusConflict,
+			wantError:  "GitHub App is not installed",
+		},
+		{
+			name:       "app installation mismatch",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{repo: validSetupRepository()},
+			app:        &fakeAppVerifier{err: ErrAppInstallationMatch},
+			wantStatus: http.StatusConflict,
+			wantError:  "App installation",
+		},
+		{
+			name:       "wrong app login",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human","app_login":"other-app"}`,
+			setup:      &fakeSetupVerifier{repo: validSetupRepository()},
+			app:        &fakeAppVerifier{},
 			wantStatus: http.StatusBadRequest,
-			wantError:  "gh auth login -h github.com",
+			wantError:  "app_login",
+		},
+		{
+			name:       "github unavailable",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{err: errors.New("github unavailable")},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusBadGateway,
+			wantError:  "setup credential",
 		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body, status := registrar.Register(context.Background(), tt.req, nil)
-			require.Equal(t, tt.wantStatus, status)
-			assert.Contains(t, body.(map[string]string)["error"], tt.wantError)
+			st := newRegisterFakeStore()
+			handler := NewRegisterHandler(RegisterHandlerOptions{
+				Store:         st,
+				SetupVerifier: tt.setup,
+				AppVerifier:   tt.app,
+				AppLogin:      "herd-os",
+			})
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, registerRequest(tt.body))
+
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			assert.Contains(t, rec.Body.String(), tt.wantError)
+			assert.Empty(t, st.tokens)
+			assert.NotContains(t, rec.Body.String(), "gho_human")
 		})
+	}
+}
+
+func registerRequest(body string) *http.Request {
+	return httptest.NewRequest(http.MethodPost, "/api/v1/github/repositories/register", bytes.NewBufferString(body))
+}
+
+func validSetupRepository() SetupRepository {
+	return SetupRepository{
+		ID:             99,
+		Owner:          "octo",
+		Name:           "herd",
+		FullName:       "octo/herd",
+		DefaultBranch:  "main",
+		Private:        true,
+		Admin:          true,
+		InstallationID: 42,
+		AccountLogin:   "octo",
+		AccountID:      100,
+		AccountType:    "Organization",
 	}
 }

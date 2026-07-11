@@ -16,11 +16,12 @@ services:
       dockerfile: Dockerfile.herd_runner
     restart: always
     environment:
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
       - REPO_URL=https://github.com/{{.Owner}}/{{.Repo}}
-      - RUNNER_LABELS=herd-worker
       - HERD_RUNNER_BOOTSTRAP_TOKEN=${HERD_RUNNER_BOOTSTRAP_TOKEN}
-      - HERD_CONTROL_PLANE_URL=${HERD_CONTROL_PLANE_URL:-}
+{{- if .ControlPlaneURL }}
+      - HERD_CONTROL_PLANE_URL={{.ControlPlaneURL}}
+{{- end }}
+      - RUNNER_LABELS=herd-worker
       # Optional UID/GID remap — see .env.herd.example. Defaults to 1001/1001
       # (the image's build-time UID/GID) when unset.
       - RUNNER_UID=${RUNNER_UID:-}

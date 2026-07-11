@@ -114,6 +114,24 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Rep
 	return r, nil
 }
 
+func (s *PostgresStore) GetRepository(ctx context.Context, owner string, name string) (Repository, error) {
+	var r Repository
+	var metadata []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, github_id, installation_id, owner, name, default_branch, private, registered_at, updated_at, metadata
+		FROM repositories
+		WHERE owner = $1 AND name = $2`, owner, name).Scan(
+		&r.ID, &r.GitHubID, &r.InstallationID, &r.Owner, &r.Name, &r.DefaultBranch, &r.Private, &r.RegisteredAt, &r.UpdatedAt, &metadata)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Repository{}, ErrNotFound
+	}
+	if err != nil {
+		return Repository{}, err
+	}
+	r.Metadata = json.RawMessage(metadata)
+	return r, nil
+}
+
 func (s *PostgresStore) CreateRegistrationAttempt(ctx context.Context, a RegistrationAttempt) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO registration_attempts (repository_id, installation_id, owner, name, status, error, metadata, created_at)
