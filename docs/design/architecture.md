@@ -50,11 +50,11 @@ The entire flow after `herd plan` is self-driving. The Planner dispatches Tier 0
 
 ### Review and Fix Details
 
-Agent review collects `/herd fix` comments from the batch PR before reviewing, so user-requested fixes are not flagged as violations. It then classifies findings by severity (HIGH, MEDIUM, LOW). HIGH and MEDIUM severity findings trigger fix workers. LOW findings are included in the PR comment for reference but do not block merge or create fix issues.
+Agent review collects `@herd-os fix` comments from the batch PR before reviewing, so user-requested fixes are not flagged as violations. It then classifies findings by severity (HIGH, MEDIUM, LOW). HIGH and MEDIUM severity findings trigger fix workers. LOW findings are included in the PR comment for reference but do not block merge or create fix issues.
 
 Each review cycle creates at most one batch fix issue containing all HIGH findings, rather than one issue per finding. The agent submits a Request Changes review to block merge while fix cycles are active. When the review passes, the agent approves and posts a batch summary with statistics (files reviewed, findings by severity, fix cycles used).
 
-After Herd has posted an approved review result for a PR head SHA, later automatic review triggers for that same head skip the agent; a new commit or manual `/herd review` requests a fresh pass.
+After Herd has posted an approved review result for a PR head SHA, later automatic review triggers for that same head skip the agent; a new commit or manual `@herd-os review` requests a fresh pass.
 
 Workers run pre-push validation before pushing changes. For Go repositories, this includes `go build`, `go test`, `go vet`, and `golangci-lint` (if available); build and test disable Go VCS stamping. If validation fails, the agent is retried once with the error output. Workers post structured reports on their issues with files changed, a summary of work done, and validation results.
 

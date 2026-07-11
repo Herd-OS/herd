@@ -1,5 +1,17 @@
 # Getting Started
 
+## Prerequisites
+
+1. Install the `herd` binary. See [installation.md](installation.md).
+2. Install the official HerdOS GitHub App (`@herd-os`) on the repository you want HerdOS to manage.
+3. Install GitHub CLI and authenticate before setup:
+
+   ```bash
+   gh auth login -h github.com
+   ```
+
+   `herd init` uses your `gh` login once to prove repository administration rights and register the repo with the HerdOS control plane. `gh` is not required in worker/runtime containers, and HerdOS production orchestration does not use your `gh` token or a Personal Access Token.
+
 ## Initialize a Repository
 
 Navigate to a git repository with a GitHub remote and run:
@@ -14,8 +26,9 @@ This will:
 2. **Create `.herd/` directory** — with empty role instruction files (`planner.md`, `worker.md`, `integrator.md`) for customizing agent behavior per role
 3. **Create GitHub labels** — the `herd/*` label taxonomy used to track issue status and type
 4. **Install workflow files** — GitHub Actions workflows for workers, integrator, and monitor in `.github/workflows/`
-5. **Create runner files** — `Dockerfile.herd_runner` (which `FROM`s the published `ghcr.io/herd-os/herd-runner-base` base image), `docker-compose.herd.yml`, and `.env.herd.example` for self-hosted runner setup (you can also run the container directly with `docker run` — see [Deployment options](runners.md#deployment-options))
-6. **Commit and open a PR** — creates a `herd/init-<version>` branch, commits all generated files, pushes, and opens a PR. Review and merge the PR to apply the changes.
+5. **Register with the control plane** — verifies the `@herd-os` GitHub App installation and writes a repo-scoped `HERD_RUNNER_BOOTSTRAP_TOKEN` into `.env`
+6. **Create runner files** — `Dockerfile.herd_runner` (which `FROM`s the published `ghcr.io/herd-os/herd-runner-base` base image), `docker-compose.herd.yml`, and `.env.herd.example` for self-hosted runner setup (you can also run the container directly with `docker run` — see [Deployment options](runners.md#deployment-options))
+7. **Commit and open a PR** — creates a `herd/init-<version>` branch, commits all generated files, pushes, and opens a PR. Review and merge the PR to apply the changes.
 
 The installed version is recorded in `.herd/state/version` (gitignored) and used on subsequent runs to decide between install, update, and sync.
 
@@ -28,6 +41,13 @@ gh variable set HERD_ENABLED --body true --repo <owner>/<repo>
 ```
 
 This prevents a workflow storm if runners are online before the system is fully configured.
+
+### Branch Protection
+
+Branch protection is configured by you in GitHub. HerdOS does not mutate branch
+protection rules. If `integrator.review` is enabled and you want Herd Review to
+block merges, add a required status check named exactly `Herd Review` to the
+protected branch. Do this only for repositories where Herd Review is enabled.
 
 ### Skipping Steps
 
@@ -245,9 +265,9 @@ Once workers are dispatched, the system runs autonomously via GitHub Actions:
 
 3. **Integrator advances** — After consolidation, the Integrator checks if the current tier is complete. If so, it unblocks and dispatches the next tier. When all tiers are done, it rebases the batch branch onto `main` and opens a single batch PR.
 
-4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. The review agent runs in a strict output mode (no tool calls, JSON-only output — see [Configuration: Agent Review](configuration.md#agent-review)). If the batch PR changes while a review is running, HerdOS discards that review result so it does not act on an outdated diff; the next trigger or a manual `/herd review` reviews the updated diff. After Herd approves a PR head SHA, repeated automatic review triggers for that same current head are logged no-ops instead of spending another review session; a new commit or manual `/herd review` asks for a fresh pass. If issues are found, the Integrator creates fix issues and dispatches fix workers. This cycle repeats up to `review_max_fix_cycles` times.
+4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. The review agent runs in a strict output mode (no tool calls, JSON-only output — see [Configuration: Agent Review](configuration.md#agent-review)). If the batch PR changes while a review is running, HerdOS discards that review result so it does not act on an outdated diff; the next trigger or a manual `@herd-os review` reviews the updated diff. After Herd approves a PR head SHA, repeated automatic review triggers for that same current head are logged no-ops instead of spending another review session; a new commit or manual `@herd-os review` asks for a fresh pass. If issues are found, the Integrator creates fix issues and dispatches fix workers. This cycle repeats up to `review_max_fix_cycles` times.
 
-5. **CI failure detection** — When `integrator.ci_workflows` lists your CI workflow names, `herd init` installs `workflow_run` self-heal triggers for those exact GitHub Actions workflows on batch branches. If configured CI fails, the Integrator re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`. CheckCI pauses dispatching a new CI fix worker if any fix-type worker — review fix, CI fix, or conflict resolution — is still in progress in the same batch milestone. The Monitor and `/herd fix-ci` remain fallback paths.
+5. **CI failure detection** — When `integrator.ci_workflows` lists your CI workflow names, `herd init` installs `workflow_run` self-heal triggers for those exact GitHub Actions workflows on batch branches. If configured CI fails, the Integrator re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`. CheckCI pauses dispatching a new CI fix worker if any fix-type worker — review fix, CI fix, or conflict resolution — is still in progress in the same batch milestone. The Monitor and `@herd-os fix-ci` remain fallback paths.
 
 6. **Monitor patrols** — A cron-triggered Action detects stale workers (in-progress with no active run), failed issues (auto-redispatches with exponential backoff), CI failures on batch PRs, and stuck PRs (open longer than `max_pr_age_hours`). It escalates to `notify_users` when retries are exhausted.
 
@@ -268,9 +288,9 @@ These are loaded automatically when the respective role runs.
 - **Tier stuck** — If any issue in a tier fails, the tier is stuck and the next tier won't be dispatched until the failure is resolved (manually or by the Monitor's auto-redispatch)
 - **Merge conflict** — When `on_conflict: dispatch-resolver`, the Integrator creates a conflict-resolution issue and dispatches a worker to resolve it. The number of attempts is limited by `max_conflict_resolution_attempts`; when that budget is exhausted, the batch enters cascade-failed state and the `herd/cascade-failed` label is applied to the batch PR — see [design/execution.md → When cascades fail](design/execution.md#when-cascades-fail). When `on_conflict: notify`, a comment is posted on the issue for manual resolution.
 - **Review safety valve** — If a single agent review finds more than 10 issues, fix workers are not created (to prevent runaway invocations). The PR is flagged for manual intervention.
-- **Stale review result** — If the batch PR changes during agent review, HerdOS discards that result instead of creating fix workers or approving based on an outdated diff. The updated diff is reviewed on a later trigger, or you can run `/herd review` manually.
-- **Duplicate approved-head review** — If an automatic trigger fires after Herd has already approved the current PR head SHA, HerdOS logs the skip and does not start another review agent. Use `/herd review` when you want a fresh pass without pushing a new commit.
-- **Unparseable review output** — If the review agent returns output that can't be parsed, the Integrator retries once after a 5-second delay within the same invocation. If both attempts fail, it posts an agent-review failure comment on the batch PR. Run `/herd review` on the PR to retry — the Integrator does not silently drop the review.
+- **Stale review result** — If the batch PR changes during agent review, HerdOS discards that result instead of creating fix workers or approving based on an outdated diff. The updated diff is reviewed on a later trigger, or you can run `@herd-os review` manually.
+- **Duplicate approved-head review** — If an automatic trigger fires after Herd has already approved the current PR head SHA, HerdOS logs the skip and does not start another review agent. Use `@herd-os review` when you want a fresh pass without pushing a new commit.
+- **Unparseable review output** — If the review agent returns output that can't be parsed, the Integrator retries once after a 5-second delay within the same invocation. If both attempts fail, it posts an agent-review failure comment on the batch PR. Run `@herd-os review` on the PR to retry — the Integrator does not silently drop the review.
 
 ### Manual Tasks
 
@@ -286,52 +306,57 @@ When a human submits a review on the batch PR, the Integrator's `re-review` job 
 herd review <pr-number>
 ```
 
-Opens an interactive read-only review session pre-loaded with the PR's diff, comments, and CI status. The agent reads code and discusses findings with you, and drafts `/herd fix` comments for any actionable changes — it never edits files locally. When you approve a draft, the agent posts it via `gh pr comment`, and herd's batch workers handle the actual edit like any other fix task.
+Opens an interactive read-only review session pre-loaded with the PR's diff, comments, and CI status. The agent reads code and discusses findings with you, and drafts `@herd-os fix` comments for any actionable changes — it never edits files locally. When you approve a draft, the agent posts it via `gh pr comment`, and herd's batch workers handle the actual edit like any other fix task.
 
 ## Comment Commands
 
-You can interact with HerdOS by posting `/herd` commands as comments on issues and PRs. Commands are available to repository owners, members, and collaborators.
+You can interact with HerdOS by posting `@herd-os` mention commands as comments
+on issues and PRs. Commands are available to repository owners, members, and
+collaborators. `/herd` slash-comment commands are no longer supported.
 
-When you post a command, HerdOS reacts with 👀 to acknowledge it, executes the command, and posts the result as a reply.
+When you post a command, the HerdOS GitHub App receives the webhook, authorizes
+the commenter, executes the command, and posts the result as a reply, review, or
+status update.
 
 ### Available Commands
 
 | Command | Where | Description |
 |---------|-------|-------------|
-| `/herd fix-ci` | Batch PR | Checks CI status and dispatches fix workers if failing |
-| `/herd fix-ci <hint>` | Batch PR | Same as above, with context passed to the fix worker |
-| `/herd retry <issue-number>` | Any issue/PR | Re-dispatches a failed issue |
-| `/herd review` | Any PR | Triggers agent review of the PR. On batch PRs, this manually requests a fresh pass for the current head even if an automatic review already approved it; findings create fix issues and dispatch workers. On non-batch PRs, only the severity-classified findings comment is posted. Non-HerdOS user comments on the PR are passed to the agent as feedback (e.g., to mark findings as false positives — see [User Feedback in Reviews](#user-feedback-in-reviews)). |
-| `/herd review <focus area>` | Any PR | Same as above, with extra review instructions |
-| `/herd fix <description>` | Any PR | Works on any PR. On a `herd/batch/` PR it goes through the batch fix cycle (fix issue in the milestone, consolidated by the Integrator, recognized by the reviewer). On any other PR it runs the standalone flow — a worker pushes the fix directly to the PR's branch. See [design/execution.md → Standalone /herd fix](design/execution.md#standalone-herd-fix) for details. |
-| `/herd integrate` | Any batch issue or PR | Manually triggers the integrator cycle (consolidate → check-ci → advance → review) for the batch. Useful for retrying after integrator failures. |
+| `@herd-os fix-ci` | Batch PR | Checks CI status and dispatches fix workers if failing |
+| `@herd-os fix-ci <hint>` | Batch PR | Same as above, with context passed to the fix worker |
+| `@herd-os retry <issue-number>` | Any issue/PR | Re-dispatches a failed issue |
+| `@herd-os review` | Any PR | Triggers agent review of the PR. On batch PRs, this manually requests a fresh pass for the current head even if an automatic review already approved it; findings create fix issues and dispatch workers. On non-batch PRs, only the severity-classified findings comment is posted. Non-HerdOS user comments on the PR are passed to the agent as feedback (e.g., to mark findings as false positives — see [User Feedback in Reviews](#user-feedback-in-reviews)). |
+| `@herd-os review <focus area>` | Any PR | Same as above, with extra review instructions |
+| `@herd-os fix <description>` | Any PR | Works on any PR. On a `herd/batch/` PR it goes through the batch fix cycle (fix issue in the milestone, consolidated by the Integrator, recognized by the reviewer). On any other PR it runs the standalone flow — a worker pushes the fix directly to the PR's branch. See [design/execution.md → Standalone @herd-os fix](design/execution.md#standalone-herd-os-fix) for details. |
+| `@herd-os integrate` | Any batch issue or PR | Manually triggers the integrator cycle (consolidate -> check-ci -> advance -> review) for the batch. Useful for retrying after integrator failures. |
 
-**Image support:** When you attach screenshots to `/herd fix` comments, workers automatically download GitHub-hosted attachment images and can view them directly. This is useful for UI bug fixes -- paste a screenshot of the problem or the desired result, and the worker will see it. Only GitHub attachment URLs are downloaded; external image URLs are left as-is for the agent to handle.
+**Image support:** When you attach screenshots to `@herd-os fix` comments, workers automatically download GitHub-hosted attachment images and can view them directly. This is useful for UI bug fixes -- paste a screenshot of the problem or the desired result, and the worker will see it. Only GitHub attachment URLs are downloaded; external image URLs are left as-is for the agent to handle.
 
 ### Examples
 
 ```
-/herd fix-ci the Node version file is missing from the Docker image
-/herd retry 42
-/herd review focus on error handling in the auth module
-/herd fix add missing error check in auth.go line 42
-/herd integrate
+@herd-os fix-ci the Node version file is missing from the Docker image
+@herd-os retry 42
+@herd-os review focus on error handling in the auth module
+@herd-os fix add missing error check in auth.go line 42
+@herd-os integrate
 ```
 
-`/herd retry` always re-runs the worker, and it is never a no-op just because a previous attempt's progress checklist looks complete. If the previous attempt finished its work but failed pre-push validation, the retry re-invokes the agent with the saved validation errors (the agent is told the progress file is stale) rather than skipping straight to reporting — the agent is skipped only when both the progress file is complete and the worker's validation marker is present. See [design/execution.md → Retry Resume](design/execution.md#retry-resume) for details.
+`@herd-os retry` always re-runs the worker, and it is never a no-op just because a previous attempt's progress checklist looks complete. If the previous attempt finished its work but failed pre-push validation, the retry re-invokes the agent with the saved validation errors (the agent is told the progress file is stale) rather than skipping straight to reporting — the agent is skipped only when both the progress file is complete and the worker's validation marker is present. See [design/execution.md → Retry Resume](design/execution.md#retry-resume) for details.
 
-When the integrator fails during any step (consolidation, CI check, advancement, or review), it posts a comment on the relevant issue or batch PR with the error details and a reminder to retry with `/herd integrate`.
+When the integrator fails during any step (consolidation, CI check, advancement, or review), it posts a comment on the relevant issue or batch PR with the error details and a reminder to retry with `@herd-os integrate`.
 
-Quotes around the prompt text are optional. You can paste error logs, JSON snippets, or any text directly after the command — everything after the command name (including subsequent lines) is treated as the prompt. The quoted format (`/herd fix "description"`) is also still supported.
+Quotes around the prompt text are optional. You can paste error logs, JSON snippets, or any text directly after the command — everything after the command name (including subsequent lines) is treated as the prompt. The quoted format (`@herd-os fix "description"`) is also supported.
 
-The Monitor also uses comment commands internally — it posts `/herd retry <N>` and `/herd fix-ci` comments instead of dispatching directly, keeping all command execution flowing through a single handler.
+The Monitor uses the same command handlers internally for retries and CI fixes,
+keeping command authorization and dispatch in one path.
 
 ### User Feedback in Reviews
 
-When `/herd review` runs on a PR, it collects non-HerdOS user comments from the PR and passes them to the review agent as context. This means:
+When `@herd-os review` runs on a PR, it collects non-HerdOS user comments from the PR and passes them to the review agent as context. This means:
 
 - If a review flags a false positive, comment on the PR explaining why (e.g., "The nil check finding is a false positive — the caller guarantees non-nil").
 - On the next review cycle, the agent will see your comment and avoid re-flagging the same issue.
 - User feedback is treated as authoritative by the review agent — if a user says a finding is a false positive or provides context explaining why the code is correct, the agent will accept that.
 
-HerdOS bot comments (review findings, integrator messages, worker progress) are automatically excluded from user feedback collection. This works for both batch PRs and standalone PRs reviewed with `/herd review`.
+HerdOS bot comments (review findings, integrator messages, worker progress) are automatically excluded from user feedback collection. This works for both batch PRs and standalone PRs reviewed with `@herd-os review`.

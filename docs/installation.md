@@ -109,7 +109,7 @@ cd /path/to/your/repo
 herd init
 ```
 
-You can preview what would change first with `herd init --check`, which re-renders every managed file and exits 1 if any are out of date — see [Runner Setup → Checking for updates](runners.md#8-checking-for-updates) for details.
+You can preview what would change first with `herd init --check`, which re-renders every managed file and exits 1 if any are out of date — see [Runner Setup → Checking for updates](runners.md#10-checking-for-updates) for details.
 
 `herd init` creates a `herd/init-<version>` branch, commits the updated files, pushes, and opens a PR. Review and merge the PR to apply the changes. Configuration (`.herdos.yml`) and role instructions (`.herd/*.md`) are never overwritten.
 
@@ -145,10 +145,15 @@ herd --version
 
 - **Git** — Herd operates on git repositories
 - **Docker** — required only for `agent.exec: docker` (running `herd plan` inside the runner image). Not needed for the default `local` execution. Also used for self-hosted runners (see [Runner Setup](runners.md))
-- **GitHub CLI** (`gh`) — optional, used as fallback for label creation during `herd init`
-- **GitHub account** — with write access to the target repository
+- **GitHub CLI** (`gh`) — required on the machine where you run `herd init`; run `gh auth login -h github.com` first. `gh` is a setup-time dependency only and is not required in worker/runtime containers.
+- **GitHub account** — with administrator access to the target repository for setup
+- **HerdOS GitHub App** — install the official `@herd-os` App on the target repository before `herd init`
 - **Self-hosted runners** — for worker execution. See [Runner Setup](runners.md) for Docker-based runner configuration
-- **GitHub Personal Access Token** — for runner registration and workflow dispatch. See [Runner Setup](runners.md) for details
+
+Production Herd orchestration no longer uses user-created GitHub Personal Access
+Tokens or a `HERD_GITHUB_TOKEN` secret. The GitHub App and HerdOS control plane
+own GitHub mutations; runner containers use `HERD_RUNNER_BOOTSTRAP_TOKEN` to
+obtain short-lived runner registration tokens.
 
 ## Release process (maintainers)
 
@@ -173,6 +178,7 @@ Builds binaries for all supported platforms, generates `checksums.txt`, and:
 
 - Uploads the linux-amd64 binary as a workflow artifact (`herd-linux-amd64`, retained for 1 day) so the follow-up `self-init` job can use the exact bits that were just built without racing the GitHub Release publish.
 - Publishes a GitHub Release via [`softprops/action-gh-release`](https://github.com/softprops/action-gh-release) with all platform binaries plus `checksums.txt` attached.
+- Publishes the control-plane service image as `ghcr.io/herd-os/herd-service`.
 - Updates the `herd-os/homebrew-tap` formula via `scripts/update-homebrew.sh` (only if `HERD_GITHUB_TOKEN` is set).
 - Updates the `herd-bin` AUR package via `scripts/update-aur.sh` (only if `AUR_SSH_PRIVATE_KEY` is set). The step runs inside an `archlinux:base-devel` container because `makepkg --printsrcinfo` is required to regenerate `.SRCINFO` and is not available on Ubuntu runners.
 
@@ -204,13 +210,20 @@ After each release, check whether a `Update HerdOS to <tag>` PR was opened again
 
 The `self-init` job needs `contents: write` and `pull-requests: write` permissions (already declared on the job).
 
+This maintainer release job has its own publishing token choice. It is not part
+of end-user HerdOS repository setup and is not used for production Herd
+orchestration in user repositories.
+
 For the GitHub token, the job uses:
 
 ```yaml
 token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
 ```
 
-Prefer `HERD_GITHUB_TOKEN` (a PAT with `contents` and `pull-requests` write) when available — PRs created by the default `GITHUB_TOKEN` do not trigger downstream workflows, which can hide CI failures on the self-init PR. The fallback to `GITHUB_TOKEN` keeps the job functional in forks or environments where the secret is not configured.
+For this maintainer-only release workflow, `HERD_GITHUB_TOKEN` may be a token
+with `contents` and `pull-requests` write so self-init PRs trigger downstream
+workflows. The fallback to `GITHUB_TOKEN` keeps the job functional in forks or
+environments where the secret is not configured.
 
 ### AUR (herd-bin) setup
 

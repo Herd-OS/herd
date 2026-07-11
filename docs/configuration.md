@@ -68,6 +68,26 @@ pull_requests:
   co_author_email: ""            # Co-authored-by email (set after installing the GitHub App)
 ```
 
+## Control Plane
+
+Hosted HerdOS uses `https://api.herd-os.com` by default. For the normal hosted
+path, leave `HERD_CONTROL_PLANE_URL` unset and do not add it to generated
+runner files. Self-hosted operators can point a repo at their own control plane:
+
+```bash
+herd init --control-plane-url https://herd.example.com
+```
+
+That persists the URL in generated runner/workflow configuration and in
+`.herdos.yml` where needed. `HERD_CONTROL_PLANE_URL` is the runtime override for
+workers, integrator callbacks, and runner registration. It must be an absolute
+`http` or `https` URL.
+
+`herd init` requires GitHub CLI on the setup machine because it calls
+`gh auth token` to prove repository administration rights during registration.
+`gh` is not required inside worker/runtime containers. Production orchestration
+uses the GitHub App and control plane, not `HERD_GITHUB_TOKEN` or a user PAT.
+
 ## Agent Providers
 
 `agent.provider` selects which AI coding agent the worker shells out to. Valid values are `claude` (Anthropic Claude Code, default), `opencode` ([OpenCode](https://opencode.ai)), and `codex` (OpenAI Codex CLI, API-key auth).
@@ -234,18 +254,18 @@ The review agent runs in a strict output mode. It is instructed not to take any 
 If the agent returns unparseable output (e.g., the JSON cannot be decoded, or the output is empty/error-like), the integrator retries once after a 5-second delay within the same invocation. If both attempts fail, the integrator posts the following comment on the batch PR and sets the review aside without creating fix workers:
 
 ```
-⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry.
+⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `@herd-os review` manually to retry.
 ```
 
-When you see that comment, run `/herd review` (optionally with a focus area) on the batch PR to trigger a fresh review. The integrator does not silently drop the review or auto-approve the PR.
+When you see that comment, comment `@herd-os review` (optionally with a focus area) on the batch PR to trigger a fresh review. The integrator does not silently drop the review or auto-approve the PR.
 
-Review retries and manual `/herd review` commands are serialized per batch PR by an application-level GitHub-backed review lock. If another review is already running, the duplicate trigger is skipped instead of launching another agent. Manual review still bypasses stable-disagreement suspension, but it respects the active-review lock. Existing active-fix guards still prevent duplicate fix cycles after review findings have already created fix issues.
+Review retries and manual `@herd-os review` commands are serialized per batch PR by an application-level GitHub-backed review lock. If another review is already running, the duplicate trigger is skipped instead of launching another agent. Manual review still bypasses stable-disagreement suspension, but it respects the active-review lock. Existing active-fix guards still prevent duplicate fix cycles after review findings have already created fix issues.
 
-Approved review results are also idempotent per PR head SHA for automatic triggers. Once a batch PR has a Herd review-result marker with `status: approved` for the current head, later automatic review triggers skip the agent and log a no-op instead of posting another PR comment. Manual `/herd review` is the force override: it asks for a fresh review of the current head even when an approved marker already exists. A new commit changes the head SHA and allows automatic review again; non-approved markers such as `changes_requested` and `max_cycles_hit` do not count as approved-head suppression.
+Approved review results are also idempotent per PR head SHA for automatic triggers. Once a batch PR has a Herd review-result marker with `status: approved` for the current head, later automatic review triggers skip the agent and log a no-op instead of posting another PR comment. Manual `@herd-os review` is the force override: it asks for a fresh review of the current head even when an approved marker already exists. A new commit changes the head SHA and allows automatic review again; non-approved markers such as `changes_requested` and `max_cycles_hit` do not count as approved-head suppression.
 
-When a batch review starts, HerdOS records the batch PR head SHA, then checks the current PR head again before applying the agent result. If the head changed while the agent was running, HerdOS discards that result, posts a comment on the batch PR, and leaves the updated diff for the next automatic trigger or manual `/herd review`.
+When a batch review starts, HerdOS records the batch PR head SHA, then checks the current PR head again before applying the agent result. If the head changed while the agent was running, HerdOS discards that result, posts a comment on the batch PR, and leaves the updated diff for the next automatic trigger or manual `@herd-os review`.
 
-If a manual `/herd review` is skipped because another review is active, HerdOS posts diagnostic lock metadata when available: owner, acquired time, expiry time, recorded head SHA, and current head SHA. A recorded head SHA that differs from the current PR head on an unexpired lock is diagnostic only; it does not allow a second concurrent review. Review lock expiry or release controls recovery.
+If a manual `@herd-os review` is skipped because another review is active, HerdOS posts diagnostic lock metadata when available: owner, acquired time, expiry time, recorded head SHA, and current head SHA. A recorded head SHA that differs from the current PR head on an unexpired lock is diagnostic only; it does not allow a second concurrent review. Review lock expiry or release controls recovery.
 
 Review-lock metadata is not merge approval. Merge approval uses the batch PR metadata and does not merge, approve, or consult `herd/review-lock/pr-N` branches.
 
@@ -255,7 +275,7 @@ Review-lock metadata is not merge approval. Merge approval uses the batch PR met
 
 `integrator.ci_workflows` defaults to an empty list. When non-empty, `herd init` renders `workflow_run` triggers for those exact GitHub Actions workflow names, and failed completed runs on `herd/batch/` branches can self-heal without waiting for the Monitor. The strings are matched exactly and preserved as configured, including punctuation and Unicode dashes.
 
-GitHub Actions CI uses `workflow_run` because `check_run` events are unreliable for some Actions-created check suites. The existing `check_run` path remains as a fallback for third-party check providers. The scheduled Monitor also remains a fallback for batch PR CI failures, and `/herd fix-ci` remains a manual override that can force a CI fix cycle.
+GitHub Actions CI uses `workflow_run` because `check_run` events are unreliable for some Actions-created check suites. The existing `check_run` path remains as a fallback for third-party check providers. The scheduled Monitor also remains a fallback for batch PR CI failures, and `@herd-os fix-ci` remains a manual override that can force a CI fix cycle.
 
 CI fix issues include the workflow/run URL, failed job URLs, head branch, head SHA, annotations when available, and either a short log excerpt or a logs-unavailable note. Obvious runner/log infrastructure failures are classified separately: Herd comments on the batch PR and does not dispatch code-fix workers for those by default.
 

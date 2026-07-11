@@ -1,6 +1,11 @@
 # GitHub Integration Design
 
-HerdOS treats GitHub as its database, event bus, and execution platform. All state lives in Issues, PRs, and Actions -- no local database, no custom server. This document consolidates the design for how HerdOS uses GitHub's primitives.
+HerdOS uses GitHub as the user-visible work surface: Issues describe tasks, PRs
+carry review context, Actions run workers, and commit statuses gate merges. A
+HerdOS control-plane service now owns GitHub App identity, webhook handling,
+runner registration-token minting, and GitHub-visible orchestration mutations.
+The hosted service runs at `https://api.herd-os.com`; self-hosted operators can
+run the same service and point repositories at it with `HERD_CONTROL_PLANE_URL`.
 
 ## 1. Issues as Work Items
 
@@ -47,7 +52,7 @@ Workers parse the front matter for metadata and pass the human-readable sections
 
 #### Body Size Limit
 
-GitHub caps issue and comment bodies at 65,536 characters. When herd creates an issue whose body would exceed a 65,000-char safety margin (e.g. a `/herd fix` issue with a long conversation history, a Review fix-issue with many findings, a CI fix-issue with a large log excerpt, or a conflict-resolution issue), the body is truncated at the last clean newline boundary and ends with the marker:
+GitHub caps issue and comment bodies at 65,536 characters. When herd creates an issue whose body would exceed a 65,000-char safety margin (e.g. an `@herd-os fix` issue with a long conversation history, a Review fix-issue with many findings, a CI fix-issue with a large log excerpt, or a conflict-resolution issue), the body is truncated at the last clean newline boundary and ends with the marker:
 
 > ⚠️ Body truncated to fit GitHub's 65536-char limit. See follow-up comment on this issue for the rest.
 
@@ -102,9 +107,15 @@ HerdOS ships three workflow files, installed by `herd init` into `.github/workfl
 
 ### Secrets Management
 
-Agent credentials are stored as repository secrets. The workflows pass all supported agent secrets; the CLI uses whichever matches the configured provider. Only one needs to be set. For Claude Code, the OAuth token is recommended as it shares an existing Pro/Max subscription at no extra per-token cost. On self-hosted runners where the agent is already authenticated locally, no agent secrets may be needed.
+Agent credentials are user-controlled and live in the self-hosted runner
+environment (`.env` for the Docker runner flow). The hosted HerdOS service does
+not receive Claude, OpenCode, Codex, or provider API credentials.
 
-`GITHUB_TOKEN` is provided automatically by GitHub Actions with permissions scoped to the repository.
+Production Herd orchestration does not use user-created GitHub PATs or
+`HERD_GITHUB_TOKEN`. GitHub-visible mutations are performed by the control plane
+using the installed GitHub App. GitHub Actions still provides its automatic
+`GITHUB_TOKEN` to workflow jobs, but HerdOS does not rely on a human PAT for
+workflow dispatch, runner registration, PR review, or status updates.
 
 ## 3. Event Architecture
 
@@ -137,7 +148,7 @@ Batch PR closed    -> pull_request.closed     -> Issues closed, cleanup
                                                       |
 Cron fires         -> schedule                -> Monitor patrols
 Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
-Comment posted     -> issue_comment.created   -> handle-comment parses and executes
+Comment posted     -> issue_comment.created   -> control plane parses @herd-os command
 ```
 
 ### Event Types
@@ -149,23 +160,26 @@ Comment posted     -> issue_comment.created   -> handle-comment parses and execu
 - **pull_request_review** -- triggers the Integrator to merge batch PRs after human approval + CI pass.
 - **pull_request** -- triggers cleanup when a batch PR is closed (merged or not). On merge: issues are closed, milestone is closed, branch is deleted. On close without merge: non-done issues are labelled `herd/status:cancelled` before closing, milestone is closed, and branch is deleted. Issues already `herd/status:done` are closed without relabelling in both cases.
 - **schedule** -- triggers Monitor patrol. GitHub may delay or skip scheduled runs under load; the Monitor is stateless and catches up on the next patrol.
-- **issue_comment** -- triggers the Integrator's `handle-comment` job when a comment starting with `/herd ` is posted. The workflow validates the commenter's permissions, parses the command, and executes it. This is the entry point for both user-initiated commands and Monitor-posted commands (retry, fix-ci).
+- **issue_comment** -- delivered to the control plane through the GitHub App webhook. Comments that mention the App login (`@herd-os` for the hosted App) are authorized against the human commenter and dispatched. `/herd` slash-comment commands are no longer a supported interface.
 
 All workflows require the `HERD_ENABLED` repository variable to be set to `true`. This prevents workflow storms when `herd init` pushes workflow files before runners are configured. All `${{ }}` expressions in `run:` blocks are passed through environment variables to prevent shell injection.
 
-The checkout action in all workflows uses `HERD_GITHUB_TOKEN` (falling back to `GITHUB_TOKEN`) to configure git credentials for pushes. `HERD_GITHUB_TOKEN` is a fine-grained PAT with the following permissions:
+The hosted GitHub App uses installation-scoped permissions:
 
 | Permission | Access | Why |
 |---|---|---|
-| Actions | Read and write | Dispatch worker workflows, list runs |
-| Administration | Read and write | Register self-hosted runners |
-| Checks | _(via Actions token)_ | CI check run results — fine-grained PATs cannot access this; workflows use the Actions-provided `GITHUB_TOKEN` as fallback |
-| Commit statuses | Read and write | Read/write commit statuses |
-| Contents | Read and write | Push branches, read repo contents |
+| Actions | Read and write | Dispatch worker workflows and list runs |
+| Administration | Read and write | Create short-lived self-hosted runner registration tokens |
+| Checks | Read | Read CI check state for diagnostics |
+| Commit statuses | Read and write | Set `Herd Review` |
+| Contents | Read and write | Push branches and read repo contents |
 | Issues | Read and write | Create/update/label issues and milestones |
-| Metadata | Read-only | Required by GitHub (automatic) |
-| Pull requests | Read and write | Create/update/comment on PRs |
-| Workflows | Read and write | Push workflow files, required for worker commits that modify `.github/workflows/` |
+| Metadata | Read | Required by GitHub Apps |
+| Pull requests | Read and write | Create/update/comment/review PRs |
+
+The App does not mutate branch protection. Users configure branch protection
+manually and should require the `Herd Review` status only when Herd Review is
+enabled for the repository.
 
 Issues auto-close via GitHub's native "Closes #N" references in the batch PR description when the PR is merged. When a batch PR is closed without merging, the Integrator explicitly closes milestone issues after labelling non-done issues as `cancelled`. Dependency unblocking is handled by the Integrator's tier advancement logic, with the Monitor as a safety net.
 
@@ -187,7 +201,7 @@ Additional safeguards: actions performed with `GITHUB_TOKEN` do not trigger furt
 
 Multiple workers can complete near-simultaneously, triggering concurrent Integrator runs.
 
-**Concurrent consolidation:** A single `herd integrator consolidate --run-id <N>` invocation is a milestone-wide operation: it enumerates every `herd/status:done` issue in the run's milestone whose worker branch is still on the remote and merges each in a deterministic, idempotent loop. If two integrator runs race, GitHub Actions concurrency groups serialize the `integrate` job per `head_branch`; if a run is cancelled mid-loop and leaves stranded worker branches, the next successful integrator run re-scans the milestone and picks them up automatically. If two pushes into the batch branch still race (e.g., a manual `/herd integrate` overlapping with a `workflow_run` trigger), the loser observes a non-fast-forward push, relabels the affected issue as `herd/status:failed` for retry, and continues with the next candidate.
+**Concurrent consolidation:** A single `herd integrator consolidate --run-id <N>` invocation is a milestone-wide operation: it enumerates every `herd/status:done` issue in the run's milestone whose worker branch is still on the remote and merges each in a deterministic, idempotent loop. If two integrator runs race, GitHub Actions concurrency groups serialize the `integrate` job per `head_branch`; if a run is cancelled mid-loop and leaves stranded worker branches, the next successful integrator run re-scans the milestone and picks them up automatically. If two pushes into the batch branch still race (e.g., a manual `@herd-os integrate` overlapping with a `workflow_run` trigger), the loser observes a non-fast-forward push, relabels the affected issue as `herd/status:failed` for retry, and continues with the next candidate.
 
 **Double-dispatch prevention:** The `advance` command uses issue labels as an atomic guard -- it sets `in-progress` before dispatching, and skips any issue already `in-progress`. Label transitions via the GitHub API are atomic, so only one advance call can transition a given issue. As a belt-and-suspenders check, `dispatchReadyIssues` also lists `in_progress` and `queued` worker runs and skips any tier issue whose number already appears in an active run's inputs (labels are left untouched and the issue does not count against `dispatched`). This catches edge cases where labels and run state diverge — for example, if a prior dispatch's HTTP call failed after GitHub queued the run.
 
@@ -197,7 +211,7 @@ Review has two separate protections: review locks serialize active review attemp
 
 #### Workflow Concurrency Groups
 
-All integrator workflow jobs use GitHub Actions [concurrency groups](https://docs.github.com/en/actions/using-jobs/using-concurrency) as defense-in-depth to reduce obvious overlap. Without these, two workers completing close together (or a `/herd integrate` comment firing at the same time as a `workflow_run` trigger) can cause duplicate fix issues, duplicate worker dispatches, and duplicate review attempts.
+All integrator workflow jobs use GitHub Actions [concurrency groups](https://docs.github.com/en/actions/using-jobs/using-concurrency) as defense-in-depth to reduce obvious overlap. Without these, two workers completing close together (or an `@herd-os integrate` comment firing at the same time as a `workflow_run` trigger) can cause duplicate fix issues, duplicate worker dispatches, and duplicate review attempts.
 
 | Job | Group Key | cancel-in-progress | Rationale |
 |-----|-----------|-------------------|----------|
@@ -207,7 +221,7 @@ All integrator workflow jobs use GitHub Actions [concurrency groups](https://doc
 | `advance-on-close` | `herd-advance-{milestone \|\| issue_number}` | false | Uses milestone number (= batch number) to serialize per-batch. Falls back to issue number for non-herd issues. |
 | `re-review` | `herd-re-review-{pr_number}` | false | Prevents concurrent reviews on the same PR. |
 | `cleanup` | `herd-cleanup-{pr_number}` | false | Prevents concurrent cleanup on the same PR. |
-| `handle-comment` | `herd-comment-{milestone \|\| issue_number}` | false | Uses milestone number to serialize all `/herd` commands for the same batch. Falls back to issue number if no milestone. |
+| `handle-comment` | `herd-comment-{milestone \|\| issue_number}` | false | Uses milestone number to serialize all `@herd-os` commands for the same batch. Falls back to issue number if no milestone. |
 
 All groups use `cancel-in-progress: false` (except `check-ci-on-completion`) so that queued runs wait rather than being cancelled. Every integrator run should complete — we want serialization, not cancellation.
 
@@ -225,7 +239,7 @@ Duplicate triggers do not launch another agent review. They log or comment:
 Review already in progress for PR #N; skipping duplicate review trigger.
 ```
 
-Stale locks expire conservatively after their recorded expiry window so a dead Actions job does not block future reviews forever. The implementation treats expiry as recovery from an abandoned review, not as permission for overlapping active reviews. Manual `/herd review` still bypasses stable-disagreement suspension, but it never bypasses the active-review lock.
+Stale locks expire conservatively after their recorded expiry window so a dead Actions job does not block future reviews forever. The implementation treats expiry as recovery from an abandoned review, not as permission for overlapping active reviews. Manual `@herd-os review` still bypasses stable-disagreement suspension, but it never bypasses the active-review lock.
 
 Pre-append-only lock branches from older HerdOS versions are migrated only when their old marker commit is recognizable as a Herd review lock and is stale according to its acquisition timestamp. Unknown or fresh legacy state fails closed rather than risking duplicate reviews.
 
@@ -235,7 +249,7 @@ Hidden PR comments are not authoritative for locking. If diagnostic lock comment
 
 Every batch Herd review result comment includes a hidden `herd:review-result` marker with `version`, `pr_number`, `batch_number`, `head_sha`, `status`, `cycle`, `findings_count`, and `created_at`. This marker records the review outcome for the exact PR head SHA that was reviewed; it is separate from the active-review lock and is not used to decide whether another review is currently running.
 
-Automatic review triggers skip the agent when the current PR head SHA already has an approved Herd review-result marker. The skip is logged instead of posted as another PR comment, so repeated automatic triggers do not add PR noise. Manual `/herd review` intentionally forces a fresh review for the current head SHA, even if an approved marker already exists.
+Automatic review triggers skip the agent when the current PR head SHA already has an approved Herd review-result marker. The skip is logged instead of posted as another PR comment, so repeated automatic triggers do not add PR noise. Manual `@herd-os review` intentionally forces a fresh review for the current head SHA, even if an approved marker already exists.
 
 A new commit changes the PR head SHA and invalidates prior approved-head idempotency, so the updated diff can be reviewed. `changes_requested` and `max_cycles_hit` markers do not suppress review as approved; existing fix-worker gates, max-cycle rules, stable-disagreement rules, and stale-head checks still govern those flows.
 
@@ -303,12 +317,18 @@ Write access is the minimum required to use HerdOS.
 
 ### Branch Protection Recommendations
 
-Batch PRs should go through branch protection. Two modes:
+Batch PRs should go through branch protection. HerdOS does not create or mutate
+branch protection rules; repository administrators configure them in GitHub.
+Two modes:
 
 - **Review required (default):** A human reviews the consolidated batch PR. The reviewer sees the complete feature as one diff. Recommended starting point.
 - **No review required:** Fully autonomous with `auto_merge: true`. Best for trusted codebases with strong CI.
 
 A middle ground: require review only for PRs touching specific paths (security-sensitive code, configuration).
+
+When Herd Review is enabled, require the commit status named exactly
+`Herd Review` on protected branches if the review should block merges. Do not
+require that status when `integrator.review` is disabled.
 
 ### Workflow Permissions
 
@@ -318,7 +338,9 @@ Each workflow's `GITHUB_TOKEN` is scoped to the minimum required:
 - **Integrator:** contents write, issues write, pull-requests write (create/manage batch PRs), actions write (dispatch next tier and fix workers)
 - **Monitor:** contents read, issues write, actions write (check run status, dispatch workers)
 
-Runner registration requires admin access to the repository (for the registration token API call). This is a one-time setup operation.
+Runner registration uses the repo-scoped `HERD_RUNNER_BOOTSTRAP_TOKEN` issued by
+the control plane during `herd init`. The service uses the GitHub App
+installation to request short-lived runner registration tokens.
 
 ### Runner Security
 
@@ -330,7 +352,11 @@ For maximum isolation, run each runner in a container with ephemeral mode so it 
 
 ### Comment Command Permissions
 
-Comment commands (`/herd`) are restricted to users with `OWNER`, `MEMBER`, or `COLLABORATOR` association on the repository, plus bot accounts. This is enforced by the CLI, not by GitHub's native permissions. The `author_association` field from the webhook payload is used for validation.
+Mention commands (`@herd-os ...` for the hosted App) are restricted to users
+with `OWNER`, `MEMBER`, or `COLLABORATOR` association on the repository, plus
+bot accounts. This is enforced by the control plane using the
+`author_association` field from the webhook payload. `/herd` slash commands are
+not a compatibility alias.
 
 ### Automatic Retry on Transient Errors
 
@@ -363,14 +389,19 @@ GitHub API limits (5,000 req/hour REST, 500 dispatches/10 min) are not a concern
 
 Worker commits use the dispatching user as author and HerdOS as co-author via the `Co-authored-by` git trailer. The user's git identity (name and email) is captured at dispatch time from `git config` and passed to the worker. GitHub renders the App's avatar alongside the user's in the commit history -- the same mechanism used by Dependabot and Renovate. This can be disabled with `pull_requests.co_author: false`.
 
-### Two Authentication Modes
+### App Authentication Model
 
-**Mode 1: Personal Token (default).** Users authenticate with their own token. The App is only used for commit attribution. This is the default for `herd init`.
+The official `herd-os` GitHub App is maintained by the HerdOS project. Users
+install it rather than creating their own for the hosted path. The App handles
+GitHub API auth, webhook delivery, bot identity, runner registration-token
+minting, and Herd Review status/review/comment updates.
 
-**Mode 2: App Installation Token (recommended for teams).** The GitHub App generates installation tokens for API calls, removing the dependency on personal tokens and giving the organization control over permissions. `herd init` detects whether the App is installed and configures accordingly; if not installed, it prints an installation link and falls back to personal token auth.
+`herd init` uses the local `gh` login as a setup-time proof that the human can
+administer the repository, verifies the App installation, registers the repo with
+the control plane, and writes `HERD_RUNNER_BOOTSTRAP_TOKEN` into the runner
+environment. After setup, production orchestration does not use that human token.
 
-The App also solves a branch protection constraint: since the Integrator (via the App) opens the batch PR, the human user is not the PR author and can approve their own work. The App must be added to the branch protection bypass list to merge PRs.
-
-### Future Plans
-
-The official `herd-os` GitHub App is maintained by the HerdOS project. Users install it rather than creating their own. For enterprise or self-hosted deployments, organizations can create a custom App with the same permissions. The App handles GitHub API auth and bot identity only -- it does not replace agent credentials, which remain separate.
+Self-hosted deployments can create a custom App with the same permissions and
+run `herd-service` with their own Postgres database. Consumer repos set
+`HERD_CONTROL_PLANE_URL` to the self-hosted service URL. The App does not replace
+agent credentials, which remain separate and user-controlled.
