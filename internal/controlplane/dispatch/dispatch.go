@@ -44,6 +44,7 @@ type DispatchRequest struct {
 	ExpectedHeadSHA string
 	RunnerLabel     string
 	TimeoutMinutes  int
+	ControlPlaneURL string
 	Reason          string
 }
 
