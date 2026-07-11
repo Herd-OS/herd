@@ -12,7 +12,11 @@ import (
 )
 
 func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
-	mux.Handle("POST /webhooks/github", cpgithub.NewHandler(cfg.WebhookSecret, deps.Store, deps.Logger))
+	webhookOptions := []cpgithub.Option{}
+	if deps.IssueCommentCommandHandler != nil {
+		webhookOptions = append(webhookOptions, cpgithub.WithIssueCommentCommandHandler(deps.IssueCommentCommandHandler))
+	}
+	mux.Handle("POST /webhooks/github", cpgithub.NewHandler(cfg.WebhookSecret, deps.Store, deps.Logger, webhookOptions...))
 	registerHandler := deps.RegisterRepositoryRoute
 	if registerHandler == nil && deps.Store != nil {
 		_, ok := deps.Store.(cpgithub.RegistrationStore)

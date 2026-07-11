@@ -17,6 +17,7 @@ type Dependencies struct {
 	RegisterRepositoryRoute      http.Handler
 	RunnerRegistrationTokenRoute http.Handler
 	JobResultsRoute              http.Handler
+	IssueCommentCommandHandler   cpgithub.IssueCommentCommandHandler
 	Reconciler                   *reconciler.Reconciler
 }
 

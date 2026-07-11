@@ -189,10 +189,6 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
 		return
 	}
-	if err := h.processReviewResult(r.Context(), result, job); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
-		return
-	}
 	idempotencyKey := ResultIdempotencyKey(result, payload)
 	created, err := h.store.RecordJobResult(r.Context(), store.JobResult{
 		JobID:          envelope.JobID,
@@ -205,6 +201,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record job result"})
 		return
+	}
+	if created {
+		if err := h.processReviewResult(r.Context(), result, job); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
+			return
+		}
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":          "accepted",

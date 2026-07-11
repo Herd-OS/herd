@@ -100,6 +100,47 @@ func runHerd(t *testing.T, bin, workdir string, args ...string) string {
 	return string(out)
 }
 
+func TestE2E_DockerComposePostgresSmoke(t *testing.T) {
+	if os.Getenv("HERD_E2E_DOCKER_POSTGRES_SMOKE") != "1" {
+		t.Skip("set HERD_E2E_DOCKER_POSTGRES_SMOKE=1 to run Docker Compose/Postgres smoke test")
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker CLI is not available")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", "info").CombinedOutput(); err != nil {
+		t.Skipf("Docker daemon is not available: %s", string(out))
+	}
+	if out, err := exec.CommandContext(ctx, "docker", "compose", "version").CombinedOutput(); err != nil {
+		t.Skipf("Docker Compose is not available: %s", string(out))
+	}
+
+	dir := t.TempDir()
+	composePath := filepath.Join(dir, "compose.yml")
+	compose := `services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: herd
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d herd"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+`
+	require.NoError(t, os.WriteFile(composePath, []byte(compose), 0644))
+	t.Cleanup(func() {
+		downCtx, downCancel := context.WithTimeout(context.Background(), time.Minute)
+		defer downCancel()
+		_ = exec.CommandContext(downCtx, "docker", "compose", "-f", composePath, "down", "-v").Run()
+	})
+	if out, err := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d", "--wait", "postgres").CombinedOutput(); err != nil {
+		t.Skipf("Docker Compose/Postgres smoke prerequisites are not available: %s", string(out))
+	}
+}
+
 // waitForIssueLabel polls until the issue has the expected label or timeout is reached.
 func waitForIssueLabel(t *testing.T, p platform.Platform, issueNumber int, expectedLabel string, timeout time.Duration) {
 	t.Helper()
