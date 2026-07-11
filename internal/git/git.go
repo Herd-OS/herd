@@ -14,6 +14,12 @@ type Git struct {
 	WorkDir string
 }
 
+type NameStatusEntry struct {
+	Status  string
+	Path    string
+	OldPath string
+}
+
 // New creates a new Git instance for the given working directory.
 func New(workDir string) *Git {
 	return &Git{WorkDir: workDir}
@@ -53,6 +59,10 @@ func (g *Git) Fetch(remote string) error {
 	return g.run("fetch", remote)
 }
 
+func (g *Git) FetchRef(remote, refspec string) error {
+	return g.run("fetch", remote, refspec)
+}
+
 func (g *Git) Merge(branch string) error {
 	return g.run("merge", branch)
 }
@@ -75,6 +85,26 @@ func (g *Git) Pull(remote, branch string) error {
 
 func (g *Git) Diff(base, head string) (string, error) {
 	return g.output("diff", base+"..."+head)
+}
+
+func (g *Git) DiffNameStatus(base, head string) ([]NameStatusEntry, error) {
+	out, err := g.output("diff", "--name-status", base+"..."+head)
+	if err != nil {
+		return nil, err
+	}
+	return parseNameStatus(out), nil
+}
+
+func (g *Git) DiffPath(base, head, path string) (string, error) {
+	return g.output("diff", base+"..."+head, "--", path)
+}
+
+func (g *Git) DiffNumStat(base, head string) (map[string][2]int, error) {
+	out, err := g.output("diff", "--numstat", base+"..."+head)
+	if err != nil {
+		return nil, err
+	}
+	return parseNumStat(out)
 }
 
 // DiffStat returns the --stat output for changes introduced by head since
@@ -237,4 +267,88 @@ func (g *Git) output(args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func parseNameStatus(out string) []NameStatusEntry {
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	lines := strings.Split(out, "\n")
+	entries := make([]NameStatusEntry, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		entry := NameStatusEntry{Status: parts[0]}
+		switch {
+		case strings.HasPrefix(entry.Status, "R"), strings.HasPrefix(entry.Status, "C"):
+			if len(parts) > 1 {
+				entry.OldPath = parts[1]
+			}
+			if len(parts) > 2 {
+				entry.Path = parts[2]
+			}
+		default:
+			if len(parts) > 1 {
+				entry.Path = parts[1]
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func parseNumStat(out string) (map[string][2]int, error) {
+	stats := make(map[string][2]int)
+	if strings.TrimSpace(out) == "" {
+		return stats, nil
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("parsing numstat line %q: expected 3 tab-separated fields", line)
+		}
+		additions, deletions := -1, -1
+		if parts[0] != "-" {
+			n, err := strconv.Atoi(parts[0])
+			if err != nil {
+				return nil, fmt.Errorf("parsing numstat additions %q: %w", parts[0], err)
+			}
+			additions = n
+		}
+		if parts[1] != "-" {
+			n, err := strconv.Atoi(parts[1])
+			if err != nil {
+				return nil, fmt.Errorf("parsing numstat deletions %q: %w", parts[1], err)
+			}
+			deletions = n
+		}
+		path := parts[2]
+		stats[path] = [2]int{additions, deletions}
+		if renamed := numstatRenamePath(path); renamed != path {
+			stats[renamed] = [2]int{additions, deletions}
+		}
+	}
+	return stats, nil
+}
+
+func numstatRenamePath(path string) string {
+	if idx := strings.LastIndex(path, " => "); idx >= 0 {
+		suffix := path[idx+4:]
+		prefix := ""
+		if openIdx := strings.LastIndex(path[:idx], "{"); openIdx >= 0 {
+			prefix = path[:openIdx]
+			if closeIdx := strings.LastIndex(suffix, "}"); closeIdx >= 0 {
+				suffix = suffix[:closeIdx] + suffix[closeIdx+1:]
+			}
+		}
+		return prefix + strings.TrimSpace(suffix)
+	}
+	return path
 }
