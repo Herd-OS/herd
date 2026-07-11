@@ -77,6 +77,9 @@ func (m *mockPRService) AddComment(_ context.Context, _ int, body string) error 
 func (m *mockPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
 	return nil, nil
 }
+func (m *mockPRService) ListFiles(_ context.Context, _ int) ([]*platform.PullRequestFile, error) {
+	return nil, nil
+}
 func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) { return "", nil }
 func (m *mockPRService) Close(_ context.Context, _ int) error             { return nil }
 

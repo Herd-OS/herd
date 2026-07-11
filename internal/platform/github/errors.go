@@ -31,6 +31,10 @@ func isGitHubRefUpdateConflict(err error) bool {
 	return isGitHubStatus(err, http.StatusConflict) || isGitHubStatus(err, http.StatusUnprocessableEntity)
 }
 
+func isGitHubDiffTooLarge(err error) bool {
+	return isGitHubStatus(err, http.StatusNotAcceptable)
+}
+
 func isGitHubStatus(err error, status int) bool {
 	if err == nil {
 		return false

@@ -571,6 +571,9 @@ func (m *mockCheckCIPRService) AddComment(_ context.Context, _ int, _ string) er
 func (m *mockCheckCIPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
 	return nil, nil
 }
+func (m *mockCheckCIPRService) ListFiles(_ context.Context, _ int) ([]*platform.PullRequestFile, error) {
+	return nil, nil
+}
 func (m *mockCheckCIPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "", nil
 }
@@ -894,6 +897,9 @@ func (m *mockFailurePRService) CreateReview(_ context.Context, _ int, _ string, 
 }
 func (m *mockFailurePRService) AddComment(_ context.Context, _ int, _ string) error { return nil }
 func (m *mockFailurePRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
+func (m *mockFailurePRService) ListFiles(_ context.Context, _ int) ([]*platform.PullRequestFile, error) {
 	return nil, nil
 }
 func (m *mockFailurePRService) GetDiff(_ context.Context, _ int) (string, error) { return "", nil }

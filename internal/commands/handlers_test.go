@@ -168,6 +168,9 @@ func (m *testPRService) CreateReview(_ context.Context, _ int, _ string, _ platf
 func (m *testPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
 	return nil, nil
 }
+func (m *testPRService) ListFiles(_ context.Context, _ int) ([]*platform.PullRequestFile, error) {
+	return nil, nil
+}
 func (m *testPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "", nil
 }

@@ -206,6 +206,9 @@ func (m *mockBatchCancelPRService) AddComment(_ context.Context, _ int, _ string
 func (m *mockBatchCancelPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
 	return nil, nil
 }
+func (m *mockBatchCancelPRService) ListFiles(_ context.Context, _ int) ([]*platform.PullRequestFile, error) {
+	return nil, nil
+}
 func (m *mockBatchCancelPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "", nil
 }

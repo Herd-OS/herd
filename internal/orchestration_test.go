@@ -263,6 +263,9 @@ func (s *statefulPRService) CreateReview(_ context.Context, _ int, _ string, _ p
 func (s *statefulPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
 	return nil, nil
 }
+func (s *statefulPRService) ListFiles(_ context.Context, _ int) ([]*platform.PullRequestFile, error) {
+	return nil, nil
+}
 func (s *statefulPRService) GetDiff(_ context.Context, _ int) (string, error) {
 	return "diff --git a/file.go b/file.go\n", nil
 }

@@ -20,6 +20,8 @@ func RenderForReview(diff DiffSet, opts RenderOptions) RenderResult {
 		patchBytes := len(file.Patch)
 
 		switch {
+		case file.Omitted:
+			file.OmitReason = firstReason(file.OmitReason, "omitted by diff source")
 		case file.Binary:
 			file.Omitted = true
 			file.OmitReason = firstReason(file.OmitReason, "binary file")
