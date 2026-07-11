@@ -155,6 +155,8 @@ All workflows require the `HERD_ENABLED` repository variable to be set to `true`
 
 The checkout action in all workflows uses `HERD_GITHUB_TOKEN` (falling back to `GITHUB_TOKEN`) to configure git credentials for pushes. `HERD_GITHUB_TOKEN` is a fine-grained PAT with the following permissions:
 
+Worker and integrator jobs that need repository history use `actions/checkout` with `fetch-depth: 0`. This is required for local merge/rebase operations and lets agent review prefer local git diffs before using GitHub raw diff or changed-file metadata fallback for large PRs.
+
 | Permission | Access | Why |
 |---|---|---|
 | Actions | Read and write | Dispatch worker workflows, list runs |

@@ -231,6 +231,10 @@ HIGH and MEDIUM severity findings create fix issues and dispatch workers. LOW fi
 
 The review agent runs in a strict output mode. It is instructed not to take any actions — no tool calls, no `gh`/`git`/`bash` invocations, no issue or comment creation, no file edits. Its only output is a single JSON object describing findings. Any mention of `.herd/integrator.md` or extra review instructions is appended to that contract; it does not loosen it.
 
+Review input is bounded so very large PRs can still be reviewed. In runner and local CLI contexts, HerdOS first tries to build the review diff from the local checkout (`local-git`). If local git diff collection is unavailable, it falls back to GitHub's raw PR diff (`github-raw-diff`), and if GitHub refuses that raw diff because it is too large or unavailable, HerdOS falls back to changed-file metadata and bounded patches from the GitHub files API (`github-files-api`). GitHub raw PR diff size limits therefore do not abort review when local git or files API fallback can provide review input.
+
+Generated files, binary files, large lockfile diffs, mode-only changes, and files beyond HerdOS's internal byte/file limits may be summarized, omitted, or truncated before being sent to the agent. When review input is limited, HerdOS posts or logs a **Diff Coverage** summary showing the source, included file count, omitted file count, truncated file count, warnings, and omitted paths with reasons. The same coverage information is included with review comments when omissions or truncation affected what the agent saw.
+
 If the agent returns unparseable output (e.g., the JSON cannot be decoded, or the output is empty/error-like), the integrator retries once after a 5-second delay within the same invocation. If both attempts fail, the integrator posts the following comment on the batch PR and sets the review aside without creating fix workers:
 
 ```
