@@ -82,8 +82,21 @@ func (s *MemoryStore) UpsertInstallation(_ context.Context, i Installation) erro
 func (s *MemoryStore) UpsertRepository(_ context.Context, r Repository) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if r.ID == 0 {
+		r.ID = r.GitHubID
+	}
 	s.repositories[repoKey(r.Owner, r.Name)] = r
 	return nil
+}
+
+func (s *MemoryStore) GetRepository(_ context.Context, owner string, name string) (Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	repo, ok := s.repositories[repoKey(owner, name)]
+	if !ok {
+		return Repository{}, ErrNotFound
+	}
+	return repo, nil
 }
 
 func (s *MemoryStore) CreateRegistrationAttempt(_ context.Context, a RegistrationAttempt) error {

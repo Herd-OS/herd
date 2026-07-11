@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -25,6 +26,11 @@ func Validate(cfg *Config) *ValidationError {
 
 	if cfg.Version != 1 {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("version must be 1, got %d", cfg.Version))
+	}
+	if strings.TrimSpace(cfg.ControlPlaneURL) != "" {
+		if err := validateControlPlaneURL(cfg.ControlPlaneURL); err != nil {
+			ve.Errors = append(ve.Errors, err.Error())
+		}
 	}
 
 	// Platform
@@ -175,6 +181,20 @@ func Validate(cfg *Config) *ValidationError {
 
 	if len(ve.Errors) > 0 {
 		return ve
+	}
+	return nil
+}
+
+func validateControlPlaneURL(value string) error {
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("control_plane_url must be a valid absolute http or https URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("control_plane_url must use http or https")
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("control_plane_url must include a host")
 	}
 	return nil
 }

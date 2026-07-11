@@ -16,14 +16,15 @@ const (
 )
 
 type Config struct {
-	Version      int          `yaml:"version"`
-	Platform     Platform     `yaml:"platform"`
-	Agent        Agent        `yaml:"agent"`
-	Workers      Workers      `yaml:"workers"`
-	Integrator   Integrator   `yaml:"integrator"`
-	Monitor      Monitor      `yaml:"monitor"`
-	PullRequests PullRequests `yaml:"pull_requests"`
-	ImagePublish ImagePublish `yaml:"image_publish"`
+	Version         int          `yaml:"version"`
+	ControlPlaneURL string       `yaml:"control_plane_url,omitempty"`
+	Platform        Platform     `yaml:"platform"`
+	Agent           Agent        `yaml:"agent"`
+	Workers         Workers      `yaml:"workers"`
+	Integrator      Integrator   `yaml:"integrator"`
+	Monitor         Monitor      `yaml:"monitor"`
+	PullRequests    PullRequests `yaml:"pull_requests"`
+	ImagePublish    ImagePublish `yaml:"image_publish"`
 }
 
 type Platform struct {

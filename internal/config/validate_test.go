@@ -37,6 +37,37 @@ func TestValidate_AgentExec(t *testing.T) {
 	}
 }
 
+func TestValidate_ControlPlaneURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		wantError bool
+		errSubstr string
+	}{
+		{"empty hosted default is valid", "", false, ""},
+		{"https self-hosted is valid", "https://herd.example.com", false, ""},
+		{"http local is valid", "http://localhost:8080", false, ""},
+		{"relative invalid", "/api", true, "control_plane_url must be a valid absolute"},
+		{"unsupported scheme invalid", "ftp://herd.example.com", true, "control_plane_url must use http or https"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			cfg.ControlPlaneURL = tt.value
+
+			ve := Validate(cfg)
+			if tt.wantError {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.errSubstr)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
 func TestValidate_AgentExecImageFreeForm(t *testing.T) {
 	cfg := Default()
 	cfg.Platform.Owner = "org"
