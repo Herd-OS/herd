@@ -193,6 +193,20 @@ func TestResultIdempotencyKeyUsesKindAndPayloadHash(t *testing.T) {
 	assert.Len(t, ResultPayloadHash(payload), 64)
 }
 
+func TestParseReviewCompletedTerminalFailureStatuses(t *testing.T) {
+	tests := []string{StatusFailure, StatusTimedOut, StatusUnparseable, StatusMaxCyclesHit}
+	for _, status := range tests {
+		t.Run(status, func(t *testing.T) {
+			payload := []byte(`{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":1,"pr_number":2,"head_sha":"head","status":"` + status + `","summary":"not approved"}`)
+
+			result, err := ParseResultPayload(payload)
+
+			require.NoError(t, err)
+			assert.Equal(t, status, result.StatusValue())
+		})
+	}
+}
+
 func TestResultMetadataEmbedsPayload(t *testing.T) {
 	payload := []byte(`{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":1,"pr_number":2,"head_sha":"head","status":"approved","summary":"ok"}`)
 

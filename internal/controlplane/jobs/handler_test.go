@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
+	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,6 +64,67 @@ func TestHandlerDuplicateCallbacksAreIdempotent(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Contains(t, second.Body.String(), `"created":false`)
 	assert.Len(t, st.results, 1)
+}
+
+func TestHandlerProcessesReviewCompletedResult(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		RepositoryID:   7,
+		InstallationID: 9,
+		PRNumber:       42,
+		HeadSHA:        "head",
+		Metadata:       json.RawMessage(`{"workflow_run_url":"https://example.test/run"}`),
+	}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", validReviewPayload("job-1", "head", StatusApproved)))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Len(t, processor.calls, 1)
+	assert.Equal(t, review.Repository{ID: 7, InstallationID: 9, Owner: "acme", Name: "widgets", ReviewEnabled: true}, processor.calls[0].repo)
+	assert.Equal(t, 42, processor.calls[0].result.PRNumber)
+	assert.Equal(t, "head", processor.calls[0].result.HeadSHA)
+	assert.Equal(t, "https://example.test/run", processor.calls[0].result.TargetURL)
+	require.Len(t, st.results, 1)
+	assert.Equal(t, StatusApproved, st.results[0].Status)
+}
+
+func TestHandlerPassesDisabledReviewMetadata(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		RepositoryID:   7,
+		InstallationID: 9,
+		PRNumber:       42,
+		HeadSHA:        "head",
+		Metadata:       json.RawMessage(`{"integrator":{"review":false}}`),
+	}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", validReviewPayload("job-1", "head", StatusApproved)))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Len(t, processor.calls, 1)
+	assert.False(t, processor.calls[0].repo.ReviewEnabled)
 }
 
 func TestHandlerRejectsMismatchedPathAndBodyJobID(t *testing.T) {
@@ -244,6 +306,20 @@ type mutationCompletion struct {
 	completedAt  time.Time
 }
 
+type capturingReviewProcessor struct {
+	calls []reviewProcessorCall
+}
+
+type reviewProcessorCall struct {
+	repo   review.Repository
+	result review.ReviewCompletedResult
+}
+
+func (p *capturingReviewProcessor) SubmitReviewResult(_ context.Context, repo review.Repository, result review.ReviewCompletedResult) error {
+	p.calls = append(p.calls, reviewProcessorCall{repo: repo, result: result})
+	return nil
+}
+
 type artifactStore map[string][]byte
 
 func artifactMap(t *testing.T, metadata artifacts.PatchMetadata, patch []byte) artifactStore {
@@ -306,4 +382,8 @@ func resultRequest(jobID string, payload string) *http.Request {
 
 func validWorkerPayload(jobID string, headSHA string) string {
 	return `{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"` + jobID + `","batch_number":106,"issue_number":837,"target_branch":"herd/worker/837","base_sha":"base","expected_head_sha":"` + headSHA + `","patch_artifact":"patches/job.diff","status":"success"}`
+}
+
+func validReviewPayload(jobID string, headSHA string, status string) string {
+	return `{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"` + jobID + `","batch_number":106,"pr_number":42,"head_sha":"` + headSHA + `","status":"` + status + `","summary":"review summary"}`
 }

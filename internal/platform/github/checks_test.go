@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	gh "github.com/google/go-github/v68/github"
+	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,6 +25,30 @@ func TestGetCombinedStatus_CommitStatusSuccess(t *testing.T) {
 	status, err := client.Checks().GetCombinedStatus(context.Background(), "main")
 	require.NoError(t, err)
 	assert.Equal(t, "success", status)
+}
+
+func TestCreateCommitStatus(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /repos/test-org/test-repo/statuses/head-sha", func(w http.ResponseWriter, r *http.Request) {
+		var req gh.RepoStatus
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "success", req.GetState())
+		assert.Equal(t, "Herd Review", req.GetContext())
+		assert.Equal(t, "approved", req.GetDescription())
+		assert.Equal(t, "https://example.test/run", req.GetTargetURL())
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(gh.RepoStatus{})
+	})
+
+	client, _ := newTestClient(t, mux)
+	err := client.Checks().(*checkService).CreateCommitStatus(context.Background(), "head-sha", platform.CommitStatus{
+		State:       "success",
+		Context:     "Herd Review",
+		Description: "approved",
+		TargetURL:   "https://example.test/run",
+	})
+
+	require.NoError(t, err)
 }
 
 func TestGetCombinedStatus_CheckRunFailure(t *testing.T) {

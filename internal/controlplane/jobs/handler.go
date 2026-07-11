@@ -13,6 +13,7 @@ import (
 	"github.com/herd-os/herd/internal/appauth"
 	"github.com/herd-os/herd/internal/controlplane"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
+	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
 )
 
@@ -32,6 +33,10 @@ type PatchApplier interface {
 	Apply(ctx context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error)
 }
 
+type ReviewProcessor interface {
+	SubmitReviewResult(ctx context.Context, repo review.Repository, result review.ReviewCompletedResult) error
+}
+
 type defaultPatchApplier struct{}
 
 func (defaultPatchApplier) Apply(ctx context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
@@ -39,29 +44,31 @@ func (defaultPatchApplier) Apply(ctx context.Context, req artifacts.ApplyRequest
 }
 
 type Handler struct {
-	store          Store
-	validator      OIDCValidator
-	audience       string
-	now            func() time.Time
-	artifactStore  artifacts.Store
-	patchApplier   PatchApplier
-	appTokenSource appauth.TokenSource
-	appLogin       string
-	appEmail       string
-	tempDir        string
+	store           Store
+	validator       OIDCValidator
+	audience        string
+	now             func() time.Time
+	artifactStore   artifacts.Store
+	patchApplier    PatchApplier
+	appTokenSource  appauth.TokenSource
+	appLogin        string
+	appEmail        string
+	tempDir         string
+	reviewProcessor ReviewProcessor
 }
 
 type HandlerOptions struct {
-	Store          Store
-	Validator      OIDCValidator
-	Audience       string
-	Now            func() time.Time
-	ArtifactStore  artifacts.Store
-	PatchApplier   PatchApplier
-	AppTokenSource appauth.TokenSource
-	AppLogin       string
-	AppEmail       string
-	TempDir        string
+	Store           Store
+	Validator       OIDCValidator
+	Audience        string
+	Now             func() time.Time
+	ArtifactStore   artifacts.Store
+	PatchApplier    PatchApplier
+	AppTokenSource  appauth.TokenSource
+	AppLogin        string
+	AppEmail        string
+	TempDir         string
+	ReviewProcessor ReviewProcessor
 }
 
 func NewHandler(opts HandlerOptions) http.Handler {
@@ -82,16 +89,17 @@ func NewHandler(opts HandlerOptions) http.Handler {
 		patchApplier = defaultPatchApplier{}
 	}
 	return Handler{
-		store:          opts.Store,
-		validator:      validator,
-		audience:       audience,
-		now:            now,
-		artifactStore:  opts.ArtifactStore,
-		patchApplier:   patchApplier,
-		appTokenSource: opts.AppTokenSource,
-		appLogin:       opts.AppLogin,
-		appEmail:       opts.AppEmail,
-		tempDir:        opts.TempDir,
+		store:           opts.Store,
+		validator:       validator,
+		audience:        audience,
+		now:             now,
+		artifactStore:   opts.ArtifactStore,
+		patchApplier:    patchApplier,
+		appTokenSource:  opts.AppTokenSource,
+		appLogin:        opts.AppLogin,
+		appEmail:        opts.AppEmail,
+		tempDir:         opts.TempDir,
+		reviewProcessor: opts.ReviewProcessor,
 	}
 }
 
@@ -181,6 +189,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
 		return
 	}
+	if err := h.processReviewResult(r.Context(), result, job); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
+		return
+	}
 	idempotencyKey := ResultIdempotencyKey(result, payload)
 	created, err := h.store.RecordJobResult(r.Context(), store.JobResult{
 		JobID:          envelope.JobID,
@@ -201,6 +213,49 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"kind":            envelope.Kind,
 		"idempotency_key": idempotencyKey,
 	})
+}
+
+func (h Handler) processReviewResult(ctx context.Context, result Result, job store.Job) error {
+	reviewResult, ok := result.(ReviewCompletedResult)
+	if !ok || h.reviewProcessor == nil {
+		return nil
+	}
+	repo := reviewRepositoryFromJob(job, reviewResult.Repository)
+	targetURL := firstMetadataString(metadataMap(job.Metadata), "workflow_run_url", "run_url", "target_url", "pr_url")
+	return h.reviewProcessor.SubmitReviewResult(ctx, repo, review.ReviewCompletedResult{
+		Repository:  reviewResult.Repository,
+		JobID:       reviewResult.JobID,
+		BatchNumber: reviewResult.BatchNumber,
+		PRNumber:    reviewResult.PRNumber,
+		HeadSHA:     reviewResult.HeadSHA,
+		Status:      reviewResult.Status,
+		Summary:     reviewResult.Summary,
+		TargetURL:   targetURL,
+	})
+}
+
+func reviewRepositoryFromJob(job store.Job, fullName string) review.Repository {
+	owner, name, _ := strings.Cut(fullName, "/")
+	enabled := true
+	metadata := metadataMap(job.Metadata)
+	if v, ok := metadata["integrator_review"].(bool); ok {
+		enabled = v
+	}
+	if v, ok := metadata["review_enabled"].(bool); ok {
+		enabled = v
+	}
+	if integrator, ok := metadata["integrator"].(map[string]any); ok {
+		if v, ok := integrator["review"].(bool); ok {
+			enabled = v
+		}
+	}
+	return review.Repository{
+		ID:             job.RepositoryID,
+		InstallationID: job.InstallationID,
+		Owner:          owner,
+		Name:           name,
+		ReviewEnabled:  enabled,
+	}
 }
 
 func validateResultAgainstJob(result Result, job store.Job) error {
@@ -308,14 +363,19 @@ func (h Handler) completePatchMutation(ctx context.Context, key, status string, 
 }
 
 func humanAttribution(raw json.RawMessage) artifacts.HumanAttribution {
-	var metadata map[string]any
-	if len(raw) == 0 || json.Unmarshal(raw, &metadata) != nil {
-		return artifacts.HumanAttribution{}
-	}
+	metadata := metadataMap(raw)
 	return artifacts.HumanAttribution{
 		Name:  firstMetadataString(metadata, "requester_name", "actor_name", "sender_name"),
 		Email: firstMetadataString(metadata, "requester_email", "actor_email", "sender_email"),
 	}
+}
+
+func metadataMap(raw json.RawMessage) map[string]any {
+	var metadata map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &metadata) != nil {
+		return map[string]any{}
+	}
+	return metadata
 }
 
 func resultMetadata(payload []byte, claims OIDCClaims, extra map[string]any) (json.RawMessage, error) {

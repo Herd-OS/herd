@@ -21,6 +21,8 @@ const (
 	StatusApproved         = "approved"
 	StatusChangesRequested = "changes_requested"
 	StatusMaxCyclesHit     = "max_cycles_hit"
+	StatusTimedOut         = "timed_out"
+	StatusUnparseable      = "unparseable"
 )
 
 type ResultEnvelope struct {
@@ -206,7 +208,7 @@ func validWorkerStatus(status string) bool {
 
 func validReviewStatus(status string) bool {
 	switch status {
-	case StatusApproved, StatusChangesRequested, StatusFailure:
+	case StatusApproved, StatusChangesRequested, StatusFailure, StatusTimedOut, StatusUnparseable, StatusMaxCyclesHit:
 		return true
 	default:
 		return false
