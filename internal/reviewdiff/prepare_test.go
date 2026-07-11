@@ -86,6 +86,59 @@ func TestPrepareForReviewUsesRawDiffWhenAvailable(t *testing.T) {
 	assert.Contains(t, prepared.Rendered.Text, "+raw")
 }
 
+func TestPrepareForReviewParsesRawDiffIntoFilesBeforeRendering(t *testing.T) {
+	raw := strings.Join([]string{
+		"diff --git a/first.go b/first.go\n",
+		"index 1111111..2222222 100644\n",
+		"--- a/first.go\n",
+		"+++ b/first.go\n",
+		"@@ -1 +1 @@\n",
+		"-old\n",
+		"+new\n",
+		"diff --git a/second.go b/second.go\n",
+		"index 3333333..4444444 100644\n",
+		"--- a/second.go\n",
+		"+++ b/second.go\n",
+		"@@ -1,20000 +1,20000 @@\n",
+		strings.Repeat("+x\n", (DefaultMaxFileDiffBytes/3)+1),
+		"diff --git a/third.go b/third.go\n",
+		"index 5555555..6666666 100644\n",
+		"--- a/third.go\n",
+		"+++ b/third.go\n",
+		"@@ -1 +1 @@\n",
+		"-before\n",
+		"+after\n",
+	}, "")
+	require.Greater(t, len(raw), DefaultMaxFileDiffBytes)
+	require.Less(t, len(raw), DefaultMaxTotalDiffBytes)
+
+	prs := &mockPreparePRService{diff: raw}
+
+	prepared, err := PrepareForReview(context.Background(), PrepareRequest{
+		PRNumber:     7,
+		PullRequests: prs,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, prepared.DiffSet.Files, 3)
+	assert.Equal(t, []string{"first.go", "second.go", "third.go"}, []string{
+		prepared.DiffSet.Files[0].Path,
+		prepared.DiffSet.Files[1].Path,
+		prepared.DiffSet.Files[2].Path,
+	})
+	assert.Contains(t, prepared.Rendered.Text, "## first.go")
+	assert.Contains(t, prepared.Rendered.Text, "## second.go")
+	assert.Contains(t, prepared.Rendered.Text, "## third.go")
+	assert.NotContains(t, prepared.Rendered.Text, "pull-request.diff")
+	require.Len(t, prepared.Rendered.TruncatedFiles, 1)
+	assert.Equal(t, "second.go", prepared.Rendered.TruncatedFiles[0].Path)
+
+	summary := FormatCoverageSummary(prepared.DiffSet, prepared.Rendered, 10)
+	assert.Contains(t, summary, "Truncated files: 1")
+	assert.Contains(t, summary, "Included files: 3")
+	assert.Contains(t, summary, "second.go: per-file diff byte limit reached")
+}
+
 func TestFormatCoverageSummaryReportsLimitedFiles(t *testing.T) {
 	result := RenderForReview(DiffSet{
 		Source: "test-source",
@@ -112,6 +165,7 @@ func TestFormatCoverageSummaryReportsLimitedFiles(t *testing.T) {
 	assert.Contains(t, summary, "Truncated files: 1")
 	assert.Contains(t, summary, "generated.pb.go: generated file")
 	assert.Contains(t, summary, "image.png: binary file")
+	assert.Contains(t, summary, "big.go: per-file diff byte limit reached")
 }
 
 type mockPreparePRService struct {

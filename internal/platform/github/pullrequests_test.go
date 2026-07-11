@@ -289,21 +289,30 @@ func TestPullRequestListFilesPaginated(t *testing.T) {
 		case 1:
 			assert.Empty(t, r.URL.Query().Get("page"))
 			w.Header().Set("Link", `</repos/test-org/test-repo/pulls/42/files?page=2>; rel="next"`)
-			json.NewEncoder(w).Encode([]gh.CommitFile{
-				{
-					Filename:         gh.Ptr("new/name.go"),
-					PreviousFilename: gh.Ptr("old/name.go"),
-					Status:           gh.Ptr("renamed"),
-					Additions:        gh.Ptr(3),
-					Deletions:        gh.Ptr(1),
-					Changes:          gh.Ptr(4),
-					Patch:            gh.Ptr("@@ -1 +1 @@\n-old\n+new\n"),
-					SHA:              gh.Ptr("abc123"),
-					BlobURL:          gh.Ptr("https://github.com/blob"),
-					RawURL:           gh.Ptr("https://github.com/raw"),
-					ContentsURL:      gh.Ptr("https://api.github.com/contents"),
-				},
-			})
+			files := make([]gh.CommitFile, 100)
+			files[0] = gh.CommitFile{
+				Filename:         gh.Ptr("new/name.go"),
+				PreviousFilename: gh.Ptr("old/name.go"),
+				Status:           gh.Ptr("renamed"),
+				Additions:        gh.Ptr(3),
+				Deletions:        gh.Ptr(1),
+				Changes:          gh.Ptr(4),
+				Patch:            gh.Ptr("@@ -1 +1 @@\n-old\n+new\n"),
+				SHA:              gh.Ptr("abc123"),
+				BlobURL:          gh.Ptr("https://github.com/blob"),
+				RawURL:           gh.Ptr("https://github.com/raw"),
+				ContentsURL:      gh.Ptr("https://api.github.com/contents"),
+			}
+			for i := 1; i < len(files); i++ {
+				files[i] = gh.CommitFile{
+					Filename:  gh.Ptr(fmt.Sprintf("page-one-%03d.go", i)),
+					Status:    gh.Ptr("modified"),
+					Additions: gh.Ptr(1),
+					Deletions: gh.Ptr(0),
+					Changes:   gh.Ptr(1),
+				}
+			}
+			json.NewEncoder(w).Encode(files)
 		case 2:
 			assert.Equal(t, "2", r.URL.Query().Get("page"))
 			json.NewEncoder(w).Encode([]gh.CommitFile{
@@ -323,7 +332,8 @@ func TestPullRequestListFilesPaginated(t *testing.T) {
 	client, _ := newTestClient(t, mux)
 	files, err := client.PullRequests().ListFiles(context.Background(), 42)
 	require.NoError(t, err)
-	require.Len(t, files, 2)
+	require.Len(t, files, 101)
+	assert.Greater(t, len(files), 100)
 	assert.Equal(t, 2, callCount)
 	assert.Equal(t, "new/name.go", files[0].Path)
 	assert.Equal(t, "old/name.go", files[0].PreviousPath)
@@ -336,7 +346,7 @@ func TestPullRequestListFilesPaginated(t *testing.T) {
 	assert.Equal(t, "https://github.com/blob", files[0].BlobURL)
 	assert.Equal(t, "https://github.com/raw", files[0].RawURL)
 	assert.Equal(t, "https://api.github.com/contents", files[0].ContentsURL)
-	assert.Equal(t, "second.go", files[1].Path)
+	assert.Equal(t, "second.go", files[100].Path)
 }
 
 func TestPullRequestListReviewComments(t *testing.T) {
