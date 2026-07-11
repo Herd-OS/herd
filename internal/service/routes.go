@@ -9,7 +9,11 @@ import (
 
 func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
 	mux.Handle("POST /webhooks/github", cpgithub.NewHandler(cfg.WebhookSecret, deps.Store, deps.Logger))
-	mux.HandleFunc("POST /api/v1/github/repositories/register", notImplementedHandler)
+	if deps.RegistrationHandler != nil {
+		mux.Handle("POST /api/v1/github/repositories/register", deps.RegistrationHandler)
+	} else {
+		mux.HandleFunc("POST /api/v1/github/repositories/register", notImplementedHandler)
+	}
 	mux.HandleFunc("POST /api/v1/runners/registration-token", notImplementedHandler)
 	mux.HandleFunc("POST /api/v1/jobs/{job_id}/results", notImplementedHandler)
 }

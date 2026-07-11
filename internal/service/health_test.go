@@ -105,8 +105,8 @@ func (healthyStore) UpsertInstallation(context.Context, store.Installation) erro
 	return nil
 }
 
-func (healthyStore) UpsertRepository(context.Context, store.Repository) error {
-	return nil
+func (healthyStore) UpsertRepository(_ context.Context, r store.Repository) (store.Repository, error) {
+	return r, nil
 }
 
 type unhealthyStore struct {
@@ -125,6 +125,6 @@ func (s unhealthyStore) UpsertInstallation(context.Context, store.Installation) 
 	return nil
 }
 
-func (s unhealthyStore) UpsertRepository(context.Context, store.Repository) error {
-	return nil
+func (s unhealthyStore) UpsertRepository(_ context.Context, r store.Repository) (store.Repository, error) {
+	return r, nil
 }

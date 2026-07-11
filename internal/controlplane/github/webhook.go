@@ -31,7 +31,7 @@ var (
 type Store interface {
 	RecordWebhookDelivery(ctx context.Context, d store.WebhookDelivery) (created bool, err error)
 	UpsertInstallation(ctx context.Context, i store.Installation) error
-	UpsertRepository(ctx context.Context, r store.Repository) error
+	UpsertRepository(ctx context.Context, r store.Repository) (store.Repository, error)
 }
 
 type Handler struct {
@@ -240,7 +240,7 @@ func (h Handler) upsertRepository(ctx context.Context, installationID int64, rep
 	}
 	metadata["selection_state"] = selectionState
 	metadata["full_name"] = repo.FullName
-	if err := h.store.UpsertRepository(ctx, store.Repository{
+	if _, err := h.store.UpsertRepository(ctx, store.Repository{
 		GitHubID:       repo.ID,
 		InstallationID: installationID,
 		Owner:          repo.Owner,

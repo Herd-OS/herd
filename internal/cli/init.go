@@ -14,6 +14,7 @@ import (
 
 	"github.com/herd-os/herd/internal/cli/runner"
 	"github.com/herd-os/herd/internal/config"
+	cpclient "github.com/herd-os/herd/internal/controlplane/client"
 	"github.com/herd-os/herd/internal/display"
 	"github.com/herd-os/herd/internal/issues"
 	ghplatform "github.com/herd-os/herd/internal/platform/github"
@@ -22,6 +23,7 @@ import (
 
 func newInitCmd() *cobra.Command {
 	var skipLabels, skipWorkflows, checkOnly, dryRun bool
+	var controlPlaneURL, appLogin string
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -32,7 +34,12 @@ func newInitCmd() *cobra.Command {
 			if checkOnly || dryRun {
 				return runInitCheck()
 			}
-			return runInit(skipLabels, skipWorkflows)
+			return runInitWithOptions(initOptions{
+				SkipLabels:      skipLabels,
+				SkipWorkflows:   skipWorkflows,
+				ControlPlaneURL: controlPlaneURL,
+				AppLogin:        appLogin,
+			})
 		},
 		SilenceUsage: true,
 	}
@@ -41,11 +48,30 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&skipWorkflows, "skip-workflows", false, "Don't install workflow files")
 	cmd.Flags().BoolVar(&checkOnly, "check", false, "Compare what `herd init` would write against on-disk files; exit 1 if any drift is detected. Writes nothing.")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Alias for --check")
+	cmd.Flags().StringVar(&controlPlaneURL, "control-plane-url", "", "Herd control plane URL for self-hosted deployments")
+	cmd.Flags().StringVar(&appLogin, "app-login", "", "GitHub App login override for self-hosted/test deployments")
 
 	return cmd
 }
 
-func runInit(skipLabels, skipWorkflows bool) error {
+type setupAuthenticator interface {
+	SetupToken(ctx context.Context) (string, error)
+}
+
+type repositoryRegistrar interface {
+	RegisterRepository(ctx context.Context, req cpclient.RegisterRepositoryRequest) (cpclient.RegisterRepositoryResponse, error)
+}
+
+type initOptions struct {
+	SkipLabels      bool
+	SkipWorkflows   bool
+	ControlPlaneURL string
+	AppLogin        string
+	GHAuth          setupAuthenticator
+	Registrar       repositoryRegistrar
+}
+
+func runInitWithOptions(opts initOptions) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -64,10 +90,18 @@ func runInit(skipLabels, skipWorkflows bool) error {
 
 	// 2. Create config
 	configPath := filepath.Join(dir, config.ConfigFile)
+	effectiveControlPlaneURL := strings.TrimRight(strings.TrimSpace(opts.ControlPlaneURL), "/")
+	if effectiveControlPlaneURL == "" {
+		effectiveControlPlaneURL = config.DefaultControlPlaneURL
+	}
+
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		cfg := config.Default()
 		cfg.Platform.Owner = owner
 		cfg.Platform.Repo = repo
+		if effectiveControlPlaneURL != config.DefaultControlPlaneURL {
+			cfg.ControlPlaneURL = effectiveControlPlaneURL
+		}
 		if err := config.Save(dir, cfg); err != nil {
 			return fmt.Errorf("creating config: %w", err)
 		}
@@ -81,6 +115,14 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	cfg, err := config.Load(dir)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
+	}
+	if opts.ControlPlaneURL != "" {
+		cfg.ControlPlaneURL = effectiveControlPlaneURL
+	}
+
+	registration, err := registerRepositoryForInit(context.Background(), owner, repo, cfg.EffectiveControlPlaneURL(), opts)
+	if err != nil {
+		return err
 	}
 
 	// 3. Create .herd/ directory with role instruction files
@@ -100,7 +142,7 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	fmt.Println(display.Success("Created .herd/ directory with role instruction files"))
 
 	// 4. Create labels
-	if !skipLabels {
+	if !opts.SkipLabels {
 		if err := createLabels(owner, repo); err != nil {
 			return err
 		}
@@ -109,7 +151,7 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	}
 
 	// 5. Install workflow files
-	if !skipWorkflows {
+	if !opts.SkipWorkflows {
 		if err := installWorkflows(dir, cfg); err != nil {
 			return err
 		}
@@ -119,6 +161,9 @@ func runInit(skipLabels, skipWorkflows bool) error {
 
 	// 6. Create runner files
 	if err := createRunnerFiles(dir, owner, repo); err != nil {
+		return err
+	}
+	if err := writeRunnerEnvFile(dir, registration.RunnerBootstrapToken, cfg.EffectiveControlPlaneURL()); err != nil {
 		return err
 	}
 
@@ -132,6 +177,100 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	printNextSteps(owner, repo)
 
 	return nil
+}
+
+func registerRepositoryForInit(ctx context.Context, owner, repo, controlPlaneURL string, opts initOptions) (cpclient.RegisterRepositoryResponse, error) {
+	auth := opts.GHAuth
+	if auth == nil {
+		auth = newGHAuthenticator()
+	}
+	setupToken, err := auth.SetupToken(ctx)
+	if err != nil {
+		return cpclient.RegisterRepositoryResponse{}, err
+	}
+
+	registrar := opts.Registrar
+	if registrar == nil {
+		client, err := cpclient.New(controlPlaneURL, nil)
+		if err != nil {
+			return cpclient.RegisterRepositoryResponse{}, err
+		}
+		registrar = client
+	}
+
+	resp, err := registrar.RegisterRepository(ctx, cpclient.RegisterRepositoryRequest{
+		Repository: owner + "/" + repo,
+		Owner:      owner,
+		Name:       repo,
+		SetupToken: setupToken,
+		AppLogin:   strings.TrimPrefix(strings.TrimSpace(opts.AppLogin), "@"),
+	})
+	if err != nil {
+		return cpclient.RegisterRepositoryResponse{}, err
+	}
+	return resp, nil
+}
+
+func writeRunnerEnvFile(dir, bootstrapToken, controlPlaneURL string) error {
+	values := map[string]string{
+		"HERD_RUNNER_BOOTSTRAP_TOKEN": bootstrapToken,
+	}
+	if strings.TrimRight(controlPlaneURL, "/") != config.DefaultControlPlaneURL {
+		values["HERD_CONTROL_PLANE_URL"] = strings.TrimRight(controlPlaneURL, "/")
+	}
+	return upsertEnvFile(filepath.Join(dir, ".env"), values)
+}
+
+func upsertEnvFile(path string, values map[string]string) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading .env: %w", err)
+	}
+
+	seen := map[string]bool{}
+	lines := strings.Split(string(existing), "\n")
+	if len(existing) == 0 {
+		lines = nil
+	}
+	for i, line := range lines {
+		key, ok := envLineKey(line)
+		if !ok {
+			continue
+		}
+		if value, exists := values[key]; exists {
+			lines[i] = key + "=" + value
+			seen[key] = true
+		}
+	}
+	for key, value := range values {
+		if !seen[key] {
+			lines = append(lines, key+"="+value)
+		}
+	}
+	out := strings.Join(lines, "\n")
+	if out != "" && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	if err := os.WriteFile(path, []byte(out), 0600); err != nil {
+		return fmt.Errorf("writing .env: %w", err)
+	}
+	return nil
+}
+
+func envLineKey(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	key, _, ok := strings.Cut(trimmed, "=")
+	if !ok {
+		return "", false
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", false
+	}
+	return key, true
 }
 
 func checkPrerequisites(dir string) error {

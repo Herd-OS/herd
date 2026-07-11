@@ -12,6 +12,8 @@ import (
 func TestDefault(t *testing.T) {
 	cfg := Default()
 	assert.Equal(t, 1, cfg.Version)
+	assert.Empty(t, cfg.ControlPlaneURL)
+	assert.Equal(t, DefaultControlPlaneURL, cfg.EffectiveControlPlaneURL())
 	assert.Equal(t, "github", cfg.Platform.Provider)
 	assert.Equal(t, "claude", cfg.Agent.Provider)
 	assert.Equal(t, "medium", cfg.Agent.CodexReasoningEffort)
@@ -44,6 +46,7 @@ platform:
   provider: "github"
   owner: "my-org"
   repo: "my-project"
+control_plane_url: "https://cp.example.com"
 agent:
   provider: "claude"
 workers:
@@ -86,6 +89,8 @@ image_publish:
 
 	assert.Equal(t, "my-org", cfg.Platform.Owner)
 	assert.Equal(t, "my-project", cfg.Platform.Repo)
+	assert.Equal(t, "https://cp.example.com", cfg.ControlPlaneURL)
+	assert.Equal(t, "https://cp.example.com", cfg.EffectiveControlPlaneURL())
 	assert.Equal(t, 5, cfg.Workers.MaxConcurrent)
 	assert.Equal(t, "custom-label", cfg.Workers.RunnerLabel)
 	assert.Equal(t, 60, cfg.Workers.TimeoutMinutes)

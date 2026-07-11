@@ -95,8 +95,8 @@ func (s *PostgresStore) UpsertInstallation(ctx context.Context, i Installation) 
 	return err
 }
 
-func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Repository, error) {
+	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO repositories (github_id, installation_id, owner, name, default_branch, private, registered_at, updated_at, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (owner, name) DO UPDATE SET
@@ -105,9 +105,13 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) erro
 			default_branch = EXCLUDED.default_branch,
 			private = EXCLUDED.private,
 			updated_at = EXCLUDED.updated_at,
-			metadata = EXCLUDED.metadata`,
-		r.GitHubID, r.InstallationID, r.Owner, r.Name, r.DefaultBranch, r.Private, timeOrNow(r.RegisteredAt), timeOrNow(r.UpdatedAt), metadataOrEmpty(r.Metadata))
-	return err
+			metadata = EXCLUDED.metadata
+		RETURNING id`,
+		r.GitHubID, r.InstallationID, r.Owner, r.Name, r.DefaultBranch, r.Private, timeOrNow(r.RegisteredAt), timeOrNow(r.UpdatedAt), metadataOrEmpty(r.Metadata)).Scan(&r.ID)
+	if err != nil {
+		return Repository{}, err
+	}
+	return r, nil
 }
 
 func (s *PostgresStore) CreateRegistrationAttempt(ctx context.Context, a RegistrationAttempt) error {

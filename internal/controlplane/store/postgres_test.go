@@ -239,7 +239,9 @@ func TestMemoryStore(t *testing.T) {
 	assert.False(t, created)
 
 	require.NoError(t, s.UpsertInstallation(ctx, Installation{ID: 1, AccountLogin: "octo"}))
-	require.NoError(t, s.UpsertRepository(ctx, Repository{Owner: "octo", Name: "repo"}))
+	repo, err := s.UpsertRepository(ctx, Repository{Owner: "octo", Name: "repo"})
+	require.NoError(t, err)
+	require.NotZero(t, repo.ID)
 	require.NoError(t, s.CreateRegistrationAttempt(ctx, RegistrationAttempt{Owner: "octo", Name: "repo", Status: "ok"}))
 
 	require.NoError(t, s.CreateRunnerBootstrapToken(ctx, RunnerBootstrapToken{ID: 1, RepositoryID: 2, TokenHash: "h"}))
@@ -345,13 +347,15 @@ func seedRepository(t *testing.T, ctx context.Context, s *PostgresStore, db *sql
 		TargetType:   "Organization",
 		Events:       []string{"issue_comment", "pull_request"},
 	}))
-	require.NoError(t, s.UpsertRepository(ctx, Repository{
+	repo, err := s.UpsertRepository(ctx, Repository{
 		GitHubID:       3003,
 		InstallationID: 1001,
 		Owner:          "octo",
 		Name:           "repo",
 		DefaultBranch:  "main",
-	}))
+	})
+	require.NoError(t, err)
+	require.NotZero(t, repo.ID)
 	var repoID int64
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT id FROM repositories WHERE owner = $1 AND name = $2", "octo", "repo").Scan(&repoID))
 	return repoID

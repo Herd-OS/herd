@@ -296,12 +296,12 @@ func (s *fakeStore) UpsertInstallation(_ context.Context, i store.Installation) 
 	return nil
 }
 
-func (s *fakeStore) UpsertRepository(_ context.Context, r store.Repository) error {
+func (s *fakeStore) UpsertRepository(_ context.Context, r store.Repository) (store.Repository, error) {
 	if s.upsertRepoErr != nil {
-		return s.upsertRepoErr
+		return store.Repository{}, s.upsertRepoErr
 	}
 	s.repositories = append(s.repositories, r)
-	return nil
+	return r, nil
 }
 
 func TestPayloadHash(t *testing.T) {
