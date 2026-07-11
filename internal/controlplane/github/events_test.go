@@ -69,14 +69,17 @@ func TestParseEvent(t *testing.T) {
 				"installation":{"id":42},
 				"repository":{"id":1,"full_name":"octo-org/herd"},
 				"issue":{"number":5,"pull_request":{"url":"https://api.github.com/pulls/5"}},
-				"comment":{"id":123,"body":"/herd review"},
-				"sender":{"login":"mona"}
+				"comment":{"id":123,"body":"@herd-os review","author_association":"MEMBER","user":{"login":"mona","type":"User"}},
+				"sender":{"login":"mona","type":"User"}
 			}`,
 			assert: func(t *testing.T, event Event) {
 				got := event.(IssueCommentEvent)
 				assert.Equal(t, 5, got.IssueNumber)
 				assert.Equal(t, int64(123), got.CommentID)
+				assert.Equal(t, "MEMBER", got.CommentAuthorAssociation)
+				assert.Equal(t, "User", got.CommentAuthorType)
 				assert.Equal(t, "mona", got.SenderLogin)
+				assert.Equal(t, "User", got.SenderType)
 			},
 		},
 		{

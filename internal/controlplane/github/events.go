@@ -56,14 +56,17 @@ func (e InstallationRepositoriesEvent) EventName() string {
 func (e InstallationRepositoriesEvent) EventAction() string { return e.Action }
 
 type IssueCommentEvent struct {
-	Action         string
-	InstallationID int64
-	Repository     Repository
-	IssueNumber    int
-	PullRequestURL string
-	CommentID      int64
-	CommentBody    string
-	SenderLogin    string
+	Action                   string
+	InstallationID           int64
+	Repository               Repository
+	IssueNumber              int
+	PullRequestURL           string
+	CommentID                int64
+	CommentBody              string
+	CommentAuthorAssociation string
+	CommentAuthorType        string
+	SenderLogin              string
+	SenderType               string
 }
 
 func (e IssueCommentEvent) EventName() string   { return EventIssueComment }
@@ -265,8 +268,10 @@ func parseIssueCommentEvent(payload []byte) (IssueCommentEvent, error) {
 			} `json:"pull_request"`
 		} `json:"issue"`
 		Comment struct {
-			ID   int64  `json:"id"`
-			Body string `json:"body"`
+			ID                int64   `json:"id"`
+			Body              string  `json:"body"`
+			AuthorAssociation string  `json:"author_association"`
+			User              account `json:"user"`
 		} `json:"comment"`
 		Sender account `json:"sender"`
 	}
@@ -274,14 +279,17 @@ func parseIssueCommentEvent(payload []byte) (IssueCommentEvent, error) {
 		return IssueCommentEvent{}, fmt.Errorf("parse issue_comment event: %w", err)
 	}
 	return IssueCommentEvent{
-		Action:         raw.Action,
-		InstallationID: raw.Installation.ID,
-		Repository:     normalizeRepository(raw.Repository),
-		IssueNumber:    raw.Issue.Number,
-		PullRequestURL: raw.Issue.PullRequest.URL,
-		CommentID:      raw.Comment.ID,
-		CommentBody:    raw.Comment.Body,
-		SenderLogin:    raw.Sender.Login,
+		Action:                   raw.Action,
+		InstallationID:           raw.Installation.ID,
+		Repository:               normalizeRepository(raw.Repository),
+		IssueNumber:              raw.Issue.Number,
+		PullRequestURL:           raw.Issue.PullRequest.URL,
+		CommentID:                raw.Comment.ID,
+		CommentBody:              raw.Comment.Body,
+		CommentAuthorAssociation: raw.Comment.AuthorAssociation,
+		CommentAuthorType:        raw.Comment.User.Type,
+		SenderLogin:              raw.Sender.Login,
+		SenderType:               raw.Sender.Type,
 	}, nil
 }
 

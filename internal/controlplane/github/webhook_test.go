@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/herd-os/herd/internal/controlplane/commands"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -237,6 +238,39 @@ func TestHandlerInstallationRepositoriesAddRemove(t *testing.T) {
 	assert.JSONEq(t, `{"full_name":"","installation_repositories_action":"removed","removed":true,"repository_selection":"selected","selection_state":"removed"}`, string(store.repositories[1].Metadata))
 }
 
+func TestHandlerIssueCommentCommandSink(t *testing.T) {
+	payload := []byte(`{
+		"action":"created",
+		"installation":{"id":42},
+		"repository":{"id":99,"name":"herd","owner":{"login":"octo-org"},"default_branch":"main"},
+		"issue":{"number":7,"pull_request":{"url":"https://api.github.com/repos/octo-org/herd/pulls/7"}},
+		"comment":{"id":123,"body":"@herd-os review","author_association":"OWNER","user":{"login":"mona","type":"User"}},
+		"sender":{"login":"mona","type":"User"}
+	}`)
+	store := &fakeStore{}
+	commander := &fakeIssueCommentCommander{}
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-command")
+	req.Header.Set("X-GitHub-Event", EventIssueComment)
+	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+	rec := httptest.NewRecorder()
+
+	NewHandler("secret", store, log.New(io.Discard, "", 0), WithIssueCommentCommandHandler(commander)).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Len(t, commander.events, 1)
+	event := commander.events[0]
+	assert.Equal(t, "created", event.Action)
+	assert.Equal(t, "octo-org", event.Owner)
+	assert.Equal(t, "herd", event.Repo)
+	assert.Equal(t, 7, event.IssueNumber)
+	assert.Equal(t, int64(123), event.CommentID)
+	assert.Equal(t, "@herd-os review", event.CommentBody)
+	assert.Equal(t, "OWNER", event.AuthorAssociation)
+	assert.Equal(t, "User", event.CommentAuthorType)
+	assert.Equal(t, "mona", event.SenderLogin)
+}
+
 func TestHandlerUpsertFailureReturnsServerError(t *testing.T) {
 	payload := []byte(`{
 		"action":"created",
@@ -302,6 +336,19 @@ func (s *fakeStore) UpsertRepository(_ context.Context, r store.Repository) (sto
 	}
 	s.repositories = append(s.repositories, r)
 	return r, nil
+}
+
+type fakeIssueCommentCommander struct {
+	err    error
+	events []commands.IssueComment
+}
+
+func (c *fakeIssueCommentCommander) HandleIssueComment(_ context.Context, event commands.IssueComment) (commands.Result, error) {
+	c.events = append(c.events, event)
+	if c.err != nil {
+		return commands.Result{}, c.err
+	}
+	return commands.Result{Status: commands.StatusAcknowledged}, nil
 }
 
 func TestPayloadHash(t *testing.T) {

@@ -31,6 +31,7 @@ type Store interface {
 	RecordJobResult(ctx context.Context, r JobResult) (created bool, err error)
 	AcquireIdempotencyKey(ctx context.Context, key IdempotencyKey) (created bool, err error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	RecordCommand(ctx context.Context, c CommandRecord) (created bool, err error)
 	SetReviewState(ctx context.Context, s ReviewState) error
 	GetReviewState(ctx context.Context, repoID int64, prNumber int, headSHA string) (ReviewState, error)
 }

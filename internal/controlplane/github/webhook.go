@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/commands"
 	"github.com/herd-os/herd/internal/controlplane/store"
 )
 
@@ -35,20 +36,37 @@ type Store interface {
 }
 
 type Handler struct {
-	secret string
-	store  Store
-	logger *log.Logger
+	secret                string
+	store                 Store
+	logger                *log.Logger
+	issueCommentCommander IssueCommentCommandHandler
 }
 
-func NewHandler(secret string, store Store, logger *log.Logger) http.Handler {
+type IssueCommentCommandHandler interface {
+	HandleIssueComment(ctx context.Context, event commands.IssueComment) (commands.Result, error)
+}
+
+type Option func(*Handler)
+
+func WithIssueCommentCommandHandler(handler IssueCommentCommandHandler) Option {
+	return func(h *Handler) {
+		h.issueCommentCommander = handler
+	}
+}
+
+func NewHandler(secret string, store Store, logger *log.Logger, opts ...Option) http.Handler {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return Handler{
+	handler := Handler{
 		secret: secret,
 		store:  store,
 		logger: logger,
 	}
+	for _, opt := range opts {
+		opt(&handler)
+	}
+	return handler
 }
 
 func VerifySignature(secret string, payload []byte, signatureHeader string) error {
@@ -172,9 +190,30 @@ func (h Handler) processEvent(ctx context.Context, event Event) error {
 		return h.processInstallation(ctx, e)
 	case InstallationRepositoriesEvent:
 		return h.processInstallationRepositories(ctx, e)
+	case IssueCommentEvent:
+		return h.processIssueComment(ctx, e)
 	default:
 		return nil
 	}
+}
+
+func (h Handler) processIssueComment(ctx context.Context, e IssueCommentEvent) error {
+	if h.issueCommentCommander == nil {
+		return nil
+	}
+	_, err := h.issueCommentCommander.HandleIssueComment(ctx, commands.IssueComment{
+		Action:            e.Action,
+		Owner:             e.Repository.Owner,
+		Repo:              e.Repository.Name,
+		IssueNumber:       e.IssueNumber,
+		PullRequestURL:    e.PullRequestURL,
+		CommentID:         e.CommentID,
+		CommentBody:       e.CommentBody,
+		CommentAuthorType: firstNonEmpty(e.CommentAuthorType, e.SenderType),
+		SenderLogin:       e.SenderLogin,
+		AuthorAssociation: e.CommentAuthorAssociation,
+	})
+	return err
 }
 
 func (h Handler) processInstallation(ctx context.Context, e InstallationEvent) error {
