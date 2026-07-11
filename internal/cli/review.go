@@ -12,7 +12,9 @@ import (
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/factory"
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/platform"
+	"github.com/herd-os/herd/internal/reviewdiff"
 	"github.com/spf13/cobra"
 )
 
@@ -64,7 +66,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
-	data, err := buildReviewPromptData(ctx, client, prNumber, cfg.Platform.Owner, cfg.Platform.Repo)
+	data, err := buildReviewPromptData(ctx, client, prNumber, cfg.Platform.Owner, cfg.Platform.Repo, dir)
 	if err != nil {
 		return err
 	}
@@ -89,14 +91,21 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 	})
 }
 
-func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int, owner, repo string) (*reviewCmdPromptData, error) {
+func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int, owner, repo, repoRoot string) (*reviewCmdPromptData, error) {
 	pr, err := client.PullRequests().Get(ctx, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("getting PR #%d: %w", prNumber, err)
 	}
-	diff, err := client.PullRequests().GetDiff(ctx, prNumber)
+	preparedDiff, err := reviewdiff.PrepareForReview(ctx, reviewdiff.PrepareRequest{
+		PRNumber:     prNumber,
+		BaseRef:      pr.Base,
+		HeadRef:      pr.Head,
+		RepoRoot:     repoRoot,
+		Git:          git.New(repoRoot),
+		PullRequests: client.PullRequests(),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("getting PR diff: %w", err)
+		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
 	}
 
 	var general []reviewCmdComment
@@ -136,7 +145,7 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		PRURL:          pr.URL,
 		PRBaseBranch:   pr.Base,
 		PRHeadBranch:   pr.Head,
-		Diff:           diff,
+		Diff:           preparedDiff.Rendered.Text,
 		Comments:       general,
 		InlineComments: inline,
 		CIStatus:       ciStatus,

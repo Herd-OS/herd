@@ -190,6 +190,11 @@ type mockPRService struct {
 	mergedNumber           int
 	mergeMethod            platform.MergeMethod
 	diffResult             string
+	diffErr                error
+	listFilesResult        []*platform.PullRequestFile
+	listFilesErr           error
+	getDiffCalled          bool
+	listFilesCalled        bool
 	comments               map[int][]string
 	reviews                []capturedReview
 	onCreateErr            error // if set, Create returns this error
@@ -245,9 +250,17 @@ func (m *mockPRService) ListReviewComments(_ context.Context, _ int) ([]*platfor
 	return nil, nil
 }
 func (m *mockPRService) ListFiles(_ context.Context, _ int) ([]*platform.PullRequestFile, error) {
-	return nil, nil
+	m.listFilesCalled = true
+	if m.listFilesErr != nil {
+		return nil, m.listFilesErr
+	}
+	return m.listFilesResult, nil
 }
 func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) {
+	m.getDiffCalled = true
+	if m.diffErr != nil {
+		return "", m.diffErr
+	}
 	if m.diffResult != "" {
 		return m.diffResult, nil
 	}
