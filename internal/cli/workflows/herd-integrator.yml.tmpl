@@ -16,14 +16,10 @@ on:
     types: [closed]
   issues:
     types: [closed]
-  issue_comment:
-    types: [created]
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  actions: write
+  contents: read
+  id-token: write
   statuses: read
   checks: read
 
@@ -41,13 +37,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
 
       - name: Consolidate, advance, and review
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
-          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
           ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
           CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
           OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
@@ -72,13 +65,10 @@ jobs:
         with:
           ref: ${{`{{`}} github.event.workflow_run.head_branch {{`}}`}}
           fetch-depth: 0
-          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
 
       - name: Check CI and dispatch fix workers
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
-          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
           ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
           CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
           OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
@@ -107,13 +97,10 @@ jobs:
         with:
           ref: ${{`{{`}} github.event.check_run.check_suite.head_branch {{`}}`}}
           fetch-depth: 0
-          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
 
       - name: Check CI and dispatch fix workers
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
-          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
           ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
           CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
           OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
@@ -137,13 +124,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
 
       - name: Check if herd issue and advance
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
-          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
           ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
           CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
           OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
@@ -174,13 +158,10 @@ jobs:
         with:
           ref: ${{`{{`}} github.event.pull_request.head.ref {{`}}`}}
           fetch-depth: 0
-          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
 
       - name: Handle review
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
-          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
           ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
           CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
           OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
@@ -207,14 +188,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
 
       - name: Post-close cleanup
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
-          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
           PR_NUMBER: ${{`{{`}} github.event.pull_request.number {{`}}`}}
           PR_MERGED: ${{`{{`}} github.event.pull_request.merged {{`}}`}}
         run: |
@@ -223,45 +200,3 @@ jobs:
             MERGED_FLAG="--merged"
           fi
           herd integrator cleanup --pr "$PR_NUMBER" $MERGED_FLAG
-
-  handle-comment:
-    if: >
-      vars.HERD_ENABLED == 'true'
-      && github.event_name == 'issue_comment'
-      && github.event.action == 'created'
-      && startsWith(github.event.comment.body, '/herd ')
-    concurrency:
-      # Issue comments do not expose a herd PR number at expression time; use the milestone when present.
-      group: herd-comment-${{`{{`}} github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number {{`}}`}}
-      cancel-in-progress: false
-    runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
-
-      - name: Handle comment command
-        env:
-          HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
-          HERD_ACTIONS_TOKEN: ${{`{{`}} secrets.GITHUB_TOKEN {{`}}`}}
-          ANTHROPIC_API_KEY: ${{`{{`}} secrets.ANTHROPIC_API_KEY {{`}}`}}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{`{{`}} secrets.CLAUDE_CODE_OAUTH_TOKEN {{`}}`}}
-          OPENAI_API_KEY: ${{`{{`}} secrets.OPENAI_API_KEY {{`}}`}}
-          GEMINI_API_KEY: ${{`{{`}} secrets.GEMINI_API_KEY {{`}}`}}
-          COMMENT_BODY: ${{`{{`}} github.event.comment.body {{`}}`}}
-          COMMENT_ID: ${{`{{`}} github.event.comment.id {{`}}`}}
-          ISSUE_NUMBER: ${{`{{`}} github.event.issue.number {{`}}`}}
-          ISSUE_BODY: ${{`{{`}} github.event.issue.body {{`}}`}}
-          AUTHOR_LOGIN: ${{`{{`}} github.event.comment.user.login {{`}}`}}
-          AUTHOR_ASSOCIATION: ${{`{{`}} github.event.comment.author_association {{`}}`}}
-          IS_PR: ${{`{{`}} github.event.issue.pull_request && 'true' || 'false' {{`}}`}}
-        run: |
-          herd integrator handle-comment \
-            --comment-id "$COMMENT_ID" \
-            --issue-number "$ISSUE_NUMBER" \
-            --author-login "$AUTHOR_LOGIN" \
-            --author-association "$AUTHOR_ASSOCIATION" \
-            --is-pr "$IS_PR"

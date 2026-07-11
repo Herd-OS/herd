@@ -21,12 +21,14 @@ func WorkflowInputs(req DispatchRequest, jobID string) (map[string]string, error
 	}
 
 	inputs := map[string]string{
-		"repository_owner": req.Owner,
-		"repository_name":  req.Repo,
-		"job_id":           jobID,
-		"batch_number":     strconv.Itoa(req.BatchNumber),
-		"batch_branch":     req.BatchBranch,
-		"head_sha":         req.HeadSHA,
+		"repository_owner":  req.Owner,
+		"repository_name":   req.Repo,
+		"repository":        req.Owner + "/" + req.Repo,
+		"job_id":            jobID,
+		"batch_number":      strconv.Itoa(req.BatchNumber),
+		"batch_branch":      req.BatchBranch,
+		"head_sha":          req.HeadSHA,
+		"expected_head_sha": req.ExpectedHeadSHA,
 	}
 	if req.IssueNumber > 0 {
 		inputs["issue_number"] = strconv.Itoa(req.IssueNumber)
@@ -34,14 +36,14 @@ func WorkflowInputs(req DispatchRequest, jobID string) (map[string]string, error
 	if req.PRNumber > 0 {
 		inputs["pr_number"] = strconv.Itoa(req.PRNumber)
 	}
-	if req.ExpectedHeadSHA != "" {
-		inputs["expected_head_sha"] = req.ExpectedHeadSHA
-	}
 	if req.RunnerLabel != "" {
 		inputs["runner_label"] = req.RunnerLabel
 	}
 	if req.TimeoutMinutes > 0 {
 		inputs["timeout_minutes"] = strconv.Itoa(req.TimeoutMinutes)
+	}
+	if req.ControlPlaneURL != "" {
+		inputs["control_plane_url"] = req.ControlPlaneURL
 	}
 	if req.Reason != "" {
 		inputs["reason"] = req.Reason

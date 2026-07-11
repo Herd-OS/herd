@@ -44,6 +44,9 @@ func newConsolidateCmd() *cobra.Command {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator consolidate is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
+			if err := ensureProductionControlPlaneAuth("herd integrator consolidate"); err != nil {
+				return err
+			}
 
 			cfg, err := config.Load(".")
 			if err != nil {
@@ -102,6 +105,9 @@ func newAdvanceCmd() *cobra.Command {
 			}
 			if runID == 0 && batchNum == 0 {
 				return fmt.Errorf("either --run-id or --batch is required")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator advance"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -195,6 +201,9 @@ func newIntegratorReviewCmd() *cobra.Command {
 			}
 			if set > 1 {
 				return fmt.Errorf("--run-id, --pr, and --batch are mutually exclusive")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator review"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -300,6 +309,9 @@ func newIntegratorMergeCmd() *cobra.Command {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator merge is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
+			if err := ensureProductionControlPlaneAuth("herd integrator merge"); err != nil {
+				return err
+			}
 
 			cfg, err := config.Load(".")
 			if err != nil {
@@ -341,6 +353,9 @@ func newIntegratorCleanupCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator cleanup is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator cleanup"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -419,6 +434,9 @@ func newHandleCommentCmd() *cobra.Command {
 					fmt.Printf("Ignoring command from %s (association: %s)\n", authorLogin, authorAssociation)
 					return nil
 				}
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator handle-comment"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -507,6 +525,9 @@ func newIntegratorCheckCICmd() *cobra.Command {
 				return fmt.Errorf("herd integrator check-ci is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
 			if err := validateCheckCIFlags(runID, batchNum, ciRunID); err != nil {
+				return err
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator check-ci"); err != nil {
 				return err
 			}
 

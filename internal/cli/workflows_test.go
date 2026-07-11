@@ -64,13 +64,13 @@ func TestWorkersExtraEnv_RendersInWorkflow(t *testing.T) {
 				assert.Contains(t, s, line, "missing rendered env line for %s", name)
 			}
 
-			// Position: every extra env appears after GITHUB_TOKEN (the line
-			// immediately before the ExtraEnv loop) and before ISSUE_NUMBER.
-			githubTokenIdx := strings.Index(s, "GITHUB_TOKEN:")
+			// Position: every extra env appears after the control-plane env block
+			// and before ISSUE_NUMBER.
+			controlPlaneIdx := strings.Index(s, "HERD_CONTROL_PLANE_URL:")
 			issueIdx := strings.Index(s, "ISSUE_NUMBER:")
-			require.True(t, githubTokenIdx >= 0 && issueIdx >= 0, "anchor lines must be present")
+			require.True(t, controlPlaneIdx >= 0 && issueIdx >= 0, "anchor lines must be present")
 
-			prevIdx := githubTokenIdx
+			prevIdx := controlPlaneIdx
 			for _, name := range tt.extra {
 				idx := strings.Index(s, name+":")
 				require.True(t, idx >= 0, "extra env %s should be in output", name)
@@ -95,9 +95,9 @@ func TestWorkersExtraEnv_EmptyOmitted(t *testing.T) {
 		"rendered template with empty ExtraEnv must match committed workflow.\nrendered:\n%s\non-disk:\n%s", rendered, onDisk)
 
 	// Sanity: no double blank lines around the env block. With ExtraEnv empty,
-	// the loop collapses to nothing between GITHUB_TOKEN and ISSUE_NUMBER.
+	// the loop collapses to nothing between HERD_CONTROL_PLANE_URL and ISSUE_NUMBER.
 	assert.NotContains(t, string(rendered),
-		"GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}\n\n          ISSUE_NUMBER:",
+		"HERD_CONTROL_PLANE_URL: ${{ inputs.control_plane_url || 'https://api.herd-os.com' }}\n\n          ISSUE_NUMBER:",
 		"empty ExtraEnv produced a stray blank line in env block")
 }
 
@@ -171,7 +171,6 @@ func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T)
 		"check-ci-workflow-completion": "herd-integrate-${{ github.event.workflow_run.head_branch || github.ref }}",
 		"advance-on-close":             "herd-advance-${{ github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number }}",
 		"re-review":                    "herd-re-review-${{ github.event.pull_request.number }}",
-		"handle-comment":               "herd-comment-${{ github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number }}",
 	}
 
 	for jobName, expectedGroup := range expectedGroups {
@@ -303,9 +302,37 @@ func TestWorkerWorkflowTemplate_ExcludesProviderAuthEnv(t *testing.T) {
 	}
 
 	// The retained env keys must remain in the env block.
-	assert.Contains(t, s, "HERD_GITHUB_TOKEN", "HERD_GITHUB_TOKEN must remain in the env block")
+	assert.NotContains(t, s, "HERD_GITHUB_TOKEN", "worker workflow must not use legacy PAT orchestration")
+	assert.NotContains(t, s, "GITHUB_TOKEN", "worker workflow must not pass GitHub tokens for orchestration")
+	assert.Contains(t, s, "id-token: write", "worker workflow must be able to request OIDC tokens")
+	assert.Contains(t, s, "job_id:", "worker workflow must accept control-plane job IDs")
+	assert.Contains(t, s, "repository:", "worker workflow must accept repository identity")
+	assert.Contains(t, s, "expected_head_sha:", "worker workflow must accept expected head SHA")
+	assert.Contains(t, s, "/api/v1/jobs/$HERD_JOB_ID/results", "worker workflow must report results to the control plane")
 	assert.Contains(t, s, "ISSUE_NUMBER: ${{ inputs.issue_number }}", "ISSUE_NUMBER input must remain")
 	assert.Contains(t, s, "HERD_WORKER_MODE: ${{ inputs.mode }}", "HERD_WORKER_MODE input must remain")
+}
+
+func TestGeneratedWorkflowsDoNotUseLegacyPATOrCommentDispatch(t *testing.T) {
+	cfg := config.Default()
+	for _, wf := range workflowFiles() {
+		if wf.DestName != "herd-worker.yml" && wf.DestName != "herd-integrator.yml" && wf.DestName != "herd-monitor.yml" {
+			continue
+		}
+		out, err := RenderWorkflow(wf, cfg)
+		require.NoError(t, err)
+		s := string(out)
+
+		assert.NotContains(t, s, "secrets.HERD_GITHUB_TOKEN", "%s must not use HERD_GITHUB_TOKEN", wf.DestName)
+		assert.NotContains(t, s, "HERD_GITHUB_TOKEN", "%s must not pass HERD_GITHUB_TOKEN", wf.DestName)
+		assert.NotContains(t, s, "secrets.GITHUB_TOKEN", "%s must not use GITHUB_TOKEN production fallbacks", wf.DestName)
+		if wf.DestName == "herd-integrator.yml" {
+			assert.NotContains(t, s, "issue_comment")
+			assert.NotContains(t, s, "handle-comment")
+			assert.NotContains(t, s, "/herd ")
+		}
+		assert.Contains(t, s, "id-token: write", "%s must request OIDC tokens", wf.DestName)
+	}
 }
 
 func TestWorkflowFiles_ContainsExpectedNames(t *testing.T) {

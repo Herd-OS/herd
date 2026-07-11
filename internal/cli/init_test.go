@@ -230,15 +230,14 @@ func TestWorkflowFiles(t *testing.T) {
 	assert.Contains(t, files, "herd-integrator.yml")
 }
 
-func TestIntegratorWorkflowUsesStartsWithForCommentFilter(t *testing.T) {
+func TestIntegratorWorkflowDoesNotDispatchIssueComments(t *testing.T) {
 	content, err := workflowFS.ReadFile("workflows/herd-integrator.yml.tmpl")
 	require.NoError(t, err)
 
 	body := string(content)
-	assert.Contains(t, body, "startsWith(github.event.comment.body, '/herd ')",
-		"handle-comment job should use startsWith, not contains, to filter comment commands")
-	assert.NotContains(t, body, "contains(github.event.comment.body, '/herd ')",
-		"handle-comment job should not use contains for comment body filtering")
+	assert.NotContains(t, body, "issue_comment")
+	assert.NotContains(t, body, "handle-comment")
+	assert.NotContains(t, body, "github.event.comment.body")
 }
 
 func TestCreateRoleInstructionFiles(t *testing.T) {

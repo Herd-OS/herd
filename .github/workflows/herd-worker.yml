@@ -3,12 +3,33 @@ run-name: "Herd Worker #${{ inputs.issue_number }}"
 on:
   workflow_dispatch:
     inputs:
+      job_id:
+        description: 'Control-plane job ID'
+        required: true
+        type: string
+      repository:
+        description: 'Repository full name'
+        required: true
+        type: string
+      batch_number:
+        description: 'Batch number'
+        required: true
+        type: number
       issue_number:
         description: 'Issue number to work on'
         required: true
         type: number
       batch_branch:
         description: 'Batch branch to base work on (empty = main)'
+        required: false
+        type: string
+        default: ''
+      expected_head_sha:
+        description: 'Expected worker head SHA for result validation'
+        required: true
+        type: string
+      control_plane_url:
+        description: 'Control-plane URL override'
         required: false
         type: string
         default: ''
@@ -29,9 +50,8 @@ on:
         default: 'herd-worker'
 
 permissions:
-  contents: write
-  issues: write
-  actions: write
+  contents: read
+  id-token: write
 
 jobs:
   execute:
@@ -44,13 +64,61 @@ jobs:
         with:
           ref: ${{ inputs.batch_branch || github.event.repository.default_branch }}
           fetch-depth: 0
-          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Execute task
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          HERD_JOB_ID: ${{ inputs.job_id }}
+          HERD_REPOSITORY: ${{ inputs.repository }}
+          HERD_BATCH_NUMBER: ${{ inputs.batch_number }}
+          HERD_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          HERD_CONTROL_PLANE_URL: ${{ inputs.control_plane_url || 'https://api.herd-os.com' }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           HERD_WORKER_MODE: ${{ inputs.mode }}
         run: |
           herd worker exec "$ISSUE_NUMBER"
+
+      - name: Report result
+        if: always()
+        env:
+          HERD_JOB_ID: ${{ inputs.job_id }}
+          HERD_REPOSITORY: ${{ inputs.repository }}
+          HERD_BATCH_NUMBER: ${{ inputs.batch_number }}
+          HERD_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          HERD_BATCH_BRANCH: ${{ inputs.batch_branch }}
+          HERD_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          HERD_CONTROL_PLANE_URL: ${{ inputs.control_plane_url || 'https://api.herd-os.com' }}
+          HERD_JOB_STATUS: ${{ job.status }}
+        run: |
+          STATUS="success"
+          if [ "$HERD_JOB_STATUS" != "success" ]; then
+            STATUS="failure"
+          fi
+          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
+          jq -n \
+            --arg repository "$HERD_REPOSITORY" \
+            --arg job_id "$HERD_JOB_ID" \
+            --argjson batch_number "$HERD_BATCH_NUMBER" \
+            --argjson issue_number "$HERD_ISSUE_NUMBER" \
+            --arg target_branch "$HERD_BATCH_BRANCH" \
+            --arg base_sha "${{ github.sha }}" \
+            --arg expected_head_sha "$HERD_EXPECTED_HEAD_SHA" \
+            --arg status "$STATUS" \
+            '{
+              version: 1,
+              kind: "worker_completed",
+              repository: $repository,
+              job_id: $job_id,
+              batch_number: $batch_number,
+              issue_number: $issue_number,
+              target_branch: $target_branch,
+              base_sha: $base_sha,
+              expected_head_sha: $expected_head_sha,
+              patch_artifact: "worker-branch",
+              status: $status
+            }' \
+            | curl -fsSL -X POST \
+              -H "Authorization: Bearer $OIDC_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data-binary @- \
+              "$HERD_CONTROL_PLANE_URL/api/v1/jobs/$HERD_JOB_ID/results"

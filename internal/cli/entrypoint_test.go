@@ -58,3 +58,64 @@ func TestEntrypoint_BashSyntax(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	assert.NoError(t, err, "bash -n failed: %s", out)
 }
+
+func TestEntrypoint_ControlPlaneRunnerRegistration(t *testing.T) {
+	script := readEntrypoint(t)
+
+	tests := []struct {
+		name string
+		want string
+	}{
+		{
+			name: "default control plane URL",
+			want: `HERD_CONTROL_PLANE_URL:-https://api.herd-os.com`,
+		},
+		{
+			name: "self hosted URL override",
+			want: `normalize_control_plane_url`,
+		},
+		{
+			name: "invalid URL failure",
+			want: `HERD_CONTROL_PLANE_URL must be an absolute http or https URL`,
+		},
+		{
+			name: "missing bootstrap token failure",
+			want: `HERD_RUNNER_BOOTSTRAP_TOKEN is required for runner registration`,
+		},
+		{
+			name: "registration token exchange endpoint",
+			want: `/api/v1/runners/registration-token`,
+		},
+		{
+			name: "registration token parsed from response",
+			want: `jq -r '.token // empty'`,
+		},
+		{
+			name: "bootstrap token sent in payload",
+			want: `bootstrap_token: $bootstrap_token`,
+		},
+		{
+			name: "request nonce sent in payload",
+			want: `request_nonce: $request_nonce`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Contains(t, script, tt.want)
+		})
+	}
+}
+
+func TestEntrypoint_RunnerRegistrationDoesNotUseGitHubToken(t *testing.T) {
+	script := readEntrypoint(t)
+	getTokenIdx := strings.Index(script, "get_token()")
+	require.NotEqual(t, -1, getTokenIdx)
+	getTokenEnd := strings.Index(script[getTokenIdx:], "\n}\n")
+	require.NotEqual(t, -1, getTokenEnd)
+	getTokenBody := script[getTokenIdx : getTokenIdx+getTokenEnd]
+
+	assert.NotContains(t, getTokenBody, "GITHUB_TOKEN")
+	assert.NotContains(t, getTokenBody, "api.github.com/repos")
+	assert.Contains(t, getTokenBody, "HERD_RUNNER_BOOTSTRAP_TOKEN")
+}
