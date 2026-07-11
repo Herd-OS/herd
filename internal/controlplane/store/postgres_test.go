@@ -174,6 +174,11 @@ func TestPostgresStoreMethods(t *testing.T) {
 	token, err := store.RotateRunnerBootstrapToken(ctx, repoID, "rotated-hash")
 	require.NoError(t, err)
 	assert.NotZero(t, token.ID)
+	gotToken, err := store.GetRunnerBootstrapTokenByHash(ctx, "rotated-hash")
+	require.NoError(t, err)
+	assert.Equal(t, token.ID, gotToken.ID)
+	_, err = store.GetRunnerBootstrapTokenByHash(ctx, "missing-hash")
+	require.ErrorIs(t, err, ErrNotFound)
 	require.NoError(t, store.MarkRunnerBootstrapTokenUsed(ctx, token.ID, time.Now().UTC()))
 
 	job := Job{
@@ -203,6 +208,12 @@ func TestPostgresStoreMethods(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, created)
 	require.NoError(t, store.CompleteIdempotencyKey(ctx, "key-1", "result-1"))
+	gotKey, err := store.GetIdempotencyKey(ctx, "key-1")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", gotKey.Status)
+	assert.Equal(t, "result-1", gotKey.ResultRef)
+	_, err = store.GetIdempotencyKey(ctx, "missing")
+	require.ErrorIs(t, err, ErrNotFound)
 	require.ErrorIs(t, store.CompleteIdempotencyKey(ctx, "missing", "result"), ErrNotFound)
 
 	state := ReviewState{RepositoryID: repoID, PRNumber: 7, HeadSHA: "def456", Status: "pending", LastJobID: job.JobID}
@@ -245,6 +256,11 @@ func TestMemoryStore(t *testing.T) {
 	require.NoError(t, s.CreateRegistrationAttempt(ctx, RegistrationAttempt{Owner: "octo", Name: "repo", Status: "ok"}))
 
 	require.NoError(t, s.CreateRunnerBootstrapToken(ctx, RunnerBootstrapToken{ID: 1, RepositoryID: 2, TokenHash: "h"}))
+	gotToken, err := s.GetRunnerBootstrapTokenByHash(ctx, "h")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), gotToken.ID)
+	_, err = s.GetRunnerBootstrapTokenByHash(ctx, "missing")
+	require.ErrorIs(t, err, ErrNotFound)
 	token, err := s.RotateRunnerBootstrapToken(ctx, 2, "h2")
 	require.NoError(t, err)
 	require.NoError(t, s.RevokeRunnerBootstrapToken(ctx, token.ID, "done"))
@@ -273,6 +289,11 @@ func TestMemoryStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, created)
 	require.NoError(t, s.CompleteIdempotencyKey(ctx, "k1", "ref"))
+	gotKey, err := s.GetIdempotencyKey(ctx, "k1")
+	require.NoError(t, err)
+	assert.Equal(t, "ref", gotKey.ResultRef)
+	_, err = s.GetIdempotencyKey(ctx, "missing")
+	require.ErrorIs(t, err, ErrNotFound)
 	require.ErrorIs(t, s.CompleteIdempotencyKey(ctx, "missing", "ref"), ErrNotFound)
 
 	require.NoError(t, s.SetReviewState(ctx, ReviewState{RepositoryID: 2, PRNumber: 3, HeadSHA: "sha", Status: "open"}))

@@ -147,6 +147,17 @@ func (s *MemoryStore) RotateRunnerBootstrapToken(_ context.Context, repoID int64
 	return token, nil
 }
 
+func (s *MemoryStore) GetRunnerBootstrapTokenByHash(_ context.Context, tokenHash string) (RunnerBootstrapToken, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, token := range s.tokens {
+		if token.TokenHash == tokenHash {
+			return token, nil
+		}
+	}
+	return RunnerBootstrapToken{}, ErrNotFound
+}
+
 func (s *MemoryStore) RevokeRunnerBootstrapToken(_ context.Context, tokenID int64, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,6 +220,16 @@ func (s *MemoryStore) AcquireIdempotencyKey(_ context.Context, key IdempotencyKe
 	}
 	s.idempotencyKeys[key.Key] = key
 	return true, nil
+}
+
+func (s *MemoryStore) GetIdempotencyKey(_ context.Context, key string) (IdempotencyKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return IdempotencyKey{}, ErrNotFound
+	}
+	return record, nil
 }
 
 func (s *MemoryStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {

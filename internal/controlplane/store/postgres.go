@@ -181,6 +181,24 @@ func (s *PostgresStore) RotateRunnerBootstrapToken(ctx context.Context, repoID i
 	return token, nil
 }
 
+func (s *PostgresStore) GetRunnerBootstrapTokenByHash(ctx context.Context, tokenHash string) (RunnerBootstrapToken, error) {
+	var token RunnerBootstrapToken
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, repository_id, token_hash, created_at, expires_at, revoked_at, revoked_reason, used_at
+		FROM runner_bootstrap_tokens
+		WHERE token_hash = $1
+		ORDER BY id DESC
+		LIMIT 1`, tokenHash).Scan(
+		&token.ID, &token.RepositoryID, &token.TokenHash, &token.CreatedAt, &token.ExpiresAt, &token.RevokedAt, &token.RevokedReason, &token.UsedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RunnerBootstrapToken{}, ErrNotFound
+	}
+	if err != nil {
+		return RunnerBootstrapToken{}, err
+	}
+	return token, nil
+}
+
 func (s *PostgresStore) RevokeRunnerBootstrapToken(ctx context.Context, tokenID int64, reason string) error {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE runner_bootstrap_tokens
@@ -241,6 +259,24 @@ func (s *PostgresStore) AcquireIdempotencyKey(ctx context.Context, key Idempoten
 		ON CONFLICT (key) DO NOTHING`,
 		key.Key, key.Scope, key.Status, key.ResultRef, key.ExpiresAt, metadataOrEmpty(key.Metadata), timeOrNow(key.CreatedAt), key.CompletedAt)
 	return createdFromResult(result, err)
+}
+
+func (s *PostgresStore) GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error) {
+	var record IdempotencyKey
+	var metadata []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT key, scope, status, result_ref, expires_at, metadata, created_at, completed_at
+		FROM idempotency_keys
+		WHERE key = $1`, key).Scan(
+		&record.Key, &record.Scope, &record.Status, &record.ResultRef, &record.ExpiresAt, &metadata, &record.CreatedAt, &record.CompletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return IdempotencyKey{}, ErrNotFound
+	}
+	if err != nil {
+		return IdempotencyKey{}, err
+	}
+	record.Metadata = json.RawMessage(metadata)
+	return record, nil
 }
 
 func (s *PostgresStore) CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/herd-os/herd/internal/appauth"
 	cpgithub "github.com/herd-os/herd/internal/controlplane/github"
+	"github.com/herd-os/herd/internal/controlplane/runners"
 )
 
 func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
@@ -41,7 +42,34 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
 		registerHandler = http.HandlerFunc(notImplementedHandler)
 	}
 	mux.Handle("POST /api/v1/github/repositories/register", registerHandler)
-	mux.HandleFunc("POST /api/v1/runners/registration-token", notImplementedHandler)
+	runnerTokenHandler := deps.RunnerRegistrationTokenRoute
+	if runnerTokenHandler == nil && deps.Store != nil {
+		runnerStore, ok := deps.Store.(runners.Store)
+		if !ok {
+			runnerTokenHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "runner registration storage is not configured",
+				})
+			})
+		} else {
+			var err error
+			runnerTokenHandler, err = runners.NewDefaultRegistrationTokenHandler(runnerStore, appauth.AppConfig{
+				AppID:         cfg.GitHubAppID,
+				PrivateKeyPEM: []byte(cfg.GitHubAppPrivateKey),
+			})
+			if err != nil {
+				runnerTokenHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{
+						"error": fmt.Sprintf("runner registration GitHub App auth is not configured: %s", err),
+					})
+				})
+			}
+		}
+	}
+	if runnerTokenHandler == nil {
+		runnerTokenHandler = http.HandlerFunc(notImplementedHandler)
+	}
+	mux.Handle("POST /api/v1/runners/registration-token", runnerTokenHandler)
 	mux.HandleFunc("POST /api/v1/jobs/{job_id}/results", notImplementedHandler)
 }
 

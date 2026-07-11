@@ -1,0 +1,311 @@
+package runners
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/herd-os/herd/internal/appauth"
+	"github.com/herd-os/herd/internal/controlplane/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestRegistrationTokenHandlerSuccess(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+
+	rec := serveRegistrationRequest(t, handler, RegistrationTokenRequest{
+		Owner:          "octo",
+		Name:           "repo",
+		RunnerName:     "runner-1",
+		RunnerLabels:   []string{"self-hosted", "herd"},
+		BootstrapToken: plain,
+		RequestNonce:   "nonce-1",
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"token":"github-runner-token","expires_at":"2026-07-11T13:00:00Z"}`, rec.Body.String())
+	assert.Equal(t, int64(1001), minter.installationID)
+	assert.Equal(t, "octo", minter.owner)
+	assert.Equal(t, "repo", minter.repo)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+	assert.Equal(t, now, *st.tokens[token.ID].UsedAt)
+	assert.NotContains(t, rec.Body.String(), "installation")
+}
+
+func TestRegistrationTokenHandlerRejectsInvalidRequests(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name        string
+		mutateStore func(*handlerFakeStore, store.RunnerBootstrapToken)
+		mutateReq   func(*RegistrationTokenRequest)
+		wantStatus  int
+	}{
+		{
+			name: "missing token",
+			mutateReq: func(req *RegistrationTokenRequest) {
+				req.BootstrapToken = ""
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "unknown token",
+			mutateReq: func(req *RegistrationTokenRequest) {
+				req.BootstrapToken = "hrb_unknown"
+			},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "wrong repo",
+			mutateStore: func(st *handlerFakeStore, token store.RunnerBootstrapToken) {
+				token.RepositoryID = 99
+				st.tokens[token.ID] = token
+				st.tokensByHash[token.TokenHash] = token
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "revoked token",
+			mutateStore: func(st *handlerFakeStore, token store.RunnerBootstrapToken) {
+				revokedAt := now.Add(-time.Minute)
+				token.RevokedAt = &revokedAt
+				token.RevokedReason = "rotated"
+				st.tokens[token.ID] = token
+				st.tokensByHash[token.TokenHash] = token
+			},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "expired token",
+			mutateStore: func(st *handlerFakeStore, token store.RunnerBootstrapToken) {
+				token.ExpiresAt = now.Add(-time.Minute)
+				st.tokens[token.ID] = token
+				st.tokensByHash[token.TokenHash] = token
+			},
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, plain, token := newHandlerTestStore(t, now)
+			if tt.mutateStore != nil {
+				tt.mutateStore(st, token)
+			}
+			req := RegistrationTokenRequest{
+				Owner:          "octo",
+				Name:           "repo",
+				RunnerName:     "runner-1",
+				BootstrapToken: plain,
+				RequestNonce:   "nonce-1",
+			}
+			if tt.mutateReq != nil {
+				tt.mutateReq(&req)
+			}
+			minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}}
+			handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+
+			rec := serveRegistrationRequest(t, handler, req)
+
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			assert.Equal(t, 0, minter.calls)
+			assert.Nil(t, st.tokens[token.ID].UsedAt)
+		})
+	}
+}
+
+func TestRegistrationTokenHandlerRotatedTokenInvalidatesOldActiveToken(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, oldPlain, oldToken := newHandlerTestStore(t, now)
+	newPlain := "hrb_new"
+	newToken := store.RunnerBootstrapToken{
+		ID:           2,
+		RepositoryID: oldToken.RepositoryID,
+		TokenHash:    HashBootstrapToken(newPlain),
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(time.Hour),
+	}
+	revokedAt := now
+	oldToken.RevokedAt = &revokedAt
+	oldToken.RevokedReason = "rotated"
+	st.tokens[oldToken.ID] = oldToken
+	st.tokensByHash[oldToken.TokenHash] = oldToken
+	st.tokens[newToken.ID] = newToken
+	st.tokensByHash[newToken.TokenHash] = newToken
+	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+
+	oldRec := serveRegistrationRequest(t, handler, RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: oldPlain, RequestNonce: "nonce-old"})
+	newRec := serveRegistrationRequest(t, handler, RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: newPlain, RequestNonce: "nonce-new"})
+
+	assert.Equal(t, http.StatusUnauthorized, oldRec.Code)
+	assert.Equal(t, http.StatusOK, newRec.Code)
+	assert.Equal(t, 1, minter.calls)
+}
+
+func TestRegistrationTokenHandlerDuplicateNonceReplaysResponse(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, _ := newHandlerTestStore(t, now)
+	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"herd"}, BootstrapToken: plain, RequestNonce: "nonce-1"}
+
+	first := serveRegistrationRequest(t, handler, req)
+	second := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.JSONEq(t, first.Body.String(), second.Body.String())
+	assert.Equal(t, 1, minter.calls)
+}
+
+func TestRegistrationTokenHandlerMinterFailures(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name   string
+		minter TokenMinter
+	}{
+		{name: "app token mint failure", minter: AppInstallationMinter{Source: fakeTokenSource{err: errors.New("mint failed")}}},
+		{name: "github registration token API failure", minter: &fakeMinter{err: errors.New("github failed")}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, plain, token := newHandlerTestStore(t, now)
+			handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: tt.minter, Now: func() time.Time { return now }})
+
+			rec := serveRegistrationRequest(t, handler, RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: tt.name})
+
+			assert.Equal(t, http.StatusBadGateway, rec.Code)
+			assert.Nil(t, st.tokens[token.ID].UsedAt)
+		})
+	}
+}
+
+func serveRegistrationRequest(t *testing.T, handler http.Handler, body RegistrationTokenRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runners/registration-token", bytes.NewReader(data))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func newHandlerTestStore(t *testing.T, now time.Time) (*handlerFakeStore, string, store.RunnerBootstrapToken) {
+	t.Helper()
+	plain := "hrb_bootstrap"
+	token := store.RunnerBootstrapToken{
+		ID:           1,
+		RepositoryID: 10,
+		TokenHash:    HashBootstrapToken(plain),
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(time.Hour),
+	}
+	st := &handlerFakeStore{
+		repository: store.Repository{ID: 10, InstallationID: 1001, Owner: "octo", Name: "repo"},
+		tokens:     map[int64]store.RunnerBootstrapToken{token.ID: token},
+		tokensByHash: map[string]store.RunnerBootstrapToken{
+			token.TokenHash: token,
+		},
+		idempotency: map[string]store.IdempotencyKey{},
+	}
+	return st, plain, token
+}
+
+type handlerFakeStore struct {
+	repository   store.Repository
+	tokens       map[int64]store.RunnerBootstrapToken
+	tokensByHash map[string]store.RunnerBootstrapToken
+	idempotency  map[string]store.IdempotencyKey
+}
+
+func (s *handlerFakeStore) GetRepository(_ context.Context, owner string, name string) (store.Repository, error) {
+	if s.repository.Owner == owner && s.repository.Name == name {
+		return s.repository, nil
+	}
+	return store.Repository{}, store.ErrNotFound
+}
+
+func (s *handlerFakeStore) GetRunnerBootstrapTokenByHash(_ context.Context, tokenHash string) (store.RunnerBootstrapToken, error) {
+	token, ok := s.tokensByHash[tokenHash]
+	if !ok {
+		return store.RunnerBootstrapToken{}, store.ErrNotFound
+	}
+	return token, nil
+}
+
+func (s *handlerFakeStore) MarkRunnerBootstrapTokenUsed(_ context.Context, tokenID int64, usedAt time.Time) error {
+	token, ok := s.tokens[tokenID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	token.UsedAt = &usedAt
+	s.tokens[tokenID] = token
+	s.tokensByHash[token.TokenHash] = token
+	return nil
+}
+
+func (s *handlerFakeStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
+	if _, ok := s.idempotency[key.Key]; ok {
+		return false, nil
+	}
+	s.idempotency[key.Key] = key
+	return true, nil
+}
+
+func (s *handlerFakeStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	record, ok := s.idempotency[key]
+	if !ok {
+		return store.IdempotencyKey{}, store.ErrNotFound
+	}
+	return record, nil
+}
+
+func (s *handlerFakeStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	record, ok := s.idempotency[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = idempotencyStatusDone
+	record.ResultRef = resultRef
+	record.CompletedAt = &now
+	s.idempotency[key] = record
+	return nil
+}
+
+type fakeMinter struct {
+	response       RegistrationTokenResponse
+	err            error
+	calls          int
+	installationID int64
+	owner          string
+	repo           string
+}
+
+func (m *fakeMinter) CreateRegistrationToken(_ context.Context, installationID int64, owner string, repo string) (RegistrationTokenResponse, error) {
+	m.calls++
+	m.installationID = installationID
+	m.owner = owner
+	m.repo = repo
+	return m.response, m.err
+}
+
+type fakeTokenSource struct {
+	err error
+}
+
+func (s fakeTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+	return appauth.InstallationToken{}, s.err
+}

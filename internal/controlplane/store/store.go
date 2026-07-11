@@ -24,12 +24,14 @@ type Store interface {
 	CreateRegistrationAttempt(ctx context.Context, a RegistrationAttempt) error
 	CreateRunnerBootstrapToken(ctx context.Context, t RunnerBootstrapToken) error
 	RotateRunnerBootstrapToken(ctx context.Context, repoID int64, tokenHash string) (RunnerBootstrapToken, error)
+	GetRunnerBootstrapTokenByHash(ctx context.Context, tokenHash string) (RunnerBootstrapToken, error)
 	RevokeRunnerBootstrapToken(ctx context.Context, tokenID int64, reason string) error
 	MarkRunnerBootstrapTokenUsed(ctx context.Context, tokenID int64, usedAt time.Time) error
 	CreateJob(ctx context.Context, j Job) error
 	GetJob(ctx context.Context, jobID string) (Job, error)
 	RecordJobResult(ctx context.Context, r JobResult) (created bool, err error)
 	AcquireIdempotencyKey(ctx context.Context, key IdempotencyKey) (created bool, err error)
+	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	SetReviewState(ctx context.Context, s ReviewState) error
 	GetReviewState(ctx context.Context, repoID int64, prNumber int, headSHA string) (ReviewState, error)

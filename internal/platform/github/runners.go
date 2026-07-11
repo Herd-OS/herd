@@ -3,12 +3,40 @@ package github
 import (
 	"context"
 	"fmt"
+	"time"
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/platform"
 )
 
 type runnerService struct{ c *Client }
+
+// RunnerRegistrationToken is a short-lived GitHub token for registering a self-hosted runner.
+type RunnerRegistrationToken struct {
+	Token     string
+	ExpiresAt time.Time
+}
+
+func CreateRunnerRegistrationToken(ctx context.Context, client *gh.Client, owner string, repo string) (RunnerRegistrationToken, error) {
+	if client == nil {
+		return RunnerRegistrationToken{}, fmt.Errorf("GitHub client is required")
+	}
+	token, _, err := client.Actions.CreateRegistrationToken(ctx, owner, repo)
+	if err != nil {
+		return RunnerRegistrationToken{}, fmt.Errorf("creating runner registration token for %s/%s: %w", owner, repo, err)
+	}
+	if token == nil || token.GetToken() == "" {
+		return RunnerRegistrationToken{}, fmt.Errorf("creating runner registration token for %s/%s: empty response", owner, repo)
+	}
+	expiresAt := time.Time{}
+	if token.ExpiresAt != nil {
+		expiresAt = token.ExpiresAt.Time
+	}
+	return RunnerRegistrationToken{
+		Token:     token.GetToken(),
+		ExpiresAt: expiresAt,
+	}, nil
+}
 
 func (s *runnerService) List(ctx context.Context) ([]*platform.Runner, error) {
 	opts := &gh.ListRunnersOptions{
