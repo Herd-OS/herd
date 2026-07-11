@@ -7,6 +7,7 @@ import (
 
 	"github.com/herd-os/herd/internal/appauth"
 	cpgithub "github.com/herd-os/herd/internal/controlplane/github"
+	"github.com/herd-os/herd/internal/controlplane/jobs"
 	"github.com/herd-os/herd/internal/controlplane/runners"
 )
 
@@ -70,7 +71,26 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
 		runnerTokenHandler = http.HandlerFunc(notImplementedHandler)
 	}
 	mux.Handle("POST /api/v1/runners/registration-token", runnerTokenHandler)
-	mux.HandleFunc("POST /api/v1/jobs/{job_id}/results", notImplementedHandler)
+	jobResultsHandler := deps.JobResultsRoute
+	if jobResultsHandler == nil && deps.Store != nil {
+		resultsStore, ok := deps.Store.(jobs.Store)
+		if !ok {
+			jobResultsHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "job result storage is not configured",
+				})
+			})
+		} else {
+			jobResultsHandler = jobs.NewHandler(jobs.HandlerOptions{
+				Store:    resultsStore,
+				Audience: cfg.OIDCAudience,
+			})
+		}
+	}
+	if jobResultsHandler == nil {
+		jobResultsHandler = http.HandlerFunc(notImplementedHandler)
+	}
+	mux.Handle("POST /api/v1/jobs/{job_id}/results", jobResultsHandler)
 }
 
 func notImplementedHandler(w http.ResponseWriter, _ *http.Request) {

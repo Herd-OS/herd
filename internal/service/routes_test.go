@@ -54,3 +54,20 @@ func TestStubRoutesReturnJSON(t *testing.T) {
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
 	assert.JSONEq(t, `{"error":"not implemented"}`, rec.Body.String())
 }
+
+func TestJobResultsRouteCanBeInjected(t *testing.T) {
+	handler, err := NewServer(Config{Env: "development"}, Dependencies{
+		JobResultsRoute: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusAccepted, map[string]string{"job_id": r.PathValue("job_id")})
+		}),
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job-123/results", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.JSONEq(t, `{"job_id":"job-123"}`, rec.Body.String())
+}

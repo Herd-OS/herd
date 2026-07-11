@@ -14,6 +14,7 @@ type Dependencies struct {
 	Store                        Store
 	RegisterRepositoryRoute      http.Handler
 	RunnerRegistrationTokenRoute http.Handler
+	JobResultsRoute              http.Handler
 }
 
 type Store interface {
