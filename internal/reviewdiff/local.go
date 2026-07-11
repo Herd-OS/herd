@@ -128,7 +128,7 @@ func (c LocalCollector) resolveRef(sha, ref, remote string, prNumber int) (strin
 		}
 	}
 	if sha != "" {
-		return sha, nil
+		return "", fmt.Errorf("commit %s is not available locally", sha)
 	}
 	if ref != "" {
 		return ref, nil

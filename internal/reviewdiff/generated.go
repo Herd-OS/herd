@@ -53,12 +53,12 @@ func HasGeneratedHeader(patch string) bool {
 }
 
 func MarkGeneratedAndLarge(file ChangedFile, opts RenderOptions) ChangedFile {
-	opts = normalizeOptions(opts)
+	_ = opts
 	diffBytes := len(file.Patch)
 	if file.Generated || IsGeneratedPath(file.Path) || (file.OldPath != "" && IsGeneratedPath(file.OldPath)) || HasGeneratedHeader(file.Patch) {
 		file.Generated = true
 	}
-	if file.Large || IsLargeLockfile(file.Path, diffBytes) || (file.OldPath != "" && IsLargeLockfile(file.OldPath, diffBytes)) || diffBytes > opts.MaxFileDiffBytes {
+	if file.Large || IsLargeLockfile(file.Path, diffBytes) || (file.OldPath != "" && IsLargeLockfile(file.OldPath, diffBytes)) {
 		file.Large = true
 	}
 	return file

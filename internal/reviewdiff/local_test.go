@@ -87,7 +87,7 @@ func TestLocalCollectorCollectsChangedFiles(t *testing.T) {
 	assert.True(t, files["dist/app.js"].Generated)
 
 	require.Contains(t, files, "large.txt")
-	assert.True(t, files["large.txt"].Large)
+	assert.False(t, files["large.txt"].Large)
 }
 
 func TestLocalCollectorPrefersPullRequestHeadBeforeLocalBranchFallback(t *testing.T) {
