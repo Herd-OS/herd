@@ -26,6 +26,22 @@ func IsLargeLockfile(path string, diffBytes int) bool {
 	}
 }
 
+func IsLikelyBinaryPath(path string) bool {
+	lower := strings.ToLower(pathBase(path))
+	for _, suffix := range []string{
+		".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp", ".tif", ".tiff",
+		".pdf", ".zip", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".tar",
+		".jar", ".war", ".wasm", ".class", ".so", ".dylib", ".dll", ".exe",
+		".mp3", ".wav", ".flac", ".ogg", ".mp4", ".mov", ".avi", ".webm",
+		".woff", ".woff2", ".ttf", ".otf", ".eot",
+	} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func HasGeneratedHeader(patch string) bool {
 	header := patch
 	if len(header) > 4096 {

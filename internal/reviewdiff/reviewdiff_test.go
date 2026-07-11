@@ -135,6 +135,27 @@ func TestIsLargeLockfile_OnlyLargeLockfiles(t *testing.T) {
 	}
 }
 
+func TestIsLikelyBinaryPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "image", path: "assets/screenshot.PNG", want: true},
+		{name: "archive", path: "release/app.tar.gz", want: true},
+		{name: "font", path: "public/fonts/app.woff2", want: true},
+		{name: "source", path: "internal/reviewdiff/github.go", want: false},
+		{name: "extension-like directory", path: "assets/png/readme.txt", want: false},
+		{name: "no extension", path: "assets/image", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsLikelyBinaryPath(tt.path))
+		})
+	}
+}
+
 func TestMarkGeneratedAndLarge(t *testing.T) {
 	opts := RenderOptions{
 		MaxTotalDiffBytes:        10000,

@@ -25,6 +25,10 @@ func FromPlatformFiles(prNumber int, baseSHA string, headSHA string, files []*pl
 		}
 		if changed.Patch == "" {
 			switch {
+			case IsLikelyBinaryPath(changed.Path) || (changed.OldPath != "" && IsLikelyBinaryPath(changed.OldPath)):
+				changed.Binary = true
+				changed.Omitted = true
+				changed.OmitReason = "binary file"
 			case changed.Additions == 0 && changed.Deletions == 0:
 				changed.Omitted = true
 				changed.OmitReason = "metadata-only change"

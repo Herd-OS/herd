@@ -112,3 +112,38 @@ func TestFromPlatformFilesMarksUnavailableMetadataGeneratedAndLarge(t *testing.T
 	assert.Contains(t, result.Text, "dist/app.js (modified, +0/-0, reason: generated file)")
 	assert.Contains(t, result.Text, "package-lock.json (modified, +0/-0, reason: large lockfile diff)")
 }
+
+func TestFromPlatformFilesMarksPatchlessLikelyBinaryPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "image", path: "assets/screenshot.png"},
+		{name: "archive", path: "release/app.tar.gz"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			diff := FromPlatformFiles(42, "base", "head", []*platform.PullRequestFile{
+				{
+					Path:   tt.path,
+					Status: "added",
+				},
+			})
+			require.Len(t, diff.Files, 1)
+			assert.True(t, diff.Files[0].Binary)
+			assert.True(t, diff.Files[0].Omitted)
+			assert.Equal(t, "binary file", diff.Files[0].OmitReason)
+
+			result := RenderForReview(diff, DefaultRenderOptions())
+			require.True(t, result.WasLimited)
+			require.Len(t, result.OmittedFiles, 1)
+			assert.True(t, result.OmittedFiles[0].Binary)
+			assert.Contains(t, result.Text, tt.path+" (added, +0/-0, reason: binary file)")
+
+			summary := FormatCoverageSummary(diff, result, 10)
+			assert.Contains(t, summary, "Omitted files: 1 (generated: 0, binary: 1)")
+			assert.Contains(t, summary, tt.path+": binary file")
+		})
+	}
+}

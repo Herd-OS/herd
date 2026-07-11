@@ -946,10 +946,10 @@ func TestReview_AppendsCoverageWhenPreparedDiffIsLimited(t *testing.T) {
 	assert.True(t, result.Approved)
 	require.NotEmpty(t, prSvc.comments)
 	assert.Contains(t, prSvc.comments[0], "## Diff Coverage")
-	assert.Contains(t, prSvc.comments[0], "Omitted files: 2 (generated: 1, binary: 0)")
+	assert.Contains(t, prSvc.comments[0], "Omitted files: 2 (generated: 1, binary: 1)")
 	assert.Contains(t, prSvc.comments[0], "Truncated files: 1")
 	assert.Contains(t, prSvc.comments[0], "dist/app.js: generated file")
-	assert.Contains(t, prSvc.comments[0], "image.png: metadata-only change")
+	assert.Contains(t, prSvc.comments[0], "image.png: binary file")
 }
 
 func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
