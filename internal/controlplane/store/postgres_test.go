@@ -1,0 +1,369 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
+)
+
+func TestPostgresMigrationsApplyFromEmptyDatabase(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	require.NoError(t, ApplyMigrations(ctx, db))
+	require.NoError(t, ValidateMigrations(ctx, db))
+
+	for _, table := range []string{
+		"app_installations",
+		"repositories",
+		"registration_attempts",
+		"runner_bootstrap_tokens",
+		"webhook_deliveries",
+		"jobs",
+		"job_results",
+		"review_states",
+		"review_locks",
+		"command_records",
+		"idempotency_keys",
+		"github_mutation_attempts",
+		"audit_records",
+	} {
+		t.Run(table, func(t *testing.T) {
+			var exists bool
+			err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)", table).Scan(&exists)
+			require.NoError(t, err)
+			assert.True(t, exists)
+		})
+	}
+}
+
+func TestPostgresStoreRequiresMigrationsUnlessExplicitlyEnabled(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+
+	_, err := NewPostgresStore(ctx, db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "migrations")
+
+	store, err := NewPostgresStore(ctx, db, WithMigrateOnStart())
+	require.NoError(t, err)
+	require.NoError(t, store.Health(ctx))
+}
+
+func TestPostgresConstraintBackedIdempotency(t *testing.T) {
+	ctx := context.Background()
+	db := newMigratedPostgresDB(t, ctx)
+	store, err := NewPostgresStore(ctx, db)
+	require.NoError(t, err)
+	repoID := seedRepository(t, ctx, store, db)
+
+	t.Run("webhook delivery dedupe", func(t *testing.T) {
+		delivery := WebhookDelivery{
+			DeliveryID:  "delivery-1",
+			Event:       "issue_comment",
+			Action:      "created",
+			PayloadHash: "sha256:payload",
+			Status:      "accepted",
+		}
+		created, err := store.RecordWebhookDelivery(ctx, delivery)
+		require.NoError(t, err)
+		assert.True(t, created)
+
+		created, err = store.RecordWebhookDelivery(ctx, delivery)
+		require.NoError(t, err)
+		assert.False(t, created)
+	})
+
+	t.Run("command repo comment command key", func(t *testing.T) {
+		command := CommandRecord{
+			RepositoryID: repoID,
+			CommentID:    10,
+			CommandKey:   "comment-10:/fix",
+			CommandName:  "fix",
+			Actor:        "octo",
+			Status:       "accepted",
+		}
+		created, err := store.RecordCommand(ctx, command)
+		require.NoError(t, err)
+		assert.True(t, created)
+
+		created, err = store.RecordCommand(ctx, command)
+		require.NoError(t, err)
+		assert.False(t, created)
+	})
+
+	t.Run("job result callback acceptance", func(t *testing.T) {
+		require.NoError(t, store.CreateJob(ctx, Job{
+			JobID:          "job-1",
+			RepositoryID:   repoID,
+			InstallationID: 1001,
+			PRNumber:       42,
+			HeadSHA:        "abc123",
+			Status:         "running",
+		}))
+		result := JobResult{JobID: "job-1", IdempotencyKey: "callback-1", Status: "succeeded", ResultRef: "checks/1"}
+		created, err := store.RecordJobResult(ctx, result)
+		require.NoError(t, err)
+		assert.True(t, created)
+
+		created, err = store.RecordJobResult(ctx, result)
+		require.NoError(t, err)
+		assert.False(t, created)
+	})
+
+	t.Run("active review lock uniqueness", func(t *testing.T) {
+		lock := ReviewLock{
+			RepositoryID: repoID,
+			PRNumber:     42,
+			HeadSHA:      "abc123",
+			Holder:       "worker-a",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour),
+		}
+		created, err := store.AcquireReviewLock(ctx, lock)
+		require.NoError(t, err)
+		assert.True(t, created)
+
+		lock.Holder = "worker-b"
+		created, err = store.AcquireReviewLock(ctx, lock)
+		require.NoError(t, err)
+		assert.False(t, created)
+	})
+
+	t.Run("runner token revocation permits hash reuse", func(t *testing.T) {
+		token := RunnerBootstrapToken{
+			RepositoryID: repoID,
+			TokenHash:    "hash-1",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour),
+		}
+		require.NoError(t, store.CreateRunnerBootstrapToken(ctx, token))
+
+		var tokenID int64
+		require.NoError(t, db.QueryRowContext(ctx, "SELECT id FROM runner_bootstrap_tokens WHERE token_hash = $1", token.TokenHash).Scan(&tokenID))
+		require.NoError(t, store.RevokeRunnerBootstrapToken(ctx, tokenID, "test"))
+		require.NoError(t, store.CreateRunnerBootstrapToken(ctx, token))
+
+		err := store.RevokeRunnerBootstrapToken(ctx, 999999, "missing")
+		require.ErrorIs(t, err, ErrNotFound)
+	})
+}
+
+func TestPostgresStoreMethods(t *testing.T) {
+	ctx := context.Background()
+	db := newMigratedPostgresDB(t, ctx)
+	store, err := NewPostgresStore(ctx, db)
+	require.NoError(t, err)
+	repoID := seedRepository(t, ctx, store, db)
+
+	require.NoError(t, store.CreateRegistrationAttempt(ctx, RegistrationAttempt{
+		RepositoryID:   repoID,
+		InstallationID: 1001,
+		Owner:          "octo",
+		Name:           "repo",
+		Status:         "created",
+	}))
+
+	token, err := store.RotateRunnerBootstrapToken(ctx, repoID, "rotated-hash")
+	require.NoError(t, err)
+	assert.NotZero(t, token.ID)
+	require.NoError(t, store.MarkRunnerBootstrapTokenUsed(ctx, token.ID, time.Now().UTC()))
+
+	job := Job{
+		JobID:          "job-get",
+		RepositoryID:   repoID,
+		InstallationID: 1001,
+		PRNumber:       7,
+		HeadSHA:        "def456",
+		BaseSHA:        "base456",
+		Status:         "queued",
+		WorkerBranch:   "worker/job-get",
+		Metadata:       []byte(`{"source":"test"}`),
+	}
+	require.NoError(t, store.CreateJob(ctx, job))
+	gotJob, err := store.GetJob(ctx, job.JobID)
+	require.NoError(t, err)
+	assert.Equal(t, job.JobID, gotJob.JobID)
+	assert.JSONEq(t, string(job.Metadata), string(gotJob.Metadata))
+
+	_, err = store.GetJob(ctx, "missing")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	created, err := store.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: "key-1", Scope: "commands", Status: "started"})
+	require.NoError(t, err)
+	assert.True(t, created)
+	created, err = store.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: "key-1", Scope: "commands", Status: "started"})
+	require.NoError(t, err)
+	assert.False(t, created)
+	require.NoError(t, store.CompleteIdempotencyKey(ctx, "key-1", "result-1"))
+	require.ErrorIs(t, store.CompleteIdempotencyKey(ctx, "missing", "result"), ErrNotFound)
+
+	state := ReviewState{RepositoryID: repoID, PRNumber: 7, HeadSHA: "def456", Status: "pending", LastJobID: job.JobID}
+	require.NoError(t, store.SetReviewState(ctx, state))
+	state.Status = "complete"
+	require.NoError(t, store.SetReviewState(ctx, state))
+	gotState, err := store.GetReviewState(ctx, repoID, 7, "def456")
+	require.NoError(t, err)
+	assert.Equal(t, "complete", gotState.Status)
+	_, err = store.GetReviewState(ctx, repoID, 7, "missing")
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestPostgresHealthFailure(t *testing.T) {
+	ctx := context.Background()
+	db := newMigratedPostgresDB(t, ctx)
+	store, err := NewPostgresStore(ctx, db)
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	err = store.Health(ctx)
+	require.Error(t, err)
+}
+
+func TestMemoryStore(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+
+	created, err := s.RecordWebhookDelivery(ctx, WebhookDelivery{DeliveryID: "d1"})
+	require.NoError(t, err)
+	assert.True(t, created)
+	created, err = s.RecordWebhookDelivery(ctx, WebhookDelivery{DeliveryID: "d1"})
+	require.NoError(t, err)
+	assert.False(t, created)
+
+	require.NoError(t, s.UpsertInstallation(ctx, Installation{ID: 1, AccountLogin: "octo"}))
+	require.NoError(t, s.UpsertRepository(ctx, Repository{Owner: "octo", Name: "repo"}))
+	require.NoError(t, s.CreateRegistrationAttempt(ctx, RegistrationAttempt{Owner: "octo", Name: "repo", Status: "ok"}))
+
+	require.NoError(t, s.CreateRunnerBootstrapToken(ctx, RunnerBootstrapToken{ID: 1, RepositoryID: 2, TokenHash: "h"}))
+	token, err := s.RotateRunnerBootstrapToken(ctx, 2, "h2")
+	require.NoError(t, err)
+	require.NoError(t, s.RevokeRunnerBootstrapToken(ctx, token.ID, "done"))
+	require.NoError(t, s.MarkRunnerBootstrapTokenUsed(ctx, token.ID, time.Now().UTC()))
+	require.ErrorIs(t, s.RevokeRunnerBootstrapToken(ctx, 404, "missing"), ErrNotFound)
+	require.ErrorIs(t, s.MarkRunnerBootstrapTokenUsed(ctx, 404, time.Now().UTC()), ErrNotFound)
+
+	require.NoError(t, s.CreateJob(ctx, Job{JobID: "j1"}))
+	job, err := s.GetJob(ctx, "j1")
+	require.NoError(t, err)
+	assert.Equal(t, "j1", job.JobID)
+	_, err = s.GetJob(ctx, "missing")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	created, err = s.RecordJobResult(ctx, JobResult{JobID: "j1", IdempotencyKey: "r1"})
+	require.NoError(t, err)
+	assert.True(t, created)
+	created, err = s.RecordJobResult(ctx, JobResult{JobID: "j1", IdempotencyKey: "r1"})
+	require.NoError(t, err)
+	assert.False(t, created)
+
+	created, err = s.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: "k1"})
+	require.NoError(t, err)
+	assert.True(t, created)
+	created, err = s.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: "k1"})
+	require.NoError(t, err)
+	assert.False(t, created)
+	require.NoError(t, s.CompleteIdempotencyKey(ctx, "k1", "ref"))
+	require.ErrorIs(t, s.CompleteIdempotencyKey(ctx, "missing", "ref"), ErrNotFound)
+
+	require.NoError(t, s.SetReviewState(ctx, ReviewState{RepositoryID: 2, PRNumber: 3, HeadSHA: "sha", Status: "open"}))
+	state, err := s.GetReviewState(ctx, 2, 3, "sha")
+	require.NoError(t, err)
+	assert.Equal(t, "open", state.Status)
+	_, err = s.GetReviewState(ctx, 2, 3, "missing")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	created, err = s.RecordCommand(ctx, CommandRecord{RepositoryID: 2, CommentID: 5, CommandKey: "cmd"})
+	require.NoError(t, err)
+	assert.True(t, created)
+	created, err = s.RecordCommand(ctx, CommandRecord{RepositoryID: 2, CommentID: 5, CommandKey: "cmd"})
+	require.NoError(t, err)
+	assert.False(t, created)
+
+	created, err = s.AcquireReviewLock(ctx, ReviewLock{RepositoryID: 2, PRNumber: 3, HeadSHA: "sha"})
+	require.NoError(t, err)
+	assert.True(t, created)
+	created, err = s.AcquireReviewLock(ctx, ReviewLock{RepositoryID: 2, PRNumber: 3, HeadSHA: "sha"})
+	require.NoError(t, err)
+	assert.False(t, created)
+
+	require.NoError(t, s.Close())
+	require.Error(t, s.Health(ctx))
+}
+
+func newMigratedPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
+	t.Helper()
+	db := newPostgresDB(t, ctx)
+	require.NoError(t, ApplyMigrations(ctx, db))
+	return db
+}
+
+func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
+	t.Helper()
+	container, err := postgres.Run(
+		ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("herd"),
+		postgres.WithUsername("herd"),
+		postgres.WithPassword("herd"),
+		testcontainers.WithWaitStrategy(wait.ForListeningPort("5432/tcp").WithStartupTimeout(60*time.Second)),
+	)
+	if err != nil {
+		if isDockerUnavailable(err) {
+			t.Skipf("skipping Postgres integration test: %v", err)
+		}
+		require.NoError(t, err)
+	}
+	t.Cleanup(func() {
+		require.NoError(t, testcontainers.TerminateContainer(container))
+	})
+
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+	db, err := sql.Open("postgres", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+	require.NoError(t, db.PingContext(ctx))
+	return db
+}
+
+func seedRepository(t *testing.T, ctx context.Context, s *PostgresStore, db *sql.DB) int64 {
+	t.Helper()
+	require.NoError(t, s.UpsertInstallation(ctx, Installation{
+		ID:           1001,
+		AccountLogin: "octo",
+		AccountID:    2002,
+		TargetType:   "Organization",
+		Events:       []string{"issue_comment", "pull_request"},
+	}))
+	require.NoError(t, s.UpsertRepository(ctx, Repository{
+		GitHubID:       3003,
+		InstallationID: 1001,
+		Owner:          "octo",
+		Name:           "repo",
+		DefaultBranch:  "main",
+	}))
+	var repoID int64
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT id FROM repositories WHERE owner = $1 AND name = $2", "octo", "repo").Scan(&repoID))
+	return repoID
+}
+
+func isDockerUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "docker") || strings.Contains(message, "container runtime") || strings.Contains(message, "cannot connect") {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
+}
