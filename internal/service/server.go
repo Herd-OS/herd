@@ -10,9 +10,10 @@ import (
 )
 
 type Dependencies struct {
-	Logger                  *log.Logger
-	Store                   Store
-	RegisterRepositoryRoute http.Handler
+	Logger                       *log.Logger
+	Store                        Store
+	RegisterRepositoryRoute      http.Handler
+	RunnerRegistrationTokenRoute http.Handler
 }
 
 type Store interface {
