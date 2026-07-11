@@ -7,7 +7,7 @@ import (
 )
 
 type HealthStore interface {
-	HealthCheck(ctx context.Context) error
+	Health(ctx context.Context) error
 }
 
 func registerHealthRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
@@ -37,7 +37,7 @@ func readyzHandler(cfg Config, store HealthStore) http.HandlerFunc {
 			return
 		}
 
-		if err := store.HealthCheck(r.Context()); err != nil {
+		if err := store.Health(r.Context()); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 				"error": fmt.Sprintf("storage not ready: %v", err),
 			})

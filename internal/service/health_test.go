@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -38,7 +39,7 @@ func TestReadyz(t *testing.T) {
 	tests := []struct {
 		name       string
 		cfg        Config
-		store      HealthStore
+		store      Store
 		wantStatus int
 		wantBody   string
 	}{
@@ -92,7 +93,19 @@ func TestReadyz(t *testing.T) {
 
 type healthyStore struct{}
 
-func (healthyStore) HealthCheck(context.Context) error {
+func (healthyStore) Health(context.Context) error {
+	return nil
+}
+
+func (healthyStore) RecordWebhookDelivery(context.Context, store.WebhookDelivery) (bool, error) {
+	return true, nil
+}
+
+func (healthyStore) UpsertInstallation(context.Context, store.Installation) error {
+	return nil
+}
+
+func (healthyStore) UpsertRepository(context.Context, store.Repository) error {
 	return nil
 }
 
@@ -100,6 +113,18 @@ type unhealthyStore struct {
 	err error
 }
 
-func (s unhealthyStore) HealthCheck(context.Context) error {
+func (s unhealthyStore) Health(context.Context) error {
 	return s.err
+}
+
+func (s unhealthyStore) RecordWebhookDelivery(context.Context, store.WebhookDelivery) (bool, error) {
+	return true, nil
+}
+
+func (s unhealthyStore) UpsertInstallation(context.Context, store.Installation) error {
+	return nil
+}
+
+func (s unhealthyStore) UpsertRepository(context.Context, store.Repository) error {
+	return nil
 }
