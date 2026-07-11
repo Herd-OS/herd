@@ -21,7 +21,7 @@ func TestRoutes(t *testing.T) {
 	}{
 		{name: "healthz", method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK},
 		{name: "readyz", method: http.MethodGet, path: "/readyz", wantStatus: http.StatusServiceUnavailable},
-		{name: "github webhook", method: http.MethodPost, path: "/webhooks/github", wantStatus: http.StatusNotImplemented},
+		{name: "github webhook requires delivery", method: http.MethodPost, path: "/webhooks/github", wantStatus: http.StatusInternalServerError},
 		{name: "repository register", method: http.MethodPost, path: "/api/v1/github/repositories/register", wantStatus: http.StatusNotImplemented},
 		{name: "runner registration token", method: http.MethodPost, path: "/api/v1/runners/registration-token", wantStatus: http.StatusNotImplemented},
 		{name: "job results", method: http.MethodPost, path: "/api/v1/jobs/job-123/results", wantStatus: http.StatusNotImplemented},
@@ -45,7 +45,7 @@ func TestStubRoutesReturnJSON(t *testing.T) {
 	handler, err := NewServer(Config{Env: "development"}, Dependencies{})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/github/repositories/register", nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
