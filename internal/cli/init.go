@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -288,9 +290,30 @@ func registerRepositoryForInit(ctx context.Context, owner, repo string, opts ini
 		AppLogin:   opts.AppLogin,
 	})
 	if err != nil {
-		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. Ensure the Herd GitHub App is installed for %s/%s and retry `herd init`", err, owner, repo)
+		if registrationFailureLooksLikeAppAccess(err) {
+			return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. Ensure the Herd GitHub App is installed for %s/%s and retry `herd init`", err, owner, repo)
+		}
+		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. The Herd control plane is unavailable or rate limited; retry `herd init` later", err)
 	}
 	return resp, nil
+}
+
+func registrationFailureLooksLikeAppAccess(err error) bool {
+	var statusErr cpclient.StatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case 401, 403, 404:
+			return true
+		default:
+			return false
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not installed") || strings.Contains(message, "installation") || strings.Contains(message, "admin access")
 }
 
 func ensureGitignore(dir, entry string) error {

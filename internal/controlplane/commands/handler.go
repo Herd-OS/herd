@@ -147,6 +147,9 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		if h.Dispatcher == nil {
 			return Result{}, fmt.Errorf("command dispatcher is not configured")
 		}
+		if err := h.markCommandDispatching(ctx, repo.ID, event.CommentID, string(cmd.Kind), record.Metadata); err != nil {
+			return Result{}, err
+		}
 		if err := h.Dispatcher.DispatchCommand(ctx, DispatchCommand{
 			RepositoryID:   repo.ID,
 			InstallationID: repo.InstallationID,
@@ -158,6 +161,7 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 			Actor:          event.SenderLogin,
 			Command:        cmd,
 		}); err != nil {
+			_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, string(cmd.Kind), StatusAcknowledged, record.Metadata)
 			return Result{}, fmt.Errorf("dispatch command: %w", err)
 		}
 		if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, string(cmd.Kind), record.Metadata); err != nil {
@@ -267,6 +271,9 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 			}
 			return repo, false, idempotencyKey, nil
 		}
+		if dispatchable && existing.Status != "completed" && h.commandDispatchOutcomeUnknown(ctx, repo.ID, event.CommentID, commandKey) {
+			return store.Repository{}, false, "", fmt.Errorf("command dispatch %q has unknown outcome after started dispatcher call", idempotencyKey)
+		}
 		if dispatchable && existing.Status == "completed" && !h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
 			if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, commandKey, record.Metadata); err != nil {
 				return store.Repository{}, false, "", err
@@ -299,9 +306,21 @@ func (h Handler) markCommandDispatched(ctx context.Context, repoID int64, commen
 	return nil
 }
 
+func (h Handler) markCommandDispatching(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
+	if err := h.Store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "dispatching", metadata); err != nil {
+		return fmt.Errorf("mark command dispatching: %w", err)
+	}
+	return nil
+}
+
 func (h Handler) commandAlreadyDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
 	record, err := h.Store.GetCommandRecord(ctx, repoID, commentID, commandKey)
 	return err == nil && record.Status == "dispatched"
+}
+
+func (h Handler) commandDispatchOutcomeUnknown(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
+	record, err := h.Store.GetCommandRecord(ctx, repoID, commentID, commandKey)
+	return err == nil && record.Status == "dispatching"
 }
 
 func prepareCommandRecord(repo store.Repository, event IssueComment, commandKey string, record store.CommandRecord) store.CommandRecord {

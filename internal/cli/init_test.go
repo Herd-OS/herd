@@ -177,6 +177,9 @@ func TestRegisterRepositoryForInitFailures(t *testing.T) {
 			_, err := registerRepositoryForInit(context.Background(), "octo", "herd", initOptions{ControlPlaneURL: config.DefaultControlPlaneURL, AppLogin: "herd-os"})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
+			if strings.Contains(tt.name, "service unavailable") {
+				assert.NotContains(t, err.Error(), "GitHub App is installed")
+			}
 			assert.NotContains(t, err.Error(), "gho_human")
 		})
 	}
@@ -1260,6 +1263,8 @@ func TestRunInitSkipLabelsEndToEnd(t *testing.T) {
 	envEx, err := os.ReadFile(filepath.Join(dir, ".env.herd.example"))
 	require.NoError(t, err)
 	assert.Contains(t, string(envEx), "HERD_RUNNER_BOOTSTRAP_TOKEN=")
+	assert.Contains(t, string(envEx), "do not overwrite a generated token")
+	assert.NotContains(t, string(envEx), "cp .env.herd.example .env")
 	assert.NotContains(t, string(envEx), "GITHUB_TOKEN=")
 }
 

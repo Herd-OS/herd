@@ -102,9 +102,6 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 				if repaired, err := s.repairCompletedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
 					return err
 				}
-				if repaired, err := s.repairStartedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
-					return err
-				}
 				return fmt.Errorf("herd review status %q is already in progress", statusKey)
 			}
 		}
@@ -211,28 +208,6 @@ func (s StatusService) repairCompletedStatusMutation(ctx context.Context, idem S
 	}
 	if attempt.Status != "completed" {
 		return false, nil
-	}
-	if err := idem.CompleteIdempotencyKey(ctx, key, "status:created"); err != nil {
-		return true, fmt.Errorf("repair Herd Review status idempotency: %w", err)
-	}
-	return true, s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
-}
-
-func (s StatusService) repairStartedStatusMutation(ctx context.Context, idem StatusIdempotencyStore, key string, repo Repository, prNumber int, headSHA string, state ReviewStatusState, description, targetURL string, now time.Time) (bool, error) {
-	mutations, ok := s.Store.(StatusMutationStore)
-	if !ok {
-		return false, nil
-	}
-	attempt, err := mutations.GetGitHubMutationAttempt(ctx, key)
-	if err != nil {
-		return false, nil
-	}
-	if attempt.Status != "started" {
-		return false, nil
-	}
-	response := json.RawMessage(`{"status":"created","repaired_from":"started"}`)
-	if err := mutations.CompleteGitHubMutationAttempt(ctx, key, "completed", response, "", now); err != nil {
-		return true, fmt.Errorf("repair Herd Review status mutation attempt: %w", err)
 	}
 	if err := idem.CompleteIdempotencyKey(ctx, key, "status:created"); err != nil {
 		return true, fmt.Errorf("repair Herd Review status idempotency: %w", err)

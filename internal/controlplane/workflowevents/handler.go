@@ -214,6 +214,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if !created && h.workflowEventProcessingUnknown(r.Context(), repo.ID, commentID, commandKey) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
+		return
+	}
 	if err := h.markWorkflowEventProcessing(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing"})
 		return
@@ -280,6 +284,11 @@ func (h Handler) acquireWorkflowEvent(ctx context.Context, key string, metadata 
 func (h Handler) workflowEventProcessedOrRepairable(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
 	record, err := h.store.GetCommandRecord(ctx, repoID, commentID, commandKey)
 	return err == nil && (record.Status == "processed" || record.Status == "processed_pending")
+}
+
+func (h Handler) workflowEventProcessingUnknown(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
+	record, err := h.store.GetCommandRecord(ctx, repoID, commentID, commandKey)
+	return err == nil && record.Status == "processing"
 }
 
 func (h Handler) markWorkflowEventProcessing(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
@@ -388,19 +397,26 @@ func rawObjectID(raw json.RawMessage) string {
 		return ""
 	}
 	var object struct {
-		ID any `json:"id"`
+		ID json.RawMessage `json:"id"`
 	}
 	if err := json.Unmarshal(raw, &object); err != nil {
 		return ""
 	}
-	switch v := object.ID.(type) {
-	case string:
-		return strings.TrimSpace(v)
-	case float64:
-		return fmt.Sprintf("%.0f", v)
-	default:
+	id := bytes.TrimSpace(object.ID)
+	if len(id) == 0 || bytes.Equal(id, []byte("null")) {
 		return ""
 	}
+	var asString string
+	if err := json.Unmarshal(id, &asString); err == nil {
+		return strings.TrimSpace(asString)
+	}
+	var number json.Number
+	decoder := json.NewDecoder(bytes.NewReader(id))
+	decoder.UseNumber()
+	if err := decoder.Decode(&number); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(number.String())
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

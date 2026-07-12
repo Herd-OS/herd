@@ -234,7 +234,7 @@ func TestHandlerProcessedMarkerAndCompletionFailureRedeliveryDoesNotProcessAgain
 	}
 }
 
-func TestHandlerProcessingMarkerRedeliveryProcessesAgain(t *testing.T) {
+func TestHandlerProcessingMarkerRedeliveryBlocksDuplicateProcessing(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	claims := validEventClaims(now)
 	payload := []byte(validEventPayload())
@@ -269,11 +269,12 @@ func TestHandlerProcessingMarkerRedeliveryProcessesAgain(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, eventRequest(string(payload)))
 
-	require.Equal(t, http.StatusAccepted, rec.Code)
-	assert.Len(t, processor.calls, 1)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unknown")
+	assert.Empty(t, processor.calls)
 	require.Len(t, st.commands, 1)
-	assert.Equal(t, "processed", st.commands[0].Status)
-	assert.Equal(t, "completed", st.idem[processKey].Status)
+	assert.Equal(t, "processing", st.commands[0].Status)
+	assert.Equal(t, "started", st.idem[processKey].Status)
 }
 
 func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {
@@ -290,11 +291,11 @@ func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {
 	})
 
 	first := httptest.NewRecorder()
-	handler.ServeHTTP(first, eventRequest(eventPayloadWithWorkflowRunID("123")))
+	handler.ServeHTTP(first, eventRequest(eventPayloadWithWorkflowRunID("9007199254740992")))
 	second := httptest.NewRecorder()
-	handler.ServeHTTP(second, eventRequest(eventPayloadWithWorkflowRunID("456")))
+	handler.ServeHTTP(second, eventRequest(eventPayloadWithWorkflowRunID("9007199254740993")))
 	redelivery := httptest.NewRecorder()
-	handler.ServeHTTP(redelivery, eventRequest(eventPayloadWithWorkflowRunID("456")))
+	handler.ServeHTTP(redelivery, eventRequest(eventPayloadWithWorkflowRunID("9007199254740993")))
 
 	require.Equal(t, http.StatusAccepted, first.Code)
 	require.Equal(t, http.StatusAccepted, second.Code)

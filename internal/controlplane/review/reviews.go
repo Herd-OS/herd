@@ -262,9 +262,6 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		if repaired, repairErr := s.repairCompletedReviewSubmission(ctx, key); repaired || repairErr != nil {
 			return repairErr
 		}
-		if repaired, repairErr := s.repairStartedReviewSubmission(ctx, key, result, event); repaired || repairErr != nil {
-			return repairErr
-		}
 		if record.Status == "started" {
 			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
 		}
@@ -320,27 +317,6 @@ func (s ReviewService) repairCompletedReviewSubmission(ctx context.Context, key 
 	}
 	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
 		return false, fmt.Errorf("repair review submission idempotency: %w", err)
-	}
-	return true, nil
-}
-
-func (s ReviewService) repairStartedReviewSubmission(ctx context.Context, key string, result ReviewCompletedResult, event platform.ReviewEvent) (bool, error) {
-	attempt, err := s.Mutations.GetGitHubMutationAttempt(ctx, key)
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("get review submission mutation attempt: %w", err)
-	}
-	if attempt.Status != "started" {
-		return false, nil
-	}
-	response, _ := json.Marshal(map[string]any{"submitted": true, "event": event, "head_sha": result.HeadSHA, "repaired_from": "started"})
-	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, "completed", response, "", s.now()); err != nil {
-		return true, fmt.Errorf("repair review submission mutation attempt: %w", err)
-	}
-	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
-		return true, fmt.Errorf("repair review submission idempotency: %w", err)
 	}
 	return true, nil
 }

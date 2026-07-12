@@ -144,6 +144,11 @@ func TestRegisterRepositoryErrors(t *testing.T) {
 			_, err = c.RegisterRepository(context.Background(), RegisterRepositoryRequest{Owner: "o", Name: "r", SetupToken: "token"})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrSub)
+			if tt.status >= 300 {
+				var statusErr StatusError
+				require.ErrorAs(t, err, &statusErr)
+				assert.Equal(t, tt.status, statusErr.StatusCode)
+			}
 		})
 	}
 }

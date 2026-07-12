@@ -384,6 +384,9 @@ func validateResultAgainstJob(result Result, job store.Job) error {
 	if job.HeadSHA != "" && head != "" && job.HeadSHA != head {
 		return fmt.Errorf("stale head SHA: expected %s, got %s", job.HeadSHA, head)
 	}
+	if review, ok := result.(ReviewCompletedResult); ok && job.PRNumber != 0 && review.PRNumber != job.PRNumber {
+		return fmt.Errorf("result pr_number does not match job: expected %d, got %d", job.PRNumber, review.PRNumber)
+	}
 	if worker, ok := result.(WorkerCompletedResult); ok {
 		if job.BaseSHA != "" && worker.BaseSHA != "" && job.BaseSHA != worker.BaseSHA {
 			return fmt.Errorf("stale base SHA: expected %s, got %s", job.BaseSHA, worker.BaseSHA)
@@ -466,7 +469,9 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		if err := h.completePatchApply(ctx, idempotencyKey, response); err != nil {
 			return err
 		}
-		h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil)
+		if err := h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil); err != nil {
+			return err
+		}
 		return nil
 	}
 	applyResult, err := h.patchApplier.Apply(ctx, artifacts.ApplyRequest{
@@ -484,7 +489,7 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		Now:             h.now,
 	})
 	if err != nil {
-		h.completePatchMutation(ctx, idempotencyKey, "failed", nil, err)
+		_ = h.completePatchMutation(ctx, idempotencyKey, "failed", nil, err)
 		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 		return err
 	}
@@ -495,7 +500,9 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 	if err != nil {
 		return fmt.Errorf("marshal patch apply result: %w", err)
 	}
-	h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil)
+	if err := h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil); err != nil {
+		return err
+	}
 	if err := h.completePatchApply(ctx, idempotencyKey, response); err != nil {
 		return err
 	}
@@ -538,8 +545,19 @@ func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, w
 	if completed, err := h.repairCompletedPatchApply(ctx, idempotencyKey); completed || err != nil {
 		return false, err
 	}
-	if _, ok := h.store.(MutationReader); !ok {
+	reader, ok := h.store.(MutationReader)
+	if !ok {
 		return false, fmt.Errorf("patch apply %q has unknown outcome and mutation repair is not configured", idempotencyKey)
+	}
+	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get patch mutation attempt: %w", err)
+	}
+	if attempt.Status == "started" {
+		return false, fmt.Errorf("patch apply %q has unknown outcome after started mutation attempt", idempotencyKey)
 	}
 	return true, nil
 }
@@ -595,16 +613,19 @@ func (h Handler) completePatchApply(ctx context.Context, idempotencyKey string, 
 	return nil
 }
 
-func (h Handler) completePatchMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error) {
+func (h Handler) completePatchMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error) error {
 	recorder, ok := h.store.(MutationRecorder)
 	if !ok {
-		return
+		return nil
 	}
 	errorMessage := ""
 	if resultErr != nil {
 		errorMessage = resultErr.Error()
 	}
-	_ = recorder.CompleteGitHubMutationAttempt(ctx, key, status, response, errorMessage, h.now())
+	if err := recorder.CompleteGitHubMutationAttempt(ctx, key, status, response, errorMessage, h.now()); err != nil {
+		return fmt.Errorf("complete patch mutation attempt: %w", err)
+	}
+	return nil
 }
 
 func humanAttribution(raw json.RawMessage) artifacts.HumanAttribution {

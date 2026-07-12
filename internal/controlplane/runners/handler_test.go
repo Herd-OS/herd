@@ -282,6 +282,7 @@ func TestRegistrationTokenHandlerCompleteFailureDoesNotMintAgain(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "outcome is unknown")
 	assert.Equal(t, 1, minter.calls)
 	assert.Nil(t, st.tokens[token.ID].UsedAt)
 }

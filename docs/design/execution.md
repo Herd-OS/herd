@@ -497,6 +497,15 @@ findings instead of one issue per chunk. Standalone `/herd review` uses the same
 chunk aggregation for its findings comment, but it does not create fix issues or
 dispatch workers.
 
+The review safety valve is evaluated per review pass. For ordinary reviews that
+means the single aggregate result; for chunked reviews, each chunk is its own
+bounded review pass. A single chunk that reports more than the safety limit of
+HIGH findings stops automated fix worker creation, but HIGH findings are not
+summed across chunks for this guard. Large PRs can legitimately produce many
+actionable findings across many chunks, and HerdOS still creates one batched fix
+issue after aggregation and deduplication when no individual chunk trips the
+valve.
+
 ### User Feedback
 
 The reviewer also collects non-HerdOS user comments from the PR and passes them

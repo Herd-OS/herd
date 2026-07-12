@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	ghapi "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -231,6 +232,31 @@ func TestRegisterHandlerSetupVerifierTransientFailureDoesNotSuggestGhAuthLogin(t
 	assert.Contains(t, rec.Body.String(), "retry repository registration")
 	assert.NotContains(t, rec.Body.String(), "gh auth login")
 	assert.Empty(t, st.tokens)
+}
+
+func TestSetupVerificationErrorResponseRateLimitsAreRetryable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "core rate limit",
+			err:  &ghapi.RateLimitError{Rate: ghapi.Rate{Limit: 1}},
+		},
+		{
+			name: "abuse rate limit",
+			err:  &ghapi.AbuseRateLimitError{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, msg := setupVerificationErrorResponse(tt.err)
+
+			assert.Equal(t, http.StatusBadGateway, status)
+			assert.Contains(t, msg, "rate limit")
+			assert.NotContains(t, msg, "gh auth login")
+		})
+	}
 }
 
 func registerRequest(body string) *http.Request {

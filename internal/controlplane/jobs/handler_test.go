@@ -112,6 +112,35 @@ func TestHandlerProcessesReviewCompletedResult(t *testing.T) {
 	assert.Equal(t, StatusApproved, st.results[0].Status)
 }
 
+func TestHandlerRejectsReviewCompletedPRNumberMismatch(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		RepositoryID:   7,
+		InstallationID: 9,
+		PRNumber:       42,
+		HeadSHA:        "head",
+	}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+	payload := strings.Replace(validReviewPayload(), `"pr_number":42`, `"pr_number":99`, 1)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "pr_number")
+	assert.Empty(t, processor.calls)
+	assert.Empty(t, st.results)
+}
+
 func TestHandlerPassesDisabledReviewMetadata(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -626,6 +655,39 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureWithoutMutationReaderDoesNo
 	assert.Empty(t, inner.results)
 }
 
+func TestHandlerRetryAfterPatchMutationCompletionFailureDoesNotReapplyPatch(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
+	st := newResultStore()
+	payload := validWorkerPayload("job-1", "head")
+	patchKey := "patch_apply:" + ResultPayloadHash([]byte(payload))
+	st.mutationCompleteErrs = []error{assert.AnError}
+	st.completeIdemErrs = map[string][]error{patchKey: {assert.AnError}}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusConflict, first.Code)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "unknown outcome")
+	assert.Len(t, applier.requests, 1)
+	assert.Empty(t, st.results)
+	require.Equal(t, "started", st.idem[patchKey].Status)
+}
+
 func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
@@ -747,10 +809,11 @@ type resultStore struct {
 	seen    map[string]struct{}
 	idem    map[string]store.IdempotencyKey
 
-	mutationAttempts    []store.GitHubMutationAttempt
-	mutationCompletions []mutationCompletion
-	recordJobResultErrs []error
-	completeIdemErrs    map[string][]error
+	mutationAttempts     []store.GitHubMutationAttempt
+	mutationCompletions  []mutationCompletion
+	mutationCompleteErrs []error
+	recordJobResultErrs  []error
+	completeIdemErrs     map[string][]error
 }
 
 func newResultStore() *resultStore {
@@ -868,6 +931,13 @@ func (s *resultStore) RecordGitHubMutationAttempt(_ context.Context, attempt sto
 func (s *resultStore) CompleteGitHubMutationAttempt(_ context.Context, key string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.mutationCompleteErrs) > 0 {
+		err := s.mutationCompleteErrs[0]
+		s.mutationCompleteErrs = s.mutationCompleteErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	s.mutationCompletions = append(s.mutationCompletions, mutationCompletion{
 		key:          key,
 		status:       status,

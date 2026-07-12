@@ -34,6 +34,15 @@ type aggregatedReview struct {
 	ChunksReviewed     int
 	ManualIntervention bool
 	AgentError         error
+	ChunkStats         []chunkReviewStats
+}
+
+type chunkReviewStats struct {
+	ChunkIndex        int
+	TotalChunks       int
+	HighFindingCount  int
+	TotalFindingCount int
+	Findings          []agent.ReviewFinding
 }
 
 func duplicateApprovedReviewSkipReason(prNumber int, headSHA string) string {
@@ -314,7 +323,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		reviewOpts.SystemPrompt += params.ExtraInstructions
 	}
 
-	reviewResult, _, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, pr.Number)
+	aggregate, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, pr.Number)
 	if errors.Is(err, errManualInterventionNeeded) {
 		_ = postManualInterventionReviewComment(ctx, p, pr.Number)
 		return &ReviewResult{
@@ -329,12 +338,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		fmt.Printf("Review agent failed: %s. Will retry on next trigger.\n", err)
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
-	if reviewResult == nil {
+	if aggregate == nil || aggregate.Result == nil {
 		return &ReviewResult{
 			BatchPRNumber:            pr.Number,
 			ManualInterventionNeeded: true,
 		}, nil
 	}
+	reviewResult := aggregate.Result
 
 	postReviewCtx, postReviewCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer postReviewCancel()
@@ -411,11 +421,30 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Safety valve — check HIGH findings count only
-	if len(highFindings) > safetyValveLimit {
-		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found %d high-severity issues in a single pass. "+
-			"This exceeds the safety limit (%d). Creating fix workers was skipped to prevent runaway agent invocations.",
-			len(highFindings), safetyValveLimit)
+	// Safety valve: a suspicious number of HIGH findings from one review pass
+	// stops automated fix dispatch. In chunked mode each chunk is an independent
+	// bounded review pass, so aggregate HIGH findings across chunks are expected on
+	// large PRs and must not trip this guard by themselves.
+	hasChunkedStats := false
+	for _, stat := range aggregate.ChunkStats {
+		if stat.TotalChunks > 1 {
+			hasChunkedStats = true
+			break
+		}
+	}
+	if hasChunkedStats {
+		if stat, ok := offendingChunkSafetyValveStats(aggregate.ChunkStats, safetyValveLimit); ok {
+			comment := buildChunkReviewSafetyValveComment(stat, safetyValveLimit)
+			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+			comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, stat.HighFindingCount)
+			if err != nil {
+				return nil, err
+			}
+			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+			return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
+		}
+	} else if len(highFindings) > safetyValveLimit {
+		comment := buildReviewSafetyValveComment(len(highFindings), safetyValveLimit)
 		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 		comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, len(highFindings))
 		if err != nil {
@@ -594,7 +623,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}, nil
 }
 
-func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform, plan reviewdiff.ChunkPlan, baseOpts agent.ReviewOptions, prNumber int) (*agent.ReviewResult, int, error) {
+func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform, plan reviewdiff.ChunkPlan, baseOpts agent.ReviewOptions, prNumber int) (*aggregatedReview, error) {
 	fmt.Printf("Running agent review in %d chunk(s)\n", len(plan.Chunks))
 	aggregate := aggregatedReview{}
 	if len(plan.Chunks) == 0 {
@@ -602,7 +631,7 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 			Approved: false,
 			Summary:  "No reviewable diff content was found.",
 		}
-		return aggregate.Result, aggregate.ChunksReviewed, nil
+		return &aggregate, nil
 	}
 
 	approved := true
@@ -628,18 +657,19 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 		if errors.Is(err, errManualInterventionNeeded) {
 			aggregate.ChunksReviewed = chunk.Index - 1
 			aggregate.ManualIntervention = true
-			return nil, aggregate.ChunksReviewed, errManualInterventionNeeded
+			return nil, errManualInterventionNeeded
 		}
 		if err != nil {
 			aggregate.ChunksReviewed = chunk.Index - 1
 			aggregate.AgentError = err
-			return nil, aggregate.ChunksReviewed, aggregate.AgentError
+			return nil, aggregate.AgentError
 		}
 		if result == nil {
 			aggregate.ChunksReviewed = chunk.Index
 			aggregate.ManualIntervention = true
-			return nil, aggregate.ChunksReviewed, nil
+			return nil, nil
 		}
+		aggregate.ChunkStats = append(aggregate.ChunkStats, buildChunkReviewStats(chunk.Index, totalChunks, result.Findings))
 		if !result.Approved {
 			approved = false
 		}
@@ -675,7 +705,22 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 		Summary:  summary,
 	}
 	aggregate.ChunksReviewed = len(plan.Chunks)
-	return aggregate.Result, aggregate.ChunksReviewed, nil
+	return &aggregate, nil
+}
+
+func buildChunkReviewStats(chunkIndex, totalChunks int, findings []agent.ReviewFinding) chunkReviewStats {
+	stat := chunkReviewStats{
+		ChunkIndex:        chunkIndex,
+		TotalChunks:       totalChunks,
+		TotalFindingCount: len(findings),
+		Findings:          append([]agent.ReviewFinding(nil), findings...),
+	}
+	for _, finding := range findings {
+		if strings.EqualFold(strings.TrimSpace(finding.Severity), "HIGH") {
+			stat.HighFindingCount++
+		}
+	}
+	return stat
 }
 
 func chunkIncludedPathRange(chunk reviewdiff.ReviewChunk) string {
@@ -701,6 +746,47 @@ func reviewCommentsFromFindings(findings []agent.ReviewFinding) []string {
 		comments = append(comments, finding.Description)
 	}
 	return comments
+}
+
+func offendingChunkSafetyValveStats(stats []chunkReviewStats, limit int) (chunkReviewStats, bool) {
+	for _, stat := range stats {
+		if stat.HighFindingCount > limit {
+			return stat, true
+		}
+	}
+	return chunkReviewStats{}, false
+}
+
+func buildReviewSafetyValveComment(highCount int, limit int) string {
+	return fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found %d high-severity issues in a single review pass. This exceeds the safety limit (%d). Creating fix workers was skipped to prevent runaway agent invocations.", highCount, limit)
+}
+
+func buildChunkReviewSafetyValveComment(stat chunkReviewStats, limit int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "⚠️ **HerdOS Integrator**\n\nAgent review chunk %d/%d found %d high-severity issues, exceeding the safety limit (%d). Creating fix workers was skipped to prevent runaway agent invocations.", stat.ChunkIndex, stat.TotalChunks, stat.HighFindingCount, limit)
+	highShown := 0
+	for _, finding := range stat.Findings {
+		if !strings.EqualFold(strings.TrimSpace(finding.Severity), "HIGH") {
+			continue
+		}
+		if highShown == 0 {
+			b.WriteString("\n\nFirst high-severity findings from the offending chunk:\n")
+		}
+		if highShown >= 3 {
+			remaining := stat.HighFindingCount - highShown
+			if remaining > 0 {
+				fmt.Fprintf(&b, "- ...and %d more high-severity finding(s) in this chunk.\n", remaining)
+			}
+			break
+		}
+		description := strings.TrimSpace(finding.Description)
+		if description == "" {
+			description = "(no description)"
+		}
+		fmt.Fprintf(&b, "- %s\n", description)
+		highShown++
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func optionalSummarySuffix(summary string) string {
@@ -841,7 +927,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 		reviewOpts.WorkerNoOpVerdicts = collectWorkerNoOpVerdicts(prComments)
 	}
 
-	reviewResult, _, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, params.PRNumber)
+	aggregate, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, params.PRNumber)
 	if errors.Is(err, errManualInterventionNeeded) {
 		_ = postManualInterventionReviewComment(ctx, p, params.PRNumber)
 		return &ReviewStandaloneResult{ManualInterventionNeeded: true}, nil
@@ -850,9 +936,10 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 		fmt.Printf("Review agent failed: %s\n", err)
 		return &ReviewStandaloneResult{}, nil
 	}
-	if reviewResult == nil {
+	if aggregate == nil || aggregate.Result == nil {
 		return &ReviewStandaloneResult{ManualInterventionNeeded: true}, nil
 	}
+	reviewResult := aggregate.Result
 
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
 	if coverageBlocksApproval(plan) {

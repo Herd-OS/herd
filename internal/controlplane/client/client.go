@@ -99,7 +99,7 @@ func (c *Client) RegisterRepository(ctx context.Context, req RegisterRepositoryR
 		if msg == "" {
 			msg = resp.Status
 		}
-		return RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %s", msg)
+		return RegisterRepositoryResponse{}, StatusError{StatusCode: resp.StatusCode, Message: msg}
 	}
 
 	var out RegisterRepositoryResponse
@@ -178,6 +178,15 @@ func BoundedExponentialBackoff(attempt int, initialBackoff, maxBackoff time.Dura
 type callbackError struct {
 	statusCode int
 	message    string
+}
+
+type StatusError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e StatusError) Error() string {
+	return fmt.Sprintf("control-plane returned HTTP %d: %s", e.StatusCode, e.Message)
 }
 
 func (e callbackError) Error() string {

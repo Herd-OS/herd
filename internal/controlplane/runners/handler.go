@@ -243,7 +243,7 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 		return RegistrationTokenResponse{}, false, true
 	}
 	if record.Status != idempotencyStatusDone {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request is already in progress"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
 		return RegistrationTokenResponse{}, false, false
 	}
 	var result RegistrationTokenResponse
