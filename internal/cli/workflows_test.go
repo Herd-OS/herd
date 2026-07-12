@@ -165,6 +165,9 @@ func TestIntegratorWorkflow_BatchExtractionIsNonFatal(t *testing.T) {
 			nonFatalParse := "BATCH=$(echo \"$HEAD_BRANCH\" | grep -oP 'herd/batch/\\K[0-9]+' || true)"
 			assert.Equal(t, tt.wantOccurrences, strings.Count(s, nonFatalParse))
 			assert.NotContains(t, s, "BATCH=$(echo \"$HEAD_BRANCH\" | grep -oP 'herd/batch/\\K[0-9]+')\n")
+			nonFatalIssueCloseParse := "BATCH=$(echo \"$ISSUE_BODY\" | grep -oP '^\\s*batch:\\s*\\K[0-9]+' | head -1 || true)"
+			assert.Contains(t, s, nonFatalIssueCloseParse)
+			assert.NotContains(t, s, "BATCH=$(echo \"$ISSUE_BODY\" | grep -oP '^\\s*batch:\\s*\\K[0-9]+' | head -1)\n")
 			assert.Contains(t, s, "batch_number: (if $batch == \"\" then null else ($batch | tonumber) end)")
 			assert.NotContains(t, s, "HERD_GITHUB_TOKEN")
 			assert.NotContains(t, s, "GITHUB_TOKEN")

@@ -212,7 +212,7 @@ jobs:
           ISSUE_NUMBER: ${{`{{`}} github.event.issue.number {{`}}`}}
           REPOSITORY: ${{`{{`}} github.repository {{`}}`}}
         run: |
-          BATCH=$(echo "$ISSUE_BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1)
+          BATCH=$(echo "$ISSUE_BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1 || true)
           if [ -n "$BATCH" ]; then
             OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
             jq -n \
