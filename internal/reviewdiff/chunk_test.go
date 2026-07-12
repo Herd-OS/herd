@@ -172,10 +172,10 @@ func TestChunkForReviewSummarizesNonReviewableFilesWithPreciseReasons(t *testing
 
 	require.Len(t, plan.Chunks, 1)
 	assert.Equal(t, []string{"src/reviewed.go"}, paths(plan.Chunks[0].IncludedFiles))
-	assert.True(t, plan.Coverage.Complete)
-	assert.Equal(t, CoverageModeFull, plan.Coverage.ReviewMode)
-	assert.Equal(t, 5, plan.Coverage.FilesSummarizedNotReviewed)
-	assert.Zero(t, plan.Coverage.FilesNotReviewed)
+	assert.False(t, plan.Coverage.Complete)
+	assert.Equal(t, CoverageModePartial, plan.Coverage.ReviewMode)
+	assert.Equal(t, 4, plan.Coverage.FilesSummarizedNotReviewed)
+	assert.Equal(t, 1, plan.Coverage.FilesNotReviewed)
 	assert.Equal(t, map[string]int{
 		"binary file":                   1,
 		"generated file":                1,
@@ -184,8 +184,8 @@ func TestChunkForReviewSummarizesNonReviewableFilesWithPreciseReasons(t *testing
 		"patch unavailable from source": 1,
 	}, plan.Coverage.OmittedByReason)
 	summary := FormatChunkedCoverageSummary(plan, len(plan.Chunks), 10)
-	assert.Contains(t, summary, "Review coverage is complete")
-	assert.NotContains(t, summary, "partial review")
+	assert.Contains(t, summary, "partial review")
+	assert.Contains(t, summary, "- Files not reviewed: 1")
 	assert.Contains(t, summary, "dist/app.js")
 	assert.Contains(t, summary, "assets/image.png")
 	assert.Contains(t, summary, "package-lock.json")
@@ -211,7 +211,7 @@ func TestChunkForReviewOmittedGeneratedPathPreservesSourceUnavailableReason(t *t
 		{
 			name: "custom blocking source unavailable reason",
 			file: ChangedFile{
-				Path:       "dist/material.js",
+				Path:       "src/material.js",
 				Status:     ChangeModified,
 				Omitted:    true,
 				OmitReason: "source unavailable: material file",
@@ -235,9 +235,43 @@ func TestChunkForReviewOmittedGeneratedPathPreservesSourceUnavailableReason(t *t
 			require.Len(t, plan.Coverage.NotReviewedFiles, 1)
 			assert.Equal(t, firstReason(tt.file.OmitReason, "patch unavailable from source"), plan.Coverage.NotReviewedFiles[0].Reason)
 			assert.NotEqual(t, "generated file", plan.Coverage.NotReviewedFiles[0].Reason)
+			if tt.wantComplete {
+				assert.Equal(t, 1, plan.Coverage.FilesSummarizedNotReviewed)
+				assert.Zero(t, plan.Coverage.FilesNotReviewed)
+			} else {
+				assert.Zero(t, plan.Coverage.FilesSummarizedNotReviewed)
+				assert.Equal(t, 1, plan.Coverage.FilesNotReviewed)
+			}
 			assert.Equal(t, 1, plan.Coverage.OmittedByReason[plan.Coverage.NotReviewedFiles[0].Reason])
 		})
 	}
+}
+
+func TestChunkForReviewSourceUnavailableMaterialFileBlocksCoverage(t *testing.T) {
+	plan := ChunkForReview(DiffSet{Source: "github-files-api", Files: []ChangedFile{
+		{Path: "src/unavailable.go", Status: ChangeModified, Omitted: true, OmitReason: "patch unavailable from GitHub files API"},
+	}}, ChunkOptions{
+		MaxChunkBytes:            100,
+		MaxFileDiffBytes:         100,
+		MaxFilesPerChunk:         10,
+		MaxChunks:                8,
+		MaxOmittedSummaryEntries: 10,
+	})
+
+	assert.Empty(t, plan.Chunks)
+	assert.False(t, plan.Coverage.Complete)
+	assert.Equal(t, CoverageModePartial, plan.Coverage.ReviewMode)
+	assert.Zero(t, plan.Coverage.FilesSummarizedNotReviewed)
+	assert.Equal(t, 1, plan.Coverage.FilesNotReviewed)
+	require.Len(t, plan.Coverage.NotReviewedFiles, 1)
+	assert.Equal(t, "src/unavailable.go", plan.Coverage.NotReviewedFiles[0].Path)
+	assert.Equal(t, "patch unavailable from GitHub files API", plan.Coverage.NotReviewedFiles[0].Reason)
+
+	summary := FormatChunkedCoverageSummary(plan, len(plan.Chunks), 10)
+	assert.Contains(t, summary, "- This is a partial review: not all files were reviewed.")
+	assert.Contains(t, summary, "- Files not reviewed: 1")
+	assert.Contains(t, summary, "patch unavailable from GitHub files API: 1")
+	assert.Contains(t, summary, "src/unavailable.go")
 }
 
 func TestChunkForReviewOversizedSingleFile(t *testing.T) {

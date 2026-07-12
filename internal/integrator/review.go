@@ -695,28 +695,12 @@ func optionalSummarySuffix(summary string) string {
 func materialNotReviewed(plan reviewdiff.ChunkPlan) []reviewdiff.FileCoverage {
 	var material []reviewdiff.FileCoverage
 	for _, file := range plan.Coverage.NotReviewedFiles {
-		if isAllowableNotReviewedReason(file.Reason) {
+		if reviewdiff.IsAllowableNotReviewedFile(file) {
 			continue
 		}
 		material = append(material, file)
 	}
 	return material
-}
-
-func isAllowableNotReviewedReason(reason string) bool {
-	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "generated file",
-		"binary file",
-		"large lockfile diff",
-		"mode-only change",
-		"patch unavailable from source",
-		"patch unavailable from github files api",
-		"metadata-only change",
-		"file diff unavailable":
-		return true
-	default:
-		return false
-	}
 }
 
 func coverageBlocksApproval(plan reviewdiff.ChunkPlan) bool {

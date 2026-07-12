@@ -420,6 +420,51 @@ func TestBuildReviewPromptDataMarksPartialCoverage(t *testing.T) {
 	assert.Contains(t, out, "Review only the included diffs in this chunk")
 }
 
+func TestBuildReviewPromptDataZeroChunksDoesNotUseLegacyRenderedDiff(t *testing.T) {
+	legacyPatch := "@@ -1 +1 @@\n-old\n+" + strings.Repeat("legacy-rendered-patch-marker", 4) + "\n"
+	prs := &mockReviewPromptPRService{
+		diffErr: platform.ErrPullRequestDiffTooLarge,
+		files: []*platform.PullRequestFile{
+			reviewPromptFile("src/oversized.go", legacyPatch),
+		},
+	}
+	client := &mockReviewPromptPlatform{
+		prs:    prs,
+		issues: &mockReviewPromptIssueService{},
+		checks: &mockReviewPromptCheckService{},
+	}
+
+	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+		MaxChunkBytes:            20,
+		MaxFileDiffBytes:         1000,
+		MaxFilesPerChunk:         10,
+		MaxChunks:                8,
+		MaxOmittedSummaryEntries: reviewdiff.DefaultMaxOmittedSummaryEntries,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, string(reviewdiff.CoverageModePartial), data.ReviewMode)
+	assert.Equal(t, 0, data.ChunkIndex)
+	assert.Equal(t, 0, data.TotalChunks)
+	assert.False(t, data.OnlyFirstChunkIncluded)
+	assert.True(t, data.PartialReview)
+	assert.Contains(t, data.CoverageSummary, "- Review mode: partial")
+	assert.Contains(t, data.CoverageSummary, "- Chunks reviewed: 0/0")
+	assert.Contains(t, data.CoverageSummary, "- Files not reviewed: 1")
+	assert.Contains(t, data.CoverageSummary, "file diff exceeds maximum reviewable size")
+	assert.Contains(t, data.CoverageSummary, "src/oversized.go")
+	assert.Contains(t, data.Diff, "No reviewable diff chunks were produced")
+	assert.Contains(t, data.Diff, "- Review mode: partial")
+	assert.NotContains(t, data.Diff, "legacy-rendered-patch-marker")
+
+	out, err := renderReviewSystemPrompt(data)
+	require.NoError(t, err)
+	assert.Contains(t, out, "No reviewable diff chunks were produced")
+	assert.Contains(t, out, "- This is a partial review")
+	assert.NotContains(t, out, "legacy-rendered-patch-marker")
+	assert.NotContains(t, out, "Review coverage is complete")
+}
+
 func TestReviewDiffChunkOptions(t *testing.T) {
 	tests := []struct {
 		name string

@@ -308,7 +308,7 @@ func buildCoverage(diff DiffSet, chunks []ReviewChunk, planned []plannedFile, op
 	coverage.FilesNotReviewed = 0
 	coverage.FilesSummarizedNotReviewed = 0
 	for _, file := range coverage.NotReviewedFiles {
-		if isSummarizedNotReviewedReason(file.Reason) {
+		if IsAllowableNotReviewedFile(file) {
 			coverage.FilesSummarizedNotReviewed++
 			continue
 		}
@@ -325,9 +325,25 @@ func buildCoverage(diff DiffSet, chunks []ReviewChunk, planned []plannedFile, op
 	return coverage
 }
 
+// IsAllowableNotReviewedFile reports whether an unreviewed file is explicitly non-material.
+func IsAllowableNotReviewedFile(file FileCoverage) bool {
+	switch {
+	case file.File.Generated:
+		return true
+	case file.File.Binary:
+		return true
+	case isLargeLockfileChange(file.File):
+		return true
+	case isModeOnly(file.File):
+		return true
+	default:
+		return isSummarizedNotReviewedReason(file.Reason)
+	}
+}
+
 func isSummarizedNotReviewedReason(reason string) bool {
-	switch reason {
-	case "generated file", "binary file", "large lockfile diff", "mode-only change", "patch unavailable from source", "patch unavailable from GitHub files API", "metadata-only change", "file diff unavailable":
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "generated file", "binary file", "large lockfile diff", "mode-only change", "metadata-only change", "file diff unavailable":
 		return true
 	default:
 		return false

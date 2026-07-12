@@ -198,6 +198,7 @@ func TestRunChunkedReviewWithRetryMaxChunksOneIncludesRequiredChunkScope(t *test
 func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) {
 	tests := []struct {
 		name       string
+		file       reviewdiff.FileCoverage
 		reason     string
 		wantCount  int
 		wantBlocks bool
@@ -206,15 +207,31 @@ func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) 
 		{name: "binary", reason: "binary file", wantCount: 0},
 		{name: "large lockfile", reason: "large lockfile diff", wantCount: 0},
 		{name: "mode only", reason: "mode-only change", wantCount: 0},
-		{name: "source unavailable", reason: "patch unavailable from source", wantCount: 0},
+		{
+			name:   "generated source unavailable",
+			reason: "patch unavailable from source",
+			file: reviewdiff.FileCoverage{
+				Path:        "dist/app.js",
+				Reason:      "patch unavailable from source",
+				NotReviewed: true,
+				File:        reviewdiff.ChangedFile{Path: "dist/app.js", Generated: true, Omitted: true},
+			},
+			wantCount: 0,
+		},
+		{name: "source unavailable", reason: "patch unavailable from source", wantCount: 1, wantBlocks: true},
+		{name: "github source unavailable", reason: "patch unavailable from GitHub files API", wantCount: 1, wantBlocks: true},
 		{name: "max chunks", reason: "max chunks reached", wantCount: 1, wantBlocks: true},
 		{name: "maximum reviewable size", reason: "file diff exceeds maximum reviewable size", wantCount: 1, wantBlocks: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			file := tt.file
+			if file.Path == "" {
+				file = reviewdiff.FileCoverage{Path: "file.go", Reason: tt.reason, NotReviewed: true}
+			}
 			plan := reviewdiff.ChunkPlan{Coverage: reviewdiff.CoverageSummary{
-				NotReviewedFiles: []reviewdiff.FileCoverage{{Path: "file.go", Reason: tt.reason, NotReviewed: true}},
+				NotReviewedFiles: []reviewdiff.FileCoverage{file},
 			}}
 
 			got := materialNotReviewed(plan)
@@ -243,6 +260,41 @@ func TestRunChunkedReviewWithRetryApprovesWhenOnlyAllowableFilesAreOmitted(t *te
 	require.NotNil(t, result)
 	assert.Equal(t, 0, chunksReviewed)
 	assert.True(t, result.Approved)
+}
+
+func TestRunChunkedReviewWithRetryBlocksSourceUnavailableMaterialFile(t *testing.T) {
+	plan := reviewdiff.ChunkPlan{Coverage: reviewdiff.CoverageSummary{
+		Source:           "github-files-api",
+		TotalFiles:       1,
+		ReviewMode:       reviewdiff.CoverageModePartial,
+		FilesNotReviewed: 1,
+		Complete:         false,
+		NotReviewedFiles: []reviewdiff.FileCoverage{
+			{
+				Path:        "src/unavailable.go",
+				Reason:      "patch unavailable from GitHub files API",
+				NotReviewed: true,
+				File: reviewdiff.ChangedFile{
+					Path:       "src/unavailable.go",
+					Status:     reviewdiff.ChangeModified,
+					Omitted:    true,
+					OmitReason: "patch unavailable from GitHub files API",
+				},
+			},
+		},
+		OmittedByReason: map[string]int{"patch unavailable from GitHub files API": 1},
+	}}
+
+	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), &chunkCaptureAgent{}, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 0, chunksReviewed)
+	assert.False(t, result.Approved)
+
+	comment := buildCoverageApprovalBlockedComment(reviewdiff.PreparedDiff{}, plan)
+	assert.Contains(t, comment, "src/unavailable.go: patch unavailable from GitHub files API")
+	assert.Contains(t, comment, "not all material source files were reviewed")
 }
 
 var _ platform.Platform = (*mockPlatform)(nil)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -108,7 +109,7 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
 	}
 	plan := reviewdiff.ChunkForReview(preparedDiff.DiffSet, opts)
-	diff := preparedDiff.Rendered.Text
+	diff := renderZeroChunkReviewDiff(plan)
 	chunkIndex := 0
 	totalChunks := len(plan.Chunks)
 	if plan.Coverage.RequiredChunks > totalChunks {
@@ -170,6 +171,20 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		RepoOwner:              owner,
 		RepoName:               repo,
 	}, nil
+}
+
+func renderZeroChunkReviewDiff(plan reviewdiff.ChunkPlan) string {
+	var b strings.Builder
+	source := plan.Coverage.Source
+	if source == "" {
+		source = "unknown"
+	}
+	b.WriteString("# Review diff\n\n")
+	fmt.Fprintf(&b, "- Source: %s\n", source)
+	fmt.Fprintf(&b, "- Total files: %d\n", plan.Coverage.TotalFiles)
+	fmt.Fprintf(&b, "- Review mode: %s\n", plan.Coverage.ReviewMode)
+	b.WriteString("- No reviewable diff chunks were produced; see Diff Coverage for omitted paths and reasons.\n")
+	return b.String()
 }
 
 func reviewDiffChunkOptions(cfg config.ReviewDiff) reviewdiff.ChunkOptions {
