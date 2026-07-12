@@ -100,11 +100,27 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 		},
 	}}
 
-	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{RepoRoot: "/repo"}, 50)
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{RepoRoot: "/repo"}, 50)
 
 	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	result := aggregate.Result
+	chunksReviewed := aggregate.ChunksReviewed
 	require.NotNil(t, result)
 	assert.Equal(t, 2, chunksReviewed)
+	require.Len(t, aggregate.ChunkStats, 2)
+	assert.Equal(t, chunkReviewStats{
+		ChunkIndex:        1,
+		TotalChunks:       2,
+		HighFindingCount:  1,
+		TotalFindingCount: 2,
+		Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "Missing nil check"},
+			{Severity: "CRITERIA", Description: "Acceptance criterion not verified"},
+		},
+	}, aggregate.ChunkStats[0])
+	assert.Equal(t, 1, aggregate.ChunkStats[1].HighFindingCount)
+	assert.Equal(t, 2, aggregate.ChunkStats[1].TotalFindingCount)
 	assert.False(t, result.Approved)
 	assert.Equal(t, []string{"diff-a", "diff-b"}, ag.diffs)
 	require.Len(t, ag.opts, 2)
@@ -148,12 +164,11 @@ func TestRunChunkedReviewWithRetryRepeatedUnparseableReportsNoReviewedChunks(t *
 		{IsUnparseable: true, Summary: "Failed to parse ..."},
 	}}
 
-	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errManualInterventionNeeded))
-	assert.Nil(t, result)
-	assert.Equal(t, 0, chunksReviewed)
+	assert.Nil(t, aggregate)
 	assert.Equal(t, []string{"diff-a", "diff-a"}, ag.diffs)
 	require.Len(t, ag.opts, 2)
 	assert.Equal(t, 1, ag.opts[0].ChunkIndex)
@@ -184,9 +199,12 @@ func TestRunChunkedReviewWithRetryMaxChunksDoesNotApprove(t *testing.T) {
 	}
 	ag := &chunkCaptureAgent{results: results}
 
-	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
 
 	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	result := aggregate.Result
+	chunksReviewed := aggregate.ChunksReviewed
 	require.NotNil(t, result)
 	assert.Equal(t, 8, chunksReviewed)
 	assert.Len(t, ag.opts, 8)
@@ -212,12 +230,17 @@ func TestRunChunkedReviewWithRetryMaxChunksOneIncludesRequiredChunkScope(t *test
 	require.Equal(t, 2, plan.Coverage.RequiredChunks)
 	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{{Approved: true, Summary: "ok"}}}
 
-	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
 
 	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	result := aggregate.Result
+	chunksReviewed := aggregate.ChunksReviewed
 	require.NotNil(t, result)
 	assert.Equal(t, 1, chunksReviewed)
 	require.Len(t, ag.opts, 1)
+	require.Len(t, aggregate.ChunkStats, 1)
+	assert.Equal(t, 2, aggregate.ChunkStats[0].TotalChunks)
 	assert.True(t, ag.opts[0].ChunkedReview)
 	assert.Equal(t, 1, ag.opts[0].ChunkIndex)
 	assert.Equal(t, 2, ag.opts[0].TotalChunks)
@@ -233,6 +256,51 @@ func TestRunChunkedReviewWithRetryMaxChunksOneIncludesRequiredChunkScope(t *test
 	assert.Contains(t, ag.diffs[0], "- Review mode: chunked")
 	assert.NotContains(t, ag.diffs[0], "- Review mode: full")
 	assert.Contains(t, prompt, "Review only the included diffs in this chunk")
+}
+
+func TestReviewSafetyValveHelpers(t *testing.T) {
+	stats := []chunkReviewStats{
+		{ChunkIndex: 1, TotalChunks: 3, HighFindingCount: safetyValveLimit},
+		{
+			ChunkIndex:        2,
+			TotalChunks:       3,
+			HighFindingCount:  safetyValveLimit + 1,
+			TotalFindingCount: safetyValveLimit + 2,
+			Findings: []agent.ReviewFinding{
+				{Severity: "LOW", Description: "low issue"},
+				{Severity: "high", Description: " first high "},
+				{Severity: " HIGH ", Description: ""},
+				{Severity: "HIGH", Description: "third high"},
+				{Severity: "HIGH", Description: "fourth high"},
+			},
+		},
+	}
+
+	stat, ok := offendingChunkSafetyValveStats(stats, safetyValveLimit)
+
+	require.True(t, ok)
+	assert.Equal(t, 2, stat.ChunkIndex)
+
+	chunkComment := buildChunkReviewSafetyValveComment(stat, safetyValveLimit)
+	assert.Contains(t, chunkComment, "Agent review chunk 2/3 found 11 high-severity issues")
+	assert.Contains(t, chunkComment, "- first high")
+	assert.Contains(t, chunkComment, "- (no description)")
+	assert.Contains(t, chunkComment, "- third high")
+	assert.Contains(t, chunkComment, "- ...and 8 more high-severity finding(s) in this chunk.")
+	assert.NotContains(t, chunkComment, "low issue")
+
+	reviewComment := buildReviewSafetyValveComment(safetyValveLimit+1, safetyValveLimit)
+	assert.Contains(t, reviewComment, "single review pass")
+}
+
+func TestReviewSafetyValveHelpersNoOffendingChunkAtLimit(t *testing.T) {
+	stat, ok := offendingChunkSafetyValveStats([]chunkReviewStats{
+		{ChunkIndex: 1, TotalChunks: 2, HighFindingCount: safetyValveLimit},
+		{ChunkIndex: 2, TotalChunks: 2, HighFindingCount: safetyValveLimit - 1},
+	}, safetyValveLimit)
+
+	assert.False(t, ok)
+	assert.Equal(t, chunkReviewStats{}, stat)
 }
 
 func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) {
@@ -369,9 +437,12 @@ func TestRunChunkedReviewWithRetryApprovesMixedReviewWhenOnlyAllowableFilesAreOm
 	}
 	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{{Approved: true, Summary: "ok"}}}
 
-	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
 
 	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	result := aggregate.Result
+	chunksReviewed := aggregate.ChunksReviewed
 	require.NotNil(t, result)
 	assert.Equal(t, 1, chunksReviewed)
 	assert.True(t, result.Approved)
@@ -395,9 +466,12 @@ func TestRunChunkedReviewWithRetryDoesNotApproveZeroChunksWithOnlyAllowableOmiss
 		},
 	}}
 
-	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), &chunkCaptureAgent{}, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), &chunkCaptureAgent{}, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
 
 	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	result := aggregate.Result
+	chunksReviewed := aggregate.ChunksReviewed
 	require.NotNil(t, result)
 	assert.Equal(t, 0, chunksReviewed)
 	assert.False(t, result.Approved)
@@ -432,9 +506,12 @@ func TestRunChunkedReviewWithRetryBlocksSourceUnavailableMaterialFile(t *testing
 		OmittedByReason: map[string]int{"patch unavailable from GitHub files API": 1},
 	}}
 
-	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), &chunkCaptureAgent{}, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), &chunkCaptureAgent{}, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
 
 	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	result := aggregate.Result
+	chunksReviewed := aggregate.ChunksReviewed
 	require.NotNil(t, result)
 	assert.Equal(t, 0, chunksReviewed)
 	assert.False(t, result.Approved)
@@ -476,9 +553,12 @@ func TestRunChunkedReviewWithRetryBlocksGeneratedPathWithUnavailableDiff(t *test
 	}
 	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{{Approved: true, Summary: "ok"}}}
 
-	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
 
 	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	result := aggregate.Result
+	chunksReviewed := aggregate.ChunksReviewed
 	require.NotNil(t, result)
 	assert.Equal(t, 1, chunksReviewed)
 	assert.False(t, result.Approved)
