@@ -279,6 +279,92 @@ func TestPullRequestGetDiff(t *testing.T) {
 	assert.Contains(t, diff, "+added line")
 }
 
+func TestPullRequestGetDiffTooLarge(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/test-org/test-repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		http.Error(w, `{"message":"diff too_large"}`, http.StatusNotAcceptable)
+	})
+
+	client, _ := newTestClient(t, mux)
+	diff, err := client.PullRequests().GetDiff(context.Background(), 42)
+	require.Error(t, err)
+	assert.Empty(t, diff)
+	assert.True(t, platform.IsPullRequestDiffTooLarge(err))
+	assert.Contains(t, err.Error(), "diff too_large")
+}
+
+func TestPullRequestListFilesPaginated(t *testing.T) {
+	callCount := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test-org/test-repo/pulls/42/files", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "100", r.URL.Query().Get("per_page"))
+		callCount++
+		switch callCount {
+		case 1:
+			assert.Empty(t, r.URL.Query().Get("page"))
+			w.Header().Set("Link", `</repos/test-org/test-repo/pulls/42/files?page=2>; rel="next"`)
+			files := make([]gh.CommitFile, 100)
+			files[0] = gh.CommitFile{
+				Filename:         gh.Ptr("new/name.go"),
+				PreviousFilename: gh.Ptr("old/name.go"),
+				Status:           gh.Ptr("renamed"),
+				Additions:        gh.Ptr(3),
+				Deletions:        gh.Ptr(1),
+				Changes:          gh.Ptr(4),
+				Patch:            gh.Ptr("@@ -1 +1 @@\n-old\n+new\n"),
+				SHA:              gh.Ptr("abc123"),
+				BlobURL:          gh.Ptr("https://github.com/blob"),
+				RawURL:           gh.Ptr("https://github.com/raw"),
+				ContentsURL:      gh.Ptr("https://api.github.com/contents"),
+			}
+			for i := 1; i < len(files); i++ {
+				files[i] = gh.CommitFile{
+					Filename:  gh.Ptr(fmt.Sprintf("page-one-%03d.go", i)),
+					Status:    gh.Ptr("modified"),
+					Additions: gh.Ptr(1),
+					Deletions: gh.Ptr(0),
+					Changes:   gh.Ptr(1),
+				}
+			}
+			json.NewEncoder(w).Encode(files)
+		case 2:
+			assert.Equal(t, "2", r.URL.Query().Get("page"))
+			json.NewEncoder(w).Encode([]gh.CommitFile{
+				{
+					Filename:  gh.Ptr("second.go"),
+					Status:    gh.Ptr("modified"),
+					Additions: gh.Ptr(1),
+					Deletions: gh.Ptr(2),
+					Changes:   gh.Ptr(3),
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: callCount=%d", callCount)
+		}
+	})
+
+	client, _ := newTestClient(t, mux)
+	files, err := client.PullRequests().ListFiles(context.Background(), 42)
+	require.NoError(t, err)
+	require.Len(t, files, 101)
+	assert.Greater(t, len(files), 100)
+	assert.Equal(t, 2, callCount)
+	assert.Equal(t, "new/name.go", files[0].Path)
+	assert.Equal(t, "old/name.go", files[0].PreviousPath)
+	assert.Equal(t, "renamed", files[0].Status)
+	assert.Equal(t, 3, files[0].Additions)
+	assert.Equal(t, 1, files[0].Deletions)
+	assert.Equal(t, 4, files[0].Changes)
+	assert.Equal(t, "@@ -1 +1 @@\n-old\n+new\n", files[0].Patch)
+	assert.Equal(t, "abc123", files[0].SHA)
+	assert.Equal(t, "https://github.com/blob", files[0].BlobURL)
+	assert.Equal(t, "https://github.com/raw", files[0].RawURL)
+	assert.Equal(t, "https://api.github.com/contents", files[0].ContentsURL)
+	assert.Equal(t, "second.go", files[100].Path)
+}
+
 func TestPullRequestListReviewComments(t *testing.T) {
 	callCount := 0
 	mux := http.NewServeMux()

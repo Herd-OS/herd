@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -164,6 +165,27 @@ func TestDiff(t *testing.T) {
 	assert.Contains(t, diff, "new.txt")
 }
 
+func TestDiffPathsDetectsPureRename(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+	cmd := exec.Command("git", "mv", "README.md", "README-renamed.md")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "rename readme")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	diff, err := g.DiffPaths(defaultBranch, "feature", "README-renamed.md", "README.md")
+	require.NoError(t, err)
+	assert.Contains(t, diff, "rename from README.md")
+	assert.Contains(t, diff, "rename to README-renamed.md")
+}
+
 func TestDiffStat(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)
@@ -278,6 +300,58 @@ func TestCloneRemoteBranchSHAAndPushHEAD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, updated, "refs/heads/"+defaultBranch)
 	assert.NotContains(t, updated, base)
+}
+
+func TestParseNameStatus(t *testing.T) {
+	raw := strings.Join([]string{
+		"A\tadded.go",
+		"M\tmodified.go",
+		"D\tdeleted.go",
+		"R091\told.go\tnew.go",
+		"C100\tsource.go\tcopy.go",
+		"T\ttypechange",
+		"X\tunknown.txt",
+	}, "\n")
+
+	got := parseNameStatus(raw)
+
+	assert.Equal(t, []NameStatusEntry{
+		{Status: "A", Path: "added.go"},
+		{Status: "M", Path: "modified.go"},
+		{Status: "D", Path: "deleted.go"},
+		{Status: "R091", Path: "new.go", OldPath: "old.go"},
+		{Status: "C100", Path: "copy.go", OldPath: "source.go"},
+		{Status: "T", Path: "typechange"},
+		{Status: "X", Path: "unknown.txt"},
+	}, got)
+}
+
+func TestParseNameStatus_EmptyOutput(t *testing.T) {
+	assert.Empty(t, parseNameStatus(""))
+}
+
+func TestParseNumStat(t *testing.T) {
+	raw := strings.Join([]string{
+		"2\t1\tmodified.go",
+		"-\t-\timage.png",
+		"0\t0\told.go => renamed.go",
+		"3\t4\tpkg/{old.go => new.go}",
+	}, "\n")
+
+	got, err := parseNumStat(raw)
+	require.NoError(t, err)
+
+	assert.Equal(t, [2]int{2, 1}, got["modified.go"])
+	assert.Equal(t, [2]int{-1, -1}, got["image.png"])
+	assert.Equal(t, [2]int{0, 0}, got["renamed.go"])
+	assert.Equal(t, [2]int{3, 4}, got["pkg/new.go"])
+	assert.Equal(t, [2]int{3, 4}, got["pkg/{old.go => new.go}"])
+}
+
+func TestParseNumStat_InvalidLine(t *testing.T) {
+	_, err := parseNumStat("not-enough-fields")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected 3 tab-separated fields")
 }
 
 func TestRebase(t *testing.T) {

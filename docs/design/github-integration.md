@@ -166,6 +166,8 @@ All workflows require the `HERD_ENABLED` repository variable to be set to `true`
 
 The hosted GitHub App uses installation-scoped permissions:
 
+Worker and integrator jobs that need repository history use `actions/checkout` with `fetch-depth: 0`. This is required for local merge/rebase operations and lets agent review prefer local git diffs before using GitHub raw diff or changed-file metadata fallback for large PRs.
+
 | Permission | Access | Why |
 |---|---|---|
 | Actions | Read and write | Dispatch worker workflows and list runs |

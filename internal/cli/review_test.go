@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/herd-os/herd/internal/platform"
+	"github.com/herd-os/herd/internal/reviewdiff"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,8 +89,48 @@ func TestRenderReviewSystemPrompt_EmptyDiffStillRenders(t *testing.T) {
 
 	out, err := renderReviewSystemPrompt(data)
 	require.NoError(t, err)
-	assert.Contains(t, out, "```diff")
+	assert.Contains(t, out, "## Diff")
 	assert.Contains(t, out, "CI status (head ref): unknown")
+}
+
+func TestRenderReviewSystemPrompt_DoesNotWrapRenderedReviewDiffInOuterFence(t *testing.T) {
+	rendered := reviewdiff.RenderForReview(reviewdiff.DiffSet{
+		Source: "github-files-api",
+		Files: []reviewdiff.ChangedFile{
+			{
+				Path:      "internal/review.go",
+				Status:    reviewdiff.ChangeModified,
+				Additions: 1,
+				Deletions: 1,
+				Patch:     "@@ -1 +1 @@\n-old\n+new\n",
+			},
+		},
+	}, reviewdiff.DefaultRenderOptions())
+	require.Contains(t, rendered.Text, "```diff", "rendered review diff should contain an internal file fence")
+
+	out, err := renderReviewSystemPrompt(&reviewCmdPromptData{
+		PRNumber:     42,
+		PRTitle:      "Rendered diff",
+		PRURL:        "https://github.com/example/repo/pull/42",
+		PRBaseBranch: "main",
+		PRHeadBranch: "feature/rendered-diff",
+		Diff:         rendered.Text,
+		CIStatus:     "success",
+		RepoOwner:    "example",
+		RepoName:     "repo",
+	})
+	require.NoError(t, err)
+
+	diffStart := strings.Index(out, "## Diff")
+	diffEnd := strings.Index(out, "## Your Role")
+	require.GreaterOrEqual(t, diffStart, 0, "diff section must be present")
+	require.Greater(t, diffEnd, diffStart, "role section must follow diff section")
+	diffSection := out[diffStart:diffEnd]
+
+	assert.Contains(t, diffSection, "# Review diff")
+	assert.Contains(t, diffSection, "internal/review.go")
+	assert.Equal(t, 1, strings.Count(diffSection, "```diff"), "prompt should preserve only the rendered per-file diff fence")
+	assert.NotContains(t, diffSection, "## Diff\n```diff\n# Review diff", "prompt must not wrap rendered markdown in an outer diff fence")
 }
 
 func TestReviewSystemPrompt_IncludesFixGuidance(t *testing.T) {
@@ -217,6 +260,143 @@ func TestReviewSystemPrompt_MustNotIncludesFileMutation(t *testing.T) {
 		"MUST NOT section should call out git commit as forbidden")
 	assert.Contains(t, mustNotSection, "gh pr comment",
 		"MUST NOT section should mention the allowed gh pr comment exception")
+}
+
+func TestBuildReviewPromptDataFallsBackWhenRawDiffTooLarge(t *testing.T) {
+	prs := &mockReviewPromptPRService{
+		diffErr: platform.ErrPullRequestDiffTooLarge,
+		files: []*platform.PullRequestFile{
+			{
+				Path:      "src/review.go",
+				Status:    "modified",
+				Additions: 1,
+				Deletions: 1,
+				Changes:   2,
+				Patch:     "@@ -1 +1 @@\n-old\n+bounded\n",
+			},
+		},
+	}
+	client := &mockReviewPromptPlatform{
+		prs:    prs,
+		issues: &mockReviewPromptIssueService{},
+		checks: &mockReviewPromptCheckService{},
+	}
+
+	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir())
+
+	require.NoError(t, err)
+	assert.True(t, prs.getDiffCalled)
+	assert.True(t, prs.listFilesCalled)
+	assert.Equal(t, "Example PR", data.PRTitle)
+	assert.Contains(t, data.Diff, "Source: github-files-api")
+	assert.Contains(t, data.Diff, "src/review.go")
+	assert.Contains(t, data.Diff, "+bounded")
+}
+
+type mockReviewPromptPlatform struct {
+	prs    platform.PullRequestService
+	issues platform.IssueService
+	checks platform.CheckService
+}
+
+func (m *mockReviewPromptPlatform) Issues() platform.IssueService             { return m.issues }
+func (m *mockReviewPromptPlatform) PullRequests() platform.PullRequestService { return m.prs }
+func (m *mockReviewPromptPlatform) Workflows() platform.WorkflowService       { return nil }
+func (m *mockReviewPromptPlatform) Labels() platform.LabelService             { return nil }
+func (m *mockReviewPromptPlatform) Milestones() platform.MilestoneService     { return nil }
+func (m *mockReviewPromptPlatform) Runners() platform.RunnerService           { return nil }
+func (m *mockReviewPromptPlatform) Repository() platform.RepositoryService    { return nil }
+func (m *mockReviewPromptPlatform) Checks() platform.CheckService             { return m.checks }
+
+type mockReviewPromptPRService struct {
+	diffErr         error
+	files           []*platform.PullRequestFile
+	getDiffCalled   bool
+	listFilesCalled bool
+}
+
+func (m *mockReviewPromptPRService) Create(context.Context, string, string, string, string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptPRService) Get(context.Context, int) (*platform.PullRequest, error) {
+	return &platform.PullRequest{
+		Number: 42,
+		Title:  "Example PR",
+		URL:    "https://github.com/example/repo/pull/42",
+		Base:   "main",
+		Head:   "feature/review",
+	}, nil
+}
+func (m *mockReviewPromptPRService) List(context.Context, platform.PRFilters) ([]*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptPRService) Update(context.Context, int, *string, *string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptPRService) Merge(context.Context, int, platform.MergeMethod) (*platform.MergeResult, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptPRService) UpdateBranch(context.Context, int) error { return nil }
+func (m *mockReviewPromptPRService) CreateReview(context.Context, int, string, platform.ReviewEvent) error {
+	return nil
+}
+func (m *mockReviewPromptPRService) AddComment(context.Context, int, string) error { return nil }
+func (m *mockReviewPromptPRService) ListReviewComments(context.Context, int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptPRService) ListFiles(context.Context, int) ([]*platform.PullRequestFile, error) {
+	m.listFilesCalled = true
+	return m.files, nil
+}
+func (m *mockReviewPromptPRService) GetDiff(context.Context, int) (string, error) {
+	m.getDiffCalled = true
+	if m.diffErr != nil {
+		return "", m.diffErr
+	}
+	return "diff --git a/raw.go b/raw.go\n", nil
+}
+func (m *mockReviewPromptPRService) Close(context.Context, int) error { return nil }
+
+type mockReviewPromptIssueService struct{}
+
+func (m *mockReviewPromptIssueService) Create(context.Context, string, string, []string, *int) (*platform.Issue, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptIssueService) Get(context.Context, int) (*platform.Issue, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptIssueService) List(context.Context, platform.IssueFilters) ([]*platform.Issue, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptIssueService) Update(context.Context, int, platform.IssueUpdate) (*platform.Issue, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptIssueService) AddLabels(context.Context, int, []string) error { return nil }
+func (m *mockReviewPromptIssueService) RemoveLabels(context.Context, int, []string) error {
+	return nil
+}
+func (m *mockReviewPromptIssueService) AddComment(context.Context, int, string) error { return nil }
+func (m *mockReviewPromptIssueService) AddCommentReturningID(context.Context, int, string) (int64, error) {
+	return 0, nil
+}
+func (m *mockReviewPromptIssueService) UpdateComment(context.Context, int64, string) error {
+	return nil
+}
+func (m *mockReviewPromptIssueService) DeleteComment(context.Context, int64) error { return nil }
+func (m *mockReviewPromptIssueService) ListComments(context.Context, int) ([]*platform.Comment, error) {
+	return nil, nil
+}
+func (m *mockReviewPromptIssueService) CreateCommentReaction(context.Context, int64, string) error {
+	return nil
+}
+
+type mockReviewPromptCheckService struct{}
+
+func (m *mockReviewPromptCheckService) GetCombinedStatus(context.Context, string) (string, error) {
+	return "success", nil
+}
+func (m *mockReviewPromptCheckService) RerunFailedChecks(context.Context, string) error {
+	return nil
 }
 
 func TestReviewSystemPrompt_RationaleIncluded(t *testing.T) {

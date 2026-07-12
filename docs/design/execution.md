@@ -1081,6 +1081,10 @@ The integrator also guards the review path. The review agent runs under a strict
 
 on the batch PR and returns `ManualInterventionNeeded=true`, leaving the review surfaced for the operator rather than silently dropped.
 
+Review diff preparation is large-PR-safe. In runner and CLI contexts HerdOS first uses local git diff collection from the checkout. If that cannot run, it tries GitHub's raw PR diff; if the raw diff is unavailable or rejected by GitHub's large-diff limit, it falls back to GitHub files API metadata and any bounded per-file patches GitHub provides. Review continues when one of those sources succeeds.
+
+The rendered review input is bounded. Generated files, binary files, large lockfile diffs, mode-only changes, and files that exceed internal byte or file-count limits can be summarized, omitted, or truncated. Whenever the input is limited, the review output includes or logs a **Diff Coverage** summary with the source, included files, omitted files, truncated files, warnings, and omitted paths with reasons so users can see what the agent did not inspect in full.
+
 ---
 
 ## 11. Failure Modes

@@ -417,6 +417,9 @@ func (s *fakePRService) AddComment(context.Context, int, string) error { return 
 func (s *fakePRService) ListReviewComments(context.Context, int) ([]*platform.ReviewComment, error) {
 	return nil, nil
 }
+func (s *fakePRService) ListFiles(context.Context, int) ([]*platform.PullRequestFile, error) {
+	return nil, nil
+}
 func (s *fakePRService) GetDiff(context.Context, int) (string, error) { return "", nil }
 func (s *fakePRService) Close(context.Context, int) error             { return nil }
 
