@@ -108,15 +108,17 @@ func TestRedactTokenRemovesRawAndExtraHeaderCredentials(t *testing.T) {
 	assert.NotContains(t, err.Error(), "AUTHORIZATION: basic")
 }
 
-func TestGitAuthEnvDoesNotReturnTokenInGitConfig(t *testing.T) {
+func TestGitAuthEnvKeepsTokenOutOfAskpassScript(t *testing.T) {
 	token := "ghs_secret_installation_token"
-	env, cleanup, err := gitAuthEnv(t.TempDir(), "https://github.com/acme/widgets.git", token)
+	root := t.TempDir()
+	env, cleanup, err := gitAuthEnv(root, "https://github.com/acme/widgets.git", token)
 	defer cleanup()
 
 	require.NoError(t, err)
 	assert.NotEmpty(t, env)
-	assert.NotContains(t, strings.Join(env, "\n"), token)
-	assert.NotContains(t, strings.Join(env, "\n"), "x-access-token")
+	assert.Contains(t, strings.Join(env, "\n"), "HERD_GIT_ASKPASS_TOKEN="+token)
+	assertTempDirDoesNotContain(t, root, token)
+	assertTempDirDoesNotContain(t, root, "x-access-token:"+token)
 }
 
 func TestApplyAuthenticatedCloneDoesNotPersistTokenInTempDir(t *testing.T) {

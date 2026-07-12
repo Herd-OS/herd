@@ -88,11 +88,39 @@ func TestGitErrorsRedactCommandScopedAuthConfig(t *testing.T) {
 
 	require.Error(t, err)
 	msg := err.Error()
-	assert.Contains(t, msg, "git -c")
 	assert.Contains(t, msg, "clone https://example.invalid/repo.git")
-	assert.Contains(t, msg, "extraHeader=<redacted>")
+	assert.NotContains(t, msg, "-c")
+	assert.NotContains(t, msg, "extraHeader")
 	assert.NotContains(t, msg, token)
 	assert.NotContains(t, strings.ToLower(msg), "authorization: bearer")
+}
+
+func TestCommandScopedAuthConfigDoesNotAppearInGitArgv(t *testing.T) {
+	binDir := t.TempDir()
+	capturePath := filepath.Join(t.TempDir(), "argv.txt")
+	fakeGit := filepath.Join(binDir, "git")
+	script := "#!/bin/sh\n" +
+		"for arg do printf '<%s>' \"$arg\"; done > \"$HERD_GIT_ARGV_CAPTURE\"\n" +
+		"exit 1\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HERD_GIT_ARGV_CAPTURE", capturePath)
+	token := "ghs_secret_installation_token"
+	credential := "eC1hY2Nlc3MtdG9rZW46" + token
+
+	err := CloneWithConfig("https://github.com/acme/widgets.git", filepath.Join(t.TempDir(), "repo"),
+		"http.https://github.com/.extraHeader=Authorization: Bearer "+token,
+		"credential.helper=!f() { echo password="+token+"; }; f")
+
+	require.Error(t, err)
+	argv := string(mustReadFile(t, capturePath))
+	assert.NotContains(t, argv, token)
+	assert.NotContains(t, argv, credential)
+	assert.NotContains(t, strings.ToLower(argv), "authorization")
+	assert.NotContains(t, strings.ToLower(argv), "bearer")
+	assert.NotContains(t, strings.ToLower(argv), "basic")
+	assert.NotContains(t, strings.ToLower(argv), "x-access-token")
+	assert.NotContains(t, strings.ToLower(argv), "password")
 }
 
 func TestCurrentBranch(t *testing.T) {

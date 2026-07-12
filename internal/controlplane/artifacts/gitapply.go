@@ -195,7 +195,7 @@ func gitAuthEnv(root, cloneURL, token string) ([]string, func(), error) {
 	script := "#!/bin/sh\n" +
 		"case \"$1\" in\n" +
 		"*Username*) printf '%s\\n' 'x-access-token' ;;\n" +
-		"*Password*) printf '%s\\n' '" + shellSingleQuote(token) + "' ;;\n" +
+		"*Password*) printf '%s\\n' \"$HERD_GIT_ASKPASS_TOKEN\" ;;\n" +
 		"*) printf '\\n' ;;\n" +
 		"esac\n"
 	if err := os.WriteFile(askpass, []byte(script), 0600); err != nil {
@@ -206,12 +206,9 @@ func gitAuthEnv(root, cloneURL, token string) ([]string, func(), error) {
 	}
 	return []string{
 		"GIT_ASKPASS=" + askpass,
+		"HERD_GIT_ASKPASS_TOKEN=" + token,
 		"GIT_TERMINAL_PROMPT=0",
 	}, cleanup, nil
-}
-
-func shellSingleQuote(s string) string {
-	return strings.ReplaceAll(s, "'", "'\"'\"'")
 }
 
 func redactToken(err error, token string) error {

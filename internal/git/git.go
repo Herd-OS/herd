@@ -28,9 +28,10 @@ func New(workDir string) *Git {
 	return &Git{WorkDir: workDir}
 }
 
-// NewWithConfig creates a Git wrapper that passes -c config entries to each git
-// invocation. It is intended for ephemeral, command-scoped options such as
-// authentication headers that must not be written to .git/config.
+// NewWithConfig creates a Git wrapper that passes config entries through Git's
+// environment config interface for each invocation. It is intended for
+// ephemeral, command-scoped options that must not be written to .git/config or
+// exposed in process arguments.
 func NewWithConfig(workDir string, config ...string) *Git {
 	return &Git{WorkDir: workDir, ExtraConfig: append([]string(nil), config...)}
 }
@@ -50,12 +51,9 @@ func CloneWithConfig(repoURL, dst string, config ...string) error {
 }
 
 func CloneWithConfigAndEnv(repoURL, dst string, config []string, env []string) error {
-	args := gitArgs(config, "clone", repoURL, dst)
-	cmd := exec.Command("git", "clone", repoURL, dst)
-	cmd.Args = append([]string{"git"}, args...)
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	args := gitArgs("clone", repoURL, dst)
+	cmd := exec.Command("git", args...)
+	cmd.Env = gitEnv(config, env)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(args), err, strings.TrimSpace(string(out)))
@@ -315,12 +313,10 @@ func (g *Git) RemoteBranchSHA(remote, branch string) (string, error) {
 }
 
 func (g *Git) run(args ...string) error {
-	cmdArgs := gitArgs(g.ExtraConfig, args...)
+	cmdArgs := gitArgs(args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
-	if len(g.Env) > 0 {
-		cmd.Env = append(os.Environ(), g.Env...)
-	}
+	cmd.Env = gitEnv(g.ExtraConfig, g.Env)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, strings.TrimSpace(string(out)))
@@ -329,12 +325,10 @@ func (g *Git) run(args ...string) error {
 }
 
 func (g *Git) output(args ...string) (string, error) {
-	cmdArgs := gitArgs(g.ExtraConfig, args...)
+	cmdArgs := gitArgs(args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
-	if len(g.Env) > 0 {
-		cmd.Env = append(os.Environ(), g.Env...)
-	}
+	cmd.Env = gitEnv(g.ExtraConfig, g.Env)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -346,12 +340,10 @@ func (g *Git) output(args ...string) (string, error) {
 }
 
 func (g *Git) outputBytes(args ...string) ([]byte, error) {
-	cmdArgs := gitArgs(g.ExtraConfig, args...)
+	cmdArgs := gitArgs(args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
-	if len(g.Env) > 0 {
-		cmd.Env = append(os.Environ(), g.Env...)
-	}
+	cmd.Env = gitEnv(g.ExtraConfig, g.Env)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -361,18 +353,31 @@ func (g *Git) outputBytes(args ...string) ([]byte, error) {
 	return out, nil
 }
 
-func gitArgs(config []string, args ...string) []string {
-	if len(config) == 0 {
-		return args
-	}
-	out := make([]string, 0, len(config)*2+len(args))
+func gitArgs(args ...string) []string {
+	return args
+}
+
+func gitEnv(config []string, env []string) []string {
+	out := append([]string{}, os.Environ()...)
+	out = append(out, env...)
+	configIndex := 0
 	for _, entry := range config {
 		if strings.TrimSpace(entry) == "" {
 			continue
 		}
-		out = append(out, "-c", entry)
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			continue
+		}
+		out = append(out,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", configIndex, key),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", configIndex, value),
+		)
+		configIndex++
 	}
-	out = append(out, args...)
+	if configIndex > 0 {
+		out = append(out, fmt.Sprintf("GIT_CONFIG_COUNT=%d", configIndex))
+	}
 	return out
 }
 
