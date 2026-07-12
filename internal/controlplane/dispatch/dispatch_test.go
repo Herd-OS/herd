@@ -256,18 +256,26 @@ func TestDispatcherRetriesAfterCreateJobFailure(t *testing.T) {
 func TestDispatcherRetriesAfterRecordMutationAttemptFailure(t *testing.T) {
 	st := newFakeStore()
 	st.recordMutationErrs = []error{errors.New("database down"), nil}
+	st.completeIdemErrs = map[string][]error{}
 	gh := &fakeWorkflowClient{}
 	req := validRequest()
 	key := IdempotencyKey(req)
+	st.completeIdemErrs[key] = []error{errors.New("database down"), nil}
 
 	_, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "record workflow dispatch mutation attempt")
 	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "complete dispatch idempotency key")
+	assert.Empty(t, result.JobID)
+	result, err = Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 
 	require.NoError(t, err)
-	assert.True(t, result.Created)
+	assert.False(t, result.Created)
 	assert.Len(t, gh.calls, 1)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
 	assert.Len(t, st.jobs, 1)
 	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
 }

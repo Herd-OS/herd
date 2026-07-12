@@ -28,10 +28,9 @@ func New(workDir string) *Git {
 	return &Git{WorkDir: workDir}
 }
 
-// NewWithConfig creates a Git wrapper that passes config entries through Git's
-// environment config interface for each invocation. It is intended for
-// ephemeral, command-scoped options that must not be written to .git/config or
-// exposed in process arguments.
+// NewWithConfig creates a Git wrapper that passes non-sensitive config entries
+// through Git's environment config interface for each invocation. Sensitive
+// auth material must use a transport such as askpass, not argv or env config.
 func NewWithConfig(workDir string, config ...string) *Git {
 	return &Git{WorkDir: workDir, ExtraConfig: append([]string(nil), config...)}
 }
@@ -369,6 +368,9 @@ func gitEnv(config []string, env []string) []string {
 		if !ok || strings.TrimSpace(key) == "" {
 			continue
 		}
+		if sensitiveGitConfigKey(key) || sensitiveGitConfigValue(value) {
+			continue
+		}
 		out = append(out,
 			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", configIndex, key),
 			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", configIndex, value),
@@ -420,7 +422,11 @@ func sensitiveGitConfigKey(key string) bool {
 
 func sensitiveGitConfigValue(value string) bool {
 	value = strings.ToLower(value)
-	return strings.Contains(value, "authorization:") || strings.Contains(value, "bearer ") || strings.Contains(value, "token ")
+	return strings.Contains(value, "authorization:") ||
+		strings.Contains(value, "bearer ") ||
+		strings.Contains(value, "token ") ||
+		strings.Contains(value, "x-access-token") ||
+		strings.Contains(value, "password")
 }
 
 func parseNameStatus(out string) []NameStatusEntry {

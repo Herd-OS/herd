@@ -81,6 +81,20 @@ func TestSetHerdReviewStatusAllowsNewHeadPendingAfterSuccess(t *testing.T) {
 	assert.Equal(t, "pending", gh.statuses[1].status.State)
 }
 
+func TestSetHerdReviewStatusRequiresIdempotencyStore(t *testing.T) {
+	ctx := context.Background()
+	st := &stateOnlyStatusStore{}
+	gh := &fakeStatusGitHub{}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	err := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "review status idempotency store is required")
+	assert.Empty(t, gh.statuses)
+	assert.Empty(t, st.states)
+}
+
 func TestSetHerdReviewStatusRetryAfterStateFailureDoesNotDuplicateGitHubStatus(t *testing.T) {
 	ctx := context.Background()
 	st := &fakeStatusStore{errs: []error{errors.New("database down"), nil}}
@@ -175,6 +189,15 @@ type fakeStatusStore struct {
 	mutationCompleteErrs []error
 	idem                 map[string]store.IdempotencyKey
 	mutationAttempts     []store.GitHubMutationAttempt
+}
+
+type stateOnlyStatusStore struct {
+	states []store.ReviewState
+}
+
+func (s *stateOnlyStatusStore) SetReviewState(_ context.Context, state store.ReviewState) error {
+	s.states = append(s.states, state)
+	return nil
 }
 
 func (s *fakeStatusStore) SetReviewState(_ context.Context, state store.ReviewState) error {

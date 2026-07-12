@@ -232,7 +232,7 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) error {
 	key := reviewSubmissionKey(repo, result, event)
 	if s.Mutations == nil {
-		return s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA)
+		return fmt.Errorf("review submission mutation store is required")
 	}
 	request, err := json.Marshal(map[string]any{
 		"repository": repo.Owner + "/" + repo.Name,
@@ -277,6 +277,20 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 				return fmt.Errorf("get failed review submission mutation attempt: %w", attemptErr)
 			} else if attemptErr == nil && attempt.Status != "completed" {
 				return fmt.Errorf("%w: %s has unknown outcome after failed mutation attempt", ErrReviewSubmissionInProgress, key)
+			} else if errors.Is(attemptErr, store.ErrNotFound) {
+				if err := s.Mutations.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+					IdempotencyKey: key,
+					RepositoryID:   repo.ID,
+					MutationType:   "review_submission",
+					Status:         "started",
+					Request:        request,
+					CreatedAt:      s.now(),
+				}); err != nil {
+					if errors.Is(err, store.ErrAlreadyExists) {
+						return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
+					}
+					return fmt.Errorf("record retry review submission mutation attempt: %w", err)
+				}
 			}
 		}
 	} else if err := s.Mutations.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{

@@ -112,13 +112,59 @@ func TestGitAuthEnvKeepsTokenOutOfAskpassScript(t *testing.T) {
 	token := "ghs_secret_installation_token"
 	root := t.TempDir()
 	env, cleanup, err := gitAuthEnv(root, "https://github.com/acme/widgets.git", token)
-	defer cleanup()
 
 	require.NoError(t, err)
 	assert.NotEmpty(t, env)
-	assert.Contains(t, strings.Join(env, "\n"), "HERD_GIT_ASKPASS_TOKEN="+token)
+	joined := strings.Join(env, "\n")
+	assert.NotContains(t, joined, token)
+	assert.NotContains(t, strings.ToLower(joined), "x-access-token")
+
+	var tokenFile string
+	for _, entry := range env {
+		if value, ok := strings.CutPrefix(entry, "HERD_GIT_ASKPASS_TOKEN_FILE="); ok {
+			tokenFile = value
+		}
+	}
+	require.NotEmpty(t, tokenFile)
+	info, err := os.Stat(tokenFile)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+
+	cleanup()
+	_, err = os.Stat(tokenFile)
+	require.True(t, os.IsNotExist(err))
 	assertTempDirDoesNotContain(t, root, token)
 	assertTempDirDoesNotContain(t, root, "x-access-token:"+token)
+}
+
+func TestGitAuthEnvDoesNotExposeTokenToGitProcess(t *testing.T) {
+	token := "ghs_secret_installation_token"
+	root := t.TempDir()
+	env, cleanup, err := gitAuthEnv(root, "https://github.com/acme/widgets.git", token)
+	defer cleanup()
+	require.NoError(t, err)
+
+	binDir := t.TempDir()
+	capturePath := filepath.Join(t.TempDir(), "capture.txt")
+	fakeGit := filepath.Join(binDir, "git")
+	script := "#!/bin/sh\n" +
+		"{ for arg do printf 'ARG:%s\\n' \"$arg\"; done; env | sort | grep -E '^(GIT|HERD_GIT)_' || true; } > \"$HERD_GIT_CAPTURE\"\n" +
+		"exit 1\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HERD_GIT_CAPTURE", capturePath)
+
+	err = herdgit.CloneWithConfigAndEnv("https://github.com/acme/widgets.git", filepath.Join(t.TempDir(), "repo"), nil, env)
+
+	require.Error(t, err)
+	captured := readFile(t, capturePath)
+	assert.NotContains(t, captured, token)
+	assert.NotContains(t, captured, base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)))
+	assert.NotContains(t, strings.ToLower(captured), "authorization")
+	assert.NotContains(t, strings.ToLower(captured), "bearer")
+	assert.NotContains(t, strings.ToLower(captured), "basic")
+	assert.NotContains(t, strings.ToLower(captured), "x-access-token")
+	assert.NotContains(t, strings.ToLower(captured), "password")
 }
 
 func TestApplyAuthenticatedCloneDoesNotPersistTokenInTempDir(t *testing.T) {

@@ -239,7 +239,25 @@ func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchReque
 		CreatedAt:      now,
 	}); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
-			return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
+			reader, ok := d.Store.(MutationReader)
+			if !ok {
+				return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
+			}
+			attempt, readErr := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
+			if readErr != nil {
+				return fmt.Errorf("get existing workflow dispatch mutation attempt: %w", readErr)
+			}
+			switch attempt.Status {
+			case "failed":
+				if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, "started", nil, "", now); err != nil {
+					return fmt.Errorf("reopen workflow dispatch mutation attempt: %w", err)
+				}
+				return nil
+			case "completed":
+				return nil
+			default:
+				return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
+			}
 		}
 		return fmt.Errorf("record workflow dispatch mutation attempt: %w", err)
 	}
@@ -279,11 +297,20 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		return DispatchResult{}, fmt.Errorf("get existing dispatch job: %w", err)
 	}
 	if record.Status == "failed" {
+		if completed, result, recoverErr := d.completedDispatchMutation(ctx, idempotencyKey); recoverErr != nil {
+			return DispatchResult{}, recoverErr
+		} else if completed {
+			if result.JobID == "" {
+				result.JobID = job.JobID
+			}
+			result.Created = false
+			return result, nil
+		}
 		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
 		if inputErr != nil {
 			return DispatchResult{}, inputErr
 		}
-		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false, false)
+		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false, true)
 	}
 	if completed, result, recoverErr := d.completedDispatchMutation(ctx, idempotencyKey); recoverErr != nil {
 		return DispatchResult{}, recoverErr

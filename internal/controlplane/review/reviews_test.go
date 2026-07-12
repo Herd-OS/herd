@@ -35,7 +35,7 @@ func TestSubmitReviewResultSetsStatusesAndReviews(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
 			statusGH := &fakeStatusGitHub{}
-			svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}}
+			svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Mutations: newFakeReviewMutationStore()}
 
 			err := svc.SubmitReviewResult(context.Background(), testRepo(true), reviewResult(tt.status, "head"))
 
@@ -57,7 +57,7 @@ func TestSubmitReviewResultSetsStatusesAndReviews(t *testing.T) {
 func TestSubmitReviewResultStaleApprovedCallbackCannotMarkNewerHeadSuccess(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "new-head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{}
-	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Mutations: newFakeReviewMutationStore()}
 
 	err := svc.SubmitReviewResult(context.Background(), testRepo(true), reviewResult(ResultStatusApproved, "old-head"))
 
@@ -71,7 +71,7 @@ func TestSubmitReviewResultStaleApprovedCallbackCannotMarkNewerHeadSuccess(t *te
 func TestSubmitReviewResultDisabledReviewDoesNothing(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head"}}
 	statusGH := &fakeStatusGitHub{}
-	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Mutations: newFakeReviewMutationStore()}
 
 	err := svc.SubmitReviewResult(context.Background(), testRepo(false), reviewResult(ResultStatusApproved, "head"))
 
@@ -86,7 +86,7 @@ func TestSubmitReviewResultFailureStillSetsStatusAndComment(t *testing.T) {
 		reviewErr: errors.New("secondary rate limit"),
 	}
 	statusGH := &fakeStatusGitHub{}
-	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Mutations: newFakeReviewMutationStore()}
 
 	err := svc.SubmitReviewResult(context.Background(), testRepo(true), reviewResult(ResultStatusApproved, "head"))
 
@@ -102,7 +102,7 @@ func TestSubmitReviewResultRetryAfterStatusFailureDoesNotDuplicateReview(t *test
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{errs: []error{errors.New("status down"), nil}}
 	mutations := newFakeReviewMutationStore()
-	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}, Mutations: mutations}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Mutations: mutations}
 	result := reviewResult(ResultStatusApproved, "head")
 
 	firstErr := svc.SubmitReviewResult(context.Background(), testRepo(true), result)
@@ -131,6 +131,37 @@ func TestSubmitPRReviewOnceStartedRecordDoesNotCreateReview(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already in progress")
 	assert.Empty(t, gh.reviews)
+}
+
+func TestSubmitPRReviewOnceRequiresMutationStore(t *testing.T) {
+	gh := &fakeReviewGitHub{}
+	svc := ReviewService{GitHub: gh}
+	repo := testRepo(true)
+	result := reviewResult(ResultStatusApproved, "head")
+
+	err := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "review submission mutation store is required")
+	assert.Empty(t, gh.reviews)
+}
+
+func TestSubmitPRReviewOnceFailedRecordWithoutMutationRecordsAttemptBeforeReview(t *testing.T) {
+	gh := &fakeReviewGitHub{}
+	mutations := newFakeReviewMutationStore()
+	svc := ReviewService{GitHub: gh, Mutations: mutations}
+	repo := testRepo(true)
+	result := reviewResult(ResultStatusApproved, "head")
+	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
+	mutations.idem[key] = store.IdempotencyKey{Key: key, Scope: "review_submission", Status: "failed"}
+
+	err := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+
+	require.NoError(t, err)
+	assert.Len(t, gh.reviews, 1)
+	attempt, err := mutations.GetGitHubMutationAttempt(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", attempt.Status)
 }
 
 func TestSubmitPRReviewOnceFailedUnknownOutcomeDoesNotCreateDuplicateReview(t *testing.T) {
@@ -182,7 +213,7 @@ func TestSubmitReviewResultStartedSubmissionReturnsRetryableError(t *testing.T) 
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{}
 	mutations := newFakeReviewMutationStore()
-	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}, Mutations: mutations}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Mutations: mutations}
 	repo := testRepo(true)
 	result := reviewResult(ResultStatusApproved, "head")
 	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
@@ -231,7 +262,7 @@ func TestDispatchReviewSetsPendingAndSuppressesDuplicateWithLock(t *testing.T) {
 	statusGH := &fakeStatusGitHub{}
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	svc := ReviewService{
-		Status:     StatusService{GitHub: statusGH, Now: func() time.Time { return now }},
+		Status:     StatusService{Store: &fakeStatusStore{}, GitHub: statusGH, Now: func() time.Time { return now }},
 		Locks:      locks,
 		Dispatcher: dispatcher,
 		Now:        func() time.Time { return now },
@@ -278,7 +309,7 @@ func TestSubmitReviewResultChangesRequestedWithFixesKeepsPendingAndDispatchesFix
 		{Fingerprint: "high-1", Severity: "high", Description: "fix high"},
 		{Fingerprint: "low-1", Severity: "low", Description: "skip low"},
 	}
-	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}, Locks: locks, Fixes: fixes}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Locks: locks, Fixes: fixes, Mutations: newFakeReviewMutationStore()}
 
 	err := svc.SubmitReviewResult(context.Background(), repo, result)
 
@@ -301,7 +332,7 @@ func TestSubmitReviewResultMaxFixCyclesSetsFailureWithoutDispatch(t *testing.T) 
 	result := reviewResult(ResultStatusChangesRequested, "head")
 	result.FixCycle = 2
 	result.Findings = []Finding{{Fingerprint: "high-1", Severity: "high", Description: "fix high"}}
-	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}, Fixes: fixes}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Fixes: fixes, Mutations: newFakeReviewMutationStore()}
 
 	err := svc.SubmitReviewResult(context.Background(), repo, result)
 

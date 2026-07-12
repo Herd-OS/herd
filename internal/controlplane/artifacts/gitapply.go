@@ -192,10 +192,14 @@ func gitAuthEnv(root, cloneURL, token string) ([]string, func(), error) {
 		return nil, func() {}, fmt.Errorf("temporary directory is required for git authentication")
 	}
 	askpass := filepath.Join(root, "git-askpass.sh")
+	tokenFile := filepath.Join(root, "git-token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0600); err != nil {
+		return nil, func() {}, fmt.Errorf("write git token file: %w", err)
+	}
 	script := "#!/bin/sh\n" +
 		"case \"$1\" in\n" +
 		"*Username*) printf '%s\\n' 'x-access-token' ;;\n" +
-		"*Password*) printf '%s\\n' \"$HERD_GIT_ASKPASS_TOKEN\" ;;\n" +
+		"*Password*) cat \"$HERD_GIT_ASKPASS_TOKEN_FILE\" ;;\n" +
 		"*) printf '\\n' ;;\n" +
 		"esac\n"
 	if err := os.WriteFile(askpass, []byte(script), 0600); err != nil {
@@ -203,10 +207,11 @@ func gitAuthEnv(root, cloneURL, token string) ([]string, func(), error) {
 	}
 	cleanup := func() {
 		_ = os.Remove(askpass)
+		_ = os.Remove(tokenFile)
 	}
 	return []string{
 		"GIT_ASKPASS=" + askpass,
-		"HERD_GIT_ASKPASS_TOKEN=" + token,
+		"HERD_GIT_ASKPASS_TOKEN_FILE=" + tokenFile,
 		"GIT_TERMINAL_PROMPT=0",
 	}, cleanup, nil
 }

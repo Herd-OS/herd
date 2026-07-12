@@ -83,53 +83,51 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 		TargetURL:   strings.TrimSpace(targetURL),
 	}
 	statusKey := statusMutationKey(repo.ID, prNumber, headSHA, state, status.TargetURL)
-	if idem, ok := s.Store.(StatusIdempotencyStore); ok {
-		created, err := idem.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
-			Key:       statusKey,
-			Scope:     "review_status",
-			Status:    "started",
-			Metadata:  mustStatusMetadata(repo, prNumber, headSHA, state, description, targetURL),
-			CreatedAt: now,
-		})
+	idem, ok := s.Store.(StatusIdempotencyStore)
+	if !ok {
+		return fmt.Errorf("review status idempotency store is required")
+	}
+	created, err := idem.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       statusKey,
+		Scope:     "review_status",
+		Status:    "started",
+		Metadata:  mustStatusMetadata(repo, prNumber, headSHA, state, description, targetURL),
+		CreatedAt: now,
+	})
+	if err != nil {
+		return fmt.Errorf("acquire Herd Review status idempotency: %w", err)
+	}
+	if !created {
+		record, err := idem.GetIdempotencyKey(ctx, statusKey)
 		if err != nil {
-			return fmt.Errorf("acquire Herd Review status idempotency: %w", err)
+			return fmt.Errorf("get Herd Review status idempotency: %w", err)
 		}
-		if !created {
-			record, err := idem.GetIdempotencyKey(ctx, statusKey)
-			if err != nil {
-				return fmt.Errorf("get Herd Review status idempotency: %w", err)
+		if record.Status == "completed" {
+			return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
+		}
+		if record.Status == "started" {
+			if repaired, err := s.repairCompletedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
+				return err
 			}
-			if record.Status == "completed" {
-				return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
+			if repaired, err := s.repairStartedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, status, state, description, targetURL, now); repaired || err != nil {
+				return err
 			}
-			if record.Status == "started" {
-				if repaired, err := s.repairCompletedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
-					return err
-				}
-				if repaired, err := s.repairStartedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, status, state, description, targetURL, now); repaired || err != nil {
-					return err
-				}
-				return fmt.Errorf("herd review status %q is already in progress", statusKey)
-			}
+			return fmt.Errorf("herd review status %q is already in progress", statusKey)
 		}
-		if err := s.ensureStatusMutationAttempt(ctx, statusKey, repo, prNumber, headSHA, status, now); err != nil {
-			return err
-		}
-		if err := s.GitHub.CreateCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status); err != nil {
-			_ = s.completeStatusMutation(ctx, statusKey, "failed", nil, err, now)
-			_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
-			return err
-		}
-		if err := s.completeStatusMutation(ctx, statusKey, "completed", json.RawMessage(`{"status":"created"}`), nil, now); err != nil {
-			return err
-		}
-		if err := idem.CompleteIdempotencyKey(ctx, statusKey, "status:created"); err != nil {
-			return fmt.Errorf("complete Herd Review status idempotency: %w", err)
-		}
-		return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
+	}
+	if err := s.ensureStatusMutationAttempt(ctx, statusKey, repo, prNumber, headSHA, status, now); err != nil {
+		return err
 	}
 	if err := s.GitHub.CreateCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status); err != nil {
+		_ = s.completeStatusMutation(ctx, statusKey, "failed", nil, err, now)
+		_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
 		return err
+	}
+	if err := s.completeStatusMutation(ctx, statusKey, "completed", json.RawMessage(`{"status":"created"}`), nil, now); err != nil {
+		return err
+	}
+	if err := idem.CompleteIdempotencyKey(ctx, statusKey, "status:created"); err != nil {
+		return fmt.Errorf("complete Herd Review status idempotency: %w", err)
 	}
 	return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
 }

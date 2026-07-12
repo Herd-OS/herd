@@ -334,6 +334,28 @@ func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeGitHub{errs: []error{errors.New("github down"), nil}}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os review")
+
+	_, err := h.HandleIssueComment(context.Background(), event)
+	assert.Empty(t, dispatcher.dispatched)
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "add acknowledgement comment")
+	require.NoError(t, retryErr)
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+	key := "repo:42:comment:123:command:review"
+	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	require.Len(t, st.commandRecords, 1)
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
+}
+
 func TestHandlerDispatchCompletionFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
 	st := newFakeStore()
 	st.completeErrs = []error{errors.New("store down"), nil}
@@ -378,7 +400,7 @@ func TestHandlerRecordFailureRetryPostsOneAcknowledgement(t *testing.T) {
 
 func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t *testing.T) {
 	st := newFakeStore()
-	st.updateErrs = []error{nil, errors.New("store down")}
+	st.updateErrs = []error{nil, nil, errors.New("store down")}
 	st.completeErrs = []error{errors.New("store down")}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
@@ -619,6 +641,7 @@ func (s *fakeStore) UpdateCommandStatus(_ context.Context, repoID int64, comment
 
 type fakeGitHub struct {
 	err      error
+	errs     []error
 	comments []fakeComment
 }
 
@@ -630,6 +653,13 @@ type fakeComment struct {
 }
 
 func (g *fakeGitHub) AddIssueComment(_ context.Context, owner, repo string, issueNumber int, body string) (int64, error) {
+	if len(g.errs) > 0 {
+		err := g.errs[0]
+		g.errs = g.errs[1:]
+		if err != nil {
+			return 0, err
+		}
+	}
 	if g.err != nil {
 		return 0, g.err
 	}

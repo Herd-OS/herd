@@ -100,7 +100,7 @@ func TestCommandScopedAuthConfigDoesNotAppearInGitArgv(t *testing.T) {
 	capturePath := filepath.Join(t.TempDir(), "argv.txt")
 	fakeGit := filepath.Join(binDir, "git")
 	script := "#!/bin/sh\n" +
-		"for arg do printf '<%s>' \"$arg\"; done > \"$HERD_GIT_ARGV_CAPTURE\"\n" +
+		"{ for arg do printf 'ARG:%s\\n' \"$arg\"; done; env | sort | grep -E '^(GIT|HERD_GIT)_' || true; } > \"$HERD_GIT_ARGV_CAPTURE\"\n" +
 		"exit 1\n"
 	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0700))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -113,14 +113,14 @@ func TestCommandScopedAuthConfigDoesNotAppearInGitArgv(t *testing.T) {
 		"credential.helper=!f() { echo password="+token+"; }; f")
 
 	require.Error(t, err)
-	argv := string(mustReadFile(t, capturePath))
-	assert.NotContains(t, argv, token)
-	assert.NotContains(t, argv, credential)
-	assert.NotContains(t, strings.ToLower(argv), "authorization")
-	assert.NotContains(t, strings.ToLower(argv), "bearer")
-	assert.NotContains(t, strings.ToLower(argv), "basic")
-	assert.NotContains(t, strings.ToLower(argv), "x-access-token")
-	assert.NotContains(t, strings.ToLower(argv), "password")
+	captured := string(mustReadFile(t, capturePath))
+	assert.NotContains(t, captured, token)
+	assert.NotContains(t, captured, credential)
+	assert.NotContains(t, strings.ToLower(captured), "authorization")
+	assert.NotContains(t, strings.ToLower(captured), "bearer")
+	assert.NotContains(t, strings.ToLower(captured), "basic")
+	assert.NotContains(t, strings.ToLower(captured), "x-access-token")
+	assert.NotContains(t, strings.ToLower(captured), "password")
 }
 
 func TestCurrentBranch(t *testing.T) {
