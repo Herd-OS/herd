@@ -69,6 +69,8 @@ func TestLocalCollectorCollectsChangedFiles(t *testing.T) {
 	assert.Equal(t, ChangeRenamed, files["rename_new.txt"].Status)
 	assert.Equal(t, "rename_old.txt", files["rename_new.txt"].OldPath)
 	assert.Contains(t, files["rename_new.txt"].Patch, "rename_new.txt")
+	assert.Contains(t, files["rename_new.txt"].Patch, "rename from rename_old.txt")
+	assert.Contains(t, files["rename_new.txt"].Patch, "rename to rename_new.txt")
 
 	require.Contains(t, files, "mode.sh")
 	assert.Equal(t, ChangeModified, files["mode.sh"].Status)
@@ -88,6 +90,36 @@ func TestLocalCollectorCollectsChangedFiles(t *testing.T) {
 
 	require.Contains(t, files, "large.txt")
 	assert.False(t, files["large.txt"].Large)
+}
+
+func TestLocalCollectorCollectsPureRenamePatch(t *testing.T) {
+	dir, g := initLocalCollectorRepo(t)
+	baseSHA := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	require.NoError(t, g.CreateBranch("feature", "main"))
+	require.NoError(t, os.Rename(filepath.Join(dir, "rename_old.txt"), filepath.Join(dir, "rename_new.txt")))
+	runLocalGit(t, dir, "add", "-A")
+	runLocalGit(t, dir, "commit", "-m", "pure rename")
+	headSHA := gitOutput(t, dir, "rev-parse", "HEAD")
+
+	diff, err := LocalCollector{Git: g}.Collect(context.Background(), CollectRequest{
+		BaseRef: "main",
+		HeadRef: "feature",
+		BaseSHA: baseSHA,
+		HeadSHA: headSHA,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, diff.Warnings)
+
+	files := filesByPath(diff.Files)
+	require.Contains(t, files, "rename_new.txt")
+	file := files["rename_new.txt"]
+	assert.Equal(t, ChangeRenamed, file.Status)
+	assert.Equal(t, "rename_old.txt", file.OldPath)
+	assert.Equal(t, 0, file.Changes)
+	assert.NotEmpty(t, file.Patch)
+	assert.Contains(t, file.Patch, "rename from rename_old.txt")
+	assert.Contains(t, file.Patch, "rename to rename_new.txt")
 }
 
 func TestLocalCollectorPrefersPullRequestHeadBeforeLocalBranchFallback(t *testing.T) {

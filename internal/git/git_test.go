@@ -158,6 +158,27 @@ func TestDiff(t *testing.T) {
 	assert.Contains(t, diff, "new.txt")
 }
 
+func TestDiffPathsDetectsPureRename(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+
+	defaultBranch, err := g.CurrentBranch()
+	require.NoError(t, err)
+
+	require.NoError(t, g.CreateBranch("feature", defaultBranch))
+	cmd := exec.Command("git", "mv", "README.md", "README-renamed.md")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "rename readme")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	diff, err := g.DiffPaths(defaultBranch, "feature", "README-renamed.md", "README.md")
+	require.NoError(t, err)
+	assert.Contains(t, diff, "rename from README.md")
+	assert.Contains(t, diff, "rename to README-renamed.md")
+}
+
 func TestDiffStat(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

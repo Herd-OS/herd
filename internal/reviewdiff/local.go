@@ -79,10 +79,7 @@ func (c LocalCollector) Collect(ctx context.Context, req CollectRequest) (DiffSe
 		}
 
 		if !file.Binary {
-			patch, patchErr := c.Git.DiffPath(base, head, diffPathFor(entry))
-			if patchErr != nil && entry.OldPath != "" {
-				patch, patchErr = c.Git.DiffPath(base, head, entry.OldPath)
-			}
+			patch, patchErr := c.collectPatch(base, head, entry)
 			if patchErr != nil {
 				file.Omitted = true
 				file.OmitReason = "file diff unavailable"
@@ -101,6 +98,25 @@ func (c LocalCollector) Collect(ctx context.Context, req CollectRequest) (DiffSe
 	}
 
 	return diff, nil
+}
+
+func (c LocalCollector) collectPatch(base, head string, entry git.NameStatusEntry) (string, error) {
+	if entry.OldPath != "" && isRenameOrCopy(entry.Status) {
+		patch, err := c.Git.DiffPaths(base, head, diffPathFor(entry), entry.OldPath)
+		if err != nil {
+			return "", err
+		}
+		if patch == "" {
+			return "", fmt.Errorf("empty rename/copy diff for %s", diffPathFor(entry))
+		}
+		return patch, nil
+	}
+
+	patch, err := c.Git.DiffPath(base, head, diffPathFor(entry))
+	if err != nil && entry.OldPath != "" {
+		patch, err = c.Git.DiffPath(base, head, entry.OldPath)
+	}
+	return patch, err
 }
 
 func (c LocalCollector) resolveRef(sha, ref, remote string, prNumber int) (string, error) {
@@ -191,6 +207,13 @@ func statusFromNameStatus(status string) ChangeStatus {
 	default:
 		return ChangeUnknown
 	}
+}
+
+func isRenameOrCopy(status string) bool {
+	if status == "" {
+		return false
+	}
+	return status[0] == 'R' || status[0] == 'C'
 }
 
 func lookupNumStat(stats map[string][2]int, path, oldPath string) ([2]int, bool) {

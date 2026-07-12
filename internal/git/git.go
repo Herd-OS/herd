@@ -96,7 +96,13 @@ func (g *Git) DiffNameStatus(base, head string) ([]NameStatusEntry, error) {
 }
 
 func (g *Git) DiffPath(base, head, path string) (string, error) {
-	return g.output("diff", base+"..."+head, "--", path)
+	return g.DiffPaths(base, head, path)
+}
+
+func (g *Git) DiffPaths(base, head string, paths ...string) (string, error) {
+	args := []string{"diff", "-M", base + "..." + head, "--"}
+	args = append(args, paths...)
+	return g.output(args...)
 }
 
 func (g *Git) DiffNumStat(base, head string) (map[string][2]int, error) {
