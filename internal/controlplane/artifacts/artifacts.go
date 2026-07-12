@@ -1,6 +1,7 @@
 package artifacts
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 )
 
@@ -15,6 +17,8 @@ const (
 	MetadataVersion = 1
 
 	FormatGitDiffBinary = "git-diff-binary"
+
+	bundledMetadataFile = "herd-worker-metadata.json"
 )
 
 type PatchMetadata struct {
@@ -56,6 +60,9 @@ func Validate(ctx context.Context, store Store, req ValidationRequest) (Validate
 	if err != nil {
 		return ValidatedArtifact{}, fmt.Errorf("metadata artifact %q unavailable: %w", req.MetadataArtifact, err)
 	}
+	if artifact, ok, bundleErr := validateBundle(metadataBytes, req); ok || bundleErr != nil {
+		return artifact, bundleErr
+	}
 	var metadata PatchMetadata
 	decoder := json.NewDecoder(bytes.NewReader(metadataBytes))
 	decoder.DisallowUnknownFields()
@@ -73,6 +80,62 @@ func Validate(ctx context.Context, store Store, req ValidationRequest) (Validate
 		return ValidatedArtifact{}, fmt.Errorf("patch artifact checksum mismatch: expected %s, got %s", metadata.SHA256, got)
 	}
 	return ValidatedArtifact{Metadata: metadata, Data: data}, nil
+}
+
+func validateBundle(data []byte, req ValidationRequest) (ValidatedArtifact, bool, error) {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return ValidatedArtifact{}, false, nil
+	}
+	files := map[string][]byte{}
+	for _, file := range reader.File {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		body, err := readZipFile(file)
+		if err != nil {
+			return ValidatedArtifact{}, true, err
+		}
+		name := strings.TrimPrefix(filepath.ToSlash(file.Name), "./")
+		files[name] = body
+		files[filepath.Base(name)] = body
+	}
+	metadataBytes, ok := files[bundledMetadataFile]
+	if !ok {
+		return ValidatedArtifact{}, true, fmt.Errorf("patch metadata %q missing from artifact bundle", bundledMetadataFile)
+	}
+	var metadata PatchMetadata
+	decoder := json.NewDecoder(bytes.NewReader(metadataBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&metadata); err != nil {
+		return ValidatedArtifact{}, true, fmt.Errorf("invalid patch metadata: %w", err)
+	}
+	if err := validateMetadata(metadata, req); err != nil {
+		return ValidatedArtifact{}, true, err
+	}
+	patchName := strings.TrimPrefix(filepath.ToSlash(metadata.ArtifactName), "./")
+	patch, ok := files[patchName]
+	if !ok {
+		patch, ok = files[filepath.Base(patchName)]
+	}
+	if !ok {
+		return ValidatedArtifact{}, true, fmt.Errorf("patch artifact %q missing from artifact bundle", metadata.ArtifactName)
+	}
+	if got := SHA256(patch); !strings.EqualFold(got, metadata.SHA256) {
+		return ValidatedArtifact{}, true, fmt.Errorf("patch artifact checksum mismatch: expected %s, got %s", metadata.SHA256, got)
+	}
+	return ValidatedArtifact{Metadata: metadata, Data: patch}, true, nil
+}
+
+func readZipFile(file *zip.File) ([]byte, error) {
+	rc, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = rc.Close()
+	}()
+	return io.ReadAll(rc)
 }
 
 func BuildMetadata(repository, jobID, baseSHA, expectedHeadSHA, artifactName string, data []byte) PatchMetadata {

@@ -32,6 +32,7 @@ type githubActionsConcurrency struct {
 type githubActionsStep struct {
 	Name string         `yaml:"name"`
 	Uses string         `yaml:"uses"`
+	If   string         `yaml:"if"`
 	Run  string         `yaml:"run"`
 	Env  map[string]any `yaml:"env"`
 	With map[string]any `yaml:"with"`
@@ -465,8 +466,8 @@ func TestWorkerWorkflowTemplate_ExcludesProviderAuthEnv(t *testing.T) {
 	assert.Contains(t, s, "expected_head_sha:", "worker workflow must accept expected head SHA")
 	assert.Contains(t, s, "/api/v1/jobs/$HERD_JOB_ID/results", "worker workflow must report results to the control plane")
 	assert.Contains(t, s, "uses: actions/upload-artifact@v4", "worker workflow must upload patch artifacts")
-	assert.Contains(t, s, "name: worker-branch", "worker workflow must upload metadata artifact named by callback")
-	assert.Contains(t, s, "name: worker.patch", "worker workflow must upload patch data artifact")
+	assert.Contains(t, s, "name: worker-branch", "worker workflow must upload artifact named by callback")
+	assert.NotContains(t, s, "name: worker.patch", "worker workflow must not upload patch bytes under a different artifact name")
 	assert.Contains(t, s, "echo \"sha=$(git rev-parse HEAD)\" >> \"$GITHUB_OUTPUT\"", "worker workflow must capture checked-out HEAD")
 	assert.Contains(t, s, "HERD_BASE_SHA: ${{ steps.checkout-base.outputs.sha }}", "worker workflow must use captured checkout HEAD")
 	assert.Contains(t, s, "git diff --binary \"$HERD_BASE_SHA\"", "worker workflow must package a binary git patch")
@@ -504,6 +505,7 @@ func TestWorkerWorkflowUsesCapturedCheckoutBaseForArtifactsAndResult(t *testing.
 			executeIndex = i
 		case "Package worker patch artifact":
 			packageIndex = i
+			assert.Equal(t, "success()", step.If)
 			require.NotNil(t, step.Env)
 			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_BASE_SHA"])
 			assert.Contains(t, step.Run, "git diff --binary \"$HERD_BASE_SHA\"")
@@ -560,8 +562,7 @@ func TestWorkerPatchArtifactUsesCheckedOutBaseWhenDispatchSHADiffers(t *testing.
 
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "task.txt"), []byte("worker change\n"), 0644))
 	t.Cleanup(func() {
-		_ = os.Remove("/tmp/herd-worker.patch")
-		_ = os.Remove("/tmp/herd-worker-metadata.json")
+		_ = os.RemoveAll("/tmp/herd-worker-artifact")
 	})
 
 	cmd := exec.Command("sh", "-c", packageStep.Run)
@@ -576,18 +577,21 @@ func TestWorkerPatchArtifactUsesCheckedOutBaseWhenDispatchSHADiffers(t *testing.
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(output))
 
-	data, err := os.ReadFile("/tmp/herd-worker-metadata.json")
+	data, err := os.ReadFile("/tmp/herd-worker-artifact/herd-worker-metadata.json")
 	require.NoError(t, err)
 
 	var metadata struct {
-		BaseSHA string `json:"base_sha"`
+		BaseSHA      string `json:"base_sha"`
+		ArtifactName string `json:"artifact_name"`
 	}
 	require.NoError(t, json.Unmarshal(data, &metadata))
 	assert.Equal(t, checkedOutBase, metadata.BaseSHA)
 	assert.NotEqual(t, dispatchSHA, metadata.BaseSHA)
+	assert.Equal(t, "herd-worker.patch", metadata.ArtifactName)
+	assert.FileExists(t, "/tmp/herd-worker-artifact/herd-worker.patch")
 }
 
-func TestWorkerWorkflowUploadsPatchArtifactBeforeCallback(t *testing.T) {
+func TestWorkerWorkflowUploadsSinglePatchArtifactBeforeCallback(t *testing.T) {
 	cfg := config.Default()
 	wf := workflowFile{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true}
 	rendered, err := RenderWorkflow(wf, cfg)
@@ -598,31 +602,32 @@ func TestWorkerWorkflowUploadsPatchArtifactBeforeCallback(t *testing.T) {
 	execute := workflow.Jobs["execute"]
 	require.NotEmpty(t, execute.Steps)
 
-	var packageIndex, patchUploadIndex, metadataUploadIndex, reportIndex = -1, -1, -1, -1
+	var packageIndex, patchUploadIndex, reportIndex = -1, -1, -1
 	for i, step := range execute.Steps {
 		switch step.Name {
 		case "Package worker patch artifact":
 			packageIndex = i
+			assert.Equal(t, "success()", step.If)
 		case "Upload worker patch artifact":
 			patchUploadIndex = i
-			assert.Equal(t, "actions/upload-artifact@v4", step.Uses)
-			assert.Equal(t, "worker.patch", step.With["name"])
-		case "Upload worker patch metadata":
-			metadataUploadIndex = i
+			assert.Equal(t, "success()", step.If)
 			assert.Equal(t, "actions/upload-artifact@v4", step.Uses)
 			assert.Equal(t, "worker-branch", step.With["name"])
+			assert.Equal(t, "/tmp/herd-worker-artifact", step.With["path"])
 		case "Report result":
 			reportIndex = i
+			assert.Equal(t, "always()", step.If)
+			assert.Contains(t, step.Run, `if $status == "success" then {patch_artifact: "worker-branch"} else {} end`)
 		}
 	}
 
 	require.NotEqual(t, -1, packageIndex)
 	require.NotEqual(t, -1, patchUploadIndex)
-	require.NotEqual(t, -1, metadataUploadIndex)
 	require.NotEqual(t, -1, reportIndex)
 	assert.Less(t, packageIndex, patchUploadIndex)
-	assert.Less(t, patchUploadIndex, metadataUploadIndex)
-	assert.Less(t, metadataUploadIndex, reportIndex)
+	assert.Less(t, patchUploadIndex, reportIndex)
+	assert.NotContains(t, string(rendered), "Upload worker patch metadata")
+	assert.NotContains(t, string(rendered), "name: worker.patch")
 }
 
 func runWorkflowGit(t *testing.T, dir string, args ...string) string {

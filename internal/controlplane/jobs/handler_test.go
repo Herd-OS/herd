@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -213,6 +214,72 @@ func TestHandlerAppliesValidPatchArtifactAndRecordsCommitSHA(t *testing.T) {
 	assert.Contains(t, string(st.mutationCompletions[0].response), strings.Repeat("a", 40))
 }
 
+func TestHandlerAppliesBundledWorkerBranchArtifactAndRecordsCommitSHA(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		RepositoryID:   7,
+		InstallationID: 9,
+		HeadSHA:        "head",
+		BaseSHA:        "base",
+		Metadata:       json.RawMessage(`{"requester_name":"Mona","requester_email":"mona@example.com"}`),
+	}
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "herd-worker.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("b", 40)}}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Audience:      "herd-control-plane",
+		Now:           func() time.Time { return now },
+		ArtifactStore: artifactStore{"worker-branch": workerBranchArtifact(t, metadata, patch)},
+		PatchApplier:  applier,
+	})
+
+	payload := `{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"job-1","batch_number":106,"issue_number":837,"target_branch":"herd/worker/837","base_sha":"base","expected_head_sha":"head","patch_artifact":"worker-branch","status":"success"}`
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Len(t, applier.requests, 1)
+	assert.Equal(t, patch, applier.requests[0].Artifact.Data)
+	assert.Equal(t, "herd-worker.patch", applier.requests[0].Artifact.Metadata.ArtifactName)
+	require.Len(t, st.results, 1)
+	assert.Equal(t, StatusSuccess, st.results[0].Status)
+	assert.Contains(t, string(st.results[0].Metadata), strings.Repeat("b", 40))
+}
+
+func TestHandlerIgnoresPatchArtifactOnFailureResult(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base"}
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "herd-worker.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("c", 40)}}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Audience:      "herd-control-plane",
+		Now:           func() time.Time { return now },
+		ArtifactStore: artifactStore{"worker-branch": workerBranchArtifact(t, metadata, patch)},
+		PatchApplier:  applier,
+	})
+
+	payload := `{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"job-1","batch_number":106,"issue_number":837,"target_branch":"herd/worker/837","base_sha":"base","expected_head_sha":"head","patch_artifact":"worker-branch","status":"failure"}`
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Empty(t, applier.requests)
+	assert.Empty(t, st.mutationAttempts)
+	assert.Empty(t, st.mutationCompletions)
+	require.Len(t, st.results, 1)
+	assert.Equal(t, StatusFailure, st.results[0].Status)
+	assert.NotContains(t, string(st.results[0].Metadata), "patch_apply")
+	assert.NotContains(t, string(st.results[0].Metadata), strings.Repeat("c", 40))
+}
+
 func TestHandlerAcceptsEmptyPatchArtifactWithoutApplying(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -375,6 +442,42 @@ type fixedPatchApplier struct {
 
 func (a fixedPatchApplier) Apply(context.Context, artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
 	return a.result, a.err
+}
+
+type recordingPatchApplier struct {
+	requests []artifacts.ApplyRequest
+	result   artifacts.ApplyResult
+	err      error
+}
+
+func (a *recordingPatchApplier) Apply(_ context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
+	a.requests = append(a.requests, req)
+	return a.result, a.err
+}
+
+func workerBranchArtifact(t *testing.T, metadata artifacts.PatchMetadata, patch []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	files := map[string][]byte{
+		"herd-worker-metadata.json": mustJSON(t, metadata),
+		metadata.ArtifactName:       patch,
+	}
+	for name, data := range files {
+		w, err := zw.Create(name)
+		require.NoError(t, err)
+		_, err = w.Write(data)
+		require.NoError(t, err)
+	}
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	require.NoError(t, err)
+	return data
 }
 
 type fixedOIDCValidator OIDCClaims

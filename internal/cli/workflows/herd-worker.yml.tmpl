@@ -90,21 +90,22 @@ jobs:
           herd worker exec "$ISSUE_NUMBER"
 
       - name: Package worker patch artifact
-        if: always()
+        if: success()
         env:
           HERD_JOB_ID: ${{`{{`}} inputs.job_id {{`}}`}}
           HERD_REPOSITORY: ${{`{{`}} inputs.repository {{`}}`}}
           HERD_EXPECTED_HEAD_SHA: ${{`{{`}} inputs.expected_head_sha {{`}}`}}
           HERD_BASE_SHA: ${{`{{`}} steps.checkout-base.outputs.sha {{`}}`}}
         run: |
-          git diff --binary "$HERD_BASE_SHA" > /tmp/herd-worker.patch
-          PATCH_SHA256="$(sha256sum /tmp/herd-worker.patch | awk '{print $1}')"
+          mkdir -p /tmp/herd-worker-artifact
+          git diff --binary "$HERD_BASE_SHA" > /tmp/herd-worker-artifact/herd-worker.patch
+          PATCH_SHA256="$(sha256sum /tmp/herd-worker-artifact/herd-worker.patch | awk '{print $1}')"
           jq -n \
             --arg repository "$HERD_REPOSITORY" \
             --arg job_id "$HERD_JOB_ID" \
             --arg base_sha "$HERD_BASE_SHA" \
             --arg expected_head_sha "$HERD_EXPECTED_HEAD_SHA" \
-            --arg artifact_name "worker.patch" \
+            --arg artifact_name "herd-worker.patch" \
             --arg sha256 "$PATCH_SHA256" \
             '{
               version: 1,
@@ -116,22 +117,14 @@ jobs:
               artifact_name: $artifact_name,
               sha256: $sha256
             }' \
-            > /tmp/herd-worker-metadata.json
+            > /tmp/herd-worker-artifact/herd-worker-metadata.json
 
       - name: Upload worker patch artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: worker.patch
-          path: /tmp/herd-worker.patch
-          if-no-files-found: error
-
-      - name: Upload worker patch metadata
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: worker-branch
-          path: /tmp/herd-worker-metadata.json
+          path: /tmp/herd-worker-artifact
           if-no-files-found: error
 
       - name: Report result
@@ -171,9 +164,8 @@ jobs:
               target_branch: $target_branch,
               base_sha: $base_sha,
               expected_head_sha: $expected_head_sha,
-              patch_artifact: "worker-branch",
               status: $status
-            }' \
+            } + (if $status == "success" then {patch_artifact: "worker-branch"} else {} end)' \
             > /tmp/herd-job-result.json
           attempt=1
           delay=1

@@ -71,6 +71,33 @@ func TestParseResultPayload(t *testing.T) {
 			},
 		},
 		{
+			name: "valid worker failure without patch artifact",
+			payload: `{
+				"version":1,
+				"kind":"worker_completed",
+				"repository":"acme/widgets",
+				"job_id":"job-1",
+				"batch_number":106,
+				"issue_number":837,
+				"target_branch":"herd/worker/837",
+				"base_sha":"base",
+				"expected_head_sha":"head",
+				"status":"failure"
+			}`,
+			want: WorkerCompletedResult{
+				Version:         1,
+				Kind:            KindWorkerCompleted,
+				Repository:      "acme/widgets",
+				JobID:           "job-1",
+				BatchNumber:     106,
+				IssueNumber:     837,
+				TargetBranch:    "herd/worker/837",
+				BaseSHA:         "base",
+				ExpectedHeadSHA: "head",
+				Status:          StatusFailure,
+			},
+		},
+		{
 			name: "unknown version",
 			payload: `{
 				"version":2,
@@ -124,6 +151,22 @@ func TestParseResultPayload(t *testing.T) {
 				"status":"approved"
 			}`,
 			wantErr: "invalid worker result status",
+		},
+		{
+			name: "success missing patch artifact",
+			payload: `{
+				"version":1,
+				"kind":"worker_completed",
+				"repository":"acme/widgets",
+				"job_id":"job-1",
+				"batch_number":106,
+				"issue_number":837,
+				"target_branch":"herd/worker/837",
+				"base_sha":"base",
+				"expected_head_sha":"head",
+				"status":"success"
+			}`,
+			wantErr: "patch_artifact is required",
 		},
 		{
 			name:    "malformed JSON",

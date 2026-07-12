@@ -1,6 +1,7 @@
 package artifacts
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -112,6 +113,73 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestValidateBundledPatchArtifact(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*PatchMetadata, map[string][]byte)
+		wantError string
+	}{
+		{
+			name: "valid",
+		},
+		{
+			name: "missing metadata",
+			mutate: func(_ *PatchMetadata, files map[string][]byte) {
+				delete(files, bundledMetadataFile)
+			},
+			wantError: "patch metadata",
+		},
+		{
+			name: "checksum mismatch",
+			mutate: func(metadata *PatchMetadata, _ map[string][]byte) {
+				metadata.SHA256 = SHA256([]byte("other"))
+			},
+			wantError: "patch artifact checksum mismatch",
+		},
+		{
+			name: "missing patch",
+			mutate: func(metadata *PatchMetadata, files map[string][]byte) {
+				delete(files, metadata.ArtifactName)
+			},
+			wantError: "missing from artifact bundle",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			patch := []byte("diff --git a/file.txt b/file.txt\n")
+			metadata := BuildMetadata("acme/widgets", "job-1", "base", "head", "herd-worker.patch", patch)
+			files := map[string][]byte{
+				bundledMetadataFile:   mustJSON(t, metadata),
+				metadata.ArtifactName: patch,
+			}
+			if tt.mutate != nil {
+				tt.mutate(&metadata, files)
+				if _, ok := files[bundledMetadataFile]; ok {
+					files[bundledMetadataFile] = mustJSON(t, metadata)
+				}
+			}
+			got, err := Validate(context.Background(), memoryArtifactStore{
+				"worker-branch": zipArtifact(t, files),
+			}, ValidationRequest{
+				Repository:       "acme/widgets",
+				JobID:            "job-1",
+				BaseSHA:          "base",
+				ExpectedHeadSHA:  "head",
+				MetadataArtifact: "worker-branch",
+			})
+			if tt.wantError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, metadata, got.Metadata)
+			assert.Equal(t, patch, got.Data)
+		})
+	}
+}
+
 type memoryArtifactStore map[string][]byte
 
 func (s memoryArtifactStore) OpenArtifact(_ context.Context, name string) (io.ReadCloser, error) {
@@ -127,4 +195,18 @@ func mustJSON(t *testing.T, v any) []byte {
 	data, err := json.Marshal(v)
 	require.NoError(t, err)
 	return data
+}
+
+func zipArtifact(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, data := range files {
+		w, err := zw.Create(name)
+		require.NoError(t, err)
+		_, err = w.Write(data)
+		require.NoError(t, err)
+	}
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
 }

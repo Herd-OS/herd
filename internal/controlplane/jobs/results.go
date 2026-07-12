@@ -42,7 +42,7 @@ type WorkerCompletedResult struct {
 	TargetBranch    string `json:"target_branch"`
 	BaseSHA         string `json:"base_sha"`
 	ExpectedHeadSHA string `json:"expected_head_sha"`
-	PatchArtifact   string `json:"patch_artifact"`
+	PatchArtifact   string `json:"patch_artifact,omitempty"`
 	Status          string `json:"status"`
 }
 
@@ -174,7 +174,7 @@ func validateWorkerCompleted(result WorkerCompletedResult) error {
 	if strings.TrimSpace(result.ExpectedHeadSHA) == "" {
 		return fmt.Errorf("expected_head_sha is required")
 	}
-	if strings.TrimSpace(result.PatchArtifact) == "" {
+	if result.Status == StatusSuccess && strings.TrimSpace(result.PatchArtifact) == "" {
 		return fmt.Errorf("patch_artifact is required")
 	}
 	if !validWorkerStatus(result.Status) {
