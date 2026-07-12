@@ -196,23 +196,49 @@ func TestNewInstallationClientRejectsEmptyToken(t *testing.T) {
 
 func TestRetryTransportRetriesOnlyReadRequests(t *testing.T) {
 	tests := []struct {
-		name       string
-		method     string
-		path       string
-		wantCalls  int
-		wantStatus int
+		name          string
+		method        string
+		path          string
+		body          string
+		nonReplayable bool
+		wantBodies    []string
+		wantCalls     int
+		wantStatus    int
 	}{
 		{
 			name:       "get retries transient server error",
 			method:     http.MethodGet,
 			path:       "/repos/herd/herd/issues/1",
+			body:       "{}",
+			wantBodies: []string{"{}", "{}"},
 			wantCalls:  2,
 			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "get retries transient server error with replayable body",
+			method:     http.MethodGet,
+			path:       "/repos/herd/herd/search/issues",
+			body:       `{"query":"repo:herd/herd"}`,
+			wantBodies: []string{`{"query":"repo:herd/herd"}`, `{"query":"repo:herd/herd"}`},
+			wantCalls:  2,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:          "get with non replayable body is not retried",
+			method:        http.MethodGet,
+			path:          "/repos/herd/herd/search/issues",
+			body:          `{"query":"repo:herd/herd"}`,
+			nonReplayable: true,
+			wantBodies:    []string{`{"query":"repo:herd/herd"}`},
+			wantCalls:     1,
+			wantStatus:    http.StatusInternalServerError,
 		},
 		{
 			name:       "create issue comment post is not retried",
 			method:     http.MethodPost,
 			path:       "/repos/herd/herd/issues/1/comments",
+			body:       "{}",
+			wantBodies: []string{"{}"},
 			wantCalls:  1,
 			wantStatus: http.StatusInternalServerError,
 		},
@@ -220,6 +246,8 @@ func TestRetryTransportRetriesOnlyReadRequests(t *testing.T) {
 			name:       "create issue post is not retried",
 			method:     http.MethodPost,
 			path:       "/repos/herd/herd/issues",
+			body:       "{}",
+			wantBodies: []string{"{}"},
 			wantCalls:  1,
 			wantStatus: http.StatusInternalServerError,
 		},
@@ -227,6 +255,8 @@ func TestRetryTransportRetriesOnlyReadRequests(t *testing.T) {
 			name:       "workflow dispatch post is not retried",
 			method:     http.MethodPost,
 			path:       "/repos/herd/herd/actions/workflows/herd-worker.yml/dispatches",
+			body:       "{}",
+			wantBodies: []string{"{}"},
 			wantCalls:  1,
 			wantStatus: http.StatusInternalServerError,
 		},
@@ -234,6 +264,8 @@ func TestRetryTransportRetriesOnlyReadRequests(t *testing.T) {
 			name:       "put mutation is not retried",
 			method:     http.MethodPut,
 			path:       "/repos/herd/herd/issues/1/labels/bug",
+			body:       "{}",
+			wantBodies: []string{"{}"},
 			wantCalls:  1,
 			wantStatus: http.StatusInternalServerError,
 		},
@@ -242,24 +274,33 @@ func TestRetryTransportRetriesOnlyReadRequests(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			calls := 0
+			var bodies []string
 			transport := newRetryTransport(roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				calls++
 				assert.Equal(t, tt.method, req.Method)
 				assert.Equal(t, tt.path, req.URL.Path)
+				body, err := io.ReadAll(req.Body)
+				require.NoError(t, err)
+				bodies = append(bodies, string(body))
 				if calls == 1 {
 					return jsonResponse(http.StatusInternalServerError, `{"message":"server error"}`), nil
 				}
 				return jsonResponse(http.StatusOK, `{}`), nil
 			}), 0)
 
-			req, err := http.NewRequestWithContext(context.Background(), tt.method, "https://api.github.test"+tt.path, strings.NewReader("{}"))
+			req, err := http.NewRequestWithContext(context.Background(), tt.method, "https://api.github.test"+tt.path, strings.NewReader(tt.body))
 			require.NoError(t, err)
+			if tt.nonReplayable {
+				req.Body = io.NopCloser(strings.NewReader(tt.body))
+				req.GetBody = nil
+			}
 
 			resp, err := transport.RoundTrip(req)
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 			assert.Equal(t, tt.wantCalls, calls)
 			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Equal(t, tt.wantBodies, bodies)
 		})
 	}
 }

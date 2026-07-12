@@ -145,7 +145,6 @@ jobs:
           if [ "$HERD_JOB_STATUS" != "success" ]; then
             STATUS="failure"
           fi
-          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
           jq -n \
             --arg repository "$HERD_REPOSITORY" \
             --arg job_id "$HERD_JOB_ID" \
@@ -171,6 +170,7 @@ jobs:
           attempt=1
           delay=1
           while true; do
+            OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
             if curl -fsSL -X POST \
               -H "Authorization: Bearer $OIDC_TOKEN" \
               -H "Content-Type: application/json" \

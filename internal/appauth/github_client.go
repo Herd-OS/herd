@@ -173,15 +173,23 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var err error
 
 	for attempt := 0; attempt <= t.maxRetries; attempt++ {
-		if attempt > 0 && req.GetBody != nil {
-			body, err := req.GetBody()
-			if err != nil {
-				return nil, fmt.Errorf("retry: failed to rewind request body: %w", err)
+		attemptReq := req.Clone(req.Context())
+		if attempt > 0 {
+			if !canReplayRequestBody(req) {
+				return resp, nil
 			}
-			req.Body = body
+			if req.Body != nil && req.Body != http.NoBody {
+				body, err := req.GetBody()
+				if err != nil {
+					return nil, fmt.Errorf("retry: failed to rewind request body: %w", err)
+				}
+				attemptReq.Body = body
+			}
+		} else {
+			attemptReq.Body = req.Body
 		}
 
-		resp, err = t.base.RoundTrip(req)
+		resp, err = t.base.RoundTrip(attemptReq)
 		if err != nil {
 			return nil, err
 		}
@@ -189,15 +197,22 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return resp, nil
 		}
 		if attempt < t.maxRetries {
+			if !canReplayRequestBody(req) {
+				return resp, nil
+			}
 			io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain
 			_ = resp.Body.Close()
 			delay := t.baseDelay * time.Duration(math.Pow(2, float64(attempt)))
 			select {
-			case <-req.Context().Done():
-				return nil, req.Context().Err()
+			case <-attemptReq.Context().Done():
+				return nil, attemptReq.Context().Err()
 			case <-time.After(delay):
 			}
 		}
 	}
 	return resp, nil
+}
+
+func canReplayRequestBody(req *http.Request) bool {
+	return req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
 }
