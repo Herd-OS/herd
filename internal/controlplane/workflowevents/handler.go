@@ -227,7 +227,9 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := h.markWorkflowEventProcessed(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
-		_ = h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey)
+		if repairErr := h.markWorkflowEventProcessedPending(r.Context(), repo.ID, commentID, commandKey, metadata); repairErr == nil {
+			_ = h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey)
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
 		return
 	}
@@ -277,7 +279,7 @@ func (h Handler) acquireWorkflowEvent(ctx context.Context, key string, metadata 
 
 func (h Handler) workflowEventProcessedOrRepairable(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
 	record, err := h.store.GetCommandRecord(ctx, repoID, commentID, commandKey)
-	return err == nil && record.Status == "processed"
+	return err == nil && (record.Status == "processed" || record.Status == "processed_pending")
 }
 
 func (h Handler) markWorkflowEventProcessing(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
@@ -286,6 +288,10 @@ func (h Handler) markWorkflowEventProcessing(ctx context.Context, repoID int64, 
 
 func (h Handler) markWorkflowEventProcessed(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
 	return h.store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "processed", metadata)
+}
+
+func (h Handler) markWorkflowEventProcessedPending(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
+	return h.store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "processed_pending", metadata)
 }
 
 func Parse(payload []byte) (Event, error) {

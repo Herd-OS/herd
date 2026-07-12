@@ -131,14 +131,12 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	usedAt := h.now()
-	if err := h.store.MarkRunnerBootstrapTokenUsed(r.Context(), token.ID, usedAt); err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, err.Error())
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record runner bootstrap token use"})
+	if err := h.store.CompleteIdempotencyKey(r.Context(), idempotencyKey, string(resultJSON)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete runner registration idempotency"})
 		return
 	}
-	if err := h.store.CompleteIdempotencyKey(r.Context(), idempotencyKey, string(resultJSON)); err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, err.Error())
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete runner registration idempotency"})
+	if err := h.store.MarkRunnerBootstrapTokenUsed(r.Context(), token.ID, usedAt); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record runner bootstrap token use"})
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

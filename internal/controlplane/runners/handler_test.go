@@ -249,7 +249,6 @@ func TestRegistrationTokenHandlerRetriesAfterMarkUsedFailure(t *testing.T) {
 	minter := &fakeMinter{
 		responses: []RegistrationTokenResponse{
 			{Token: "github-runner-token-1", ExpiresAt: now.Add(time.Hour)},
-			{Token: "github-runner-token-2", ExpiresAt: now.Add(2 * time.Hour)},
 		},
 	}
 	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
@@ -260,20 +259,19 @@ func TestRegistrationTokenHandlerRetriesAfterMarkUsedFailure(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusOK, second.Code)
-	assert.Contains(t, second.Body.String(), "github-runner-token-2")
-	assert.Equal(t, 2, minter.calls)
+	assert.Contains(t, second.Body.String(), "github-runner-token-1")
+	assert.Equal(t, 1, minter.calls)
 	assert.Equal(t, 1, st.markUsedSuccesses)
 	require.NotNil(t, st.tokens[token.ID].UsedAt)
 }
 
-func TestRegistrationTokenHandlerCompleteFailureCanRetry(t *testing.T) {
+func TestRegistrationTokenHandlerCompleteFailureDoesNotMintAgain(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, token := newHandlerTestStore(t, now)
 	st.completeErrs = []error{errors.New("database down"), nil}
 	minter := &fakeMinter{
 		responses: []RegistrationTokenResponse{
 			{Token: "github-runner-token-1", ExpiresAt: now.Add(time.Hour)},
-			{Token: "github-runner-token-2", ExpiresAt: now.Add(2 * time.Hour)},
 		},
 	}
 	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
@@ -283,10 +281,9 @@ func TestRegistrationTokenHandlerCompleteFailureCanRetry(t *testing.T) {
 	second := serveRegistrationRequest(t, handler, req)
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusOK, second.Code)
-	assert.Contains(t, second.Body.String(), "github-runner-token-2")
-	assert.Equal(t, 2, minter.calls)
-	require.NotNil(t, st.tokens[token.ID].UsedAt)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Equal(t, 1, minter.calls)
+	assert.Nil(t, st.tokens[token.ID].UsedAt)
 }
 
 func serveRegistrationRequest(t *testing.T, handler http.Handler, body RegistrationTokenRequest) *httptest.ResponseRecorder {
