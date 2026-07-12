@@ -105,6 +105,49 @@ func TestChunkForReviewRequiredChunksGroupsFilesAfterMaxChunks(t *testing.T) {
 	assert.NotContains(t, plan.Chunks[0].Text, "- Review mode: full")
 }
 
+func TestBuildCoverageMaxChunksExceededIsPartialWithoutMaterialOmissions(t *testing.T) {
+	diff := DiffSet{
+		Source: "github",
+		Files: []ChangedFile{
+			sourceFile("src/001.go", "aaa"),
+			sourceFile("src/002.go", "bbb"),
+		},
+	}
+	chunks := []ReviewChunk{{
+		Index:         1,
+		Total:         2,
+		IncludedFiles: []ChangedFile{diff.Files[0]},
+		UsedDiffBytes: 3,
+	}}
+	planned := []plannedFile{
+		{file: diff.Files[0], reviewable: true, reviewed: true, chunkIndex: 1},
+		{file: diff.Files[1], reviewable: true, reviewed: true, chunkIndex: 2},
+	}
+
+	plan := ChunkPlan{
+		DiffSet: diff,
+		Chunks:  chunks,
+		Coverage: buildCoverage(diff, chunks, planned, ChunkOptions{
+			MaxChunkBytes:            100,
+			MaxFileDiffBytes:         100,
+			MaxFilesPerChunk:         1,
+			MaxChunks:                1,
+			MaxOmittedSummaryEntries: 10,
+		}, 2),
+	}
+	summary := FormatChunkedCoverageSummary(plan, len(plan.Chunks), 10)
+
+	assert.False(t, plan.Coverage.Complete)
+	assert.Equal(t, CoverageModePartial, plan.Coverage.ReviewMode)
+	assert.Equal(t, "maximum planned review chunks exceeded", plan.Coverage.PartialReason)
+	assert.True(t, plan.Coverage.ExceededMaxChunks)
+	assert.Zero(t, plan.Coverage.FilesNotReviewed)
+	assert.Contains(t, summary, "- This is a partial review: maximum planned review chunks exceeded.")
+	assert.Contains(t, summary, "- Required chunks: 2; max chunks: 1")
+	assert.Contains(t, summary, "- Chunks reviewed: 1/2")
+	assert.NotContains(t, summary, "Review coverage is complete")
+}
+
 func TestChunkForReviewSummarizesNonReviewableFilesWithPreciseReasons(t *testing.T) {
 	largeLockPatch := strings.Repeat("x", LargeLockfileDiffBytes)
 	diff := DiffSet{

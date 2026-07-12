@@ -22,7 +22,7 @@ func FormatChunkedCoverageSummary(plan ChunkPlan, chunksReviewed int, maxEntries
 	if coverage.RequiredChunks > chunksPlanned {
 		chunksPlanned = coverage.RequiredChunks
 	}
-	complete := coverage.Complete && chunksReviewed >= coverage.ChunksPlanned
+	complete := coverage.Complete && chunksReviewed >= chunksPlanned
 
 	var b strings.Builder
 	b.WriteString("## Diff Coverage\n\n")

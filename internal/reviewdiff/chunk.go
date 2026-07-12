@@ -314,7 +314,7 @@ func buildCoverage(diff DiffSet, chunks []ReviewChunk, planned []plannedFile, op
 		}
 		coverage.FilesNotReviewed++
 	}
-	if coverage.FilesNotReviewed > 0 {
+	if coverage.ExceededMaxChunks || coverage.FilesNotReviewed > 0 {
 		coverage.Complete = false
 		coverage.ReviewMode = CoverageModePartial
 		coverage.PartialReason = partialReason(coverage)
