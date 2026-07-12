@@ -44,6 +44,26 @@ func TestHandlerRecordsAndProcessesWorkflowEvent(t *testing.T) {
 	assert.Equal(t, "worker_completed", processor.calls[0].event.Action)
 }
 
+func TestHandlerRequiresProcessorBeforeRecordingWorkflowEvent(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newEventStore()
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd", InstallationID: 42}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(validEventClaims(now)),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, eventRequest(validEventPayload()))
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "workflow event processor is not configured")
+	assert.Empty(t, st.commands)
+	assert.Empty(t, st.idem)
+}
+
 func TestHandlerDuplicateWorkflowEventDoesNotProcessAgain(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()

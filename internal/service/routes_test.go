@@ -77,6 +77,19 @@ func TestJobResultsRouteCanBeInjected(t *testing.T) {
 	assert.JSONEq(t, `{"job_id":"job-123"}`, rec.Body.String())
 }
 
+func TestDefaultJobResultsRouteFailsClosedWithoutProcessors(t *testing.T) {
+	handler, err := NewServer(Config{Env: "development"}, Dependencies{Store: store.NewMemoryStore()})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job-123/results", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.JSONEq(t, `{"error":"job result processors are not configured"}`, rec.Body.String())
+}
+
 func TestWorkflowEventsRouteCanBeInjected(t *testing.T) {
 	handler, err := NewServer(Config{Env: "development"}, Dependencies{
 		WorkflowEventsRoute: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -92,6 +105,19 @@ func TestWorkflowEventsRouteCanBeInjected(t *testing.T) {
 
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 	assert.JSONEq(t, `{"status":"accepted"}`, rec.Body.String())
+}
+
+func TestDefaultWorkflowEventsRouteFailsClosedWithoutProcessor(t *testing.T) {
+	handler, err := NewServer(Config{Env: "development"}, Dependencies{Store: store.NewMemoryStore()})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow-events", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.JSONEq(t, `{"error":"workflow event processor is not configured"}`, rec.Body.String())
 }
 
 func TestStartReconcilerLoopStartsAndStopsWithContext(t *testing.T) {

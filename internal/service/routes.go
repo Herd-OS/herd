@@ -86,10 +86,12 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
 				})
 			})
 		} else {
-			jobResultsHandler = jobs.NewHandler(jobs.HandlerOptions{
-				Store:    resultsStore,
-				Audience: cfg.OIDCAudience,
+			jobResultsHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "job result processors are not configured",
+				})
 			})
+			_ = resultsStore
 		}
 	}
 	if jobResultsHandler == nil {
@@ -105,6 +107,13 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
 					"error": "workflow event storage is not configured",
 				})
 			})
+		} else if deps.WorkflowEventProcessor == nil {
+			workflowEventsHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "workflow event processor is not configured",
+				})
+			})
+			_ = eventStore
 		} else {
 			workflowEventsHandler = workflowevents.NewHandler(workflowevents.HandlerOptions{
 				Store:     eventStore,

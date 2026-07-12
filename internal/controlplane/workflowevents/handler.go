@@ -133,6 +133,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
+	if h.processor == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "workflow event processor is not configured"})
+		return
+	}
 
 	owner, name, ok := strings.Cut(event.Repository, "/")
 	if !ok || owner == "" || name == "" {
