@@ -6,42 +6,79 @@ import (
 	"strings"
 )
 
+type chunkedCoverageSummaryMode int
+
+const (
+	chunkedCoverageSummaryModeReviewed chunkedCoverageSummaryMode = iota
+	chunkedCoverageSummaryModeInteractivePrompt
+)
+
 func FormatChunkedCoverageSummary(plan ChunkPlan, chunksReviewed int, maxEntries int) string {
+	return formatChunkedCoverageSummary(plan, chunksReviewed, maxEntries, chunkedCoverageSummaryModeReviewed)
+}
+
+func FormatInteractivePromptCoverageSummary(plan ChunkPlan, chunksIncluded int, maxEntries int) string {
+	return formatChunkedCoverageSummary(plan, chunksIncluded, maxEntries, chunkedCoverageSummaryModeInteractivePrompt)
+}
+
+func formatChunkedCoverageSummary(plan ChunkPlan, chunksCount int, maxEntries int, mode chunkedCoverageSummaryMode) string {
 	if maxEntries <= 0 {
 		maxEntries = DefaultMaxOmittedSummaryEntries
 	}
 	coverage := plan.Coverage
-	if chunksReviewed < 0 {
-		chunksReviewed = 0
+	if chunksCount < 0 {
+		chunksCount = 0
 	}
-	if chunksReviewed > len(plan.Chunks) {
-		chunksReviewed = len(plan.Chunks)
+	if chunksCount > len(plan.Chunks) {
+		chunksCount = len(plan.Chunks)
 	}
-	coverage.ChunksReviewed = chunksReviewed
+	coverage.ChunksReviewed = chunksCount
 	chunksPlanned := coverage.ChunksPlanned
 	if coverage.RequiredChunks > chunksPlanned {
 		chunksPlanned = coverage.RequiredChunks
 	}
-	complete := coverage.Complete && chunksReviewed >= chunksPlanned
+	complete := coverage.Complete && chunksCount >= chunksPlanned
+	if mode == chunkedCoverageSummaryModeInteractivePrompt {
+		complete = coverage.Complete
+	}
 
 	var b strings.Builder
 	b.WriteString("## Diff Coverage\n\n")
 	fmt.Fprintf(&b, "- Source: %s\n", valueOrUnknown(coverage.Source))
 	fmt.Fprintf(&b, "- Review mode: %s\n", coverage.ReviewMode)
-	fmt.Fprintf(&b, "- Total files: %d\n", coverage.TotalFiles)
-	fmt.Fprintf(&b, "- Chunks reviewed: %d/%d\n", chunksReviewed, chunksPlanned)
-	fmt.Fprintf(&b, "- Files reviewed: %d\n", coverage.FilesReviewed)
-	fmt.Fprintf(&b, "- Files reviewed with truncated diffs: %d\n", coverage.FilesReviewedWithTruncatedDiffs)
-	fmt.Fprintf(&b, "- Files summarized but not reviewed: %d\n", coverage.FilesSummarizedNotReviewed)
-	fmt.Fprintf(&b, "- Files not reviewed: %d\n", coverage.FilesNotReviewed)
+	if mode == chunkedCoverageSummaryModeInteractivePrompt {
+		fmt.Fprintf(&b, "- Chunks included in this prompt: %d/%d\n", chunksCount, chunksPlanned)
+		fmt.Fprintf(&b, "- PR-level planned review chunks: %d\n", chunksPlanned)
+		b.WriteString("- PR-level file coverage:\n")
+		fmt.Fprintf(&b, "  - Total files: %d\n", coverage.TotalFiles)
+		fmt.Fprintf(&b, "  - Files included in planned review chunks: %d\n", coverage.FilesReviewed)
+		fmt.Fprintf(&b, "  - Files included with truncated diffs: %d\n", coverage.FilesReviewedWithTruncatedDiffs)
+		fmt.Fprintf(&b, "  - Files summarized but not included in review chunks: %d\n", coverage.FilesSummarizedNotReviewed)
+		fmt.Fprintf(&b, "  - Files not included in review chunks: %d\n", coverage.FilesNotReviewed)
+	} else {
+		fmt.Fprintf(&b, "- Total files: %d\n", coverage.TotalFiles)
+		fmt.Fprintf(&b, "- Chunks reviewed: %d/%d\n", chunksCount, chunksPlanned)
+		fmt.Fprintf(&b, "- Files reviewed: %d\n", coverage.FilesReviewed)
+		fmt.Fprintf(&b, "- Files reviewed with truncated diffs: %d\n", coverage.FilesReviewedWithTruncatedDiffs)
+		fmt.Fprintf(&b, "- Files summarized but not reviewed: %d\n", coverage.FilesSummarizedNotReviewed)
+		fmt.Fprintf(&b, "- Files not reviewed: %d\n", coverage.FilesNotReviewed)
+	}
 	if complete {
-		b.WriteString("- Review coverage is complete; all reviewable files were reviewed.\n")
+		if mode == chunkedCoverageSummaryModeInteractivePrompt {
+			b.WriteString("- PR-level planned file coverage is complete; all reviewable files were assigned to review chunks.\n")
+		} else {
+			b.WriteString("- Review coverage is complete; all reviewable files were reviewed.\n")
+		}
 	} else {
 		reason := coverage.PartialReason
 		if reason == "" {
 			reason = "not all files were reviewed"
 		}
-		fmt.Fprintf(&b, "- This is a partial review: %s.\n", reason)
+		if mode == chunkedCoverageSummaryModeInteractivePrompt {
+			fmt.Fprintf(&b, "- PR-level planned file coverage is partial: %s.\n", reason)
+		} else {
+			fmt.Fprintf(&b, "- This is a partial review: %s.\n", reason)
+		}
 	}
 	if coverage.ExceededMaxChunks {
 		fmt.Fprintf(&b, "- Required chunks: %d; max chunks: %d\n", coverage.RequiredChunks, coverage.MaxChunks)
@@ -53,7 +90,11 @@ func FormatChunkedCoverageSummary(plan ChunkPlan, chunksReviewed int, maxEntries
 		}
 	}
 	if len(plan.Chunks) > 0 {
-		b.WriteString("- Chunks:\n")
+		if mode == chunkedCoverageSummaryModeInteractivePrompt {
+			b.WriteString("- PR-level planned chunks:\n")
+		} else {
+			b.WriteString("- Chunks:\n")
+		}
 		for _, chunk := range plan.Chunks {
 			fmt.Fprintf(&b, "  - Chunk %d/%d: %d files, %s\n", chunk.Index, chunk.Total, len(chunk.IncludedFiles), formatBytes(chunk.UsedDiffBytes))
 		}

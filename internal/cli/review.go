@@ -162,7 +162,7 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		ReviewMode:             string(plan.Coverage.ReviewMode),
 		ChunkIndex:             chunkIndex,
 		TotalChunks:            totalChunks,
-		CoverageSummary:        reviewdiff.FormatChunkedCoverageSummary(plan, 1, reviewdiff.DefaultMaxOmittedSummaryEntries),
+		CoverageSummary:        reviewdiff.FormatInteractivePromptCoverageSummary(plan, 1, reviewdiff.DefaultMaxOmittedSummaryEntries),
 		PartialReview:          !plan.Coverage.Complete,
 		OnlyFirstChunkIncluded: totalChunks > 1,
 		NoReviewableChunks:     !plan.Coverage.Complete && len(plan.Chunks) == 0 && chunkIndex == 0,

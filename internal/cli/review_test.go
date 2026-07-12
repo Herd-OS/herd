@@ -142,7 +142,7 @@ func TestRenderReviewSystemPrompt_DoesNotWrapRenderedReviewDiffInOuterFence(t *t
 func TestRenderReviewSystemPrompt_MultiChunkCoverageWording(t *testing.T) {
 	data := baseReviewData()
 	data.Diff = "# Review diff\n\n## first.go\n\n```diff\n+first\n```\n"
-	data.CoverageSummary = "## Diff Coverage\n\n- Review mode: chunked\n- Chunks reviewed: 1/3\n"
+	data.CoverageSummary = "## Diff Coverage\n\n- Review mode: chunked\n- Chunks included in this prompt: 1/3\n- PR-level planned review chunks: 3\n"
 	data.ReviewMode = string(reviewdiff.CoverageModeChunked)
 	data.ChunkIndex = 1
 	data.TotalChunks = 3
@@ -153,6 +153,7 @@ func TestRenderReviewSystemPrompt_MultiChunkCoverageWording(t *testing.T) {
 
 	assert.Contains(t, out, "## Diff Coverage")
 	assert.Contains(t, out, "- Review mode: chunked")
+	assert.NotContains(t, out, "- Chunks reviewed:")
 	assert.Contains(t, out, "Only chunk 1/3 is included in this interactive prompt")
 	assert.Contains(t, out, "Additional chunks are not hidden as reviewed")
 
@@ -362,9 +363,15 @@ func TestBuildReviewPromptDataUsesChunkPlanningForInteractivePrompt(t *testing.T
 	assert.False(t, data.PartialReview)
 	assert.Contains(t, data.CoverageSummary, "## Diff Coverage")
 	assert.Contains(t, data.CoverageSummary, "- Review mode: chunked")
-	assert.Contains(t, data.CoverageSummary, "- Chunks reviewed: 1/3")
-	assert.Contains(t, data.CoverageSummary, "- Chunk 1/3: 1 files")
-	assert.Contains(t, data.CoverageSummary, "- Chunk 2/3: 1 files")
+	assert.Contains(t, data.CoverageSummary, "- Chunks included in this prompt: 1/3")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned review chunks: 3")
+	assert.Contains(t, data.CoverageSummary, "- PR-level file coverage:")
+	assert.Contains(t, data.CoverageSummary, "  - Files included in planned review chunks: 3")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned chunks:")
+	assert.Contains(t, data.CoverageSummary, "  - Chunk 1/3: 1 files")
+	assert.Contains(t, data.CoverageSummary, "  - Chunk 2/3: 1 files")
+	assert.NotContains(t, data.CoverageSummary, "- Chunks reviewed:")
+	assert.NotContains(t, data.CoverageSummary, "- Files reviewed:")
 	assert.Contains(t, data.Diff, "src/first.go")
 	assert.Contains(t, data.Diff, "+first chunk body")
 	assert.NotContains(t, data.Diff, "+second chunk body")
@@ -407,10 +414,12 @@ func TestBuildReviewPromptDataMarksPartialCoverage(t *testing.T) {
 	assert.True(t, data.OnlyFirstChunkIncluded)
 	assert.True(t, data.PartialReview)
 	assert.Contains(t, data.CoverageSummary, "- Review mode: partial")
-	assert.Contains(t, data.CoverageSummary, "- Chunks reviewed: 1/2")
-	assert.Contains(t, data.CoverageSummary, "- This is a partial review")
+	assert.Contains(t, data.CoverageSummary, "- Chunks included in this prompt: 1/2")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned review chunks: 2")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned file coverage is partial")
 	assert.Contains(t, data.CoverageSummary, "maximum planned review chunks exceeded")
 	assert.Contains(t, data.CoverageSummary, "- Required chunks: 2; max chunks: 1")
+	assert.NotContains(t, data.CoverageSummary, "- Chunks reviewed:")
 	assert.Contains(t, data.Diff, "+reviewed body")
 	assert.NotContains(t, data.Diff, "+not reviewed body")
 
@@ -450,8 +459,9 @@ func TestBuildReviewPromptDataZeroChunksDoesNotUseLegacyRenderedDiff(t *testing.
 	assert.True(t, data.NoReviewableChunks)
 	assert.True(t, data.PartialReview)
 	assert.Contains(t, data.CoverageSummary, "- Review mode: partial")
-	assert.Contains(t, data.CoverageSummary, "- Chunks reviewed: 0/0")
-	assert.Contains(t, data.CoverageSummary, "- Files not reviewed: 1")
+	assert.Contains(t, data.CoverageSummary, "- Chunks included in this prompt: 0/0")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned review chunks: 0")
+	assert.Contains(t, data.CoverageSummary, "  - Files not included in review chunks: 1")
 	assert.Contains(t, data.CoverageSummary, "file diff exceeds maximum reviewable size")
 	assert.Contains(t, data.CoverageSummary, "src/oversized.go")
 	assert.Contains(t, data.Diff, "No reviewable diff chunks were produced")
@@ -464,7 +474,7 @@ func TestBuildReviewPromptDataZeroChunksDoesNotUseLegacyRenderedDiff(t *testing.
 	assert.Contains(t, out, "this interactive prompt includes no source diffs to review")
 	assert.Contains(t, out, "The Diff Coverage section is authoritative for omitted paths and reasons")
 	assert.Contains(t, out, "do not conclude that the PR was reviewed")
-	assert.Contains(t, out, "- This is a partial review")
+	assert.Contains(t, out, "- PR-level planned file coverage is partial")
 	assert.NotContains(t, out, "legacy-rendered-patch-marker")
 	assert.NotContains(t, out, "Review coverage is complete")
 }
