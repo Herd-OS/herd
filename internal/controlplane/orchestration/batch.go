@@ -297,6 +297,13 @@ func (s Service) withIdempotency(ctx context.Context, key string, mutationType s
 			return resultRef, err
 		}
 		status := strings.TrimSpace(record.Status)
+		if status == mutationStatusFailed {
+			if _, err := s.Store.GetGitHubMutationAttempt(ctx, key); errors.Is(err, store.ErrNotFound) {
+				return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
+			} else if err != nil {
+				return "", fmt.Errorf("get mutation attempt: %w", err)
+			}
+		}
 		if status == "" {
 			status = "unknown"
 		}
@@ -313,6 +320,7 @@ func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutati
 		Status:         mutationStatusStarted,
 		CreatedAt:      s.now(),
 	}); err != nil {
+		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
 		return "", fmt.Errorf("record mutation attempt: %w", err)
 	}
 	resultRef, err := fn()
@@ -323,6 +331,9 @@ func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutati
 	}
 	response, _ := json.Marshal(map[string]string{"result_ref": resultRef})
 	if err := s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusCompleted, response, "", s.now()); err != nil {
+		if idemErr := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); idemErr != nil {
+			return "", fmt.Errorf("complete mutation attempt: %w; complete idempotency key after mutation attempt failure: %v", err, idemErr)
+		}
 		return "", fmt.Errorf("complete mutation attempt: %w", err)
 	}
 	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {

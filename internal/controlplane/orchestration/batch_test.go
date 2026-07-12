@@ -202,6 +202,74 @@ func TestOpenBatchPRRetryRepairsIdempotencyFromCompletedMutationAttempt(t *testi
 	assert.Equal(t, 1, len(fake.prs.createCalls))
 }
 
+func TestOpenBatchPRRetriesAfterMutationAttemptRecordFailure(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("batch-pr", "repo", svc.Repo.ID, "batch", 4)
+	st.recordMutationErrs = map[string][]error{key: {errors.New("database down"), nil}}
+
+	first, firstErr := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+	second, secondErr := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+
+	require.Error(t, firstErr)
+	assert.Nil(t, first)
+	require.NoError(t, secondErr)
+	require.NotNil(t, second)
+	assert.Equal(t, 1, second.Number)
+	assert.Equal(t, "completed", st.keys[key].Status)
+	assert.Equal(t, "pr:1", st.keys[key].ResultRef)
+	assert.Equal(t, 1, len(fake.prs.createCalls))
+}
+
+func TestOpenBatchPRRetryRepairsAfterMutationAttemptCompletionFailure(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("batch-pr", "repo", svc.Repo.ID, "batch", 4)
+	st.completeMutationErrs = map[string][]error{key: {errors.New("database down"), nil}}
+
+	first, firstErr := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+	second, secondErr := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+
+	require.Error(t, firstErr)
+	assert.Nil(t, first)
+	require.NoError(t, secondErr)
+	require.NotNil(t, second)
+	assert.Equal(t, 1, second.Number)
+	assert.Equal(t, "completed", st.keys[key].Status)
+	assert.Equal(t, "pr:1", st.keys[key].ResultRef)
+	assert.Equal(t, "completed", st.mutations[key].Status)
+	assert.Contains(t, string(st.mutations[key].Response), "pr:1")
+	assert.Equal(t, 1, len(fake.prs.createCalls))
+}
+
 func TestEnsureTaskIssueStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
@@ -247,10 +315,12 @@ func fixedClock() time.Time {
 }
 
 type fakeStore struct {
-	keys         map[string]store.IdempotencyKey
-	mutations    map[string]store.GitHubMutationAttempt
-	results      map[string]store.JobResult
-	completeErrs map[string][]error
+	keys                 map[string]store.IdempotencyKey
+	mutations            map[string]store.GitHubMutationAttempt
+	results              map[string]store.JobResult
+	completeErrs         map[string][]error
+	recordMutationErrs   map[string][]error
+	completeMutationErrs map[string][]error
 }
 
 func newFakeStore() *fakeStore {
@@ -307,6 +377,13 @@ func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessa
 }
 
 func (s *fakeStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
+	if len(s.recordMutationErrs[a.IdempotencyKey]) > 0 {
+		err := s.recordMutationErrs[a.IdempotencyKey][0]
+		s.recordMutationErrs[a.IdempotencyKey] = s.recordMutationErrs[a.IdempotencyKey][1:]
+		if err != nil {
+			return err
+		}
+	}
 	s.mutations[a.IdempotencyKey] = a
 	return nil
 }
@@ -320,6 +397,13 @@ func (s *fakeStore) GetGitHubMutationAttempt(_ context.Context, key string) (sto
 }
 
 func (s *fakeStore) CompleteGitHubMutationAttempt(_ context.Context, key string, status string, response json.RawMessage, errMsg string, completedAt time.Time) error {
+	if len(s.completeMutationErrs[key]) > 0 {
+		err := s.completeMutationErrs[key][0]
+		s.completeMutationErrs[key] = s.completeMutationErrs[key][1:]
+		if err != nil {
+			return err
+		}
+	}
 	attempt := s.mutations[key]
 	attempt.Status = status
 	attempt.Response = response
