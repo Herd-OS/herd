@@ -19,6 +19,7 @@ const (
 	idempotencyTTL           = time.Hour
 	idempotencyStatusStarted = "started"
 	idempotencyStatusDone    = "completed"
+	failedResultPrefix       = "registration_token:"
 )
 
 type RegistrationTokenRequest struct {
@@ -104,7 +105,7 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	idempotencyKey := registrationIDKey(repo.ID, req.RunnerName, req.RunnerLabels, token.ID, req.RequestNonce)
+	idempotencyKey := registrationIDKey(repo.ID, token.ID, req.RequestNonce)
 	result, replayed, ok := h.acquireOrReplay(w, r.Context(), idempotencyKey, repo.ID, req, token)
 	if !ok {
 		return
@@ -132,6 +133,7 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 	usedAt := h.now()
 	if err := h.store.CompleteIdempotencyKey(r.Context(), idempotencyKey, string(resultJSON)); err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, failedResultPrefix+string(resultJSON))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete runner registration idempotency"})
 		return
 	}
@@ -208,13 +210,7 @@ func (h RegistrationTokenHandler) validateBootstrap(w http.ResponseWriter, ctx c
 
 func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx context.Context, key string, repoID int64, req RegistrationTokenRequest, token store.RunnerBootstrapToken) (RegistrationTokenResponse, bool, bool) {
 	expiresAt := h.now().Add(idempotencyTTL)
-	metadata, err := json.Marshal(map[string]any{
-		"repository_id":      repoID,
-		"runner_name":        req.RunnerName,
-		"runner_labels":      req.RunnerLabels,
-		"bootstrap_token_id": token.ID,
-		"request_nonce":      req.RequestNonce,
-	})
+	metadata, err := runnerRequestMetadata(repoID, req, token)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build runner registration idempotency metadata"})
 		return RegistrationTokenResponse{}, false, false
@@ -239,29 +235,42 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "lookup runner registration idempotency"})
 		return RegistrationTokenResponse{}, false, false
 	}
+	if !sameRegistrationRequest(record.Metadata, metadata) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration nonce was already used with different runner metadata"})
+		return RegistrationTokenResponse{}, false, false
+	}
 	if record.Status == "failed" {
+		if resultJSON, ok := strings.CutPrefix(record.ResultRef, failedResultPrefix); ok {
+			result, ok := h.replayRegistrationResult(w, ctx, resultJSON, token)
+			return result, ok, ok
+		}
 		return RegistrationTokenResponse{}, false, true
 	}
 	if record.Status != idempotencyStatusDone {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
 		return RegistrationTokenResponse{}, false, false
 	}
+	result, ok := h.replayRegistrationResult(w, ctx, record.ResultRef, token)
+	return result, ok, ok
+}
+
+func (h RegistrationTokenHandler) replayRegistrationResult(w http.ResponseWriter, ctx context.Context, raw string, token store.RunnerBootstrapToken) (RegistrationTokenResponse, bool) {
 	var result RegistrationTokenResponse
-	if err := json.Unmarshal([]byte(record.ResultRef), &result); err != nil {
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "decode runner registration idempotency result"})
-		return RegistrationTokenResponse{}, false, false
+		return RegistrationTokenResponse{}, false
 	}
 	if token.UsedAt == nil {
 		if err := h.store.MarkRunnerBootstrapTokenUsed(ctx, token.ID, h.now()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record runner bootstrap token use"})
-			return RegistrationTokenResponse{}, false, false
+			return RegistrationTokenResponse{}, false
 		}
 	}
-	return result, true, true
+	return result, true
 }
 
-func registrationIDKey(repoID int64, runnerName string, labels []string, tokenID int64, nonce string) string {
-	payload, _ := json.Marshal(struct {
+func runnerRequestMetadata(repoID int64, req RegistrationTokenRequest, token store.RunnerBootstrapToken) ([]byte, error) {
+	return json.Marshal(struct {
 		RepositoryID     int64    `json:"repository_id"`
 		RunnerName       string   `json:"runner_name"`
 		RunnerLabels     []string `json:"runner_labels"`
@@ -269,8 +278,24 @@ func registrationIDKey(repoID int64, runnerName string, labels []string, tokenID
 		RequestNonce     string   `json:"request_nonce"`
 	}{
 		RepositoryID:     repoID,
-		RunnerName:       strings.TrimSpace(runnerName),
-		RunnerLabels:     labels,
+		RunnerName:       strings.TrimSpace(req.RunnerName),
+		RunnerLabels:     req.RunnerLabels,
+		BootstrapTokenID: token.ID,
+		RequestNonce:     strings.TrimSpace(req.RequestNonce),
+	})
+}
+
+func sameRegistrationRequest(existing json.RawMessage, current []byte) bool {
+	return strings.TrimSpace(string(existing)) == strings.TrimSpace(string(current))
+}
+
+func registrationIDKey(repoID int64, tokenID int64, nonce string) string {
+	payload, _ := json.Marshal(struct {
+		RepositoryID     int64  `json:"repository_id"`
+		BootstrapTokenID int64  `json:"bootstrap_token_id"`
+		RequestNonce     string `json:"request_nonce"`
+	}{
+		RepositoryID:     repoID,
 		BootstrapTokenID: tokenID,
 		RequestNonce:     strings.TrimSpace(nonce),
 	})

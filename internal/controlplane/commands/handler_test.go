@@ -332,6 +332,26 @@ func TestHandlerDispatchCompletionFailureRedeliveryDoesNotDispatchAgain(t *testi
 	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
 }
 
+func TestHandlerRecordFailureRetryPostsOneAcknowledgement(t *testing.T) {
+	st := newFakeStore()
+	st.recordErr = errors.New("store down")
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os review")
+
+	_, err := h.HandleIssueComment(context.Background(), event)
+	st.recordErr = nil
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "record command")
+	require.NoError(t, retryErr)
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, st.commandRecords, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+}
+
 func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t *testing.T) {
 	st := newFakeStore()
 	st.updateErrs = []error{nil, errors.New("store down")}

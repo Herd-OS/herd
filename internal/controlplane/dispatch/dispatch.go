@@ -178,6 +178,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 
 	if recordMutation {
 		if err := d.recordMutationAttempt(ctx, req, idempotencyKey, inputs, now); err != nil {
+			_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 			return DispatchResult{}, err
 		}
 	}

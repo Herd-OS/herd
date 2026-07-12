@@ -466,10 +466,11 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 	}
 	response := json.RawMessage(`{"empty":true}`)
 	if len(artifact.Data) == 0 {
-		if err := h.completePatchApply(ctx, idempotencyKey, response); err != nil {
+		if err := h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil); err != nil {
+			_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 			return err
 		}
-		if err := h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil); err != nil {
+		if err := h.completePatchApply(ctx, idempotencyKey, response); err != nil {
 			return err
 		}
 		return nil
@@ -540,6 +541,9 @@ func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, w
 		return false, fmt.Errorf("get patch apply idempotency: %w", err)
 	}
 	if record.Status == "completed" {
+		if completed, err := h.repairCompletedPatchApply(ctx, idempotencyKey); completed || err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 	if completed, err := h.repairCompletedPatchApply(ctx, idempotencyKey); completed || err != nil {

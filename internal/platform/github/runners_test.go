@@ -102,3 +102,19 @@ func TestCreateRunnerRegistrationTokenFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "creating runner registration token")
 	assert.Zero(t, token)
 }
+
+func TestCreateRunnerRegistrationTokenMissingExpiry(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /repos/test-org/test-repo/actions/runners/registration-token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"token": "runner-registration-token",
+		})
+	})
+	client, _ := newTestClient(t, mux)
+
+	token, err := CreateRunnerRegistrationToken(context.Background(), client.gh, "test-org", "test-repo")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing expires_at")
+	assert.Zero(t, token)
+}

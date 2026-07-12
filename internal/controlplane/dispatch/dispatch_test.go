@@ -253,6 +253,25 @@ func TestDispatcherRetriesAfterCreateJobFailure(t *testing.T) {
 	assert.Equal(t, "completed", st.idempotencyKeys[IdempotencyKey(req)].Status)
 }
 
+func TestDispatcherRetriesAfterRecordMutationAttemptFailure(t *testing.T) {
+	st := newFakeStore()
+	st.recordMutationErrs = []error{errors.New("database down"), nil}
+	gh := &fakeWorkflowClient{}
+	req := validRequest()
+	key := IdempotencyKey(req)
+
+	_, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "record workflow dispatch mutation attempt")
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.True(t, result.Created)
+	assert.Len(t, gh.calls, 1)
+	assert.Len(t, st.jobs, 1)
+	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
+}
+
 func TestAppWorkflowClientPropagatesTokenSourceError(t *testing.T) {
 	client := NewAppWorkflowClient(fakeTokenSource{err: errors.New("mint failed")})
 
@@ -297,11 +316,12 @@ func validRequest() DispatchRequest {
 }
 
 type fakeStore struct {
-	jobs             map[string]store.Job
-	idempotencyKeys  map[string]store.IdempotencyKey
-	mutationAttempts []store.GitHubMutationAttempt
-	createJobErrs    []error
-	completeIdemErrs map[string][]error
+	jobs               map[string]store.Job
+	idempotencyKeys    map[string]store.IdempotencyKey
+	mutationAttempts   []store.GitHubMutationAttempt
+	createJobErrs      []error
+	recordMutationErrs []error
+	completeIdemErrs   map[string][]error
 }
 
 func newFakeStore() *fakeStore {
@@ -381,6 +401,13 @@ func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessa
 }
 
 func (s *fakeStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
+	if len(s.recordMutationErrs) > 0 {
+		err := s.recordMutationErrs[0]
+		s.recordMutationErrs = s.recordMutationErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	for _, existing := range s.mutationAttempts {
 		if existing.IdempotencyKey == a.IdempotencyKey {
 			return store.ErrAlreadyExists

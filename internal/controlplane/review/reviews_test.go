@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -154,7 +155,7 @@ func TestSubmitPRReviewOnceFailedUnknownOutcomeDoesNotCreateDuplicateReview(t *t
 	assert.Len(t, gh.reviews, 1)
 }
 
-func TestSubmitPRReviewOnceRetryAfterMutationCompletionFailureBlocksStartedAttempt(t *testing.T) {
+func TestSubmitPRReviewOnceRetryAfterMutationCompletionFailureRepairsStartedAttempt(t *testing.T) {
 	gh := &fakeReviewGitHub{}
 	mutations := newFakeReviewMutationStore()
 	mutations.completeMutationErrs = []error{errors.New("database down"), nil}
@@ -167,14 +168,14 @@ func TestSubmitPRReviewOnceRetryAfterMutationCompletionFailureBlocksStartedAttem
 	secondErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
 
 	require.Error(t, firstErr)
-	require.ErrorIs(t, secondErr, ErrReviewSubmissionInProgress)
+	require.NoError(t, secondErr)
 	assert.Len(t, gh.reviews, 1)
 	record, err := mutations.GetIdempotencyKey(context.Background(), key)
 	require.NoError(t, err)
-	assert.Equal(t, "started", record.Status)
+	assert.Equal(t, "completed", record.Status)
 	attempt, err := mutations.GetGitHubMutationAttempt(context.Background(), key)
 	require.NoError(t, err)
-	assert.Equal(t, "started", attempt.Status)
+	assert.Equal(t, "completed", attempt.Status)
 }
 
 func TestSubmitReviewResultStartedSubmissionReturnsRetryableError(t *testing.T) {
@@ -481,6 +482,7 @@ func (f *fakeFixCoordinator) DispatchReviewFixWorker(_ context.Context, _ Reposi
 }
 
 type capturedReview struct {
+	body     string
 	event    platform.ReviewEvent
 	commitID string
 }
@@ -489,14 +491,25 @@ func (g *fakeReviewGitHub) GetPullRequest(_ context.Context, _ int64, _, _ strin
 	return g.pr, nil
 }
 
-func (g *fakeReviewGitHub) CreateReviewForCommit(_ context.Context, _ int64, _, _ string, _ int, _ string, event platform.ReviewEvent, commitID string) error {
+func (g *fakeReviewGitHub) CreateReviewForCommit(_ context.Context, _ int64, _, _ string, _ int, body string, event platform.ReviewEvent, commitID string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.reviewErr != nil {
 		return g.reviewErr
 	}
-	g.reviews = append(g.reviews, capturedReview{event: event, commitID: commitID})
+	g.reviews = append(g.reviews, capturedReview{body: strings.TrimSpace(body), event: event, commitID: commitID})
 	return nil
+}
+
+func (g *fakeReviewGitHub) FindReviewForCommit(_ context.Context, _ int64, _, _ string, _ int, body string, event platform.ReviewEvent, commitID string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, review := range g.reviews {
+		if review.body == strings.TrimSpace(body) && review.event == event && review.commitID == commitID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (g *fakeReviewGitHub) AddPullRequestComment(_ context.Context, _ int64, _, _ string, _ int, body string) error {

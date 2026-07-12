@@ -55,6 +55,10 @@ type StatusClient interface {
 	CreateCommitStatus(ctx context.Context, installationID int64, owner, repo, sha string, status platform.CommitStatus) error
 }
 
+type StatusLookupClient interface {
+	FindCommitStatus(ctx context.Context, installationID int64, owner, repo, sha string, status platform.CommitStatus) (bool, error)
+}
+
 type StatusService struct {
 	Store  StatusStore
 	GitHub StatusClient
@@ -100,6 +104,9 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 			}
 			if record.Status == "started" {
 				if repaired, err := s.repairCompletedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
+					return err
+				}
+				if repaired, err := s.repairStartedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, status, state, description, targetURL, now); repaired || err != nil {
 					return err
 				}
 				return fmt.Errorf("herd review status %q is already in progress", statusKey)
@@ -208,6 +215,36 @@ func (s StatusService) repairCompletedStatusMutation(ctx context.Context, idem S
 	}
 	if attempt.Status != "completed" {
 		return false, nil
+	}
+	if err := idem.CompleteIdempotencyKey(ctx, key, "status:created"); err != nil {
+		return true, fmt.Errorf("repair Herd Review status idempotency: %w", err)
+	}
+	return true, s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
+}
+
+func (s StatusService) repairStartedStatusMutation(ctx context.Context, idem StatusIdempotencyStore, key string, repo Repository, prNumber int, headSHA string, status platform.CommitStatus, state ReviewStatusState, description, targetURL string, now time.Time) (bool, error) {
+	mutations, ok := s.Store.(StatusMutationStore)
+	if !ok {
+		return false, nil
+	}
+	attempt, err := mutations.GetGitHubMutationAttempt(ctx, key)
+	if err != nil || attempt.Status != "started" {
+		return false, nil
+	}
+	lookup, ok := s.GitHub.(StatusLookupClient)
+	if !ok {
+		return false, nil
+	}
+	found, err := lookup.FindCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status)
+	if err != nil {
+		return false, fmt.Errorf("repair Herd Review status lookup: %w", err)
+	}
+	if !found {
+		return false, nil
+	}
+	response := json.RawMessage(`{"status":"created","repaired":true}`)
+	if err := mutations.CompleteGitHubMutationAttempt(ctx, key, "completed", response, "", now); err != nil {
+		return true, fmt.Errorf("repair Herd Review status mutation attempt: %w", err)
 	}
 	if err := idem.CompleteIdempotencyKey(ctx, key, "status:created"); err != nil {
 		return true, fmt.Errorf("repair Herd Review status idempotency: %w", err)

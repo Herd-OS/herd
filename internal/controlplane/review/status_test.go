@@ -131,7 +131,7 @@ func TestSetHerdReviewStatusReturnsMutationCompletionFailure(t *testing.T) {
 	assert.Equal(t, "started", st.mutationAttempts[0].Status)
 }
 
-func TestSetHerdReviewStatusRetryAfterMutationCompletionFailureBlocksStartedAttempt(t *testing.T) {
+func TestSetHerdReviewStatusRetryAfterMutationCompletionFailureRepairsStartedAttempt(t *testing.T) {
 	ctx := context.Background()
 	st := &fakeStatusStore{mutationCompleteErrs: []error{errors.New("database down"), nil}}
 	gh := &fakeStatusGitHub{}
@@ -141,12 +141,12 @@ func TestSetHerdReviewStatusRetryAfterMutationCompletionFailureBlocksStartedAtte
 	secondErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
 
 	require.Error(t, firstErr)
-	require.Error(t, secondErr)
-	assert.Contains(t, secondErr.Error(), "already in progress")
+	require.NoError(t, secondErr)
 	assert.Len(t, gh.statuses, 1)
 	require.Len(t, st.mutationAttempts, 1)
-	assert.Equal(t, "started", st.mutationAttempts[0].Status)
-	assert.Empty(t, st.states)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+	require.Len(t, st.states, 1)
+	assert.Equal(t, "success", st.states[0].Status)
 }
 
 func TestSetHerdReviewStatusRetryAfterGitHubFailureReusesFailedMutationAttempt(t *testing.T) {
@@ -307,6 +307,19 @@ func (g *fakeStatusGitHub) CreateCommitStatus(_ context.Context, installationID 
 	}
 	g.statuses = append(g.statuses, capturedStatus{installationID: installationID, owner: owner, repo: repo, sha: sha, status: status})
 	return nil
+}
+
+func (g *fakeStatusGitHub) FindCommitStatus(_ context.Context, installationID int64, owner, repo, sha string, status platform.CommitStatus) (bool, error) {
+	for _, existing := range g.statuses {
+		if existing.installationID == installationID &&
+			existing.owner == owner &&
+			existing.repo == repo &&
+			existing.sha == sha &&
+			existing.status == status {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func testRepo(enabled bool) Repository {

@@ -71,6 +71,10 @@ type PullRequestClient interface {
 	AddPullRequestComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) error
 }
 
+type ReviewLookupClient interface {
+	FindReviewForCommit(ctx context.Context, installationID int64, owner, repo string, number int, body string, event platform.ReviewEvent, commitID string) (bool, error)
+}
+
 type LockStore interface {
 	AcquireReviewLock(ctx context.Context, lock store.ReviewLock) (created bool, err error)
 	ReleaseReviewLock(ctx context.Context, repoID int64, prNumber int, headSHA string, holder string, releasedAt time.Time) error
@@ -262,6 +266,9 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		if repaired, repairErr := s.repairCompletedReviewSubmission(ctx, key); repaired || repairErr != nil {
 			return repairErr
 		}
+		if repaired, repairErr := s.repairStartedReviewSubmission(ctx, key, repo, result, event); repaired || repairErr != nil {
+			return repairErr
+		}
 		if record.Status == "started" {
 			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
 		}
@@ -317,6 +324,38 @@ func (s ReviewService) repairCompletedReviewSubmission(ctx context.Context, key 
 	}
 	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
 		return false, fmt.Errorf("repair review submission idempotency: %w", err)
+	}
+	return true, nil
+}
+
+func (s ReviewService) repairStartedReviewSubmission(ctx context.Context, key string, repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) (bool, error) {
+	attempt, err := s.Mutations.GetGitHubMutationAttempt(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get review submission mutation attempt: %w", err)
+	}
+	if attempt.Status != "started" {
+		return false, nil
+	}
+	lookup, ok := s.GitHub.(ReviewLookupClient)
+	if !ok {
+		return false, nil
+	}
+	found, err := lookup.FindReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA)
+	if err != nil {
+		return false, fmt.Errorf("repair review submission lookup: %w", err)
+	}
+	if !found {
+		return false, nil
+	}
+	response, _ := json.Marshal(map[string]any{"submitted": true, "event": event, "head_sha": result.HeadSHA, "repaired": true})
+	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, "completed", response, "", s.now()); err != nil {
+		return true, fmt.Errorf("repair review submission mutation attempt: %w", err)
+	}
+	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
+		return true, fmt.Errorf("repair review submission idempotency: %w", err)
 	}
 	return true, nil
 }

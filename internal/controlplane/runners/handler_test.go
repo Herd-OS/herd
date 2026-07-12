@@ -175,7 +175,9 @@ func TestRegistrationTokenHandlerReplayRepairsMissingTokenUse(t *testing.T) {
 	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
 	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"herd"}, BootstrapToken: plain, RequestNonce: "nonce-repair"}
 
-	key := registrationIDKey(st.repository.ID, req.RunnerName, req.RunnerLabels, token.ID, req.RequestNonce)
+	key := registrationIDKey(st.repository.ID, token.ID, req.RequestNonce)
+	metadata, err := runnerRequestMetadata(st.repository.ID, req, token)
+	require.NoError(t, err)
 	resultJSON, err := json.Marshal(minter.response)
 	require.NoError(t, err)
 	st.idempotency[key] = store.IdempotencyKey{
@@ -183,6 +185,7 @@ func TestRegistrationTokenHandlerReplayRepairsMissingTokenUse(t *testing.T) {
 		Scope:     idempotencyScope,
 		Status:    idempotencyStatusDone,
 		ResultRef: string(resultJSON),
+		Metadata:  metadata,
 		CreatedAt: now,
 	}
 
@@ -281,10 +284,39 @@ func TestRegistrationTokenHandlerCompleteFailureDoesNotMintAgain(t *testing.T) {
 	second := serveRegistrationRequest(t, handler, req)
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusConflict, second.Code)
-	assert.Contains(t, second.Body.String(), "outcome is unknown")
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.Contains(t, second.Body.String(), "github-runner-token-1")
 	assert.Equal(t, 1, minter.calls)
-	assert.Nil(t, st.tokens[token.ID].UsedAt)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+}
+
+func TestRegistrationTokenHandlerSameNonceRejectsChangedRunnerMetadata(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, _ := newHandlerTestStore(t, now)
+	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	firstReq := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"self-hosted", "herd"}, BootstrapToken: plain, RequestNonce: "nonce-1"}
+	tests := []struct {
+		name string
+		req  RegistrationTokenRequest
+	}{
+		{name: "runner name changed", req: RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-2", RunnerLabels: []string{"self-hosted", "herd"}, BootstrapToken: plain, RequestNonce: "nonce-1"}},
+		{name: "labels reordered", req: RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"herd", "self-hosted"}, BootstrapToken: plain, RequestNonce: "nonce-1"}},
+		{name: "labels changed", req: RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"self-hosted", "other"}, BootstrapToken: plain, RequestNonce: "nonce-1"}},
+	}
+
+	first := serveRegistrationRequest(t, handler, firstReq)
+	require.Equal(t, http.StatusOK, first.Code)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := serveRegistrationRequest(t, handler, tt.req)
+
+			assert.Equal(t, http.StatusConflict, rec.Code)
+			assert.Contains(t, rec.Body.String(), "different runner metadata")
+			assert.Equal(t, 1, minter.calls)
+		})
+	}
 }
 
 func serveRegistrationRequest(t *testing.T, handler http.Handler, body RegistrationTokenRequest) *httptest.ResponseRecorder {

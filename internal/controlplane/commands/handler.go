@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,6 +24,10 @@ type Store interface {
 	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
 	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
 	UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error
+}
+
+type IdempotencyFailureStore interface {
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 }
 
 type QueueStore interface {
@@ -257,6 +262,11 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 		return store.Repository{}, false, "", fmt.Errorf("acquire command idempotency key: %w", err)
 	}
 	if !created {
+		_, commandErr := h.Store.GetCommandRecord(ctx, repo.ID, event.CommentID, commandKey)
+		commandMissing := errors.Is(commandErr, store.ErrNotFound)
+		if commandErr != nil && !commandMissing {
+			return store.Repository{}, false, "", fmt.Errorf("get command record: %w", commandErr)
+		}
 		record = prepareCommandRecord(repo, event, commandKey, record)
 		if _, err := h.Store.RecordCommand(ctx, record); err != nil {
 			return store.Repository{}, false, "", fmt.Errorf("record command: %w", err)
@@ -279,17 +289,24 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 				return store.Repository{}, false, "", err
 			}
 		}
+		if existing.Status != "completed" && commandMissing {
+			if _, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody); err != nil {
+				return store.Repository{}, false, "", fmt.Errorf("add acknowledgement comment: %w", err)
+			}
+		}
 		return repo, existing.Status != "completed", idempotencyKey, nil
-	}
-
-	ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)
-	if err != nil {
-		return store.Repository{}, false, "", fmt.Errorf("add acknowledgement comment: %w", err)
 	}
 
 	record = prepareCommandRecord(repo, event, commandKey, record)
 	if _, err := h.Store.RecordCommand(ctx, record); err != nil {
 		return store.Repository{}, false, "", fmt.Errorf("record command: %w", err)
+	}
+	ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)
+	if err != nil {
+		if failures, ok := h.Store.(IdempotencyFailureStore); ok {
+			_ = failures.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
+		}
+		return store.Repository{}, false, "", fmt.Errorf("add acknowledgement comment: %w", err)
 	}
 	if !dispatchable {
 		if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, fmt.Sprintf("issue_comment:%d", ackID)); err != nil {

@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/appauth"
@@ -32,6 +33,26 @@ func (c AppGitHubClient) CreateCommitStatus(ctx context.Context, installationID 
 		return fmt.Errorf("creating Herd Review commit status on %s/%s@%s: %w", owner, repo, sha, err)
 	}
 	return nil
+}
+
+func (c AppGitHubClient) FindCommitStatus(ctx context.Context, installationID int64, owner, repo, sha string, status platform.CommitStatus) (bool, error) {
+	client, err := c.installationClient(ctx, installationID)
+	if err != nil {
+		return false, err
+	}
+	statuses, _, err := client.Repositories.ListStatuses(ctx, owner, repo, sha, &gh.ListOptions{PerPage: 100})
+	if err != nil {
+		return false, fmt.Errorf("listing commit statuses on %s/%s@%s: %w", owner, repo, sha, err)
+	}
+	for _, existing := range statuses {
+		if existing.GetContext() == status.Context &&
+			existing.GetState() == status.State &&
+			existing.GetTargetURL() == status.TargetURL &&
+			existing.GetDescription() == status.Description {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c AppGitHubClient) GetPullRequest(ctx context.Context, installationID int64, owner, repo string, number int) (*platform.PullRequest, error) {
@@ -72,6 +93,39 @@ func (c AppGitHubClient) CreateReviewForCommit(ctx context.Context, installation
 		return fmt.Errorf("creating App-authored review on pull request #%d: %w", number, err)
 	}
 	return nil
+}
+
+func (c AppGitHubClient) FindReviewForCommit(ctx context.Context, installationID int64, owner, repo string, number int, body string, event platform.ReviewEvent, commitID string) (bool, error) {
+	client, err := c.installationClient(ctx, installationID)
+	if err != nil {
+		return false, err
+	}
+	reviews, _, err := client.PullRequests.ListReviews(ctx, owner, repo, number, &gh.ListOptions{PerPage: 100})
+	if err != nil {
+		return false, fmt.Errorf("listing reviews on pull request #%d: %w", number, err)
+	}
+	wantState := reviewEventState(event)
+	for _, review := range reviews {
+		if review.GetCommitID() == commitID &&
+			strings.TrimSpace(review.GetBody()) == strings.TrimSpace(body) &&
+			strings.EqualFold(review.GetState(), wantState) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func reviewEventState(event platform.ReviewEvent) string {
+	switch event {
+	case platform.ReviewApprove:
+		return "APPROVED"
+	case platform.ReviewRequestChanges:
+		return "CHANGES_REQUESTED"
+	case platform.ReviewCommentEvent:
+		return "COMMENTED"
+	default:
+		return string(event)
+	}
 }
 
 func (c AppGitHubClient) AddPullRequestComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) error {

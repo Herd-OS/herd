@@ -32,6 +32,9 @@ func CreateRunnerRegistrationToken(ctx context.Context, client *gh.Client, owner
 	if token.ExpiresAt != nil {
 		expiresAt = token.ExpiresAt.Time
 	}
+	if expiresAt.IsZero() {
+		return RunnerRegistrationToken{}, fmt.Errorf("creating runner registration token for %s/%s: missing expires_at", owner, repo)
+	}
 	return RunnerRegistrationToken{
 		Token:     token.GetToken(),
 		ExpiresAt: expiresAt,
