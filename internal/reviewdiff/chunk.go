@@ -327,18 +327,28 @@ func buildCoverage(diff DiffSet, chunks []ReviewChunk, planned []plannedFile, op
 
 // IsAllowableNotReviewedFile reports whether an unreviewed file is explicitly non-material.
 func IsAllowableNotReviewedFile(file FileCoverage) bool {
+	if isSourceUnavailableReason(file.Reason) {
+		return false
+	}
 	switch {
-	case file.File.Generated:
+	case file.File.Generated && isSummarizedNotReviewedReason(file.Reason):
 		return true
-	case file.File.Binary:
+	case file.File.Binary && isSummarizedNotReviewedReason(file.Reason):
 		return true
-	case isLargeLockfileChange(file.File):
+	case isLargeLockfileChange(file.File) && isSummarizedNotReviewedReason(file.Reason):
 		return true
-	case isModeOnly(file.File):
+	case isModeOnly(file.File) && isSummarizedNotReviewedReason(file.Reason):
 		return true
 	default:
 		return isSummarizedNotReviewedReason(file.Reason)
 	}
+}
+
+func isSourceUnavailableReason(reason string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	return normalized == "patch unavailable from source" ||
+		normalized == "patch unavailable from github files api" ||
+		strings.HasPrefix(normalized, "source unavailable:")
 }
 
 func isSummarizedNotReviewedReason(reason string) bool {

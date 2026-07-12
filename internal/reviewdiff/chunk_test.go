@@ -206,7 +206,7 @@ func TestChunkForReviewOmittedGeneratedPathPreservesSourceUnavailableReason(t *t
 				Status:  ChangeModified,
 				Omitted: true,
 			},
-			wantComplete: true,
+			wantComplete: false,
 		},
 		{
 			name: "custom blocking source unavailable reason",

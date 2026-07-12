@@ -4147,16 +4147,8 @@ func TestReviewStandalone_ChunkedRepeatedUnparseablePostsManualIntervention(t *t
 	assert.Equal(t, 2, ag.opts[0].TotalChunks)
 	assert.Equal(t, 1, ag.opts[1].ChunkIndex, "retry should reuse the first chunk instead of advancing")
 
-	require.NotEmpty(t, prSvc.comments)
-	found := false
-	for _, c := range prSvc.comments {
-		if strings.Contains(c, "Agent review failed to produce valid output after 2 attempts") &&
-			strings.Contains(c, "/herd review") {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "expected a manual-intervention comment containing the canonical text and `/herd review`")
+	require.Len(t, prSvc.comments, 1)
+	assert.Equal(t, manualInterventionReviewComment, prSvc.comments[0])
 	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
 	assert.Empty(t, issueSvc.createdTitle, "standalone manual intervention must not create fix issues")
 	assert.Empty(t, wf.dispatched, "standalone manual intervention must not dispatch workers")
@@ -4316,16 +4308,8 @@ func TestReview_PostsCommentOnRepeatedUnparseable(t *testing.T) {
 	assert.Equal(t, 50, res.BatchPRNumber)
 	assert.Equal(t, 2, ag.calls)
 
-	require.NotEmpty(t, prSvc.comments)
-	found := false
-	for _, c := range prSvc.comments {
-		if strings.Contains(c, "Agent review failed to produce valid output after 2 attempts") &&
-			strings.Contains(c, "/herd review") {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "expected a manual-intervention comment containing the canonical text and `/herd review`")
+	require.Len(t, prSvc.comments, 1)
+	assert.Equal(t, manualInterventionReviewComment, prSvc.comments[0])
 }
 
 func TestReview_DoesNotSilentlyDrop(t *testing.T) {

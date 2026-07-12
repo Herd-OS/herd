@@ -216,6 +216,18 @@ func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) 
 				NotReviewed: true,
 				File:        reviewdiff.ChangedFile{Path: "dist/app.js", Generated: true, Omitted: true},
 			},
+			wantCount:  1,
+			wantBlocks: true,
+		},
+		{
+			name:   "generated file reason",
+			reason: "generated file",
+			file: reviewdiff.FileCoverage{
+				Path:        "dist/app.js",
+				Reason:      "generated file",
+				NotReviewed: true,
+				File:        reviewdiff.ChangedFile{Path: "dist/app.js", Generated: true, Omitted: true, OmitReason: "generated file"},
+			},
 			wantCount: 0,
 		},
 		{name: "source unavailable", reason: "patch unavailable from source", wantCount: 1, wantBlocks: true},

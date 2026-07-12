@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +20,10 @@ import (
 )
 
 const safetyValveLimit = 10
+
+var errManualInterventionNeeded = errors.New("manual intervention needed")
+
+const manualInterventionReviewComment = "⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry."
 
 type authenticatedLoginProvider interface {
 	AuthenticatedLogin(ctx context.Context) (string, error)
@@ -310,6 +315,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 
 	reviewResult, _, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, pr.Number)
+	if errors.Is(err, errManualInterventionNeeded) {
+		_ = postManualInterventionReviewComment(ctx, p, pr.Number)
+		return &ReviewResult{
+			BatchPRNumber:            pr.Number,
+			ManualInterventionNeeded: true,
+		}, nil
+	}
 	if err != nil {
 		// Agent failed (e.g., API error, suspicious output). Don't propagate the
 		// error — return a neutral result so the workflow succeeds and the review
@@ -318,8 +330,6 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
 	if reviewResult == nil {
-		// Both attempts produced unparseable output. A manual-intervention
-		// comment was already posted by runReviewWithRetry.
 		return &ReviewResult{
 			BatchPRNumber:            pr.Number,
 			ManualInterventionNeeded: true,
@@ -612,6 +622,11 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 		opts.PartialReview = !plan.Coverage.Complete
 
 		result, err := runReviewWithRetry(ctx, ag, p, chunk.Text, opts, prNumber)
+		if errors.Is(err, errManualInterventionNeeded) {
+			aggregate.ChunksReviewed = chunk.Index
+			aggregate.ManualIntervention = true
+			return nil, aggregate.ChunksReviewed, errManualInterventionNeeded
+		}
 		if err != nil {
 			aggregate.ChunksReviewed = chunk.Index - 1
 			aggregate.AgentError = err
@@ -799,6 +814,10 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	}
 
 	reviewResult, _, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, params.PRNumber)
+	if errors.Is(err, errManualInterventionNeeded) {
+		_ = postManualInterventionReviewComment(ctx, p, params.PRNumber)
+		return &ReviewStandaloneResult{ManualInterventionNeeded: true}, nil
+	}
 	if err != nil {
 		fmt.Printf("Review agent failed: %s\n", err)
 		return &ReviewStandaloneResult{}, nil
@@ -1025,10 +1044,10 @@ func findMaxFixCycle(allIssues []*platform.Issue) int {
 var unparseableRetryDelay = 5 * time.Second
 
 // runReviewWithRetry runs ag.Review and retries once on unparseable
-// output. If both attempts fail, it posts a manual-intervention comment
-// on the batch PR and returns (nil, nil). On agent-side error it
-// returns (nil, err). On success it returns the parsed result.
-func runReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform, diff string, opts agent.ReviewOptions, prNumber int) (*agent.ReviewResult, error) {
+// output. If both attempts fail, it returns errManualInterventionNeeded.
+// On agent-side error it returns (nil, err). On success it returns the
+// parsed result.
+func runReviewWithRetry(ctx context.Context, ag agent.Agent, _ platform.Platform, diff string, opts agent.ReviewOptions, _ int) (*agent.ReviewResult, error) {
 	res, err := ag.Review(ctx, diff, opts)
 	if err != nil {
 		return nil, err
@@ -1049,9 +1068,11 @@ func runReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform
 	if !isUnparseable(res2) {
 		return res2, nil
 	}
-	comment := "⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry."
-	_ = p.PullRequests().AddComment(ctx, prNumber, comment)
-	return nil, nil
+	return nil, errManualInterventionNeeded
+}
+
+func postManualInterventionReviewComment(ctx context.Context, p platform.Platform, prNumber int) error {
+	return p.PullRequests().AddComment(ctx, prNumber, manualInterventionReviewComment)
 }
 
 // isUnparseable returns true when the agent layer signaled an
