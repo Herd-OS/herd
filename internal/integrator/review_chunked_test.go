@@ -1,0 +1,205 @@
+package integrator
+
+import (
+	"context"
+	"testing"
+
+	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/platform"
+	"github.com/herd-os/herd/internal/reviewdiff"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type chunkCaptureAgent struct {
+	results []*agent.ReviewResult
+	diffs   []string
+	opts    []agent.ReviewOptions
+}
+
+func (a *chunkCaptureAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
+	return nil, nil
+}
+
+func (a *chunkCaptureAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOptions) (*agent.ExecResult, error) {
+	return nil, nil
+}
+
+func (a *chunkCaptureAgent) Review(_ context.Context, diff string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
+	a.diffs = append(a.diffs, diff)
+	a.opts = append(a.opts, opts)
+	idx := len(a.opts) - 1
+	if idx >= len(a.results) {
+		idx = len(a.results) - 1
+	}
+	return a.results[idx], nil
+}
+
+func (a *chunkCaptureAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
+}
+
+func TestChunkOptionsFromConfig(t *testing.T) {
+	cfg := &config.Config{Integrator: config.Integrator{ReviewDiff: config.ReviewDiff{
+		MaxChunkBytes:    123,
+		MaxFileBytes:     45,
+		MaxFilesPerChunk: 6,
+		MaxChunks:        7,
+	}}}
+
+	got := chunkOptionsFromConfig(cfg)
+
+	assert.Equal(t, 123, got.MaxChunkBytes)
+	assert.Equal(t, 45, got.MaxFileDiffBytes)
+	assert.Equal(t, 6, got.MaxFilesPerChunk)
+	assert.Equal(t, 7, got.MaxChunks)
+	assert.Equal(t, reviewdiff.DefaultMaxOmittedSummaryEntries, got.MaxOmittedSummaryEntries)
+}
+
+func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *testing.T) {
+	plan := reviewdiff.ChunkPlan{
+		DiffSet: reviewdiff.DiffSet{Source: "test", Files: []reviewdiff.ChangedFile{
+			{Path: "a.go"},
+			{Path: "b.go"},
+		}},
+		Chunks: []reviewdiff.ReviewChunk{
+			{Index: 1, Total: 2, Text: "diff-a", IncludedFiles: []reviewdiff.ChangedFile{{Path: "a.go"}}, UsedDiffBytes: 10},
+			{Index: 2, Total: 2, Text: "diff-b", IncludedFiles: []reviewdiff.ChangedFile{{Path: "b.go"}}, UsedDiffBytes: 10},
+		},
+		Coverage: reviewdiff.CoverageSummary{
+			Source:         "test",
+			TotalFiles:     2,
+			ReviewMode:     reviewdiff.CoverageModeChunked,
+			ChunksPlanned:  2,
+			ChunksReviewed: 2,
+			FilesReviewed:  2,
+			Complete:       true,
+		},
+	}
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{
+		{
+			Approved: true,
+			Summary:  "first ok",
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Missing nil check"},
+				{Severity: "CRITERIA", Description: "Acceptance criterion not verified"},
+			},
+		},
+		{
+			Approved: false,
+			Summary:  "second found issue",
+			Findings: []agent.ReviewFinding{
+				{Severity: "high", Description: "  Missing   nil check  "},
+				{Severity: "LOW", Description: "Small cleanup"},
+			},
+		},
+	}}
+
+	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{RepoRoot: "/repo"}, 50)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 2, chunksReviewed)
+	assert.False(t, result.Approved)
+	assert.Equal(t, []string{"diff-a", "diff-b"}, ag.diffs)
+	require.Len(t, ag.opts, 2)
+	assert.Equal(t, 1, ag.opts[0].ChunkIndex)
+	assert.Equal(t, 2, ag.opts[0].TotalChunks)
+	assert.Equal(t, "a.go", ag.opts[0].ChunkIncludedPathRange)
+	assert.True(t, ag.opts[0].ChunkedReview)
+	assert.False(t, ag.opts[0].PartialReview)
+	assert.Contains(t, ag.opts[0].CoverageSummary, "Chunks reviewed: 2/2")
+	assert.Equal(t, 2, ag.opts[1].ChunkIndex)
+	assert.Equal(t, "b.go", ag.opts[1].ChunkIncludedPathRange)
+	require.Len(t, result.Findings, 3)
+	assert.Equal(t, "HIGH", result.Findings[0].Severity)
+	assert.Equal(t, "CRITERIA", result.Findings[1].Severity)
+	assert.Equal(t, "LOW", result.Findings[2].Severity)
+	assert.Contains(t, result.Summary, "Chunked review completed across 2 chunk(s)")
+}
+
+func TestRunChunkedReviewWithRetryMaxChunksDoesNotApprove(t *testing.T) {
+	chunks := make([]reviewdiff.ReviewChunk, 8)
+	results := make([]*agent.ReviewResult, 8)
+	for i := range chunks {
+		chunks[i] = reviewdiff.ReviewChunk{Index: i + 1, Total: 8, Text: "diff", IncludedFiles: []reviewdiff.ChangedFile{{Path: "file.go"}}}
+		results[i] = &agent.ReviewResult{Approved: true, Summary: "ok"}
+	}
+	plan := reviewdiff.ChunkPlan{
+		Chunks: chunks,
+		Coverage: reviewdiff.CoverageSummary{
+			Source:            "test",
+			TotalFiles:        20,
+			ReviewMode:        reviewdiff.CoverageModePartial,
+			ChunksPlanned:     8,
+			FilesReviewed:     8,
+			FilesNotReviewed:  12,
+			Complete:          false,
+			ExceededMaxChunks: true,
+			RequiredChunks:    20,
+			MaxChunks:         8,
+		},
+	}
+	ag := &chunkCaptureAgent{results: results}
+
+	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 8, chunksReviewed)
+	assert.Len(t, ag.opts, 8)
+	assert.False(t, result.Approved)
+}
+
+func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) {
+	tests := []struct {
+		name       string
+		reason     string
+		wantCount  int
+		wantBlocks bool
+	}{
+		{name: "generated", reason: "generated file", wantCount: 0},
+		{name: "binary", reason: "binary file", wantCount: 0},
+		{name: "large lockfile", reason: "large lockfile diff", wantCount: 0},
+		{name: "mode only", reason: "mode-only change", wantCount: 0},
+		{name: "source unavailable", reason: "patch unavailable from source", wantCount: 0},
+		{name: "max chunks", reason: "max chunks reached", wantCount: 1, wantBlocks: true},
+		{name: "maximum reviewable size", reason: "file diff exceeds maximum reviewable size", wantCount: 1, wantBlocks: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := reviewdiff.ChunkPlan{Coverage: reviewdiff.CoverageSummary{
+				NotReviewedFiles: []reviewdiff.FileCoverage{{Path: "file.go", Reason: tt.reason, NotReviewed: true}},
+			}}
+
+			got := materialNotReviewed(plan)
+
+			assert.Len(t, got, tt.wantCount)
+			assert.Equal(t, tt.wantBlocks, coverageBlocksApproval(plan))
+		})
+	}
+}
+
+func TestRunChunkedReviewWithRetryApprovesWhenOnlyAllowableFilesAreOmitted(t *testing.T) {
+	plan := reviewdiff.ChunkPlan{Coverage: reviewdiff.CoverageSummary{
+		Source:        "test",
+		TotalFiles:    1,
+		ReviewMode:    reviewdiff.CoverageModeFull,
+		ChunksPlanned: 0,
+		Complete:      true,
+		NotReviewedFiles: []reviewdiff.FileCoverage{
+			{Path: "dist/app.js", Reason: "generated file", NotReviewed: true},
+		},
+	}}
+
+	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), &chunkCaptureAgent{}, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 0, chunksReviewed)
+	assert.True(t, result.Approved)
+}
+
+var _ platform.Platform = (*mockPlatform)(nil)

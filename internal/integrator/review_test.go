@@ -4031,10 +4031,8 @@ func TestReviewStandalone_PostsComment(t *testing.T) {
 	assert.Empty(t, issueSvc.createdTitle, "standalone review must not create fix issues")
 	assert.Empty(t, wf.dispatched, "standalone review must not dispatch workers")
 
-	// No review event should be a request-changes one (Approved path posts CreateReview)
-	for _, r := range prSvc.reviews {
-		assert.NotEqual(t, platform.ReviewRequestChanges, r.event, "standalone review must not create request-changes review")
-	}
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
 }
 
 func TestReviewStandalone_Approved(t *testing.T) {
