@@ -165,6 +165,7 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		CoverageSummary:        reviewdiff.FormatChunkedCoverageSummary(plan, 1, reviewdiff.DefaultMaxOmittedSummaryEntries),
 		PartialReview:          !plan.Coverage.Complete,
 		OnlyFirstChunkIncluded: totalChunks > 1,
+		NoReviewableChunks:     !plan.Coverage.Complete && len(plan.Chunks) == 0 && chunkIndex == 0,
 		Comments:               general,
 		InlineComments:         inline,
 		CIStatus:               ciStatus,
@@ -210,6 +211,7 @@ type reviewCmdPromptData struct {
 	CoverageSummary        string
 	PartialReview          bool
 	OnlyFirstChunkIncluded bool
+	NoReviewableChunks     bool
 	Comments               []reviewCmdComment
 	InlineComments         []reviewCmdInlineComment
 	CIStatus               string
@@ -242,7 +244,10 @@ Head: {{.PRHeadBranch}}
 CI status (head ref): {{.CIStatus}}
 
 {{.CoverageSummary}}
-{{if .OnlyFirstChunkIncluded}}
+{{if .NoReviewableChunks}}
+No reviewable diff chunks were produced for this pull request, so this interactive prompt includes no source diffs to review. The Diff Coverage section is authoritative for omitted paths and reasons; do not conclude that the PR was reviewed.
+
+{{else if .OnlyFirstChunkIncluded}}
 This pull request was split into {{.TotalChunks}} review chunks. Only chunk 1/{{.TotalChunks}} is included in this interactive prompt. Additional chunks are not hidden as reviewed; inspect them separately before making full-PR conclusions.
 Review only the included diffs in this chunk.
 
