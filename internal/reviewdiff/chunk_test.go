@@ -339,7 +339,7 @@ func TestChunkForReviewOversizedSingleFile(t *testing.T) {
 			name:  "truncated file fits chunk",
 			patch: strings.Repeat("+x\n", 20),
 			opts: ChunkOptions{
-				MaxChunkBytes:            80,
+				MaxChunkBytes:            500,
 				MaxFileDiffBytes:         40,
 				MaxFilesPerChunk:         10,
 				MaxChunks:                8,
@@ -363,6 +363,19 @@ func TestChunkForReviewOversizedSingleFile(t *testing.T) {
 			wantNotReviewed: 1,
 			wantReason:      "file diff exceeds maximum reviewable size",
 		},
+		{
+			name:  "patch fits but rendered chunk does not fit",
+			patch: "+x\n",
+			opts: ChunkOptions{
+				MaxChunkBytes:            len("+x\n"),
+				MaxFileDiffBytes:         100,
+				MaxFilesPerChunk:         10,
+				MaxChunks:                8,
+				MaxOmittedSummaryEntries: 10,
+			},
+			wantNotReviewed: 1,
+			wantReason:      "file diff exceeds maximum reviewable size",
+		},
 	}
 
 	for _, tt := range tests {
@@ -374,6 +387,9 @@ func TestChunkForReviewOversizedSingleFile(t *testing.T) {
 			assert.Equal(t, boolToInt(tt.wantReviewed), plan.Coverage.FilesReviewed)
 			assert.Equal(t, tt.wantTruncatedDiff, plan.Coverage.FilesReviewedWithTruncatedDiffs)
 			assert.Equal(t, tt.wantNotReviewed, plan.Coverage.FilesNotReviewed)
+			for _, chunk := range plan.Chunks {
+				assert.LessOrEqual(t, len(chunk.Text), tt.opts.MaxChunkBytes)
+			}
 			if tt.wantReviewed {
 				require.Len(t, plan.Chunks, 1)
 				assert.Equal(t, tt.wantTruncated, plan.Chunks[0].IncludedFiles[0].Truncated)
@@ -392,7 +408,7 @@ func TestFormatChunkedCoverageSummaryCompleteAndPartialWording(t *testing.T) {
 	complete := ChunkForReview(DiffSet{
 		Source: "github",
 		Files:  []ChangedFile{sourceFile("src/a.go", "aaa")},
-	}, ChunkOptions{MaxChunkBytes: 100, MaxFileDiffBytes: 100, MaxFilesPerChunk: 10, MaxChunks: 8})
+	}, ChunkOptions{MaxChunkBytes: 1000, MaxFileDiffBytes: 100, MaxFilesPerChunk: 10, MaxChunks: 8})
 	completeSummary := FormatChunkedCoverageSummary(complete, len(complete.Chunks), 10)
 	assert.Contains(t, completeSummary, "Review coverage is complete")
 	assert.NotContains(t, completeSummary, "partial review")
@@ -403,7 +419,7 @@ func TestFormatChunkedCoverageSummaryCompleteAndPartialWording(t *testing.T) {
 		sourceFile("src/003.go", strings.Repeat("c", 20)),
 	}
 	partial := ChunkForReview(DiffSet{Source: "github", Files: files}, ChunkOptions{
-		MaxChunkBytes:            30,
+		MaxChunkBytes:            1000,
 		MaxFileDiffBytes:         100,
 		MaxFilesPerChunk:         1,
 		MaxChunks:                2,

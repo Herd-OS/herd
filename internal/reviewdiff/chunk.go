@@ -212,6 +212,16 @@ func ChunkForReview(diff DiffSet, opts ChunkOptions) ChunkPlan {
 			singleChunk.OmittedFiles = plannedOmittedFiles(planned, idx, singleChunk.IncludedFiles)
 			renderedBytes = len(renderChunk(diff, singleChunk, opts))
 		}
+		if renderedBytes > opts.MaxChunkBytes {
+			planned[idx].reviewable = false
+			planned[idx].notReviewed = true
+			planned[idx].truncated = false
+			planned[idx].reason = "file diff exceeds maximum reviewable size"
+			planned[idx].file.Omitted = true
+			planned[idx].file.Truncated = false
+			planned[idx].file.OmitReason = planned[idx].reason
+			continue
+		}
 
 		current.IncludedFiles = append(current.IncludedFiles, planned[idx].file)
 		current.UsedDiffBytes = renderedBytes
