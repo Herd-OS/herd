@@ -381,6 +381,29 @@ func TestHandlerAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing
 	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
+func TestHandlerAcknowledgementCompletionFailureRedeliveryDoesNotAckAgain(t *testing.T) {
+	st := newFakeStore()
+	st.completeErrs = []error{errors.New("store down"), nil, nil}
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os plan")
+
+	_, err := h.HandleIssueComment(context.Background(), event)
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "record acknowledgement intent")
+	require.NoError(t, retryErr)
+	assert.Len(t, gh.comments, 1)
+	assert.Empty(t, dispatcher.dispatched)
+	key := "repo:42:comment:123:command:plan"
+	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
+	require.Len(t, st.commandRecords, 1)
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","raw":"@herd-os plan"}`, string(st.commandRecords[0].Metadata))
+}
+
 func TestHandlerDispatchCompletionFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
 	st := newFakeStore()
 	st.completeErrs = []error{nil, errors.New("store down"), nil}

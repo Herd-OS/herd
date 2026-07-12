@@ -133,6 +133,36 @@ func TestAppGitHubClientFindReviewForCommitPaginates(t *testing.T) {
 	assert.True(t, found)
 }
 
+func TestAppGitHubClientFindReviewForCommitRequiresAppActor(t *testing.T) {
+	tests := []struct {
+		name  string
+		actor string
+		want  bool
+	}{
+		{name: "non Herd actor ignored", actor: "other-bot[bot]", want: false},
+		{name: "configured App actor accepted", actor: "herd-os[bot]", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newReviewTestGitHub(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/repos/octo/widgets/pulls/42/reviews", r.URL.Path)
+				json.NewEncoder(w).Encode([]gh.PullRequestReview{{
+					CommitID: gh.Ptr("head"),
+					Body:     gh.Ptr("body"),
+					State:    gh.Ptr("APPROVED"),
+					User:     &gh.User{Login: gh.Ptr(tt.actor)},
+				}})
+			}))
+			client.AppLogin = "herd-os"
+
+			found, err := client.FindReviewForCommit(context.Background(), 99, "octo", "widgets", 42, "body", platform.ReviewApprove, "head")
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, found)
+		})
+	}
+}
+
 func TestAppGitHubClientAddPullRequestComment(t *testing.T) {
 	client := newReviewTestGitHub(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/repos/octo/widgets/issues/42/comments", r.URL.Path)

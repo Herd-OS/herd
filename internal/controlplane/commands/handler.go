@@ -324,11 +324,12 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 			}
 			ackMetadata := commandMetadataWithAck(record.Metadata, ackID)
 			ackResultRef := fmt.Sprintf("issue_comment:%d", ackID)
+			if err := h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata); err != nil {
+				_ = h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef)
+				return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement comment: %w", err)
+			}
 			if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef); err != nil {
 				return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement intent: %w", err)
-			}
-			if err := h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata); err != nil {
-				return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement comment: %w", err)
 			}
 			if !dispatchable {
 				return repo, false, idempotencyKey, ackMetadata, nil
@@ -365,11 +366,12 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 	}
 	ackMetadata := commandMetadataWithAck(record.Metadata, ackID)
 	ackResultRef := fmt.Sprintf("issue_comment:%d", ackID)
+	if err := h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata); err != nil {
+		_ = h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef)
+		return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement comment: %w", err)
+	}
 	if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef); err != nil {
 		return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement intent: %w", err)
-	}
-	if err := h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata); err != nil {
-		return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement comment: %w", err)
 	}
 	return repo, true, idempotencyKey, ackMetadata, nil
 }

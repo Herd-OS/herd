@@ -196,6 +196,12 @@ func gitAuthEnv(root, cloneURL, token string) ([]string, func(), error) {
 	if err := os.WriteFile(tokenFile, []byte(token), 0600); err != nil {
 		return nil, func() {}, fmt.Errorf("write git token file: %w", err)
 	}
+	cleanupOnError := true
+	defer func() {
+		if cleanupOnError {
+			_ = os.Remove(tokenFile)
+		}
+	}()
 	script := "#!/bin/sh\n" +
 		"case \"$1\" in\n" +
 		"*Username*) printf '%s\\n' 'x-access-token' ;;\n" +
@@ -205,6 +211,7 @@ func gitAuthEnv(root, cloneURL, token string) ([]string, func(), error) {
 	if err := os.WriteFile(askpass, []byte(script), 0700); err != nil {
 		return nil, func() {}, fmt.Errorf("write git askpass helper: %w", err)
 	}
+	cleanupOnError = false
 	cleanup := func() {
 		_ = os.Remove(askpass)
 		_ = os.Remove(tokenFile)

@@ -143,6 +143,17 @@ func TestProductionServerAcceptsInjectedHostedControlPlaneDependencies(t *testin
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 }
 
+func TestProductionServerFailsWhenDefaultAppRoutesCannotBeConstructed(t *testing.T) {
+	deps := productionTestDependencies(store.NewMemoryStore())
+	deps.RegisterRepositoryRoute = nil
+	deps.RunnerRegistrationTokenRoute = nil
+
+	_, err := NewServer(validProductionConfig(), deps)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GitHub App auth is not configured")
+}
+
 func TestStartReconcilerLoopStartsAndStopsWithContext(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()

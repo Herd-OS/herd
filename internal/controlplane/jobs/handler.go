@@ -198,7 +198,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
 			return
 		}
-		_, _ = h.store.RecordJobResult(r.Context(), store.JobResult{
+		_, err = h.store.RecordJobResult(r.Context(), store.JobResult{
 			JobID:          envelope.JobID,
 			IdempotencyKey: ResultIdempotencyKey(result, payload),
 			Status:         StatusFailure,
@@ -206,6 +206,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Metadata:       metadata,
 			CreatedAt:      h.now(),
 		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record rejected job result"})
+			return
+		}
 		writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
 		return
 	}
@@ -574,6 +578,9 @@ func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, w
 	}
 	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
 	if errors.Is(err, store.ErrNotFound) {
+		if err := h.recordPatchMutationAttempt(ctx, idempotencyKey, job.RepositoryID, metadata); err != nil {
+			return false, nil, err
+		}
 		return true, nil, nil
 	}
 	if err != nil {

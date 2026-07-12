@@ -13,6 +13,7 @@ import (
 type AppGitHubClient struct {
 	TokenSource appauth.TokenSource
 	NewClient   func(ctx context.Context, installationID int64) (*gh.Client, error)
+	AppLogin    string
 }
 
 func (c AppGitHubClient) CreateCommitStatus(ctx context.Context, installationID int64, owner, repo, sha string, status platform.CommitStatus) error {
@@ -116,7 +117,8 @@ func (c AppGitHubClient) FindReviewForCommit(ctx context.Context, installationID
 		for _, review := range reviews {
 			if review.GetCommitID() == commitID &&
 				strings.TrimSpace(review.GetBody()) == strings.TrimSpace(body) &&
-				strings.EqualFold(review.GetState(), wantState) {
+				strings.EqualFold(review.GetState(), wantState) &&
+				c.matchesAppActor(review.GetUser().GetLogin()) {
 				return true, nil
 			}
 		}
@@ -125,6 +127,20 @@ func (c AppGitHubClient) FindReviewForCommit(ctx context.Context, installationID
 		}
 		opts.Page = resp.NextPage
 	}
+}
+
+func (c AppGitHubClient) matchesAppActor(login string) bool {
+	want := strings.TrimSpace(c.AppLogin)
+	if want == "" {
+		return true
+	}
+	if strings.EqualFold(login, want) {
+		return true
+	}
+	if !strings.HasSuffix(strings.ToLower(want), "[bot]") && strings.EqualFold(login, want+"[bot]") {
+		return true
+	}
+	return false
 }
 
 func reviewEventState(event platform.ReviewEvent) string {

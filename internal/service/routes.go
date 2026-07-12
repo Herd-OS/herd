@@ -12,7 +12,8 @@ import (
 	"github.com/herd-os/herd/internal/controlplane/workflowevents"
 )
 
-func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
+func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) error {
+	productionLike := cfg.Env == "production" || cfg.Env == "staging"
 	webhookOptions := []cpgithub.Option{cpgithub.WithAppLogin(cfg.AppLogin)}
 	if deps.IssueCommentCommandHandler != nil {
 		webhookOptions = append(webhookOptions, cpgithub.WithIssueCommentCommandHandler(deps.IssueCommentCommandHandler))
@@ -37,6 +38,9 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
 			PrivateKeyPEM: []byte(cfg.GitHubAppPrivateKey),
 		}, cfg.AppLogin, cfg.PublicURL)
 		if err != nil {
+			if productionLike {
+				return fmt.Errorf("repository registration GitHub App auth is not configured: %w", err)
+			}
 			registerHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{
 					"error": fmt.Sprintf("repository registration GitHub App auth is not configured: %s", err),
@@ -64,6 +68,9 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
 				PrivateKeyPEM: []byte(cfg.GitHubAppPrivateKey),
 			})
 			if err != nil {
+				if productionLike {
+					return fmt.Errorf("runner registration GitHub App auth is not configured: %w", err)
+				}
 				runnerTokenHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{
 						"error": fmt.Sprintf("runner registration GitHub App auth is not configured: %s", err),
@@ -126,6 +133,7 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
 		workflowEventsHandler = http.HandlerFunc(notImplementedHandler)
 	}
 	mux.Handle("POST /api/v1/workflow-events", workflowEventsHandler)
+	return nil
 }
 
 func notImplementedHandler(w http.ResponseWriter, _ *http.Request) {

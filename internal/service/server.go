@@ -43,7 +43,9 @@ func NewServer(cfg Config, deps Dependencies) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	registerHealthRoutes(mux, cfg, deps)
-	registerAPIRoutes(mux, cfg, deps)
+	if err := registerAPIRoutes(mux, cfg, deps); err != nil {
+		return nil, err
+	}
 
 	return mux, nil
 }

@@ -411,6 +411,36 @@ func TestHandlerRecordsFailureWhenPatchArtifactMissingFromBundle(t *testing.T) {
 	assert.Empty(t, st.mutationCompletions)
 }
 
+func TestHandlerRetriesTerminalPatchValidationWhenFailureResultCannotBeRecorded(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.recordJobResultErrs = []error{assert.AnError, nil}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/other", "job-1", "base", "head", "patch.diff", patch)
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   fixedPatchApplier{},
+		AppTokenSource: fakeAppTokenSource{},
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", validWorkerPayload("job-1", "head")))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", validWorkerPayload("job-1", "head")))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	assert.Contains(t, first.Body.String(), "record rejected job result")
+	require.Equal(t, http.StatusConflict, second.Code)
+	require.Len(t, st.results, 1)
+	assert.Equal(t, StatusFailure, st.results[0].Status)
+	assert.Contains(t, string(st.results[0].Metadata), "patch repository does not match result repository")
+}
+
 func TestHandlerAppliesValidPatchArtifactAndRecordsCommitSHA(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -671,6 +701,38 @@ func TestHandlerRetriesWorkerPatchAfterApplyFailure(t *testing.T) {
 	assert.Contains(t, third.Body.String(), `"created":false`)
 	assert.Len(t, applier.requests, 2)
 	assert.Len(t, st.results, 1)
+}
+
+func TestHandlerRetryAfterPatchMutationAttemptRecordFailureRecordsBeforeApply(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("9", 40)}}
+	st := newResultStore()
+	st.recordMutationErrs = []error{assert.AnError, nil}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+	})
+	payload := validWorkerPayload("job-1", "head")
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusConflict, first.Code)
+	assert.Contains(t, first.Body.String(), "record patch mutation attempt")
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, applier.requests, 1)
+	assert.Len(t, st.mutationAttempts, 1)
+	assert.Len(t, st.results, 1)
+	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("9", 40))
 }
 
 func TestHandlerRetryAfterRecordJobResultFailureDoesNotReapplyPatch(t *testing.T) {
@@ -942,6 +1004,7 @@ type resultStore struct {
 	mutationCompleteErrs []error
 	recordJobResultErrs  []error
 	completeIdemErrs     map[string][]error
+	recordMutationErrs   []error
 }
 
 func newResultStore() *resultStore {
@@ -1052,6 +1115,13 @@ func (s *resultStore) FailIdempotencyKey(_ context.Context, key string, errorMes
 func (s *resultStore) RecordGitHubMutationAttempt(_ context.Context, attempt store.GitHubMutationAttempt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.recordMutationErrs) > 0 {
+		err := s.recordMutationErrs[0]
+		s.recordMutationErrs = s.recordMutationErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	s.mutationAttempts = append(s.mutationAttempts, attempt)
 	return nil
 }

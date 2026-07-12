@@ -145,6 +145,22 @@ func TestGitAuthEnvKeepsTokenOutOfAskpassScript(t *testing.T) {
 	assertTempDirDoesNotContain(t, root, "x-access-token:"+token)
 }
 
+func TestGitAuthEnvRemovesTokenFileWhenAskpassWriteFails(t *testing.T) {
+	token := "ghs_secret_installation_token"
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, "git-askpass.sh"), 0700))
+
+	env, cleanup, err := gitAuthEnv(root, "https://github.com/acme/widgets.git", token)
+
+	require.Error(t, err)
+	assert.Empty(t, env)
+	cleanup()
+	assert.NotContains(t, err.Error(), token)
+	_, statErr := os.Stat(filepath.Join(root, "git-token"))
+	assert.True(t, os.IsNotExist(statErr))
+	assertTempDirDoesNotContain(t, root, token)
+}
+
 func TestGitAuthEnvDoesNotExposeTokenToGitProcess(t *testing.T) {
 	token := "ghs_secret_installation_token"
 	root := t.TempDir()
