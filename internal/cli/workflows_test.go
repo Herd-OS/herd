@@ -147,20 +147,22 @@ func TestMonitorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {
 
 func TestCallbackWorkflows_RenderControlPlaneURL(t *testing.T) {
 	tests := []struct {
-		name           string
-		controlPlane   string
-		wantURL        string
-		wantHostedOnly bool
+		name                 string
+		controlPlane         string
+		wantURL              string
+		wantRepositoryVarURL bool
+		wantHostedLiteral    bool
 	}{
 		{
-			name:           "default hosted",
-			wantURL:        "https://api.herd-os.com",
-			wantHostedOnly: true,
+			name:                 "default hosted",
+			wantURL:              "https://api.herd-os.com",
+			wantRepositoryVarURL: true,
 		},
 		{
-			name:         "self hosted",
-			controlPlane: "https://herd.example.com",
-			wantURL:      "https://herd.example.com",
+			name:              "self hosted",
+			controlPlane:      "https://herd.example.com",
+			wantURL:           "https://herd.example.com",
+			wantHostedLiteral: false,
 		},
 	}
 
@@ -183,11 +185,63 @@ func TestCallbackWorkflows_RenderControlPlaneURL(t *testing.T) {
 					assert.Contains(t, s, "HERD_CONTROL_PLANE_URL:")
 					assert.Contains(t, s, tt.wantURL)
 					assert.Contains(t, s, "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events")
-					if !tt.wantHostedOnly {
+					if tt.wantRepositoryVarURL {
+						assert.Contains(t, s, "vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com'")
+					} else {
+						assert.NotContains(t, s, "vars.HERD_CONTROL_PLANE_URL")
+					}
+					if !tt.wantHostedLiteral {
 						assert.NotContains(t, s, "HERD_CONTROL_PLANE_URL: https://api.herd-os.com")
 					}
 					assert.NotContains(t, s, "HERD_GITHUB_TOKEN")
 					assert.NotContains(t, s, "GITHUB_TOKEN")
+					assert.NotContains(t, s, "GH_TOKEN")
+				})
+			}
+		})
+	}
+}
+
+func TestInstallCallbackWorkflowsRenderControlPlaneURL(t *testing.T) {
+	tests := []struct {
+		name         string
+		controlPlane string
+		want         string
+		notWant      string
+	}{
+		{
+			name:    "default uses repository variable fallback",
+			want:    "HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}",
+			notWant: "HERD_CONTROL_PLANE_URL: https://api.herd-os.com",
+		},
+		{
+			name:         "self hosted uses configured url",
+			controlPlane: "https://herd.example.com",
+			want:         `HERD_CONTROL_PLANE_URL: "https://herd.example.com"`,
+			notWant:      "HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}",
+		},
+	}
+
+	callbackWorkflows := []string{"herd-integrator.yml", "herd-monitor.yml"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := config.Default()
+			cfg.ControlPlaneURL = tt.controlPlane
+
+			require.NoError(t, installWorkflows(dir, cfg))
+
+			for _, name := range callbackWorkflows {
+				t.Run(name, func(t *testing.T) {
+					data, err := os.ReadFile(filepath.Join(dir, ".github", "workflows", name))
+					require.NoError(t, err)
+					s := string(data)
+
+					assert.Contains(t, s, tt.want)
+					assert.NotContains(t, s, tt.notWant)
+					assert.NotContains(t, s, "HERD_GITHUB_TOKEN")
+					assert.NotContains(t, s, "GITHUB_TOKEN")
+					assert.NotContains(t, s, "GH_TOKEN")
 				})
 			}
 		})

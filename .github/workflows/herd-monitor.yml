@@ -19,7 +19,7 @@ jobs:
       - name: Request hosted monitor patrol
         env:
           HERD_RUNNER: "true"
-          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           REPOSITORY: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
         run: |

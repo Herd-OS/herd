@@ -34,7 +34,7 @@ jobs:
       - name: Request hosted integration
         env:
           HERD_RUNNER: "true"
-          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
@@ -89,7 +89,7 @@ jobs:
       - name: Request hosted CI reconciliation
         env:
           HERD_RUNNER: "true"
-          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           HEAD_BRANCH: ${{ github.event.check_run.check_suite.head_branch }}
           CHECK_RUN_ID: ${{ github.event.check_run.id }}
           CHECK_RUN_CONCLUSION: ${{ github.event.check_run.conclusion }}
@@ -144,7 +144,7 @@ jobs:
       - name: Request hosted issue-close reconciliation
         env:
           HERD_RUNNER: "true"
-          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPOSITORY: ${{ github.repository }}
@@ -196,7 +196,7 @@ jobs:
       - name: Request hosted review reconciliation
         env:
           HERD_RUNNER: "true"
-          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           REVIEW_STATE: ${{ github.event.review.state }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -244,7 +244,7 @@ jobs:
       - name: Request hosted cleanup
         env:
           HERD_RUNNER: "true"
-          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_MERGED: ${{ github.event.pull_request.merged }}
           REPOSITORY: ${{ github.repository }}

@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/reconciler"
@@ -27,21 +29,23 @@ func main() {
 	}
 
 	ctx := context.Background()
-	st, err := store.OpenPostgresStore(ctx, cfg.DatabaseURL)
+	st, err := openServiceStore(ctx, cfg)
 	if err != nil {
 		logger.Fatalf("open postgres store: %v", err)
 	}
-	defer func() {
-		if err := st.Close(); err != nil {
-			logger.Printf("close store: %v", err)
-		}
-	}()
+	if st != nil {
+		defer func() {
+			if err := st.Close(); err != nil {
+				logger.Printf("close store: %v", err)
+			}
+		}()
+	}
 
 	deps := service.Dependencies{
 		Logger: logger,
 		Store:  st,
 	}
-	if cfg.ReconcilerEnabled {
+	if cfg.ReconcilerEnabled && st != nil {
 		deps.Reconciler = &reconciler.Reconciler{Store: st}
 	}
 	stopReconciler, started := service.StartReconcilerLoop(ctx, cfg, deps)
@@ -68,4 +72,14 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatalf("serve: %v", err)
 	}
+}
+
+func openServiceStore(ctx context.Context, cfg service.Config) (*store.PostgresStore, error) {
+	if strings.TrimSpace(cfg.DatabaseURL) == "" {
+		if cfg.Env == "production" {
+			return nil, fmt.Errorf("HERD_DATABASE_URL is required")
+		}
+		return nil, nil
+	}
+	return store.OpenPostgresStore(ctx, cfg.DatabaseURL)
 }

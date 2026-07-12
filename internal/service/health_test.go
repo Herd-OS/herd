@@ -58,6 +58,12 @@ func TestReadyz(t *testing.T) {
 			wantBody:   "storage not ready",
 		},
 		{
+			name:       "development health smoke keeps readiness storage backed",
+			cfg:        Config{Env: "development"},
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "storage not ready",
+		},
+		{
 			name: "storage unhealthy",
 			cfg:  validConfig,
 			store: unhealthyStore{
