@@ -30,6 +30,43 @@ func TestAppGitHubClientCreateCommitStatus(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAppGitHubClientFindCommitStatusPaginates(t *testing.T) {
+	client := newReviewTestGitHub(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Equal(t, "/repos/octo/widgets/commits/head/statuses", r.URL.Path)
+		switch r.URL.Query().Get("page") {
+		case "":
+			w.Header().Set("Link", `<http://`+r.Host+`/repos/octo/widgets/commits/head/statuses?page=2>; rel="next"`)
+			json.NewEncoder(w).Encode([]gh.RepoStatus{{
+				Context:     gh.Ptr(HerdReviewContext),
+				State:       gh.Ptr("pending"),
+				Description: gh.Ptr("different"),
+				TargetURL:   gh.Ptr("https://example.test/run"),
+			}})
+		case "2":
+			json.NewEncoder(w).Encode([]gh.RepoStatus{{
+				Context:     gh.Ptr(HerdReviewContext),
+				State:       gh.Ptr("success"),
+				Description: gh.Ptr("done"),
+				TargetURL:   gh.Ptr("https://example.test/run"),
+			}})
+		default:
+			assert.Failf(t, "unexpected page", "page=%q", r.URL.Query().Get("page"))
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	found, err := client.FindCommitStatus(context.Background(), 99, "octo", "widgets", "head", platform.CommitStatus{
+		State:       "success",
+		Context:     HerdReviewContext,
+		Description: "done",
+		TargetURL:   "https://example.test/run",
+	})
+
+	require.NoError(t, err)
+	assert.True(t, found)
+}
+
 func TestAppGitHubClientGetPullRequest(t *testing.T) {
 	client := newReviewTestGitHub(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/repos/octo/widgets/pulls/42", r.URL.Path)
@@ -64,6 +101,36 @@ func TestAppGitHubClientCreateReviewForCommit(t *testing.T) {
 	err := client.CreateReviewForCommit(context.Background(), 99, "octo", "widgets", 42, "body", platform.ReviewRequestChanges, "head")
 
 	require.NoError(t, err)
+}
+
+func TestAppGitHubClientFindReviewForCommitPaginates(t *testing.T) {
+	client := newReviewTestGitHub(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Equal(t, "/repos/octo/widgets/pulls/42/reviews", r.URL.Path)
+		switch r.URL.Query().Get("page") {
+		case "":
+			w.Header().Set("Link", `<http://`+r.Host+`/repos/octo/widgets/pulls/42/reviews?page=2>; rel="next"`)
+			json.NewEncoder(w).Encode([]gh.PullRequestReview{{
+				CommitID: gh.Ptr("head"),
+				Body:     gh.Ptr("different"),
+				State:    gh.Ptr("COMMENTED"),
+			}})
+		case "2":
+			json.NewEncoder(w).Encode([]gh.PullRequestReview{{
+				CommitID: gh.Ptr("head"),
+				Body:     gh.Ptr("body"),
+				State:    gh.Ptr("COMMENTED"),
+			}})
+		default:
+			assert.Failf(t, "unexpected page", "page=%q", r.URL.Query().Get("page"))
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	found, err := client.FindReviewForCommit(context.Background(), 99, "octo", "widgets", 42, " body\n", platform.ReviewCommentEvent, "head")
+
+	require.NoError(t, err)
+	assert.True(t, found)
 }
 
 func TestAppGitHubClientAddPullRequestComment(t *testing.T) {

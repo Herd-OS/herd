@@ -40,19 +40,25 @@ func (c AppGitHubClient) FindCommitStatus(ctx context.Context, installationID in
 	if err != nil {
 		return false, err
 	}
-	statuses, _, err := client.Repositories.ListStatuses(ctx, owner, repo, sha, &gh.ListOptions{PerPage: 100})
-	if err != nil {
-		return false, fmt.Errorf("listing commit statuses on %s/%s@%s: %w", owner, repo, sha, err)
-	}
-	for _, existing := range statuses {
-		if existing.GetContext() == status.Context &&
-			existing.GetState() == status.State &&
-			existing.GetTargetURL() == status.TargetURL &&
-			existing.GetDescription() == status.Description {
-			return true, nil
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		statuses, resp, err := client.Repositories.ListStatuses(ctx, owner, repo, sha, opts)
+		if err != nil {
+			return false, fmt.Errorf("listing commit statuses on %s/%s@%s: %w", owner, repo, sha, err)
 		}
+		for _, existing := range statuses {
+			if existing.GetContext() == status.Context &&
+				existing.GetState() == status.State &&
+				existing.GetTargetURL() == status.TargetURL &&
+				existing.GetDescription() == status.Description {
+				return true, nil
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			return false, nil
+		}
+		opts.Page = resp.NextPage
 	}
-	return false, nil
 }
 
 func (c AppGitHubClient) GetPullRequest(ctx context.Context, installationID int64, owner, repo string, number int) (*platform.PullRequest, error) {
@@ -100,19 +106,25 @@ func (c AppGitHubClient) FindReviewForCommit(ctx context.Context, installationID
 	if err != nil {
 		return false, err
 	}
-	reviews, _, err := client.PullRequests.ListReviews(ctx, owner, repo, number, &gh.ListOptions{PerPage: 100})
-	if err != nil {
-		return false, fmt.Errorf("listing reviews on pull request #%d: %w", number, err)
-	}
 	wantState := reviewEventState(event)
-	for _, review := range reviews {
-		if review.GetCommitID() == commitID &&
-			strings.TrimSpace(review.GetBody()) == strings.TrimSpace(body) &&
-			strings.EqualFold(review.GetState(), wantState) {
-			return true, nil
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		reviews, resp, err := client.PullRequests.ListReviews(ctx, owner, repo, number, opts)
+		if err != nil {
+			return false, fmt.Errorf("listing reviews on pull request #%d: %w", number, err)
 		}
+		for _, review := range reviews {
+			if review.GetCommitID() == commitID &&
+				strings.TrimSpace(review.GetBody()) == strings.TrimSpace(body) &&
+				strings.EqualFold(review.GetState(), wantState) {
+				return true, nil
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			return false, nil
+		}
+		opts.Page = resp.NextPage
 	}
-	return false, nil
 }
 
 func reviewEventState(event platform.ReviewEvent) string {

@@ -67,7 +67,6 @@ get_token() {
     --arg name "$REPO_NAME" \
     --arg runner_name "$RUNNER_NAME_RESOLVED" \
     --arg labels "$RUNNER_LABELS_RESOLVED" \
-    --arg bootstrap_token "$HERD_RUNNER_BOOTSTRAP_TOKEN" \
     --arg request_nonce "$HERD_RUNNER_REQUEST_NONCE" \
     '{
       repository: $repository,
@@ -75,7 +74,7 @@ get_token() {
       name: $name,
       runner_name: $runner_name,
       runner_labels: ($labels | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))),
-      bootstrap_token: $bootstrap_token,
+      bootstrap_token: env.HERD_RUNNER_BOOTSTRAP_TOKEN,
       request_nonce: $request_nonce
     }' \
     | curl -fsSL -X POST \

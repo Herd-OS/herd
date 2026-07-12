@@ -198,6 +198,36 @@ func TestRegistrationTokenHandlerReplayRepairsMissingTokenUse(t *testing.T) {
 	assert.Equal(t, now, *st.tokens[token.ID].UsedAt)
 }
 
+func TestRegistrationTokenHandlerDuplicateNonceRejectsExpiredStoredToken(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "new-token", ExpiresAt: now.Add(time.Hour)}}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"herd"}, BootstrapToken: plain, RequestNonce: "nonce-expired"}
+
+	key := registrationIDKey(st.repository.ID, token.ID, req.RequestNonce)
+	metadata, err := runnerRequestMetadata(st.repository.ID, req, token)
+	require.NoError(t, err)
+	resultJSON, err := json.Marshal(RegistrationTokenResponse{Token: "expired-token", ExpiresAt: now.Add(-time.Minute)})
+	require.NoError(t, err)
+	st.idempotency[key] = store.IdempotencyKey{
+		Key:       key,
+		Scope:     idempotencyScope,
+		Status:    idempotencyStatusDone,
+		ResultRef: string(resultJSON),
+		Metadata:  metadata,
+		CreatedAt: now.Add(-time.Hour),
+	}
+
+	rec := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusGone, rec.Code)
+	assert.Contains(t, rec.Body.String(), "expired")
+	assert.NotContains(t, rec.Body.String(), "expired-token")
+	assert.Equal(t, 0, minter.calls)
+	assert.Nil(t, st.tokens[token.ID].UsedAt)
+}
+
 func TestRegistrationTokenHandlerMinterFailures(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 

@@ -260,6 +260,10 @@ func (h RegistrationTokenHandler) replayRegistrationResult(w http.ResponseWriter
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "decode runner registration idempotency result"})
 		return RegistrationTokenResponse{}, false
 	}
+	if result.ExpiresAt.IsZero() || !h.now().Before(result.ExpiresAt) {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "stored runner registration token has expired; retry with a new nonce"})
+		return RegistrationTokenResponse{}, false
+	}
 	if token.UsedAt == nil {
 		if err := h.store.MarkRunnerBootstrapTokenUsed(ctx, token.ID, h.now()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record runner bootstrap token use"})

@@ -92,7 +92,7 @@ func TestEntrypoint_ControlPlaneRunnerRegistration(t *testing.T) {
 		},
 		{
 			name: "bootstrap token sent in payload",
-			want: `bootstrap_token: $bootstrap_token`,
+			want: `bootstrap_token: env.HERD_RUNNER_BOOTSTRAP_TOKEN`,
 		},
 		{
 			name: "request nonce sent in payload",
@@ -118,4 +118,6 @@ func TestEntrypoint_RunnerRegistrationDoesNotUseGitHubToken(t *testing.T) {
 	assert.NotContains(t, getTokenBody, "GITHUB_TOKEN")
 	assert.NotContains(t, getTokenBody, "api.github.com/repos")
 	assert.Contains(t, getTokenBody, "HERD_RUNNER_BOOTSTRAP_TOKEN")
+	assert.NotContains(t, getTokenBody, `--arg bootstrap_token "$HERD_RUNNER_BOOTSTRAP_TOKEN"`)
+	assert.NotContains(t, getTokenBody, `$bootstrap_token`)
 }
