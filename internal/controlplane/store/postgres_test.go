@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moby/moby/api/types/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -470,6 +471,10 @@ func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
 	var container *postgres.PostgresContainer
 	var err error
+	const port = "5432/tcp"
+	dsnForPort := func(host string, p network.Port) string {
+		return "postgres://herd:herd@" + host + ":" + p.Port() + "/herd?sslmode=disable"
+	}
 	for attempt := 1; attempt <= 3; attempt++ {
 		container, err = postgres.Run(
 			ctx,
@@ -477,7 +482,7 @@ func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 			postgres.WithDatabase("herd"),
 			postgres.WithUsername("herd"),
 			postgres.WithPassword("herd"),
-			testcontainers.WithWaitStrategy(wait.ForListeningPort("5432/tcp").WithStartupTimeout(60*time.Second)),
+			testcontainers.WithAdditionalWaitStrategy(wait.ForSQL(port, "postgres", dsnForPort).WithStartupTimeout(60*time.Second)),
 		)
 		if err == nil || !isTransientContainerStartError(err) || attempt == 3 {
 			break
