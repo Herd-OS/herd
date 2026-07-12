@@ -664,7 +664,6 @@ func TestHandlerRetryAfterPatchMutationCompletionFailureDoesNotReapplyPatch(t *t
 	payload := validWorkerPayload("job-1", "head")
 	patchKey := "patch_apply:" + ResultPayloadHash([]byte(payload))
 	st.mutationCompleteErrs = []error{assert.AnError}
-	st.completeIdemErrs = map[string][]error{patchKey: {assert.AnError}}
 	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{
 		Store:          st,
@@ -681,11 +680,14 @@ func TestHandlerRetryAfterPatchMutationCompletionFailureDoesNotReapplyPatch(t *t
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusConflict, first.Code)
-	require.Equal(t, http.StatusConflict, second.Code)
-	assert.Contains(t, second.Body.String(), "unknown outcome")
+	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, applier.requests, 1)
-	assert.Empty(t, st.results)
-	require.Equal(t, "started", st.idem[patchKey].Status)
+	assert.Len(t, st.results, 1)
+	require.Equal(t, "completed", st.idem[patchKey].Status)
+	assert.Contains(t, st.idem[patchKey].ResultRef, strings.Repeat("a", 40))
+	attempt, err := st.GetGitHubMutationAttempt(context.Background(), patchKey)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", attempt.Status)
 }
 
 func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.T) {

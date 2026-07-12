@@ -502,6 +502,9 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		return fmt.Errorf("marshal patch apply result: %w", err)
 	}
 	if err := h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil); err != nil {
+		if idemErr := h.completePatchApply(ctx, idempotencyKey, response); idemErr != nil {
+			return fmt.Errorf("%w; complete patch apply idempotency after mutation completion failure: %v", err, idemErr)
+		}
 		return err
 	}
 	if err := h.completePatchApply(ctx, idempotencyKey, response); err != nil {
@@ -541,12 +544,12 @@ func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, w
 		return false, fmt.Errorf("get patch apply idempotency: %w", err)
 	}
 	if record.Status == "completed" {
-		if completed, err := h.repairCompletedPatchApply(ctx, idempotencyKey); completed || err != nil {
+		if completed, err := h.repairCompletedPatchApply(ctx, idempotencyKey, json.RawMessage(record.ResultRef)); completed || err != nil {
 			return false, err
 		}
 		return false, nil
 	}
-	if completed, err := h.repairCompletedPatchApply(ctx, idempotencyKey); completed || err != nil {
+	if completed, err := h.repairCompletedPatchApply(ctx, idempotencyKey, nil); completed || err != nil {
 		return false, err
 	}
 	reader, ok := h.store.(MutationReader)
@@ -566,7 +569,7 @@ func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, w
 	return true, nil
 }
 
-func (h Handler) repairCompletedPatchApply(ctx context.Context, idempotencyKey string) (bool, error) {
+func (h Handler) repairCompletedPatchApply(ctx context.Context, idempotencyKey string, fallbackResponse json.RawMessage) (bool, error) {
 	reader, ok := h.store.(MutationReader)
 	if !ok {
 		return false, nil
@@ -578,10 +581,18 @@ func (h Handler) repairCompletedPatchApply(ctx context.Context, idempotencyKey s
 	if err != nil {
 		return false, fmt.Errorf("get patch mutation attempt: %w", err)
 	}
-	if attempt.Status != "completed" {
+	response := attempt.Response
+	if attempt.Status == "started" {
+		if len(fallbackResponse) == 0 {
+			return false, nil
+		}
+		response = fallbackResponse
+		if err := h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil); err != nil {
+			return false, err
+		}
+	} else if attempt.Status != "completed" {
 		return false, nil
 	}
-	response := attempt.Response
 	if len(response) == 0 {
 		response = json.RawMessage(`{"recovered":true}`)
 	}
