@@ -379,6 +379,31 @@ func TestMemoryStore(t *testing.T) {
 	require.Error(t, s.Health(ctx))
 }
 
+func TestContainerErrorClassification(t *testing.T) {
+	tests := []struct {
+		name          string
+		err           error
+		wantDocker    bool
+		wantTransient bool
+	}{
+		{name: "nil", err: nil},
+		{name: "docker unavailable", err: errors.New("cannot connect to Docker daemon"), wantDocker: true},
+		{name: "container runtime unavailable", err: errors.New("container runtime is not reachable"), wantDocker: true},
+		{name: "context canceled", err: context.Canceled, wantDocker: true},
+		{name: "unexpected EOF", err: errors.New("create container: EOF"), wantTransient: true},
+		{name: "connection reset", err: errors.New("read tcp: connection reset by peer"), wantTransient: true},
+		{name: "connection refused", err: errors.New("dial unix docker.sock: connection refused"), wantDocker: true, wantTransient: true},
+		{name: "sql assertion failure", err: errors.New("duplicate key value violates unique constraint")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantDocker, isDockerUnavailable(tt.err))
+			assert.Equal(t, tt.wantTransient, isTransientContainerStartError(tt.err))
+		})
+	}
+}
+
 func newMigratedPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
 	db := newPostgresDB(t, ctx)
@@ -388,14 +413,22 @@ func newMigratedPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 
 func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
-	container, err := postgres.Run(
-		ctx,
-		"postgres:16-alpine",
-		postgres.WithDatabase("herd"),
-		postgres.WithUsername("herd"),
-		postgres.WithPassword("herd"),
-		testcontainers.WithWaitStrategy(wait.ForListeningPort("5432/tcp").WithStartupTimeout(60*time.Second)),
-	)
+	var container *postgres.PostgresContainer
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		container, err = postgres.Run(
+			ctx,
+			"postgres:16-alpine",
+			postgres.WithDatabase("herd"),
+			postgres.WithUsername("herd"),
+			postgres.WithPassword("herd"),
+			testcontainers.WithWaitStrategy(wait.ForListeningPort("5432/tcp").WithStartupTimeout(60*time.Second)),
+		)
+		if err == nil || !isTransientContainerStartError(err) || attempt == 3 {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+	}
 	if err != nil {
 		if isDockerUnavailable(err) {
 			t.Skipf("skipping Postgres integration test: %v", err)
@@ -449,4 +482,14 @@ func isDockerUnavailable(err error) bool {
 		return true
 	}
 	return errors.Is(err, context.Canceled)
+}
+
+func isTransientContainerStartError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "eof") ||
+		strings.Contains(message, "connection reset by peer") ||
+		strings.Contains(message, "connection refused")
 }
