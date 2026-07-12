@@ -66,7 +66,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
-	data, err := buildReviewPromptData(ctx, client, prNumber, cfg.Platform.Owner, cfg.Platform.Repo, dir)
+	data, err := buildReviewPromptData(ctx, client, prNumber, cfg.Platform.Owner, cfg.Platform.Repo, dir, reviewDiffChunkOptions(cfg.Integrator.ReviewDiff))
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 	})
 }
 
-func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int, owner, repo, repoRoot string) (*reviewCmdPromptData, error) {
+func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int, owner, repo, repoRoot string, opts reviewdiff.ChunkOptions) (*reviewCmdPromptData, error) {
 	pr, err := client.PullRequests().Get(ctx, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("getting PR #%d: %w", prNumber, err)
@@ -106,6 +106,15 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 	})
 	if err != nil {
 		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
+	}
+	plan := reviewdiff.ChunkForReview(preparedDiff.DiffSet, opts)
+	diff := preparedDiff.Rendered.Text
+	chunkIndex := 0
+	totalChunks := len(plan.Chunks)
+	if len(plan.Chunks) > 0 {
+		firstChunk := plan.Chunks[0]
+		diff = firstChunk.Text
+		chunkIndex = firstChunk.Index
 	}
 
 	var general []reviewCmdComment
@@ -140,33 +149,55 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 	}
 
 	return &reviewCmdPromptData{
-		PRNumber:       prNumber,
-		PRTitle:        pr.Title,
-		PRURL:          pr.URL,
-		PRBaseBranch:   pr.Base,
-		PRHeadBranch:   pr.Head,
-		Diff:           preparedDiff.Rendered.Text,
-		Comments:       general,
-		InlineComments: inline,
-		CIStatus:       ciStatus,
-		RepoOwner:      owner,
-		RepoName:       repo,
+		PRNumber:               prNumber,
+		PRTitle:                pr.Title,
+		PRURL:                  pr.URL,
+		PRBaseBranch:           pr.Base,
+		PRHeadBranch:           pr.Head,
+		Diff:                   diff,
+		ReviewMode:             string(plan.Coverage.ReviewMode),
+		ChunkIndex:             chunkIndex,
+		TotalChunks:            totalChunks,
+		CoverageSummary:        reviewdiff.FormatChunkedCoverageSummary(plan, 1, reviewdiff.DefaultMaxOmittedSummaryEntries),
+		PartialReview:          !plan.Coverage.Complete,
+		OnlyFirstChunkIncluded: len(plan.Chunks) > 1,
+		Comments:               general,
+		InlineComments:         inline,
+		CIStatus:               ciStatus,
+		RepoOwner:              owner,
+		RepoName:               repo,
 	}, nil
 }
 
+func reviewDiffChunkOptions(cfg config.ReviewDiff) reviewdiff.ChunkOptions {
+	return reviewdiff.ChunkOptions{
+		MaxChunkBytes:            cfg.MaxChunkBytes,
+		MaxFileDiffBytes:         cfg.MaxFileBytes,
+		MaxFilesPerChunk:         cfg.MaxFilesPerChunk,
+		MaxChunks:                cfg.MaxChunks,
+		MaxOmittedSummaryEntries: reviewdiff.DefaultMaxOmittedSummaryEntries,
+	}
+}
+
 type reviewCmdPromptData struct {
-	PRNumber         int
-	PRTitle          string
-	PRURL            string
-	PRBaseBranch     string
-	PRHeadBranch     string
-	Diff             string
-	Comments         []reviewCmdComment
-	InlineComments   []reviewCmdInlineComment
-	CIStatus         string
-	RoleInstructions string
-	RepoOwner        string
-	RepoName         string
+	PRNumber               int
+	PRTitle                string
+	PRURL                  string
+	PRBaseBranch           string
+	PRHeadBranch           string
+	Diff                   string
+	ReviewMode             string
+	ChunkIndex             int
+	TotalChunks            int
+	CoverageSummary        string
+	PartialReview          bool
+	OnlyFirstChunkIncluded bool
+	Comments               []reviewCmdComment
+	InlineComments         []reviewCmdInlineComment
+	CIStatus               string
+	RoleInstructions       string
+	RepoOwner              string
+	RepoName               string
 }
 
 type reviewCmdComment struct {
@@ -192,6 +223,11 @@ Base: {{.PRBaseBranch}}
 Head: {{.PRHeadBranch}}
 CI status (head ref): {{.CIStatus}}
 
+{{.CoverageSummary}}
+{{if .OnlyFirstChunkIncluded}}
+This pull request was split into {{.TotalChunks}} review chunks. Only chunk 1/{{.TotalChunks}} is included in this interactive prompt. Additional chunks are not hidden as reviewed; inspect them separately before making full-PR conclusions.
+
+{{end}}
 ## Diff
 {{.Diff}}
 {{if .Comments}}
