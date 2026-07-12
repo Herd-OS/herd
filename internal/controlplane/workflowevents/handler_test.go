@@ -64,6 +64,42 @@ func TestHandlerRequiresProcessorBeforeRecordingWorkflowEvent(t *testing.T) {
 	assert.Empty(t, st.idem)
 }
 
+func TestHandlerRepositoryLookupErrors(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		store      *eventStore
+		wantStatus int
+		wantError  string
+	}{
+		{name: "not found", store: newEventStore(), wantStatus: http.StatusNotFound, wantError: "repository not found"},
+		{name: "storage error", store: func() *eventStore {
+			st := newEventStore()
+			st.getRepoErr = errors.New("database down")
+			return st
+		}(), wantStatus: http.StatusInternalServerError, wantError: "lookup repository"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewHandler(HandlerOptions{
+				Store:     tt.store,
+				Validator: fixedValidator(validEventClaims(now)),
+				Audience:  "herd-control-plane",
+				Now:       func() time.Time { return now },
+				Processor: &capturingProcessor{},
+			})
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, eventRequest(validEventPayload()))
+
+			require.Equal(t, tt.wantStatus, rec.Code)
+			assert.Contains(t, rec.Body.String(), tt.wantError)
+			assert.Empty(t, tt.store.commands)
+		})
+	}
+}
+
 func TestHandlerDuplicateWorkflowEventDoesNotProcessAgain(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()
@@ -321,6 +357,7 @@ type eventStore struct {
 	idem         map[string]store.IdempotencyKey
 	completeErrs []error
 	updateErrs   []error
+	getRepoErr   error
 }
 
 func newEventStore() *eventStore {
@@ -330,6 +367,9 @@ func newEventStore() *eventStore {
 func (s *eventStore) GetRepository(_ context.Context, owner string, name string) (store.Repository, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.getRepoErr != nil {
+		return store.Repository{}, s.getRepoErr
+	}
 	repo, ok := s.repos[owner+"/"+name]
 	if !ok {
 		return store.Repository{}, store.ErrNotFound

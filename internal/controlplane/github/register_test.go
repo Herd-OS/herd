@@ -191,7 +191,7 @@ func TestRegisterHandlerFailures(t *testing.T) {
 			setup:      &fakeSetupVerifier{err: errors.New("github unavailable")},
 			app:        &fakeAppVerifier{},
 			wantStatus: http.StatusBadGateway,
-			wantError:  "setup credential",
+			wantError:  "GitHub unavailable",
 		},
 	}
 	for _, tt := range tests {
@@ -213,6 +213,24 @@ func TestRegisterHandlerFailures(t *testing.T) {
 			assert.NotContains(t, rec.Body.String(), "gho_human")
 		})
 	}
+}
+
+func TestRegisterHandlerSetupVerifierTransientFailureDoesNotSuggestGhAuthLogin(t *testing.T) {
+	st := newRegisterFakeStore()
+	handler := NewRegisterHandler(RegisterHandlerOptions{
+		Store:         st,
+		SetupVerifier: &fakeSetupVerifier{err: errors.New("github 502")},
+		AppVerifier:   &fakeAppVerifier{},
+		AppLogin:      "herd-os",
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, registerRequest(`{"owner":"octo","name":"herd","setup_token":"gho_human"}`))
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "retry repository registration")
+	assert.NotContains(t, rec.Body.String(), "gh auth login")
+	assert.Empty(t, st.tokens)
 }
 
 func registerRequest(body string) *http.Request {

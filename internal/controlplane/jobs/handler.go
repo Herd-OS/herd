@@ -183,6 +183,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	patchArtifact, applyMetadata, applyErr := h.validateWorkerPatch(r.Context(), result)
 	if applyErr != nil {
+		if workerPatchConfigurationError(applyErr) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": applyErr.Error()})
+			return
+		}
 		if transientPatchValidationError(applyErr) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
 			return
@@ -285,8 +289,11 @@ func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, 
 
 func (h Handler) processReviewResult(ctx context.Context, result Result, job store.Job) error {
 	reviewResult, ok := result.(ReviewCompletedResult)
-	if !ok || h.reviewProcessor == nil {
+	if !ok {
 		return nil
+	}
+	if h.reviewProcessor == nil {
+		return fmt.Errorf("review result processor is not configured")
 	}
 	repo := reviewRepositoryFromJob(job, reviewResult.Repository)
 	targetURL := firstMetadataString(metadataMap(job.Metadata), "workflow_run_url", "run_url", "target_url", "pr_url")
@@ -377,16 +384,35 @@ func validateResultAgainstJob(result Result, job store.Job) error {
 	if job.HeadSHA != "" && head != "" && job.HeadSHA != head {
 		return fmt.Errorf("stale head SHA: expected %s, got %s", job.HeadSHA, head)
 	}
-	if worker, ok := result.(WorkerCompletedResult); ok && job.BaseSHA != "" && worker.BaseSHA != "" && job.BaseSHA != worker.BaseSHA {
-		return fmt.Errorf("stale base SHA: expected %s, got %s", job.BaseSHA, worker.BaseSHA)
+	if worker, ok := result.(WorkerCompletedResult); ok {
+		if job.BaseSHA != "" && worker.BaseSHA != "" && job.BaseSHA != worker.BaseSHA {
+			return fmt.Errorf("stale base SHA: expected %s, got %s", job.BaseSHA, worker.BaseSHA)
+		}
+		if worker.Status == StatusSuccess {
+			if strings.TrimSpace(job.WorkerBranch) == "" {
+				return fmt.Errorf("job worker branch is missing")
+			}
+			if strings.TrimSpace(worker.TargetBranch) != job.WorkerBranch {
+				return fmt.Errorf("result target_branch does not match job worker branch")
+			}
+		}
 	}
 	return nil
 }
 
 func (h Handler) validateWorkerPatch(ctx context.Context, result Result) (*artifacts.ValidatedArtifact, map[string]any, error) {
 	worker, ok := result.(WorkerCompletedResult)
-	if !ok || worker.Status != StatusSuccess || h.artifactStore == nil {
+	if !ok || worker.Status != StatusSuccess {
 		return nil, nil, nil
+	}
+	if h.artifactStore == nil {
+		return nil, nil, fmt.Errorf("worker patch artifact store is not configured")
+	}
+	if h.patchApplier == nil {
+		return nil, nil, fmt.Errorf("worker patch applier is not configured")
+	}
+	if h.appTokenSource == nil {
+		return nil, nil, fmt.Errorf("worker patch GitHub App token source is not configured")
 	}
 	metadata := map[string]any{
 		"patch_artifact": worker.PatchArtifact,
@@ -418,6 +444,10 @@ func transientPatchValidationError(err error) bool {
 	return strings.Contains(message, "unavailable") || strings.Contains(message, "missing from artifact bundle")
 }
 
+func workerPatchConfigurationError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not configured")
+}
+
 func (h Handler) processWorkerPatch(ctx context.Context, result Result, job store.Job, payload []byte, artifact *artifacts.ValidatedArtifact, metadata map[string]any) error {
 	worker, ok := result.(WorkerCompletedResult)
 	if !ok || worker.Status != StatusSuccess || artifact == nil {
@@ -437,12 +467,6 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 			return err
 		}
 		h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil)
-		return nil
-	}
-	if h.patchApplier == nil {
-		if err := h.completePatchApply(ctx, idempotencyKey, json.RawMessage(`{"skipped":true}`)); err != nil {
-			return err
-		}
 		return nil
 	}
 	applyResult, err := h.patchApplier.Apply(ctx, artifacts.ApplyRequest{

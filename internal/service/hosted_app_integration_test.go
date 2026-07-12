@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/appauth"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
 	cpclient "github.com/herd-os/herd/internal/controlplane/client"
 	"github.com/herd-os/herd/internal/controlplane/commands"
@@ -104,6 +105,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 		Now:             func() time.Time { return now },
 		ArtifactStore:   hostedAppArtifacts{},
 		PatchApplier:    patcher,
+		AppTokenSource:  hostedAppTokenSource{},
 		AppLogin:        "herd-os[bot]",
 		AppEmail:        "herd-os[bot]@users.noreply.github.com",
 		ReviewProcessor: reviewService,
@@ -487,6 +489,12 @@ func (a hostedAppArtifacts) OpenArtifact(_ context.Context, name string) (io.Rea
 type hostedAppPatchApplier struct {
 	requests []artifacts.ApplyRequest
 	result   artifacts.ApplyResult
+}
+
+type hostedAppTokenSource struct{}
+
+func (hostedAppTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+	return appauth.InstallationToken{Token: "token"}, nil
 }
 
 func (a *hostedAppPatchApplier) Apply(_ context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error) {

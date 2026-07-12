@@ -197,6 +197,9 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 	if !ok || !isAuthorized(event.AuthorAssociation) {
 		return nil
 	}
+	if shouldDispatch(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
+		return nil
+	}
 	metadata, err := json.Marshal(map[string]any{
 		"args":               cmd.Args,
 		"raw":                cmd.Raw,

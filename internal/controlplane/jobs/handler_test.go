@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/appauth"
+	"github.com/herd-os/herd/internal/controlplane"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
@@ -24,12 +26,17 @@ import (
 func TestHandlerAcceptsAndStoresResult(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", Metadata: json.RawMessage(`{"ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345"}`)}
+	patch := []byte{}
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837", Metadata: json.RawMessage(`{"ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345"}`)}
 	handler := NewHandler(HandlerOptions{
-		Store:     st,
-		Validator: fixedOIDCValidator(validClaims(now)),
-		Audience:  "herd-control-plane",
-		Now:       func() time.Time { return now },
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   fixedPatchApplier{},
+		AppTokenSource: fakeAppTokenSource{},
 	})
 
 	req := resultRequest("job-1", validWorkerPayload("job-1", "head"))
@@ -48,12 +55,17 @@ func TestHandlerAcceptsAndStoresResult(t *testing.T) {
 func TestHandlerDuplicateCallbacksAreIdempotent(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head"}
+	patch := []byte{}
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{
-		Store:     st,
-		Validator: fixedOIDCValidator(validClaims(now)),
-		Audience:  "herd-control-plane",
-		Now:       func() time.Time { return now },
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   fixedPatchApplier{},
+		AppTokenSource: fakeAppTokenSource{},
 	})
 
 	first := httptest.NewRecorder()
@@ -88,7 +100,7 @@ func TestHandlerProcessesReviewCompletedResult(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, resultRequest("job-1", validReviewPayload("job-1", "head", StatusApproved)))
+	handler.ServeHTTP(rec, resultRequest("job-1", validReviewPayload()))
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	require.Len(t, processor.calls, 1)
@@ -121,7 +133,7 @@ func TestHandlerPassesDisabledReviewMetadata(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, resultRequest("job-1", validReviewPayload("job-1", "head", StatusApproved)))
+	handler.ServeHTTP(rec, resultRequest("job-1", validReviewPayload()))
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	require.Len(t, processor.calls, 1)
@@ -141,7 +153,7 @@ func TestHandlerRejectsMismatchedPathAndBodyJobID(t *testing.T) {
 
 func TestHandlerRejectsStaleHeadSHA(t *testing.T) {
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "new"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "new", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{Store: st, Validator: fixedOIDCValidator(validClaims(time.Now().Add(time.Hour)))})
 
 	rec := httptest.NewRecorder()
@@ -154,7 +166,7 @@ func TestHandlerRejectsStaleHeadSHA(t *testing.T) {
 func TestHandlerRejectsResultRepositoryDifferentFromJobRepository(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", Metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345"}`)}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", WorkerBranch: "herd/worker/837", Metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345"}`)}
 	claims := validClaims(now)
 	claims.Repository = "evil/fork"
 	handler := NewHandler(HandlerOptions{
@@ -174,19 +186,82 @@ func TestHandlerRejectsResultRepositoryDifferentFromJobRepository(t *testing.T) 
 	assert.Empty(t, st.mutationAttempts)
 }
 
+func TestHandlerRejectsWorkerSuccessWhenPatchDependenciesMissing(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name          string
+		opts          HandlerOptions
+		directHandler bool
+		want          string
+	}{
+		{name: "artifact store", opts: HandlerOptions{PatchApplier: fixedPatchApplier{}, AppTokenSource: fakeAppTokenSource{}}, want: "artifact store"},
+		{name: "patch applier", opts: HandlerOptions{ArtifactStore: artifactStore{}, AppTokenSource: fakeAppTokenSource{}}, directHandler: true, want: "patch applier"},
+		{name: "app token source", opts: HandlerOptions{ArtifactStore: artifactStore{}, PatchApplier: fixedPatchApplier{}}, want: "App token source"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newResultStore()
+			st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+			tt.opts.Store = st
+			tt.opts.Validator = fixedOIDCValidator(validClaims(now))
+			tt.opts.Now = func() time.Time { return now }
+			handler := NewHandler(tt.opts)
+			if tt.directHandler {
+				handler = Handler{
+					store:          tt.opts.Store,
+					validator:      tt.opts.Validator,
+					audience:       controlplane.DefaultOIDCAudience,
+					now:            tt.opts.Now,
+					artifactStore:  tt.opts.ArtifactStore,
+					appTokenSource: tt.opts.AppTokenSource,
+				}
+			}
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, resultRequest("job-1", validWorkerPayload("job-1", "head")))
+
+			require.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.Contains(t, rec.Body.String(), tt.want)
+			assert.Empty(t, st.results)
+			assert.Empty(t, st.mutationAttempts)
+		})
+	}
+}
+
+func TestHandlerRejectsWorkerResultTargetBranchMismatch(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedOIDCValidator(validClaims(now)),
+		Now:       func() time.Time { return now },
+	})
+	payload := `{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"job-1","batch_number":106,"issue_number":837,"target_branch":"main","base_sha":"base","expected_head_sha":"head","patch_artifact":"patches/job.diff","status":"success"}`
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "target_branch")
+	assert.Empty(t, st.results)
+	assert.Empty(t, st.mutationAttempts)
+}
+
 func TestHandlerRejectsPatchForDifferentRepositoryAndRecordsFailure(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
 	metadata := artifacts.BuildMetadata("acme/other", "job-1", "base", "head", "patch.diff", patch)
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Audience:      "herd-control-plane",
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactMap(t, metadata, patch),
-		PatchApplier:  fixedPatchApplier{},
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   fixedPatchApplier{},
+		AppTokenSource: fakeAppTokenSource{},
 	})
 
 	rec := httptest.NewRecorder()
@@ -208,20 +283,22 @@ func TestHandlerAppliesValidPatchArtifactAndRecordsCommitSHA(t *testing.T) {
 		InstallationID: 9,
 		HeadSHA:        "head",
 		BaseSHA:        "base",
+		WorkerBranch:   "herd/worker/837",
 		Metadata:       json.RawMessage(`{"requester_name":"Mona","requester_email":"mona@example.com"}`),
 	}
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
 	applier := fixedPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Audience:      "herd-control-plane",
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactMap(t, metadata, patch),
-		PatchApplier:  applier,
-		AppLogin:      "herd-os[bot]",
-		AppEmail:      "herd@example.com",
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+		AppLogin:       "herd-os[bot]",
+		AppEmail:       "herd@example.com",
 	})
 
 	rec := httptest.NewRecorder()
@@ -245,18 +322,20 @@ func TestHandlerAppliesBundledWorkerBranchArtifactAndRecordsCommitSHA(t *testing
 		InstallationID: 9,
 		HeadSHA:        "head",
 		BaseSHA:        "base",
+		WorkerBranch:   "herd/worker/837",
 		Metadata:       json.RawMessage(`{"requester_name":"Mona","requester_email":"mona@example.com"}`),
 	}
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "herd-worker.patch", patch)
 	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("b", 40)}}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Audience:      "herd-control-plane",
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactStore{"worker-branch": workerBranchArtifact(t, metadata, patch)},
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactStore{"worker-branch": workerBranchArtifact(t, metadata, patch)},
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 
 	payload := `{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"job-1","batch_number":106,"issue_number":837,"target_branch":"herd/worker/837","base_sha":"base","expected_head_sha":"head","patch_artifact":"worker-branch","status":"success"}`
@@ -276,17 +355,18 @@ func TestHandlerAppliesBundledWorkerBranchArtifactAndRecordsCommitSHA(t *testing
 func TestHandlerIgnoresPatchArtifactOnFailureResult(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "herd-worker.patch", patch)
 	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("c", 40)}}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Audience:      "herd-control-plane",
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactStore{"worker-branch": workerBranchArtifact(t, metadata, patch)},
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactStore{"worker-branch": workerBranchArtifact(t, metadata, patch)},
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 
 	payload := `{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"job-1","batch_number":106,"issue_number":837,"target_branch":"herd/worker/837","base_sha":"base","expected_head_sha":"head","patch_artifact":"worker-branch","status":"failure"}`
@@ -306,17 +386,18 @@ func TestHandlerIgnoresPatchArtifactOnFailureResult(t *testing.T) {
 func TestHandlerAcceptsEmptyPatchArtifactWithoutApplying(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	patch := []byte{}
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
 	applier := fixedPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Audience:      "herd-control-plane",
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactMap(t, metadata, patch),
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 
 	rec := httptest.NewRecorder()
@@ -333,7 +414,7 @@ func TestHandlerAcceptsEmptyPatchArtifactWithoutApplying(t *testing.T) {
 
 func TestHandlerRejectsMissingBearerToken(t *testing.T) {
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{Store: st, Validator: fixedOIDCValidator(validClaims(time.Now().Add(time.Hour)))})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job-1/results", strings.NewReader(validWorkerPayload("job-1", "head")))
@@ -347,7 +428,7 @@ func TestHandlerRejectsMissingBearerToken(t *testing.T) {
 
 func TestHandlerRejectsOIDCValidatorFailure(t *testing.T) {
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{Store: st, Validator: errOIDCValidator{}})
 
 	rec := httptest.NewRecorder()
@@ -363,13 +444,14 @@ func TestHandlerDuplicateWorkerPatchAppliesOnce(t *testing.T) {
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
 	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("d", 40)}}
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactMap(t, metadata, patch),
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 	payload := validWorkerPayload("job-1", "head")
 
@@ -392,13 +474,14 @@ func TestHandlerTransientPatchArtifactValidationRetryRecordsSuccess(t *testing.T
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
 	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("b", 40)}}
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Now:           func() time.Time { return now },
-		ArtifactStore: &flakyArtifactStore{store: artifactMap(t, metadata, patch), errs: []error{fmt.Errorf("artifact unavailable")}},
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  &flakyArtifactStore{store: artifactMap(t, metadata, patch), errs: []error{fmt.Errorf("artifact unavailable")}},
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 	payload := validWorkerPayload("job-1", "head")
 
@@ -426,13 +509,14 @@ func TestHandlerRetriesWorkerPatchAfterApplyFailure(t *testing.T) {
 		errs:   []error{assert.AnError, nil},
 	}
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactMap(t, metadata, patch),
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 	payload := validWorkerPayload("job-1", "head")
 
@@ -459,13 +543,14 @@ func TestHandlerRetryAfterRecordJobResultFailureDoesNotReapplyPatch(t *testing.T
 	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("f", 40)}}
 	st := newResultStore()
 	st.recordJobResultErrs = []error{assert.AnError, nil}
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactMap(t, metadata, patch),
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 	payload := validWorkerPayload("job-1", "head")
 
@@ -488,13 +573,14 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureDoesNotReapplyPatch(t *test
 	st := newResultStore()
 	payload := validWorkerPayload("job-1", "head")
 	st.completeIdemErrs = map[string][]error{"patch_apply:" + ResultPayloadHash([]byte(payload)): {assert.AnError, nil}}
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactMap(t, metadata, patch),
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 
 	first := httptest.NewRecorder()
@@ -517,14 +603,15 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureWithoutMutationReaderDoesNo
 	inner := newResultStore()
 	payload := validWorkerPayload("job-1", "head")
 	inner.completeIdemErrs = map[string][]error{"patch_apply:" + ResultPayloadHash([]byte(payload)): {assert.AnError}}
-	inner.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	inner.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	st := mutationRecorderOnlyResultStore{inner: inner}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactMap(t, metadata, patch),
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 
 	first := httptest.NewRecorder()
@@ -547,13 +634,14 @@ func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.
 	st := newResultStore()
 	payload := validWorkerPayload("job-1", "head")
 	st.completeIdemErrs = map[string][]error{"job_result:" + ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload)): []error{assert.AnError, nil}}
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{
-		Store:         st,
-		Validator:     fixedOIDCValidator(validClaims(now)),
-		Now:           func() time.Time { return now },
-		ArtifactStore: artifactMap(t, metadata, patch),
-		PatchApplier:  applier,
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
 	})
 
 	first := httptest.NewRecorder()
@@ -615,7 +703,7 @@ func TestHandlerRetriesReviewResultAfterProcessorFailure(t *testing.T) {
 		Now:             func() time.Time { return now },
 		ReviewProcessor: processor,
 	})
-	payload := validReviewPayload("job-1", "head", StatusApproved)
+	payload := validReviewPayload()
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, resultRequest("job-1", payload))
@@ -631,6 +719,25 @@ func TestHandlerRetriesReviewResultAfterProcessorFailure(t *testing.T) {
 	assert.Contains(t, third.Body.String(), `"created":false`)
 	assert.Len(t, processor.calls, 2)
 	assert.Len(t, st.results, 1)
+}
+
+func TestHandlerRejectsReviewResultWhenProcessorMissing(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedOIDCValidator(validClaims(now)),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", validReviewPayload()))
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "process review result")
+	assert.Empty(t, st.results)
 }
 
 type resultStore struct {
@@ -863,6 +970,12 @@ type fixedPatchApplier struct {
 	err    error
 }
 
+type fakeAppTokenSource struct{}
+
+func (fakeAppTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+	return appauth.InstallationToken{Token: "token"}, nil
+}
+
 func (a fixedPatchApplier) Apply(context.Context, artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
 	return a.result, a.err
 }
@@ -951,6 +1064,6 @@ func parsedResultPayload(t *testing.T, payload string) Result {
 	return result
 }
 
-func validReviewPayload(jobID string, headSHA string, status string) string {
-	return `{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"` + jobID + `","batch_number":106,"pr_number":42,"head_sha":"` + headSHA + `","status":"` + status + `","summary":"review summary"}`
+func validReviewPayload() string {
+	return `{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":106,"pr_number":42,"head_sha":"head","status":"approved","summary":"review summary"}`
 }

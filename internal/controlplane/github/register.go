@@ -145,12 +145,7 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setupRepo, err := h.setupVerifier.VerifySetupRepository(r.Context(), req.SetupToken, req.Owner, req.Name)
 	if err != nil {
 		h.recordAttempt(r.Context(), 0, 0, req.Owner, req.Name, "rejected", err.Error())
-		status := http.StatusBadGateway
-		msg := "verify GitHub setup credential: run `gh auth login -h github.com` with an account that has admin access to the repository"
-		if errors.Is(err, ErrRepoUnauthorized) {
-			status = http.StatusForbidden
-			msg = "repository registration requires a GitHub account with admin access; run `gh auth login -h github.com` as a repo admin and retry"
-		}
+		status, msg := setupVerificationErrorResponse(err)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -223,6 +218,32 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		RunnerBootstrapToken: plainToken,
 		ControlPlaneURL:      h.controlPlaneURL,
 	})
+}
+
+func setupVerificationErrorResponse(err error) (int, string) {
+	if errors.Is(err, ErrRepoUnauthorized) {
+		return http.StatusForbidden, "repository registration requires a GitHub account with admin access; run `gh auth login -h github.com` as a repo admin and retry"
+	}
+	var ghErr *ghapi.ErrorResponse
+	if errors.As(err, &ghErr) && ghErr.Response != nil {
+		switch ghErr.Response.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+			return ghErr.Response.StatusCode, "verify GitHub setup credential: run `gh auth login -h github.com` with an account that has admin access to the repository"
+		default:
+			if ghErr.Response.StatusCode == http.StatusTooManyRequests || ghErr.Response.StatusCode >= 500 {
+				return http.StatusBadGateway, "verify GitHub setup credential: GitHub unavailable, retry repository registration"
+			}
+		}
+	}
+	var rateLimitErr *ghapi.RateLimitError
+	if errors.As(err, &rateLimitErr) {
+		return http.StatusBadGateway, "verify GitHub setup credential: GitHub rate limit reached, retry repository registration"
+	}
+	var abuseErr *ghapi.AbuseRateLimitError
+	if errors.As(err, &abuseErr) {
+		return http.StatusBadGateway, "verify GitHub setup credential: GitHub rate limit reached, retry repository registration"
+	}
+	return http.StatusBadGateway, "verify GitHub setup credential: GitHub unavailable, retry repository registration"
 }
 
 func (h RegisterHandler) recordAttempt(ctx context.Context, repositoryID int64, installationID int64, owner string, name string, status string, msg string) {
