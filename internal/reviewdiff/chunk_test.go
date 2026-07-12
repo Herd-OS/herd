@@ -231,6 +231,16 @@ func TestChunkForReviewOmittedGeneratedPathPreservesSourceUnavailableReason(t *t
 			wantComplete: false,
 		},
 		{
+			name: "generated path with generic unavailable reason",
+			file: ChangedFile{
+				Path:       "dist/app.js",
+				Status:     ChangeModified,
+				Omitted:    true,
+				OmitReason: "file diff unavailable",
+			},
+			wantComplete: false,
+		},
+		{
 			name: "custom blocking source unavailable reason",
 			file: ChangedFile{
 				Path:       "src/material.js",
@@ -264,6 +274,7 @@ func TestChunkForReviewOmittedGeneratedPathPreservesSourceUnavailableReason(t *t
 				assert.Zero(t, plan.Coverage.FilesSummarizedNotReviewed)
 				assert.Equal(t, 1, plan.Coverage.FilesNotReviewed)
 			}
+			assert.False(t, IsAllowableNotReviewedFile(plan.Coverage.NotReviewedFiles[0]))
 			assert.Equal(t, 1, plan.Coverage.OmittedByReason[plan.Coverage.NotReviewedFiles[0].Reason])
 		})
 	}

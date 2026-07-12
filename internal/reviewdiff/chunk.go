@@ -407,13 +407,13 @@ func IsAllowableNotReviewedFile(file FileCoverage) bool {
 		return false
 	}
 	switch {
-	case file.File.Generated && isSummarizedNotReviewedReason(file.Reason):
+	case file.File.Generated && isNotReviewedReason(file.Reason, "generated file"):
 		return true
-	case file.File.Binary && isSummarizedNotReviewedReason(file.Reason):
+	case file.File.Binary && isNotReviewedReason(file.Reason, "binary file"):
 		return true
-	case isLargeLockfileChange(file.File) && isSummarizedNotReviewedReason(file.Reason):
+	case isLargeLockfileChange(file.File) && isNotReviewedReason(file.Reason, "large lockfile diff"):
 		return true
-	case isModeOnly(file.File) && isSummarizedNotReviewedReason(file.Reason):
+	case isModeOnly(file.File) && (isNotReviewedReason(file.Reason, "mode-only change") || isNotReviewedReason(file.Reason, "metadata-only change")):
 		return true
 	default:
 		return false
@@ -427,13 +427,8 @@ func isSourceUnavailableReason(reason string) bool {
 		strings.HasPrefix(normalized, "source unavailable:")
 }
 
-func isSummarizedNotReviewedReason(reason string) bool {
-	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "generated file", "binary file", "large lockfile diff", "mode-only change", "metadata-only change", "file diff unavailable":
-		return true
-	default:
-		return false
-	}
+func isNotReviewedReason(reason, want string) bool {
+	return strings.EqualFold(strings.TrimSpace(reason), want)
 }
 
 func partialReason(coverage CoverageSummary) string {

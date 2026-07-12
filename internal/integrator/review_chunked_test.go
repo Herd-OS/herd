@@ -257,6 +257,18 @@ func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) 
 			wantBlocks: true,
 		},
 		{
+			name:   "generated file diff unavailable",
+			reason: "file diff unavailable",
+			file: reviewdiff.FileCoverage{
+				Path:        "dist/app.js",
+				Reason:      "file diff unavailable",
+				NotReviewed: true,
+				File:        reviewdiff.ChangedFile{Path: "dist/app.js", Generated: true, Omitted: true, OmitReason: "file diff unavailable"},
+			},
+			wantCount:  1,
+			wantBlocks: true,
+		},
+		{
 			name:   "generated file reason",
 			reason: "generated file",
 			file: reviewdiff.FileCoverage{
@@ -390,6 +402,50 @@ func TestRunChunkedReviewWithRetryBlocksSourceUnavailableMaterialFile(t *testing
 
 	comment := buildCoverageApprovalBlockedComment(reviewdiff.PreparedDiff{}, plan)
 	assert.Contains(t, comment, "src/unavailable.go: patch unavailable from GitHub files API")
+	assert.Contains(t, comment, "not all material source files were reviewed")
+}
+
+func TestRunChunkedReviewWithRetryBlocksGeneratedPathWithUnavailableDiff(t *testing.T) {
+	plan := reviewdiff.ChunkPlan{
+		Chunks: []reviewdiff.ReviewChunk{
+			{Index: 1, Total: 1, Text: "diff-a", IncludedFiles: []reviewdiff.ChangedFile{{Path: "src/app.go"}}, UsedDiffBytes: 10},
+		},
+		Coverage: reviewdiff.CoverageSummary{
+			Source:           "github-files-api",
+			TotalFiles:       2,
+			ReviewMode:       reviewdiff.CoverageModePartial,
+			ChunksPlanned:    1,
+			FilesReviewed:    1,
+			FilesNotReviewed: 1,
+			Complete:         false,
+			NotReviewedFiles: []reviewdiff.FileCoverage{
+				{
+					Path:        "dist/app.js",
+					Reason:      "file diff unavailable",
+					NotReviewed: true,
+					File: reviewdiff.ChangedFile{
+						Path:       "dist/app.js",
+						Status:     reviewdiff.ChangeModified,
+						Generated:  true,
+						Omitted:    true,
+						OmitReason: "file diff unavailable",
+					},
+				},
+			},
+			OmittedByReason: map[string]int{"file diff unavailable": 1},
+		},
+	}
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{{Approved: true, Summary: "ok"}}}
+
+	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, chunksReviewed)
+	assert.False(t, result.Approved)
+
+	comment := buildCoverageApprovalBlockedComment(reviewdiff.PreparedDiff{}, plan)
+	assert.Contains(t, comment, "dist/app.js: file diff unavailable")
 	assert.Contains(t, comment, "not all material source files were reviewed")
 }
 
