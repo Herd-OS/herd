@@ -98,7 +98,8 @@ jobs:
           HERD_BASE_SHA: ${{`{{`}} steps.checkout-base.outputs.sha {{`}}`}}
         run: |
           mkdir -p /tmp/herd-worker-artifact
-          git diff --binary "$HERD_BASE_SHA" > /tmp/herd-worker-artifact/herd-worker.patch
+          git add -A
+          git diff --binary --cached "$HERD_BASE_SHA" > /tmp/herd-worker-artifact/herd-worker.patch
           PATCH_SHA256="$(sha256sum /tmp/herd-worker-artifact/herd-worker.patch | awk '{print $1}')"
           jq -n \
             --arg repository "$HERD_REPOSITORY" \

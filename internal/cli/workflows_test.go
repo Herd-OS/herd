@@ -473,7 +473,8 @@ func TestWorkerWorkflowTemplate_ExcludesProviderAuthEnv(t *testing.T) {
 	assert.NotContains(t, s, "name: worker.patch", "worker workflow must not upload patch bytes under a different artifact name")
 	assert.Contains(t, s, "echo \"sha=$(git rev-parse HEAD)\" >> \"$GITHUB_OUTPUT\"", "worker workflow must capture checked-out HEAD")
 	assert.Contains(t, s, "HERD_BASE_SHA: ${{ steps.checkout-base.outputs.sha }}", "worker workflow must use captured checkout HEAD")
-	assert.Contains(t, s, "git diff --binary \"$HERD_BASE_SHA\"", "worker workflow must package a binary git patch")
+	assert.Contains(t, s, "git add -A", "worker workflow must stage all worker changes before packaging")
+	assert.Contains(t, s, "git diff --binary --cached \"$HERD_BASE_SHA\"", "worker workflow must package a binary git patch from the staged worker result")
 	assert.Contains(t, s, "format: \"git-diff-binary\"", "worker metadata must declare the artifact format expected by the service")
 	assert.Contains(t, s, "--arg base_sha \"$HERD_BASE_SHA\"", "worker result payload must use captured checkout HEAD")
 	assert.NotContains(t, s, "--arg base_sha \"${{ github.sha }}\"", "worker result payload must not use dispatch event SHA")
@@ -511,7 +512,8 @@ func TestWorkerWorkflowUsesCapturedCheckoutBaseForArtifactsAndResult(t *testing.
 			assert.Equal(t, "success()", step.If)
 			require.NotNil(t, step.Env)
 			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_BASE_SHA"])
-			assert.Contains(t, step.Run, "git diff --binary \"$HERD_BASE_SHA\"")
+			assert.Contains(t, step.Run, "git add -A")
+			assert.Contains(t, step.Run, "git diff --binary --cached \"$HERD_BASE_SHA\"")
 			assert.Contains(t, step.Run, "--arg base_sha \"$HERD_BASE_SHA\"")
 		case "Report result":
 			reportIndex = i
@@ -564,9 +566,11 @@ func TestWorkerPatchArtifactUsesCheckedOutBaseWhenDispatchSHADiffers(t *testing.
 	require.NotEqual(t, dispatchSHA, checkedOutBase)
 
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "task.txt"), []byte("worker change\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "created.txt"), []byte("created by worker\n"), 0644))
 	t.Cleanup(func() {
 		_ = os.RemoveAll("/tmp/herd-worker-artifact")
 	})
+	require.NoError(t, os.RemoveAll("/tmp/herd-worker-artifact"))
 
 	cmd := exec.Command("sh", "-c", packageStep.Run)
 	cmd.Dir = repoDir
@@ -592,6 +596,26 @@ func TestWorkerPatchArtifactUsesCheckedOutBaseWhenDispatchSHADiffers(t *testing.
 	assert.NotEqual(t, dispatchSHA, metadata.BaseSHA)
 	assert.Equal(t, "herd-worker.patch", metadata.ArtifactName)
 	assert.FileExists(t, "/tmp/herd-worker-artifact/herd-worker.patch")
+
+	applyDir := t.TempDir()
+	runWorkflowGit(t, applyDir, "init")
+	runWorkflowGit(t, applyDir, "config", "user.email", "herd@example.com")
+	runWorkflowGit(t, applyDir, "config", "user.name", "Herd Test")
+	require.NoError(t, os.WriteFile(filepath.Join(applyDir, "task.txt"), []byte("base\n"), 0644))
+	runWorkflowGit(t, applyDir, "add", "task.txt")
+	runWorkflowGit(t, applyDir, "commit", "-m", "base")
+	require.Equal(t, checkedOutBase, strings.TrimSpace(runWorkflowGit(t, applyDir, "rev-parse", "HEAD")))
+	runWorkflowGit(t, applyDir, "apply", "--index", "--binary", "/tmp/herd-worker-artifact/herd-worker.patch")
+	assert.Equal(t, "worker change\n", readWorkflowFile(t, filepath.Join(applyDir, "task.txt")))
+	assert.Equal(t, "created by worker\n", readWorkflowFile(t, filepath.Join(applyDir, "created.txt")))
+}
+
+func readWorkflowFile(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(data)
 }
 
 func TestWorkerWorkflowUploadsSinglePatchArtifactBeforeCallback(t *testing.T) {
