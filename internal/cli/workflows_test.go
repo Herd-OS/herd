@@ -353,9 +353,12 @@ func TestCallbackWorkflows_WorkflowEventPostsUseBoundedOIDCRetry(t *testing.T) {
 					assert.Contains(t, step.Run, `if [ "$delay" -gt 30 ]; then`)
 					assert.Contains(t, step.Run, "delay=30")
 					assert.Contains(t, step.Run, `if [ "$attempt" -ge 4 ]; then`)
+					assertCallbackOIDCTokenFetchRetries(t, step.Run,
+						"Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s).",
+						"HerdOS workflow event OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4).")
 
 					loopIndex := strings.Index(step.Run, "while true; do")
-					oidcIndex := strings.Index(step.Run, `OIDC_TOKEN="$(curl -fsSL`)
+					oidcIndex := strings.Index(step.Run, `if ! OIDC_TOKEN="$(curl -fsSL`)
 					postIndex := strings.Index(step.Run, "if curl -fsSL -X POST")
 					require.NotEqual(t, -1, loopIndex)
 					require.NotEqual(t, -1, oidcIndex)
@@ -537,6 +540,27 @@ func workflowEventCallbackSteps(workflow githubActionsWorkflow) []githubActionsS
 	return steps
 }
 
+func assertCallbackOIDCTokenFetchRetries(t *testing.T, run, finalFailure, retryFailure string) {
+	t.Helper()
+
+	assert.Contains(t, run, `if ! OIDC_TOKEN="$(curl -fsSL`, "OIDC fetch failure must be handled inside the retry loop")
+	assert.Contains(t, run, `jq -er '.value // empty'`, "OIDC fetch must fail on missing or empty token values")
+	assert.Contains(t, run, finalFailure)
+	assert.Contains(t, run, retryFailure)
+	assert.Contains(t, run, "continue", "OIDC fetch failures must advance to the next retry attempt before POSTing")
+	assert.NotContains(t, run, `jq -r '.value'`, "OIDC fetch must not accept empty token values")
+	assert.NotContains(t, run, "\n            OIDC_TOKEN=\"$(curl -fsSL", "OIDC fetch must not be a bare assignment")
+
+	for _, line := range strings.Split(run, "\n") {
+		if !strings.Contains(line, "Failed to ") {
+			continue
+		}
+		assert.NotContains(t, line, "$OIDC_TOKEN", "final failure log must not include token variables")
+		assert.NotContains(t, line, "Authorization", "final failure log must not include auth headers")
+		assert.NotContains(t, line, "Bearer", "final failure log must not include auth headers")
+	}
+}
+
 func namedStep(t *testing.T, job githubActionsJob, name string) githubActionsStep {
 	t.Helper()
 	for _, step := range job.Steps {
@@ -623,13 +647,16 @@ func TestWorkerWorkflowTemplate_ExcludesProviderAuthEnv(t *testing.T) {
 	assert.NotContains(t, s, "--arg base_sha \"${{ github.sha }}\"", "worker result payload must not use dispatch event SHA")
 	assert.Contains(t, s, "while true; do", "worker workflow must retry result callbacks")
 	loopIndex := strings.Index(s, "while true; do")
-	oidcIndex := strings.Index(s, "OIDC_TOKEN=\"$(curl -fsSL")
+	oidcIndex := strings.Index(s, "if ! OIDC_TOKEN=\"$(curl -fsSL")
 	postIndex := strings.Index(s, "if curl -fsSL -X POST")
 	require.NotEqual(t, -1, loopIndex, "worker workflow must have a callback retry loop")
 	require.NotEqual(t, -1, oidcIndex, "worker workflow must fetch an OIDC token for callbacks")
 	require.NotEqual(t, -1, postIndex, "worker workflow must post callback results")
 	assert.Greater(t, oidcIndex, loopIndex, "worker workflow must fetch OIDC tokens inside the callback retry loop")
 	assert.Less(t, oidcIndex, postIndex, "worker workflow must refresh the OIDC token before each callback POST")
+	assertCallbackOIDCTokenFetchRetries(t, s,
+		"Failed to fetch HerdOS job result OIDC token after ${attempt} attempt(s).",
+		"HerdOS job result OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4).")
 	assert.Contains(t, s, "Failed to submit HerdOS job result after ${attempt} attempt(s).", "worker workflow must log final callback failure")
 	assert.Contains(t, s, "delay=$((delay * 2))", "worker workflow must use bounded backoff")
 	assert.Contains(t, s, "ISSUE_NUMBER: ${{ inputs.issue_number }}", "ISSUE_NUMBER input must remain")
