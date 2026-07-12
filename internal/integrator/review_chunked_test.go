@@ -183,11 +183,15 @@ func TestRunChunkedReviewWithRetryMaxChunksOneIncludesRequiredChunkScope(t *test
 	assert.Equal(t, 2, ag.opts[0].TotalChunks)
 	assert.Contains(t, ag.opts[0].CoverageSummary, "Chunks reviewed: 1/2")
 	assert.Contains(t, ag.opts[0].CoverageSummary, "Required chunks: 2; max chunks: 1")
+	assert.Contains(t, result.Summary, "Chunk 1/2: ok")
 
 	prompt, err := agentprompt.RenderReviewPrompt(ag.diffs[0], ag.opts[0])
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "## Review Chunk")
 	assert.Contains(t, prompt, "Chunk: 1 of 2")
+	assert.Contains(t, ag.diffs[0], "- Chunk: 1 of 2")
+	assert.Contains(t, ag.diffs[0], "- Review mode: chunked")
+	assert.NotContains(t, ag.diffs[0], "- Review mode: full")
 	assert.Contains(t, prompt, "Review only the included diffs in this chunk")
 }
 

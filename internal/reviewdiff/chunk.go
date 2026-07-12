@@ -203,7 +203,7 @@ func ChunkForReview(diff DiffSet, opts ChunkOptions) ChunkPlan {
 	flush()
 
 	for i := range chunks {
-		chunks[i].Total = len(chunks)
+		chunks[i].Total = max(len(chunks), requiredChunks)
 		chunks[i].Warnings = append(chunks[i].Warnings, diff.Warnings...)
 		if len(chunks[i].TruncatedFiles) > 0 {
 			chunks[i].Warnings = append(chunks[i].Warnings, fmt.Sprintf("%d truncated file diff(s) in this chunk", len(chunks[i].TruncatedFiles)))

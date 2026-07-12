@@ -626,7 +626,7 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 			approved = false
 		}
 		if strings.TrimSpace(result.Summary) != "" {
-			summaries = append(summaries, fmt.Sprintf("Chunk %d/%d: %s", chunk.Index, chunk.Total, strings.TrimSpace(result.Summary)))
+			summaries = append(summaries, fmt.Sprintf("Chunk %d/%d: %s", chunk.Index, totalChunks, strings.TrimSpace(result.Summary)))
 		}
 		chunkFindingKeys := make(map[string]struct{})
 		for _, finding := range result.Findings {

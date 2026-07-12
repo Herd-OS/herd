@@ -96,9 +96,13 @@ func TestChunkForReviewRequiredChunksGroupsFilesAfterMaxChunks(t *testing.T) {
 	require.Len(t, plan.Chunks, 1)
 	assert.Equal(t, 3, plan.Coverage.RequiredChunks)
 	assert.True(t, plan.Coverage.ExceededMaxChunks)
+	assert.Equal(t, 3, plan.Chunks[0].Total)
 	assert.Equal(t, 3, plan.Coverage.FilesReviewed)
 	assert.Equal(t, 5, plan.Coverage.FilesNotReviewed)
 	assert.Equal(t, map[string]int{"max chunks reached": 5}, plan.Coverage.OmittedByReason)
+	assert.Contains(t, plan.Chunks[0].Text, "- Review mode: chunked")
+	assert.Contains(t, plan.Chunks[0].Text, "- Chunk: 1 of 3")
+	assert.NotContains(t, plan.Chunks[0].Text, "- Review mode: full")
 }
 
 func TestChunkForReviewSummarizesNonReviewableFilesWithPreciseReasons(t *testing.T) {
@@ -283,8 +287,8 @@ func TestFormatChunkedCoverageSummaryCompleteAndPartialWording(t *testing.T) {
 	assert.False(t, partial.Coverage.Complete)
 	assert.True(t, partial.Coverage.ExceededMaxChunks)
 	assert.Contains(t, partialSummary, "partial review")
-	assert.Contains(t, partialSummary, "Chunk 1/2: 1 files")
-	assert.Contains(t, partialSummary, "Chunk 2/2: 1 files")
+	assert.Contains(t, partialSummary, "Chunk 1/3: 1 files")
+	assert.Contains(t, partialSummary, "Chunk 2/3: 1 files")
 	assert.Contains(t, partialSummary, "max chunks reached: 1")
 	assert.Contains(t, partialSummary, "src/003.go")
 	assert.NotContains(t, partialSummary, "total diff byte limit reached")
