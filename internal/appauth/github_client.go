@@ -7,13 +7,18 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/go-github/v68/github"
 	"golang.org/x/oauth2"
 )
 
-const defaultMaxRetries = 3
+const (
+	defaultMaxRetries    = 3
+	githubAppJWTLifetime = 9 * time.Minute
+	githubAppJWTLeeway   = 30 * time.Second
+)
 
 var retryableStatusCodes = map[int]bool{
 	500: true,
@@ -32,17 +37,15 @@ type GitHubTokenSource struct {
 	client *github.Client
 }
 
+type jwtGenerator func(time.Time, AppConfig) (string, error)
+
 // NewGitHubTokenSource creates a token source authenticated as a GitHub App.
 func NewGitHubTokenSource(cfg AppConfig) (*GitHubTokenSource, *http.Client, error) {
-	jwt, err := GenerateJWT(time.Now(), cfg)
-	if err != nil {
+	ts := newGitHubAppJWTTokenSource(cfg, time.Now, GenerateJWT)
+	if _, err := ts.Token(); err != nil {
 		return nil, nil, err
 	}
 
-	ts := oauth2.StaticTokenSource(&oauth2.Token{
-		AccessToken: jwt,
-		TokenType:   "Bearer",
-	})
 	httpClient := oauth2.NewClient(context.Background(), ts)
 	httpClient.Transport = newRetryTransport(httpClient.Transport, time.Second)
 
@@ -215,4 +218,52 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func canReplayRequestBody(req *http.Request) bool {
 	return req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
+}
+
+type githubAppJWTTokenSource struct {
+	mu       sync.Mutex
+	cfg      AppConfig
+	now      func() time.Time
+	generate jwtGenerator
+	cached   *oauth2.Token
+}
+
+func newGitHubAppJWTTokenSource(cfg AppConfig, now func() time.Time, generate jwtGenerator) *githubAppJWTTokenSource {
+	if now == nil {
+		now = time.Now
+	}
+	if generate == nil {
+		generate = GenerateJWT
+	}
+	return &githubAppJWTTokenSource{
+		cfg:      cfg,
+		now:      now,
+		generate: generate,
+	}
+}
+
+func (s *githubAppJWTTokenSource) Token() (*oauth2.Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now()
+	if s.cached != nil && now.Before(s.cached.Expiry) {
+		token := *s.cached
+		return &token, nil
+	}
+
+	jwt, err := s.generate(now, s.cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	token := &oauth2.Token{
+		AccessToken: jwt,
+		TokenType:   "Bearer",
+		Expiry:      now.Add(githubAppJWTLifetime - githubAppJWTLeeway),
+	}
+	s.cached = token
+
+	tokenCopy := *token
+	return &tokenCopy, nil
 }

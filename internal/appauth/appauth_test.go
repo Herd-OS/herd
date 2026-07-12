@@ -126,6 +126,72 @@ func TestGitHubTokenSourceInstallationTokenSuccess(t *testing.T) {
 	assert.Equal(t, []string{"herd", "infra"}, token.Repositories)
 }
 
+func TestGitHubTokenSourceRefreshesAppJWTAfterExpiry(t *testing.T) {
+	current := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	generatedAt := []time.Time{}
+	jwtSource := newGitHubAppJWTTokenSource(
+		AppConfig{AppID: 123},
+		func() time.Time { return current },
+		func(now time.Time, _ AppConfig) (string, error) {
+			generatedAt = append(generatedAt, now)
+			tokens := []string{"app-jwt-1", "app-jwt-2"}
+			return tokens[len(generatedAt)-1], nil
+		},
+	)
+
+	authHeaders := []string{}
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, http.MethodPost, req.Method)
+		assert.Equal(t, "/api/v3/app/installations/99/access_tokens", req.URL.Path)
+		authHeaders = append(authHeaders, req.Header.Get("Authorization"))
+		return jsonResponse(http.StatusCreated, `{"token":"installation-token","expires_at":"2026-07-11T13:00:00Z"}`), nil
+	})
+	httpClient := oauth2.NewClient(context.Background(), jwtSource)
+	oauthTransport, ok := httpClient.Transport.(*oauth2.Transport)
+	require.True(t, ok)
+	oauthTransport.Base = rt
+	ghClient, err := github.NewClient(httpClient).WithEnterpriseURLs("https://example.test/api/v3/", "https://example.test/api/uploads/")
+	require.NoError(t, err)
+	source, err := NewGitHubTokenSourceWithClient(ghClient)
+	require.NoError(t, err)
+
+	_, err = source.InstallationToken(context.Background(), 99)
+	require.NoError(t, err)
+
+	current = current.Add(githubAppJWTLifetime - githubAppJWTLeeway - time.Second)
+	_, err = source.InstallationToken(context.Background(), 99)
+	require.NoError(t, err)
+
+	current = current.Add(2 * time.Second)
+	_, err = source.InstallationToken(context.Background(), 99)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{
+		"Bearer app-jwt-1",
+		"Bearer app-jwt-1",
+		"Bearer app-jwt-2",
+	}, authHeaders)
+	assert.Len(t, generatedAt, 2)
+	assert.Equal(t, time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC), generatedAt[0])
+	assert.Equal(t, time.Date(2026, 7, 11, 12, 8, 31, 0, time.UTC), generatedAt[1])
+}
+
+func TestGitHubAppJWTTokenSourcePropagatesGenerateError(t *testing.T) {
+	generateErr := errors.New("jwt unavailable")
+	jwtSource := newGitHubAppJWTTokenSource(
+		AppConfig{AppID: 123},
+		func() time.Time { return time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC) },
+		func(time.Time, AppConfig) (string, error) {
+			return "", generateErr
+		},
+	)
+
+	token, err := jwtSource.Token()
+	require.Error(t, err)
+	assert.Nil(t, token)
+	assert.ErrorIs(t, err, generateErr)
+}
+
 func TestGitHubTokenSourceInstallationTokenError(t *testing.T) {
 	rt := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return jsonResponse(http.StatusInternalServerError, `{"message":"server error"}`), nil
