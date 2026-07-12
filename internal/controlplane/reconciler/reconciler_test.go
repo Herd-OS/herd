@@ -149,6 +149,41 @@ func TestDuplicateDispatchIsNotRepeated(t *testing.T) {
 	assert.Equal(t, 1, report.CountsByClassification()[ClassificationComplete])
 }
 
+func TestRunOnceDoesNotFailCompletedIdempotencyForStuckMutationAttempt(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := store.NewMemoryStore()
+	_ = seedRepo(t, st, ctx)
+	key := "review_status:completed"
+	created, err := st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "review_status",
+		Status:    "completed",
+		ResultRef: "status:created",
+		CreatedAt: now.Add(-time.Hour),
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+	require.NoError(t, st.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		MutationType:   "review_status",
+		Status:         "started",
+		CreatedAt:      now.Add(-time.Hour),
+	}))
+	r := &Reconciler{Store: st, Now: func() time.Time { return now }, Config: Config{CallbackTimeout: time.Minute}}
+
+	_, err = r.RunOnce(ctx)
+
+	require.NoError(t, err)
+	idem, err := st.GetIdempotencyKey(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", idem.Status)
+	assert.Equal(t, "status:created", idem.ResultRef)
+	attempt, err := st.GetGitHubMutationAttempt(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", attempt.Status)
+}
+
 func seedReconcilerStore(t *testing.T, now time.Time) *store.MemoryStore {
 	t.Helper()
 	ctx := context.Background()

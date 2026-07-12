@@ -32,6 +32,7 @@ type Store interface {
 	ListReconcileReviewStates(ctx context.Context, updatedBefore time.Time, limit int) ([]store.ReconcileReviewState, error)
 	SetReviewState(ctx context.Context, state store.ReviewState) error
 	ListStartedIdempotencyKeys(ctx context.Context, scope string, createdBefore time.Time, limit int) ([]store.IdempotencyKey, error)
+	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	ListStartedGitHubMutationAttempts(ctx context.Context, createdBefore time.Time, limit int) ([]store.GitHubMutationAttempt, error)
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
@@ -233,6 +234,14 @@ func (r *Reconciler) runMutationAttempts(ctx context.Context, cfg Config, now ti
 		d := r.add(report, "mutation_attempt", attempt.IdempotencyKey, ClassificationFailedSurfaced, "mark_failed", "mutation/callback side effect remained started past timeout")
 		if err := r.Store.CompleteGitHubMutationAttempt(ctx, attempt.IdempotencyKey, "failed", diagnosticMetadata(d), d.Message, now); err != nil {
 			*errs = append(*errs, fmt.Errorf("surface stuck mutation attempt %s: %w", attempt.IdempotencyKey, err))
+		}
+		idem, err := r.Store.GetIdempotencyKey(ctx, attempt.IdempotencyKey)
+		if err == nil && idem.Status == "completed" {
+			continue
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			*errs = append(*errs, fmt.Errorf("get stuck mutation idempotency key %s: %w", attempt.IdempotencyKey, err))
+			continue
 		}
 		if err := r.Store.FailIdempotencyKey(ctx, attempt.IdempotencyKey, d.Message); err != nil && !errors.Is(err, store.ErrNotFound) {
 			*errs = append(*errs, fmt.Errorf("fail stuck mutation idempotency key %s: %w", attempt.IdempotencyKey, err))

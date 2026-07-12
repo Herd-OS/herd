@@ -18,6 +18,7 @@ import (
 func TestDispatchReadyWorkers_UsesServiceDispatcher(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
+	fake.prs.items[99] = &platform.PullRequest{Number: 99}
 	disp := &fakeDispatcher{}
 	svc := newTestService(fake, newFakeStore(), disp)
 	allIssues := []*platform.Issue{
@@ -140,6 +141,32 @@ func TestOpenBatchPRStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
 	assert.Nil(t, fake.prs.created)
 }
 
+func TestOpenBatchPRCompletedIdempotencyRepairsStartedMutationAttempt(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.prs.items[99] = &platform.PullRequest{Number: 99}
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("batch-pr", "repo", svc.Repo.ID, "batch", 4)
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "pull_request_create", Status: "completed", ResultRef: "pr:99", CreatedAt: fixedClock()}
+	st.mutations[key] = store.GitHubMutationAttempt{IdempotencyKey: key, RepositoryID: svc.Repo.ID, MutationType: "pull_request_create", Status: "started", CreatedAt: fixedClock()}
+
+	pr, err := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, pr)
+	assert.Equal(t, 99, pr.Number)
+	assert.Nil(t, fake.prs.created)
+	assert.Equal(t, "completed", st.mutations[key].Status)
+	assert.Contains(t, string(st.mutations[key].Response), "pr:99")
+}
+
 func TestEnsureTaskIssueStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
@@ -245,6 +272,14 @@ func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessa
 func (s *fakeStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
 	s.mutations[a.IdempotencyKey] = a
 	return nil
+}
+
+func (s *fakeStore) GetGitHubMutationAttempt(_ context.Context, key string) (store.GitHubMutationAttempt, error) {
+	attempt, ok := s.mutations[key]
+	if !ok {
+		return store.GitHubMutationAttempt{}, store.ErrNotFound
+	}
+	return attempt, nil
 }
 
 func (s *fakeStore) CompleteGitHubMutationAttempt(_ context.Context, key string, status string, response json.RawMessage, errMsg string, completedAt time.Time) error {

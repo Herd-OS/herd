@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,6 +30,7 @@ type Store interface {
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 	RecordJobResult(ctx context.Context, r store.JobResult) (created bool, err error)
 }
@@ -286,6 +288,9 @@ func (s Service) withIdempotency(ctx context.Context, key string, mutationType s
 			return "", fmt.Errorf("get idempotency key: %w", err)
 		}
 		if record.Status == mutationStatusCompleted && strings.TrimSpace(record.ResultRef) != "" {
+			if err := s.repairCompletedMutationAttempt(ctx, key, record.ResultRef); err != nil {
+				return "", err
+			}
 			return record.ResultRef, nil
 		}
 		status := strings.TrimSpace(record.Status)
@@ -313,14 +318,32 @@ func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutati
 		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
 		return "", err
 	}
-	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
-		return "", fmt.Errorf("complete idempotency key: %w", err)
-	}
 	response, _ := json.Marshal(map[string]string{"result_ref": resultRef})
 	if err := s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusCompleted, response, "", s.now()); err != nil {
 		return "", fmt.Errorf("complete mutation attempt: %w", err)
 	}
+	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+		return "", fmt.Errorf("complete idempotency key: %w", err)
+	}
 	return resultRef, nil
+}
+
+func (s Service) repairCompletedMutationAttempt(ctx context.Context, key string, resultRef string) error {
+	attempt, err := s.Store.GetGitHubMutationAttempt(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get mutation attempt: %w", err)
+	}
+	if attempt.Status == mutationStatusCompleted {
+		return nil
+	}
+	response, _ := json.Marshal(map[string]string{"result_ref": resultRef})
+	if err := s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusCompleted, response, "", s.now()); err != nil {
+		return fmt.Errorf("repair mutation attempt: %w", err)
+	}
+	return nil
 }
 
 func BuildTiers(allIssues []*platform.Issue) ([][]int, error) {
