@@ -165,6 +165,8 @@ func TestIntegratorWorkflow_BatchExtractionIsNonFatal(t *testing.T) {
 			nonFatalParse := "BATCH=$(echo \"$HEAD_BRANCH\" | grep -oP 'herd/batch/\\K[0-9]+' || true)"
 			assert.Equal(t, tt.wantOccurrences, strings.Count(s, nonFatalParse))
 			assert.NotContains(t, s, "BATCH=$(echo \"$HEAD_BRANCH\" | grep -oP 'herd/batch/\\K[0-9]+')\n")
+			assert.Contains(t, s, "ISSUE_BODY=\"$(jq -r '.issue.body // \"\"' \"$GITHUB_EVENT_PATH\")\"")
+			assert.NotContains(t, s, "ISSUE_BODY: ${{ github.event.issue.body }}")
 			nonFatalIssueCloseParse := "BATCH=$(echo \"$ISSUE_BODY\" | grep -oP '^\\s*batch:\\s*\\K[0-9]+' | head -1 || true)"
 			assert.Contains(t, s, nonFatalIssueCloseParse)
 			assert.NotContains(t, s, "BATCH=$(echo \"$ISSUE_BODY\" | grep -oP '^\\s*batch:\\s*\\K[0-9]+' | head -1)\n")
@@ -179,6 +181,52 @@ func TestIntegratorWorkflow_BatchExtractionIsNonFatal(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIntegratorWorkflow_IssueCloseReadsBodyFromEventPathAndSkipsNonHerdMultilineBody(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+
+	step := namedStep(t, workflow.Jobs["advance-on-close"], "Request hosted issue-close reconciliation")
+	require.NotContains(t, step.Env, "ISSUE_BODY")
+	require.Contains(t, step.Run, "$GITHUB_EVENT_PATH")
+
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	require.NoError(t, os.WriteFile(eventPath, []byte(`{"issue":{"body":"not herd\nbatch: not-a-number\n${{ github.event.issue.body }}"}}`), 0600))
+
+	binDir := filepath.Join(dir, "bin")
+	require.NoError(t, os.Mkdir(binDir, 0700))
+	jqPath := filepath.Join(binDir, "jq")
+	require.NoError(t, os.WriteFile(jqPath, []byte(`#!/bin/sh
+if [ "$1" != "-r" ] || [ "$2" != ".issue.body // \"\"" ] || [ "$3" != "$GITHUB_EVENT_PATH" ]; then
+  echo "unexpected jq invocation: $*" >&2
+  exit 2
+fi
+printf '%s\n' 'not herd' 'batch: not-a-number' '${{ github.event.issue.body }}'
+`), 0700))
+	curlPath := filepath.Join(binDir, "curl")
+	require.NoError(t, os.WriteFile(curlPath, []byte(`#!/bin/sh
+echo "curl should not be called for non-Herd issue bodies" >&2
+exit 9
+`), 0700))
+
+	cmd := exec.Command("sh", "-c", step.Run)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GITHUB_EVENT_PATH="+eventPath,
+		"ISSUE_NUMBER=884",
+		"REPOSITORY=octo/herd",
+		"HERD_CONTROL_PLANE_URL=https://api.herd-os.com",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+	assert.Contains(t, string(output), "Not a herd issue")
 }
 
 func TestMonitorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {
@@ -403,6 +451,17 @@ func jobPostsWorkflowEvent(job githubActionsJob) bool {
 		}
 	}
 	return false
+}
+
+func namedStep(t *testing.T, job githubActionsJob, name string) githubActionsStep {
+	t.Helper()
+	for _, step := range job.Steps {
+		if step.Name == name {
+			return step
+		}
+	}
+	require.Failf(t, "step not found", "step %q not found", name)
+	return githubActionsStep{}
 }
 
 func TestRenderWorkflow_UnknownSource(t *testing.T) {
