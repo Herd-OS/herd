@@ -421,7 +421,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{MaxCyclesHit: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Safety valve — for chunked reviews, only an individual chunk can trip it.
+	// Safety valve: a suspicious number of HIGH findings from one review pass
+	// stops automated fix dispatch. In chunked mode each chunk is an independent
+	// bounded review pass, so aggregate HIGH findings across chunks are expected on
+	// large PRs and must not trip this guard by themselves.
 	if len(aggregate.ChunkStats) > 1 {
 		if stat, ok := offendingChunkSafetyValveStats(aggregate.ChunkStats, safetyValveLimit); ok {
 			comment := buildChunkReviewSafetyValveComment(stat, safetyValveLimit)
