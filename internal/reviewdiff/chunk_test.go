@@ -22,7 +22,7 @@ func TestChunkForReviewSmallPRComplete(t *testing.T) {
 	}
 
 	plan := ChunkForReview(diff, ChunkOptions{
-		MaxChunkBytes:            100,
+		MaxChunkBytes:            1000,
 		MaxFileDiffBytes:         100,
 		MaxFilesPerChunk:         10,
 		MaxChunks:                8,
@@ -53,7 +53,7 @@ func TestChunkForReviewMultipleChunksIncludesEveryReviewableFileOnce(t *testing.
 	}
 
 	plan := ChunkForReview(DiffSet{Source: "local-git", Files: files}, ChunkOptions{
-		MaxChunkBytes:            1000,
+		MaxChunkBytes:            5000,
 		MaxFileDiffBytes:         100,
 		MaxFilesPerChunk:         31,
 		MaxChunks:                8,
@@ -77,6 +77,28 @@ func TestChunkForReviewMultipleChunksIncludesEveryReviewableFileOnce(t *testing.
 	}
 	assert.Equal(t, "src/000.go", plan.Chunks[0].IncludedFiles[0].Path)
 	assert.Equal(t, "src/119.go", plan.Chunks[3].IncludedFiles[len(plan.Chunks[3].IncludedFiles)-1].Path)
+}
+
+func TestChunkForReviewSplitsByRenderedChunkBytes(t *testing.T) {
+	files := make([]ChangedFile, 0, 12)
+	for i := range 12 {
+		files = append(files, sourceFile(fmt.Sprintf("src/%03d.go", i), strings.Repeat("x", 30)))
+	}
+	opts := ChunkOptions{
+		MaxChunkBytes:            900,
+		MaxFileDiffBytes:         100,
+		MaxFilesPerChunk:         12,
+		MaxChunks:                12,
+		MaxOmittedSummaryEntries: 2,
+	}
+
+	plan := ChunkForReview(DiffSet{Source: "github", Files: files}, opts)
+
+	require.Greater(t, len(plan.Chunks), 1)
+	assert.True(t, plan.Coverage.Complete)
+	for _, chunk := range plan.Chunks {
+		assert.LessOrEqual(t, len(chunk.Text), opts.MaxChunkBytes)
+	}
 }
 
 func TestChunkForReviewRequiredChunksGroupsFilesAfterMaxChunks(t *testing.T) {

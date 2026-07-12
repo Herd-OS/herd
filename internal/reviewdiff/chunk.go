@@ -157,25 +157,28 @@ func ChunkForReview(diff DiffSet, opts ChunkOptions) ChunkPlan {
 		})
 		reviewable, reason := chunkReviewability(file)
 		pf := plannedFile{file: file, reviewable: reviewable, reason: reason}
-		planned = append(planned, pf)
-		idx := len(planned) - 1
 		if !reviewable {
-			planned[idx].notReviewed = true
-			planned[idx].file.Omitted = true
-			planned[idx].file.OmitReason = reason
+			pf.notReviewed = true
+			pf.file.Omitted = true
+			pf.file.OmitReason = reason
+		}
+		planned = append(planned, pf)
+	}
+
+	for idx := range planned {
+		if !planned[idx].reviewable {
 			continue
 		}
 
-		patchBytes := len(file.Patch)
-		usedBytes := patchBytes
+		patchBytes := len(planned[idx].file.Patch)
 		if patchBytes > opts.MaxFileDiffBytes {
-			usedBytes = opts.MaxFileDiffBytes
 			planned[idx].truncated = true
 			planned[idx].reason = "file diff exceeds per-file limit and was truncated"
 			planned[idx].file.Truncated = true
 			planned[idx].file.OmitReason = planned[idx].reason
 		}
-		if usedBytes > opts.MaxChunkBytes {
+		usedPatchBytes := min(patchBytes, opts.MaxFileDiffBytes)
+		if usedPatchBytes > opts.MaxChunkBytes {
 			planned[idx].reviewable = false
 			planned[idx].notReviewed = true
 			planned[idx].truncated = false
@@ -185,16 +188,36 @@ func ChunkForReview(diff DiffSet, opts ChunkOptions) ChunkPlan {
 			planned[idx].file.OmitReason = planned[idx].reason
 			continue
 		}
+		singleChunk := chunkWithCandidate(current, planned[idx].file)
+		singleChunk.Index = requiredChunks + 1
+		singleChunk.Total = conservativeChunkTotal(diff)
+		if planned[idx].truncated {
+			singleChunk.TruncatedFiles = append(singleChunk.TruncatedFiles, planned[idx].file)
+			singleChunk.WasLimited = true
+		}
+		singleChunk.Warnings = chunkWarnings(diff, singleChunk)
+		singleChunk.OmittedFiles = plannedOmittedFiles(planned, idx, singleChunk.IncludedFiles)
+		renderedBytes := len(renderChunk(diff, singleChunk, opts))
 
-		if len(current.IncludedFiles) > 0 && (len(current.IncludedFiles) >= opts.MaxFilesPerChunk || current.UsedDiffBytes+usedBytes > opts.MaxChunkBytes) {
+		if len(current.IncludedFiles) > 0 && (len(current.IncludedFiles) >= opts.MaxFilesPerChunk || renderedBytes > opts.MaxChunkBytes) {
 			flush()
+			singleChunk = chunkWithCandidate(current, planned[idx].file)
+			singleChunk.Index = requiredChunks + 1
+			singleChunk.Total = conservativeChunkTotal(diff)
+			if planned[idx].truncated {
+				singleChunk.TruncatedFiles = append(singleChunk.TruncatedFiles, planned[idx].file)
+				singleChunk.WasLimited = true
+			}
+			singleChunk.Warnings = chunkWarnings(diff, singleChunk)
+			singleChunk.OmittedFiles = plannedOmittedFiles(planned, idx, singleChunk.IncludedFiles)
+			renderedBytes = len(renderChunk(diff, singleChunk, opts))
 		}
 
 		current.IncludedFiles = append(current.IncludedFiles, planned[idx].file)
-		current.UsedDiffBytes += usedBytes
+		current.UsedDiffBytes = renderedBytes
 		planned[idx].reviewed = true
 		planned[idx].chunkIndex = requiredChunks + 1
-		planned[idx].usedDiffBytes = usedBytes
+		planned[idx].usedDiffBytes = renderedBytes
 		if planned[idx].truncated {
 			current.TruncatedFiles = append(current.TruncatedFiles, planned[idx].file)
 			current.WasLimited = true
@@ -204,15 +227,13 @@ func ChunkForReview(diff DiffSet, opts ChunkOptions) ChunkPlan {
 
 	for i := range chunks {
 		chunks[i].Total = max(len(chunks), requiredChunks)
-		chunks[i].Warnings = append(chunks[i].Warnings, diff.Warnings...)
-		if len(chunks[i].TruncatedFiles) > 0 {
-			chunks[i].Warnings = append(chunks[i].Warnings, fmt.Sprintf("%d truncated file diff(s) in this chunk", len(chunks[i].TruncatedFiles)))
-		}
+		chunks[i].Warnings = chunkWarnings(diff, chunks[i])
 		chunks[i].OmittedFiles = chunkOmittedFiles(planned, chunks[i].Index)
 		if len(chunks[i].OmittedFiles) > 0 {
 			chunks[i].WasLimited = true
 		}
 		chunks[i].Text = renderChunk(diff, chunks[i], opts)
+		chunks[i].UsedDiffBytes = len(chunks[i].Text)
 	}
 
 	coverage := buildCoverage(diff, chunks, planned, opts, requiredChunks)
@@ -223,6 +244,51 @@ func ChunkForReview(diff DiffSet, opts ChunkOptions) ChunkPlan {
 		Coverage: coverage,
 		Warnings: warnings,
 	}
+}
+
+func chunkWithCandidate(current ReviewChunk, file ChangedFile) ReviewChunk {
+	chunk := current
+	chunk.IncludedFiles = append(append([]ChangedFile{}, current.IncludedFiles...), file)
+	chunk.TruncatedFiles = append([]ChangedFile{}, current.TruncatedFiles...)
+	return chunk
+}
+
+func conservativeChunkTotal(diff DiffSet) int {
+	return max(2, len(diff.Files))
+}
+
+func chunkWarnings(diff DiffSet, chunk ReviewChunk) []string {
+	warnings := append([]string{}, diff.Warnings...)
+	if len(chunk.TruncatedFiles) > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d truncated file diff(s) in this chunk", len(chunk.TruncatedFiles)))
+	}
+	return warnings
+}
+
+func plannedOmittedFiles(planned []plannedFile, candidateIdx int, included []ChangedFile) []ChangedFile {
+	includedPaths := make(map[string]struct{}, len(included))
+	for _, file := range included {
+		includedPaths[file.Path] = struct{}{}
+	}
+	omitted := make([]ChangedFile, 0, len(planned))
+	for idx, pf := range planned {
+		if _, ok := includedPaths[pf.file.Path]; ok {
+			continue
+		}
+		file := pf.file
+		file.Omitted = true
+		file.Truncated = false
+		switch {
+		case pf.reason != "":
+			file.OmitReason = pf.reason
+		case idx < candidateIdx && pf.reviewed:
+			file.OmitReason = "reviewed in another chunk"
+		default:
+			file.OmitReason = "reviewed in another chunk"
+		}
+		omitted = append(omitted, file)
+	}
+	return omitted
 }
 
 func chunkReviewability(file ChangedFile) (bool, string) {
