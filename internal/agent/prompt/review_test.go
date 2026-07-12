@@ -113,6 +113,141 @@ func TestRenderReviewPrompt_DoesNotWrapRenderedReviewDiffInOuterFence(t *testing
 	assert.NotContains(t, diffSection, "## Diff\n\n```diff\n# Review diff", "prompt must not wrap rendered markdown in an outer diff fence")
 }
 
+func TestRenderReviewPrompt_ChunkMetadata(t *testing.T) {
+	tests := []struct {
+		name            string
+		opts            agent.ReviewOptions
+		wantContains    []string
+		wantNotContains []string
+		wantBeforeDiff  []string
+	}{
+		{
+			name: "chunked review includes metadata and scope",
+			opts: agent.ReviewOptions{
+				AcceptanceCriteria:     []string{"works"},
+				ChunkedReview:          true,
+				ChunkIndex:             2,
+				TotalChunks:            4,
+				ChunkIncludedPathRange: "internal/a.go through internal/z.go",
+			},
+			wantContains: []string{
+				"## Review Chunk",
+				"Chunk: 2 of 4",
+				"Included path range: internal/a.go through internal/z.go",
+				"Review only the included diffs in this chunk",
+				"Do not assume files from other chunks are present here",
+			},
+			wantBeforeDiff: []string{
+				"## Review Chunk",
+				"Chunk: 2 of 4",
+				"Review only the included diffs in this chunk",
+			},
+		},
+		{
+			name: "non chunked review omits chunk section",
+			opts: agent.ReviewOptions{
+				AcceptanceCriteria: []string{"works"},
+				ChunkIndex:         2,
+				TotalChunks:        4,
+			},
+			wantNotContains: []string{
+				"## Review Chunk",
+				"Chunk: 2 of 4",
+				"Review only the included diffs in this chunk",
+			},
+		},
+		{
+			name: "chunked review omits empty path range",
+			opts: agent.ReviewOptions{
+				AcceptanceCriteria: []string{"works"},
+				ChunkedReview:      true,
+				ChunkIndex:         1,
+				TotalChunks:        3,
+			},
+			wantContains: []string{
+				"## Review Chunk",
+				"Chunk: 1 of 3",
+			},
+			wantNotContains: []string{
+				"Included path range:",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prompt, err := RenderReviewPrompt("diff", tt.opts)
+			require.NoError(t, err)
+
+			for _, want := range tt.wantContains {
+				assert.Contains(t, prompt, want)
+			}
+			for _, want := range tt.wantNotContains {
+				assert.NotContains(t, prompt, want)
+			}
+			diffIdx := strings.Index(prompt, "## Diff")
+			require.GreaterOrEqual(t, diffIdx, 0, "diff section must be present")
+			for _, want := range tt.wantBeforeDiff {
+				idx := strings.Index(prompt, want)
+				require.GreaterOrEqual(t, idx, 0, "%q must be present", want)
+				assert.Less(t, idx, diffIdx, "%q must appear before ## Diff", want)
+			}
+		})
+	}
+}
+
+func TestRenderReviewPrompt_CoverageSummary(t *testing.T) {
+	tests := []struct {
+		name string
+		opts agent.ReviewOptions
+	}{
+		{
+			name: "chunked review",
+			opts: agent.ReviewOptions{
+				AcceptanceCriteria: []string{"works"},
+				ChunkedReview:      true,
+				ChunkIndex:         1,
+				TotalChunks:        2,
+				CoverageSummary:    "Rendered 10 of 20 files.",
+			},
+		},
+		{
+			name: "partial review",
+			opts: agent.ReviewOptions{
+				AcceptanceCriteria: []string{"works"},
+				PartialReview:      true,
+				CoverageSummary:    "Rendered 5 of 12 files; omitted large generated files.",
+			},
+		},
+		{
+			name: "summary with diff coverage heading",
+			opts: agent.ReviewOptions{
+				AcceptanceCriteria: []string{"works"},
+				ChunkedReview:      true,
+				ChunkIndex:         2,
+				TotalChunks:        2,
+				CoverageSummary:    "## Diff Coverage\nRendered all files in this chunk.",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prompt, err := RenderReviewPrompt("diff", tt.opts)
+			require.NoError(t, err)
+
+			assert.Contains(t, prompt, "## Review Coverage Context")
+			assert.Contains(t, prompt, tt.opts.CoverageSummary)
+			assert.Equal(t, 1, strings.Count(prompt, "## Review Coverage Context"))
+			diffIdx := strings.Index(prompt, "\n## Diff\n\n")
+			require.GreaterOrEqual(t, diffIdx, 0, "diff section must be present")
+			assert.Less(t, strings.Index(prompt, "## Review Coverage Context"), diffIdx)
+			assert.Less(t, strings.Index(prompt, tt.opts.CoverageSummary), diffIdx)
+			assert.LessOrEqual(t, strings.Count(prompt, "## Diff Coverage"), 1)
+		})
+	}
+}
+
 func TestRenderReviewPrompt_EmptyCriteria(t *testing.T) {
 	opts := agent.ReviewOptions{
 		AcceptanceCriteria: nil,
