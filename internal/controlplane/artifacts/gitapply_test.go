@@ -3,6 +3,7 @@ package artifacts
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,6 +94,18 @@ func TestApplyAuthenticatedCloneErrorRedactsInstallationToken(t *testing.T) {
 	assert.NotContains(t, err.Error(), token)
 	assert.NotContains(t, err.Error(), "x-access-token")
 	assert.NotContains(t, err.Error(), base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)))
+}
+
+func TestRedactTokenRemovesRawAndExtraHeaderCredentials(t *testing.T) {
+	token := "ghs_secret_installation_token"
+	credential := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	err := redactToken(errors.New("git -c http.https://github.com/.extraheader=AUTHORIZATION: basic "+credential+" remote x-access-token:"+token+" "+token), token)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), token)
+	assert.NotContains(t, err.Error(), credential)
+	assert.NotContains(t, err.Error(), "x-access-token")
+	assert.NotContains(t, err.Error(), "AUTHORIZATION: basic")
 }
 
 func TestApplyAuthenticatedCloneDoesNotPersistTokenInTempDir(t *testing.T) {

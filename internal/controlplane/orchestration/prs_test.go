@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/herd-os/herd/internal/issues"
@@ -181,5 +182,23 @@ func TestCleanupClosedBatchPR_ClosesIssuesMilestoneAndDeletesBranch(t *testing.T
 	assert.Equal(t, "closed", fake.issues.items[2].State)
 	assert.Contains(t, fake.issues.added[1], issues.StatusCancelled)
 	assert.Equal(t, []int{9}, fake.milestones.closed)
+	assert.Contains(t, fake.repo.deleted, "herd/batch/9-demo")
+}
+
+func TestCleanupClosedBatchPR_ReturnsIssueCleanupErrorAndDeletesBranch(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.prs.items[9] = &platform.PullRequest{Number: 9, Title: "[herd] Demo", State: "closed", Head: "herd/batch/9-demo"}
+	fake.issues.listResult = []*platform.Issue{{Number: 1, Labels: []string{issues.StatusReady}}}
+	fake.issues.items[1] = fake.issues.listResult[0]
+	fake.issues.updateErr = fmt.Errorf("github unavailable")
+	fake.milestones.items[9] = &platform.Milestone{Number: 9, Title: "Demo"}
+	fake.repo.branches["herd/batch/9-demo"] = "head"
+	svc := newTestService(fake, newFakeStore(), nil)
+
+	err := svc.CleanupClosedBatchPR(ctx, 9, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "close issue 1")
 	assert.Contains(t, fake.repo.deleted, "herd/batch/9-demo")
 }

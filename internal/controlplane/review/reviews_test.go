@@ -132,6 +132,23 @@ func TestSubmitPRReviewOnceStartedRecordDoesNotCreateReview(t *testing.T) {
 	assert.Empty(t, gh.reviews)
 }
 
+func TestSubmitReviewResultStartedSubmissionReturnsRetryableError(t *testing.T) {
+	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
+	statusGH := &fakeStatusGitHub{}
+	mutations := newFakeReviewMutationStore()
+	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}, Mutations: mutations}
+	repo := testRepo(true)
+	result := reviewResult(ResultStatusApproved, "head")
+	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
+	mutations.idem[key] = store.IdempotencyKey{Key: key, Scope: "review_submission", Status: "started"}
+
+	err := svc.SubmitReviewResult(context.Background(), repo, result)
+
+	require.ErrorIs(t, err, ErrReviewSubmissionInProgress)
+	assert.Empty(t, gh.reviews)
+	assert.Empty(t, statusGH.statuses)
+}
+
 func TestSubmitPRReviewOnceConcurrentDuplicateCreatesOneReview(t *testing.T) {
 	gh := &fakeReviewGitHub{}
 	mutations := newFakeReviewMutationStore()
@@ -324,7 +341,7 @@ func (s *fakeReviewMutationStore) RecordGitHubMutationAttempt(_ context.Context,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.mutations[a.IdempotencyKey]; ok {
-		return errors.New("duplicate mutation")
+		return store.ErrAlreadyExists
 	}
 	s.mutations[a.IdempotencyKey] = a
 	return nil

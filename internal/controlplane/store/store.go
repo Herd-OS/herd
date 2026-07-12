@@ -10,6 +10,9 @@ import (
 // ErrNotFound is returned when a requested control-plane record does not exist.
 var ErrNotFound = errors.New("control-plane store record not found")
 
+// ErrAlreadyExists is returned when a unique control-plane guard already exists.
+var ErrAlreadyExists = errors.New("control-plane store record already exists")
+
 // Store persists durable control-plane state. Implementations must use database
 // uniqueness constraints for idempotent methods so concurrent callers observe
 // the same created=false result instead of racing in application code.

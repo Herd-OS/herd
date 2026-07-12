@@ -108,6 +108,25 @@ func TestDispatcherDuplicateStartedWithCompletedMutationRepairsIdempotency(t *te
 	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
 }
 
+func TestDispatcherRetryAfterCompleteIdempotencyFailureRepairsFromMutation(t *testing.T) {
+	st := newFakeStore()
+	st.completeIdemErrs = map[string][]error{}
+	gh := &fakeWorkflowClient{}
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.completeIdemErrs[key] = []error{errors.New("database down"), nil}
+
+	first, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.Error(t, err)
+	assert.Empty(t, first.JobID)
+	second, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.False(t, second.Created)
+	assert.Len(t, gh.calls, 1)
+	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
+}
+
 func TestDispatcherValidationRejectsMissingAndStaleHeadSHA(t *testing.T) {
 	tests := []struct {
 		name string
@@ -260,6 +279,7 @@ type fakeStore struct {
 	idempotencyKeys  map[string]store.IdempotencyKey
 	mutationAttempts []store.GitHubMutationAttempt
 	createJobErrs    []error
+	completeIdemErrs map[string][]error
 }
 
 func newFakeStore() *fakeStore {
@@ -306,6 +326,13 @@ func (s *fakeStore) GetIdempotencyKey(_ context.Context, key string) (store.Idem
 }
 
 func (s *fakeStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	if len(s.completeIdemErrs[key]) > 0 {
+		err := s.completeIdemErrs[key][0]
+		s.completeIdemErrs[key] = s.completeIdemErrs[key][1:]
+		if err != nil {
+			return err
+		}
+	}
 	record, ok := s.idempotencyKeys[key]
 	if !ok {
 		return store.ErrNotFound
@@ -334,7 +361,7 @@ func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessa
 func (s *fakeStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
 	for _, existing := range s.mutationAttempts {
 		if existing.IdempotencyKey == a.IdempotencyKey {
-			return errors.New("duplicate mutation idempotency key")
+			return store.ErrAlreadyExists
 		}
 	}
 	s.mutationAttempts = append(s.mutationAttempts, a)

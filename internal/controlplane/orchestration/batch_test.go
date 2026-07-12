@@ -329,6 +329,7 @@ type fakeIssueService struct {
 	comments   map[int][]string
 	added      map[int][]string
 	removed    map[int][]string
+	updateErr  error
 	next       int
 }
 
@@ -367,6 +368,9 @@ func (s *fakeIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*
 }
 
 func (s *fakeIssueService) Update(_ context.Context, number int, changes platform.IssueUpdate) (*platform.Issue, error) {
+	if s.updateErr != nil {
+		return nil, s.updateErr
+	}
 	iss, ok := s.items[number]
 	if !ok {
 		iss = &platform.Issue{Number: number}

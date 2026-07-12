@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -204,20 +205,32 @@ func (s Service) CleanupClosedBatchPR(ctx context.Context, prNumber int, merged 
 		return err
 	}
 	closed := "closed"
+	var cleanupErrs []error
 	for _, iss := range openIssues {
 		if !merged && !issues.HasLabel(iss.Labels, issues.StatusDone) {
 			if status := issues.StatusLabel(iss.Labels); status != "" {
-				_ = s.Platform.Issues().RemoveLabels(ctx, iss.Number, []string{status})
+				if err := s.Platform.Issues().RemoveLabels(ctx, iss.Number, []string{status}); err != nil {
+					cleanupErrs = append(cleanupErrs, fmt.Errorf("remove issue %d status label: %w", iss.Number, err))
+				}
 			}
-			_ = s.Platform.Issues().AddLabels(ctx, iss.Number, []string{issues.StatusCancelled})
+			if err := s.Platform.Issues().AddLabels(ctx, iss.Number, []string{issues.StatusCancelled}); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("add issue %d cancelled label: %w", iss.Number, err))
+			}
 		}
-		_, _ = s.Platform.Issues().Update(ctx, iss.Number, platform.IssueUpdate{State: &closed})
+		if _, err := s.Platform.Issues().Update(ctx, iss.Number, platform.IssueUpdate{State: &closed}); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("close issue %d: %w", iss.Number, err))
+		}
 	}
-	_, _ = s.Platform.Milestones().Update(ctx, msNumber, platform.MilestoneUpdate{State: &closed})
-	return s.ApplyBranchOperation(ctx, BranchOperationRequest{
+	if _, err := s.Platform.Milestones().Update(ctx, msNumber, platform.MilestoneUpdate{State: &closed}); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("close milestone %d: %w", msNumber, err))
+	}
+	if err := s.ApplyBranchOperation(ctx, BranchOperationRequest{
 		OperationKind: "delete",
 		BranchName:    pr.Head,
-	})
+	}); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
+	}
+	return errors.Join(cleanupErrs...)
 }
 
 // MergeApprovedBatchPR is the hosted-service equivalent of local approved PR

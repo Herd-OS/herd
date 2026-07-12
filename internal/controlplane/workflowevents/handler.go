@@ -28,6 +28,8 @@ const (
 type Store interface {
 	GetRepository(ctx context.Context, owner string, name string) (store.Repository, error)
 	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
+	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
+	UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error
 	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
@@ -36,11 +38,6 @@ type Store interface {
 
 type Processor interface {
 	ProcessWorkflowEvent(ctx context.Context, repo store.Repository, event Event) error
-}
-
-type CommandStateStore interface {
-	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
-	UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error
 }
 
 type HandlerOptions struct {
@@ -183,7 +180,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	commandKey := workflowEventCommandKey(event, payload, claims)
 	commentID := workflowEventCommentID(event, payload, claims)
-	if !created && h.workflowEventAlreadyProcessed(r.Context(), repo.ID, commentID, commandKey) {
+	if !created && h.workflowEventProcessedOrRepairable(r.Context(), repo.ID, commentID, commandKey) {
+		if err := h.markWorkflowEventProcessed(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
+			return
+		}
 		if err := h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete workflow event idempotency"})
 			return
@@ -196,8 +197,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if err := h.markWorkflowEventProcessing(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing"})
+		return
+	}
 	if h.processor != nil {
 		if err := h.processor.ProcessWorkflowEvent(r.Context(), repo, event); err != nil {
+			_ = h.store.UpdateCommandStatus(r.Context(), repo.ID, commentID, commandKey, "acknowledged", metadata)
 			_ = h.store.FailIdempotencyKey(r.Context(), processKey, err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process workflow event"})
 			return
@@ -251,21 +257,17 @@ func (h Handler) acquireWorkflowEvent(ctx context.Context, key string, metadata 
 	return record.Status != "completed", nil
 }
 
-func (h Handler) workflowEventAlreadyProcessed(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
-	state, ok := h.store.(CommandStateStore)
-	if !ok {
-		return false
-	}
-	record, err := state.GetCommandRecord(ctx, repoID, commentID, commandKey)
-	return err == nil && record.Status == "processed"
+func (h Handler) workflowEventProcessedOrRepairable(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
+	record, err := h.store.GetCommandRecord(ctx, repoID, commentID, commandKey)
+	return err == nil && (record.Status == "processed" || record.Status == "processing")
+}
+
+func (h Handler) markWorkflowEventProcessing(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
+	return h.store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "processing", metadata)
 }
 
 func (h Handler) markWorkflowEventProcessed(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
-	state, ok := h.store.(CommandStateStore)
-	if !ok {
-		return nil
-	}
-	return state.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "processed", metadata)
+	return h.store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "processed", metadata)
 }
 
 func Parse(payload []byte) (Event, error) {

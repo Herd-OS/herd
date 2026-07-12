@@ -122,6 +122,32 @@ func TestHandlerCompletionFailureRedeliveryDoesNotProcessAgain(t *testing.T) {
 	}
 }
 
+func TestHandlerProcessedMarkerFailureRedeliveryDoesNotProcessAgain(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newEventStore()
+	st.updateErrs = []error{nil, errors.New("store down"), nil}
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	processor := &capturingProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(validEventClaims(now)),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+		Processor: processor,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, eventRequest(validEventPayload()))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, eventRequest(validEventPayload()))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, processor.calls, 1)
+	require.Len(t, st.commands, 1)
+	assert.Equal(t, "processed", st.commands[0].Status)
+}
+
 func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()
@@ -232,6 +258,7 @@ type eventStore struct {
 	commands     []store.CommandRecord
 	idem         map[string]store.IdempotencyKey
 	completeErrs []error
+	updateErrs   []error
 }
 
 func newEventStore() *eventStore {
@@ -316,6 +343,13 @@ func (s *eventStore) GetCommandRecord(_ context.Context, repoID int64, commentID
 func (s *eventStore) UpdateCommandStatus(_ context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.updateErrs) > 0 {
+		err := s.updateErrs[0]
+		s.updateErrs = s.updateErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	for i, existing := range s.commands {
 		if existing.RepositoryID == repoID && existing.CommentID == commentID && existing.CommandKey == commandKey {
 			existing.Status = status

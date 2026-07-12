@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -266,6 +267,13 @@ func TestPostgresStoreMethods(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotFound)
 	require.ErrorIs(t, store.CompleteIdempotencyKey(ctx, "missing", "result"), ErrNotFound)
 	require.ErrorIs(t, store.FailIdempotencyKey(ctx, "missing", "boom"), ErrNotFound)
+
+	require.NoError(t, store.RecordGitHubMutationAttempt(ctx, GitHubMutationAttempt{IdempotencyKey: "mutation-1", MutationType: "workflow_dispatch", Status: "started"}))
+	require.ErrorIs(t, store.RecordGitHubMutationAttempt(ctx, GitHubMutationAttempt{IdempotencyKey: "mutation-1", MutationType: "workflow_dispatch", Status: "started"}), ErrAlreadyExists)
+	require.NoError(t, store.CompleteGitHubMutationAttempt(ctx, "mutation-1", "completed", json.RawMessage(`{"ok":true}`), "", time.Now().UTC()))
+	attempt, err := store.GetGitHubMutationAttempt(ctx, "mutation-1")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", attempt.Status)
 	expiredAt := time.Now().Add(-time.Hour)
 	created, err = store.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: "expired-key", Scope: "runner-registration-token", Status: "started", ExpiresAt: &expiredAt, ResultRef: "old"})
 	require.NoError(t, err)
@@ -382,6 +390,13 @@ func TestMemoryStore(t *testing.T) {
 	assert.Equal(t, "new", gotKey.ResultRef)
 	require.ErrorIs(t, s.CompleteIdempotencyKey(ctx, "missing", "ref"), ErrNotFound)
 	require.ErrorIs(t, s.FailIdempotencyKey(ctx, "missing", "boom"), ErrNotFound)
+
+	require.NoError(t, s.RecordGitHubMutationAttempt(ctx, GitHubMutationAttempt{IdempotencyKey: "mutation-1", MutationType: "workflow_dispatch", Status: "started"}))
+	require.ErrorIs(t, s.RecordGitHubMutationAttempt(ctx, GitHubMutationAttempt{IdempotencyKey: "mutation-1", MutationType: "workflow_dispatch", Status: "started"}), ErrAlreadyExists)
+	require.NoError(t, s.CompleteGitHubMutationAttempt(ctx, "mutation-1", "completed", json.RawMessage(`{"ok":true}`), "", time.Now().UTC()))
+	attempt, err := s.GetGitHubMutationAttempt(ctx, "mutation-1")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", attempt.Status)
 
 	require.NoError(t, s.SetReviewState(ctx, ReviewState{RepositoryID: 2, PRNumber: 3, HeadSHA: "sha", Status: "open"}))
 	state, err := s.GetReviewState(ctx, 2, 3, "sha")

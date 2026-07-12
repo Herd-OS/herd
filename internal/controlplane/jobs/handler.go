@@ -156,6 +156,15 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
+	expected := ExpectedIdentityFromJob(job, "")
+	if expected.Repository == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job repository metadata is missing"})
+		return
+	}
+	if envelope.Repository != expected.Repository {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "result repository does not match job"})
+		return
+	}
 
 	token, err := BearerToken(r.Header.Get("Authorization"))
 	if err != nil {
@@ -167,7 +176,6 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "validate OIDC token"})
 		return
 	}
-	expected := ExpectedIdentityFromJob(job, envelope.Repository)
 	if err := ValidateOIDCClaims(claims, expected, OIDCOptions{Audience: h.audience, Now: h.now}); err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
@@ -529,6 +537,9 @@ func (h Handler) recordPatchMutationAttempt(ctx context.Context, idempotencyKey 
 			Request:        request,
 			CreatedAt:      h.now(),
 		}); err != nil {
+			if errors.Is(err, store.ErrAlreadyExists) {
+				return fmt.Errorf("patch mutation already in progress: %w", err)
+			}
 			return fmt.Errorf("record patch mutation attempt: %w", err)
 		}
 	}

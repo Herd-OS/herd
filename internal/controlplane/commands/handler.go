@@ -21,6 +21,8 @@ type Store interface {
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
+	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
+	UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error
 }
 
 type QueueStore interface {
@@ -34,11 +36,6 @@ type AppGitHub interface {
 
 type CommandDispatcher interface {
 	DispatchCommand(ctx context.Context, cmd DispatchCommand) error
-}
-
-type CommandStateStore interface {
-	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
-	UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error
 }
 
 type DispatchCommand struct {
@@ -284,22 +281,14 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 }
 
 func (h Handler) markCommandDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
-	state, ok := h.Store.(CommandStateStore)
-	if !ok {
-		return nil
-	}
-	if err := state.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "dispatched", metadata); err != nil {
+	if err := h.Store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "dispatched", metadata); err != nil {
 		return fmt.Errorf("mark command dispatched: %w", err)
 	}
 	return nil
 }
 
 func (h Handler) commandAlreadyDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
-	state, ok := h.Store.(CommandStateStore)
-	if !ok {
-		return false
-	}
-	record, err := state.GetCommandRecord(ctx, repoID, commentID, commandKey)
+	record, err := h.Store.GetCommandRecord(ctx, repoID, commentID, commandKey)
 	return err == nil && record.Status == "dispatched"
 }
 

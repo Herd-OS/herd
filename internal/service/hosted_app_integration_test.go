@@ -225,7 +225,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 		BaseSHA:        "base",
 		Status:         "dispatched",
 		WorkerBranch:   "herd/worker/845",
-		Metadata:       json.RawMessage(`{"requester_name":"Mona","requester_email":"mona@example.com"}`),
+		Metadata:       json.RawMessage(`{"repository":"octo-org/herd","ref":"refs/heads/main","workflow_file":"herd-review.yml","requester_name":"Mona","requester_email":"mona@example.com"}`),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}))

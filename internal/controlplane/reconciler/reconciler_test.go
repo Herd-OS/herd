@@ -73,6 +73,9 @@ func TestRunOnceRepairsRecoverableWork(t *testing.T) {
 	attempts, err := st.ListStartedGitHubMutationAttempts(ctx, now, 10)
 	require.NoError(t, err)
 	assert.Empty(t, attempts)
+	mutationKey, err := st.GetIdempotencyKey(ctx, "patch_apply:stuck")
+	require.NoError(t, err)
+	assert.Equal(t, "failed", mutationKey.Status)
 }
 
 func TestRunOnceDoesNotRepeatRecoveredSideEffects(t *testing.T) {
@@ -163,6 +166,8 @@ func seedReconcilerStore(t *testing.T, now time.Time) *store.MemoryStore {
 
 	require.NoError(t, st.SetReviewState(ctx, store.ReviewState{RepositoryID: repo.ID, PRNumber: 10, HeadSHA: "review-sha", Status: "pending", Metadata: json.RawMessage(`{"target_url":"https://runs/1"}`), UpdatedAt: now.Add(-time.Hour)}))
 	require.NoError(t, st.SetReviewState(ctx, store.ReviewState{RepositoryID: repo.ID, PRNumber: 11, HeadSHA: "old-sha", Status: "pending", UpdatedAt: now.Add(-time.Hour)}))
+	_, err = st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{Key: "patch_apply:stuck", Scope: "patch_apply", Status: "started", CreatedAt: now.Add(-time.Hour)})
+	require.NoError(t, err)
 	require.NoError(t, st.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{IdempotencyKey: "patch_apply:stuck", MutationType: "patch_apply", Status: "started", CreatedAt: now.Add(-time.Hour)}))
 	return st
 }

@@ -87,13 +87,13 @@ func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 	}
 	current, err := g.RemoteBranchSHA("origin", req.TargetBranch)
 	if err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
 	if current != req.ExpectedHeadSHA {
 		return ApplyResult{}, fmt.Errorf("target branch advanced: expected %s, got %s", req.ExpectedHeadSHA, current)
 	}
 	if err := g.CheckoutDetached(req.BaseSHA); err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
 	if req.Artifact.Metadata.BaseSHA != req.BaseSHA {
 		return ApplyResult{}, fmt.Errorf("stale patch base SHA: expected %s, got %s", req.BaseSHA, req.Artifact.Metadata.BaseSHA)
@@ -103,24 +103,24 @@ func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 	if err := g.ApplyBinaryPatch(patchFile); err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
 	if err := g.ConfigureIdentity(req.Identity.Name, req.Identity.Email); err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
 	dirty, err := g.IsDirty()
 	if err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
 	if !dirty {
 		return ApplyResult{}, fmt.Errorf("patch artifact produced no changes")
 	}
 	if err := g.Commit(commitMessage(req)); err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
 	commitSHA, err := g.HeadSHA()
 	if err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
 	if err := g.PushHEAD("origin", req.TargetBranch, req.ExpectedHeadSHA); err != nil {
 		return ApplyResult{}, redactToken(err, tokenValue)
@@ -197,7 +197,10 @@ func redactToken(err error, token string) error {
 	if err == nil || token == "" {
 		return err
 	}
-	message := strings.ReplaceAll(err.Error(), token, "[REDACTED]")
-	message = strings.ReplaceAll(message, base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)), "[REDACTED]")
+	credential := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	message := strings.ReplaceAll(err.Error(), "AUTHORIZATION: basic "+credential, "AUTHORIZATION: [REDACTED]")
+	message = strings.ReplaceAll(message, credential, "[REDACTED]")
+	message = strings.ReplaceAll(message, "x-access-token:"+token, "[REDACTED]")
+	message = strings.ReplaceAll(message, token, "[REDACTED]")
 	return errors.New(message)
 }

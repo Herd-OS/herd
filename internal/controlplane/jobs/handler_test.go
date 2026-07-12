@@ -151,6 +151,29 @@ func TestHandlerRejectsStaleHeadSHA(t *testing.T) {
 	assert.Empty(t, st.results)
 }
 
+func TestHandlerRejectsResultRepositoryDifferentFromJobRepository(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", Metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345"}`)}
+	claims := validClaims(now)
+	claims.Repository = "evil/fork"
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedOIDCValidator(claims),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+	})
+	payload := `{"version":1,"kind":"worker_completed","repository":"evil/fork","job_id":"job-1","batch_number":106,"issue_number":837,"target_branch":"herd/worker/837","base_sha":"base","expected_head_sha":"head","patch_artifact":"patches/job.diff","status":"success"}`
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "result repository does not match job")
+	assert.Empty(t, st.results)
+	assert.Empty(t, st.mutationAttempts)
+}
+
 func TestHandlerRejectsPatchForDifferentRepositoryAndRecordsFailure(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -541,7 +564,18 @@ func (s *resultStore) GetJob(_ context.Context, jobID string) (store.Job, error)
 	if !ok {
 		return store.Job{}, store.ErrNotFound
 	}
+	job.Metadata = withDefaultJobRepositoryMetadata(job.Metadata)
 	return job, nil
+}
+
+func withDefaultJobRepositoryMetadata(raw json.RawMessage) json.RawMessage {
+	metadata := map[string]any{"repository": "acme/widgets"}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &metadata)
+		metadata["repository"] = "acme/widgets"
+	}
+	out, _ := json.Marshal(metadata)
+	return out
 }
 
 func (s *resultStore) RecordJobResult(_ context.Context, result store.JobResult) (bool, error) {

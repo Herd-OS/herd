@@ -100,7 +100,7 @@ func ValidateOIDCClaims(claims OIDCClaims, expected ExpectedOIDCIdentity, opts O
 }
 
 func ExpectedIdentityFromJob(job store.Job, repository string) ExpectedOIDCIdentity {
-	expected := ExpectedOIDCIdentity{Repository: repository}
+	expected := ExpectedOIDCIdentity{}
 	var metadata map[string]any
 	if len(job.Metadata) == 0 || json.Unmarshal(job.Metadata, &metadata) != nil {
 		return expected
@@ -108,15 +108,16 @@ func ExpectedIdentityFromJob(job store.Job, repository string) ExpectedOIDCIdent
 	expected.Ref = normalizeExpectedRef(firstMetadataString(metadata, "github_ref", "ref"))
 	expected.Workflow = firstMetadataString(metadata, "workflow", "workflow_file", "workflow_ref")
 	expected.RunID = firstMetadataString(metadata, "run_id", "workflow_run_id", "github_run_id")
+	expected.Repository = firstMetadataString(metadata, "repository")
 	if expected.Repository == "" {
-		expected.Repository = firstMetadataString(metadata, "repository")
-		if expected.Repository == "" {
-			owner := firstMetadataString(metadata, "owner")
-			name := firstMetadataString(metadata, "repo", "name")
-			if owner != "" && name != "" {
-				expected.Repository = owner + "/" + name
-			}
+		owner := firstMetadataString(metadata, "owner")
+		name := firstMetadataString(metadata, "repo", "name")
+		if owner != "" && name != "" {
+			expected.Repository = owner + "/" + name
 		}
+	}
+	if expected.Repository == "" {
+		expected.Repository = repository
 	}
 	return expected
 }

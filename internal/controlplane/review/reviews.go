@@ -209,7 +209,7 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 	if event != "" {
 		if err := s.submitPRReviewOnce(ctx, repo, result, event); err != nil {
 			if errors.Is(err, ErrReviewSubmissionInProgress) {
-				return nil
+				return err
 			}
 			statusErr := s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review could not submit a PR review", targetURL(result, current.URL))
 			commentErr := s.GitHub.AddPullRequestComment(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewSubmissionFailureComment(err))
@@ -273,6 +273,9 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		Request:        request,
 		CreatedAt:      s.now(),
 	}); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
+		}
 		return fmt.Errorf("record review submission mutation attempt: %w", err)
 	}
 	if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA); err != nil {

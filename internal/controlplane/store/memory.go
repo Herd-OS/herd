@@ -354,7 +354,7 @@ func (s *MemoryStore) RecordGitHubMutationAttempt(_ context.Context, a GitHubMut
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.mutationAttempts[a.IdempotencyKey]; ok {
-		return nil
+		return ErrAlreadyExists
 	}
 	if a.Status == "" {
 		a.Status = "started"

@@ -35,6 +35,7 @@ type Store interface {
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	ListStartedGitHubMutationAttempts(ctx context.Context, createdBefore time.Time, limit int) ([]store.GitHubMutationAttempt, error)
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 }
 
 type CurrentState interface {
@@ -232,6 +233,9 @@ func (r *Reconciler) runMutationAttempts(ctx context.Context, cfg Config, now ti
 		d := r.add(report, "mutation_attempt", attempt.IdempotencyKey, ClassificationFailedSurfaced, "mark_failed", "mutation/callback side effect remained started past timeout")
 		if err := r.Store.CompleteGitHubMutationAttempt(ctx, attempt.IdempotencyKey, "failed", diagnosticMetadata(d), d.Message, now); err != nil {
 			*errs = append(*errs, fmt.Errorf("surface stuck mutation attempt %s: %w", attempt.IdempotencyKey, err))
+		}
+		if err := r.Store.FailIdempotencyKey(ctx, attempt.IdempotencyKey, d.Message); err != nil && !errors.Is(err, store.ErrNotFound) {
+			*errs = append(*errs, fmt.Errorf("fail stuck mutation idempotency key %s: %w", attempt.IdempotencyKey, err))
 		}
 	}
 }
