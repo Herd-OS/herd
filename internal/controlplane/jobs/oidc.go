@@ -360,16 +360,28 @@ func containsString(values []string, want string) bool {
 }
 
 func workflowMatches(claims OIDCClaims, expected string) bool {
-	if claims.Workflow == expected {
+	expected = strings.TrimSpace(expected)
+	expectedFile := strings.TrimPrefix(expected, ".github/workflows/")
+	if claims.Workflow == expected || claims.Workflow == expectedFile {
 		return true
 	}
 	if claims.WorkflowRef == expected {
 		return true
 	}
-	if strings.Contains(claims.WorkflowRef, "/.github/workflows/"+expected+"@") {
-		return true
+	refFile, ok := workflowFileFromRef(claims.WorkflowRef)
+	return ok && (refFile == expected || refFile == expectedFile)
+}
+
+func workflowFileFromRef(workflowRef string) (string, bool) {
+	beforeRef, _, ok := strings.Cut(workflowRef, "@")
+	if !ok {
+		return "", false
 	}
-	return false
+	_, file, ok := strings.Cut(beforeRef, "/.github/workflows/")
+	if !ok || file == "" || strings.Contains(file, "/") {
+		return "", false
+	}
+	return file, true
 }
 
 func firstMetadataString(metadata map[string]any, keys ...string) string {

@@ -22,6 +22,10 @@ const maxResultPayloadBytes = 1 << 20
 type Store interface {
 	GetJob(ctx context.Context, jobID string) (store.Job, error)
 	RecordJobResult(ctx context.Context, r store.JobResult) (created bool, err error)
+	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
+	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
+	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 }
 
 type MutationRecorder interface {
@@ -190,6 +194,32 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	idempotencyKey := ResultIdempotencyKey(result, payload)
+	callbackKey := "job_result:" + idempotencyKey
+	shouldProcess, err := h.acquireResultCallback(r.Context(), callbackKey, envelope.JobID, idempotencyKey)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "acquire job result idempotency"})
+		return
+	}
+	if !shouldProcess {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status":          "accepted",
+			"created":         false,
+			"job_id":          envelope.JobID,
+			"kind":            envelope.Kind,
+			"idempotency_key": idempotencyKey,
+		})
+		return
+	}
+	if applyErr := h.processWorkerPatch(r.Context(), result, job, payload, patchArtifact); applyErr != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
+		writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
+		return
+	}
+	if err := h.processReviewResult(r.Context(), result, job); err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
+		return
+	}
 	created, err := h.store.RecordJobResult(r.Context(), store.JobResult{
 		JobID:          envelope.JobID,
 		IdempotencyKey: idempotencyKey,
@@ -202,15 +232,9 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record job result"})
 		return
 	}
-	if created {
-		if applyErr := h.processWorkerPatch(r.Context(), result, job, payload, patchArtifact); applyErr != nil {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
-			return
-		}
-		if err := h.processReviewResult(r.Context(), result, job); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
-			return
-		}
+	if err := h.store.CompleteIdempotencyKey(r.Context(), callbackKey, idempotencyKey); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete job result idempotency"})
+		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":          "accepted",
@@ -219,6 +243,28 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"kind":            envelope.Kind,
 		"idempotency_key": idempotencyKey,
 	})
+}
+
+func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, resultKey string) (bool, error) {
+	created, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       callbackKey,
+		Scope:     "job_result_callback",
+		Status:    "started",
+		ResultRef: resultKey,
+		Metadata:  json.RawMessage(fmt.Sprintf(`{"job_id":%q}`, jobID)),
+		CreatedAt: h.now(),
+	})
+	if err != nil {
+		return false, err
+	}
+	if created {
+		return true, nil
+	}
+	record, err := h.store.GetIdempotencyKey(ctx, callbackKey)
+	if err != nil {
+		return false, err
+	}
+	return record.Status != "completed", nil
 }
 
 func (h Handler) processReviewResult(ctx context.Context, result Result, job store.Job) error {

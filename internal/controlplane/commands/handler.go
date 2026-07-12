@@ -18,6 +18,7 @@ const (
 type Store interface {
 	GetRepository(ctx context.Context, owner string, name string) (store.Repository, error)
 	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
+	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
 }
@@ -90,10 +91,10 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		if h.GitHub == nil {
 			return Result{}, fmt.Errorf("command GitHub client is not configured")
 		}
-		if _, _, err := h.recordAndAck(ctx, event, "migration", migrationResponse(h.AppLogin), store.CommandRecord{
+		if _, _, _, err := h.recordAndAck(ctx, event, "migration", migrationResponse(h.AppLogin), store.CommandRecord{
 			CommandName: "migration",
 			Status:      StatusAcknowledged,
-		}); err != nil {
+		}, false); err != nil {
 			return Result{}, err
 		}
 		return Result{Status: StatusIgnored}, nil
@@ -132,11 +133,12 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		Status:      StatusAcknowledged,
 		Metadata:    metadata,
 	}
-	repo, dispatched, err := h.recordAndAck(ctx, event, string(cmd.Kind), acknowledgement(cmd), record)
+	dispatchable := shouldDispatch(cmd.Kind)
+	repo, dispatchPending, idempotencyKey, err := h.recordAndAck(ctx, event, string(cmd.Kind), acknowledgement(cmd), record, dispatchable)
 	if err != nil {
 		return Result{}, err
 	}
-	if dispatched && shouldDispatch(cmd.Kind) {
+	if dispatchPending && dispatchable {
 		if h.Dispatcher == nil {
 			return Result{}, fmt.Errorf("command dispatcher is not configured")
 		}
@@ -152,6 +154,9 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 			Command:        cmd,
 		}); err != nil {
 			return Result{}, fmt.Errorf("dispatch command: %w", err)
+		}
+		if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed"); err != nil {
+			return Result{}, fmt.Errorf("complete command idempotency key: %w", err)
 		}
 	}
 	return Result{Status: StatusAcknowledged, Command: cmd}, nil
@@ -219,10 +224,10 @@ func recordQueuedCommand(ctx context.Context, st QueueStore, event IssueComment,
 	return nil
 }
 
-func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKey, ackBody string, record store.CommandRecord) (store.Repository, bool, error) {
+func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKey, ackBody string, record store.CommandRecord, dispatchable bool) (store.Repository, bool, string, error) {
 	repo, err := h.Store.GetRepository(ctx, event.Owner, event.Repo)
 	if err != nil {
-		return store.Repository{}, false, fmt.Errorf("get repository: %w", err)
+		return store.Repository{}, false, "", fmt.Errorf("get repository: %w", err)
 	}
 
 	idempotencyKey := fmt.Sprintf("repo:%d:comment:%d:command:%s", repo.ID, event.CommentID, commandKey)
@@ -233,17 +238,38 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 		CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
-		return store.Repository{}, false, fmt.Errorf("acquire command idempotency key: %w", err)
+		return store.Repository{}, false, "", fmt.Errorf("acquire command idempotency key: %w", err)
 	}
 	if !created {
-		return repo, false, nil
+		record = prepareCommandRecord(repo, event, commandKey, record)
+		if _, err := h.Store.RecordCommand(ctx, record); err != nil {
+			return store.Repository{}, false, "", fmt.Errorf("record command: %w", err)
+		}
+		existing, err := h.Store.GetIdempotencyKey(ctx, idempotencyKey)
+		if err != nil {
+			return store.Repository{}, false, "", fmt.Errorf("get command idempotency key: %w", err)
+		}
+		return repo, existing.Status != "completed", idempotencyKey, nil
 	}
 
 	ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)
 	if err != nil {
-		return store.Repository{}, false, fmt.Errorf("add acknowledgement comment: %w", err)
+		return store.Repository{}, false, "", fmt.Errorf("add acknowledgement comment: %w", err)
 	}
 
+	record = prepareCommandRecord(repo, event, commandKey, record)
+	if _, err := h.Store.RecordCommand(ctx, record); err != nil {
+		return store.Repository{}, false, "", fmt.Errorf("record command: %w", err)
+	}
+	if !dispatchable {
+		if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, fmt.Sprintf("issue_comment:%d", ackID)); err != nil {
+			return store.Repository{}, false, "", fmt.Errorf("complete command idempotency key: %w", err)
+		}
+	}
+	return repo, true, idempotencyKey, nil
+}
+
+func prepareCommandRecord(repo store.Repository, event IssueComment, commandKey string, record store.CommandRecord) store.CommandRecord {
 	record.RepositoryID = repo.ID
 	record.CommentID = event.CommentID
 	record.CommandKey = commandKey
@@ -256,13 +282,7 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 	if len(record.Metadata) == 0 {
 		record.Metadata = json.RawMessage(`{}`)
 	}
-	if _, err := h.Store.RecordCommand(ctx, record); err != nil {
-		return store.Repository{}, false, fmt.Errorf("record command: %w", err)
-	}
-	if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, fmt.Sprintf("issue_comment:%d", ackID)); err != nil {
-		return store.Repository{}, false, fmt.Errorf("complete command idempotency key: %w", err)
-	}
-	return repo, true, nil
+	return record
 }
 
 func isAuthorized(association string) bool {

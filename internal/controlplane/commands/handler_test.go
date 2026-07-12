@@ -228,16 +228,25 @@ func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
 func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeGitHub{}
-	dispatcher := &fakeDispatcher{err: errors.New("dispatch down")}
+	dispatcher := &fakeDispatcher{errs: []error{errors.New("dispatch down"), nil}}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os review")
 
-	_, err := h.HandleIssueComment(context.Background(), validComment("OWNER", "@herd-os review"))
+	_, err := h.HandleIssueComment(context.Background(), event)
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+	_, duplicateErr := h.HandleIssueComment(context.Background(), event)
 
 	require.Error(t, err)
+	require.NoError(t, retryErr)
+	require.NoError(t, duplicateErr)
 	assert.Contains(t, err.Error(), "dispatch command")
 	assert.Len(t, gh.comments, 1)
 	assert.Len(t, st.commandRecords, 1)
 	assert.Len(t, st.idempotencyKeys, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+	for _, record := range st.idempotencyKeys {
+		assert.Equal(t, "completed", record.Status)
+	}
 }
 
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {
@@ -269,36 +278,42 @@ func TestHandlerNonMentionIgnored(t *testing.T) {
 func TestHandlerStoreAndGitHubFailures(t *testing.T) {
 	tests := []struct {
 		name    string
+		body    string
 		store   *fakeStore
 		github  *fakeGitHub
 		wantErr string
 	}{
 		{
 			name:    "repository lookup",
+			body:    "@herd-os review",
 			store:   &fakeStore{getRepoErr: store.ErrNotFound},
 			github:  &fakeGitHub{},
 			wantErr: "get repository",
 		},
 		{
 			name:    "idempotency",
+			body:    "@herd-os review",
 			store:   func() *fakeStore { s := newFakeStore(); s.acquireErr = errors.New("down"); return s }(),
 			github:  &fakeGitHub{},
 			wantErr: "acquire command idempotency key",
 		},
 		{
 			name:    "ack",
+			body:    "@herd-os review",
 			store:   newFakeStore(),
 			github:  &fakeGitHub{err: errors.New("down")},
 			wantErr: "add acknowledgement comment",
 		},
 		{
 			name:    "record",
+			body:    "@herd-os review",
 			store:   func() *fakeStore { s := newFakeStore(); s.recordErr = errors.New("down"); return s }(),
 			github:  &fakeGitHub{},
 			wantErr: "record command",
 		},
 		{
 			name:    "complete",
+			body:    "@herd-os plan",
 			store:   func() *fakeStore { s := newFakeStore(); s.completeErr = errors.New("down"); return s }(),
 			github:  &fakeGitHub{},
 			wantErr: "complete command idempotency key",
@@ -309,7 +324,7 @@ func TestHandlerStoreAndGitHubFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := Handler{AppLogin: "herd-os", Store: tt.store, GitHub: tt.github}
 
-			_, err := h.HandleIssueComment(context.Background(), validComment("OWNER", "@herd-os review"))
+			_, err := h.HandleIssueComment(context.Background(), validComment("OWNER", tt.body))
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
@@ -393,6 +408,14 @@ func (s *fakeStore) CompleteIdempotencyKey(_ context.Context, key string, result
 	return nil
 }
 
+func (s *fakeStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return store.IdempotencyKey{}, store.ErrNotFound
+	}
+	return record, nil
+}
+
 func (s *fakeStore) RecordCommand(_ context.Context, c store.CommandRecord) (bool, error) {
 	if s.recordErr != nil {
 		return false, s.recordErr
@@ -429,9 +452,17 @@ func (g *fakeGitHub) AddIssueComment(_ context.Context, owner, repo string, issu
 type fakeDispatcher struct {
 	dispatched []DispatchCommand
 	err        error
+	errs       []error
 }
 
 func (d *fakeDispatcher) DispatchCommand(_ context.Context, cmd DispatchCommand) error {
+	if len(d.errs) > 0 {
+		err := d.errs[0]
+		d.errs = d.errs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	if d.err != nil {
 		return d.err
 	}

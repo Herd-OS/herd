@@ -237,6 +237,30 @@ func TestValidateOIDCClaimsAcceptsNormalizedExpectedBranchRef(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestValidateOIDCClaimsAcceptsExpectedWorkflowFullPath(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	claims := OIDCClaims{
+		Issuer:      GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "acme/widgets",
+		Ref:         "refs/heads/main",
+		Workflow:    "herd-worker.yml",
+		WorkflowRef: "acme/widgets/.github/workflows/herd-worker.yml@refs/heads/main",
+		RunID:       "123",
+		ExpiresAt:   now.Add(time.Hour),
+	}
+	expected := ExpectedOIDCIdentity{
+		Repository: "acme/widgets",
+		Ref:        "refs/heads/main",
+		Workflow:   ".github/workflows/herd-worker.yml",
+		RunID:      "123",
+	}
+
+	err := ValidateOIDCClaims(claims, expected, OIDCOptions{Audience: "herd-control-plane", Now: func() time.Time { return now }})
+
+	require.NoError(t, err)
+}
+
 func TestValidateOIDCClaimsRejectsWrongIdentityFields(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	base := OIDCClaims{

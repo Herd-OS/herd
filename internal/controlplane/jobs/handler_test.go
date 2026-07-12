@@ -363,11 +363,77 @@ func TestHandlerDuplicateWorkerPatchAppliesOnce(t *testing.T) {
 	assert.Len(t, st.results, 1)
 }
 
+func TestHandlerRetriesWorkerPatchAfterApplyFailure(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{
+		result: artifacts.ApplyResult{CommitSHA: strings.Repeat("e", 40)},
+		errs:   []error{assert.AnError, nil},
+	}
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Now:           func() time.Time { return now },
+		ArtifactStore: artifactMap(t, metadata, patch),
+		PatchApplier:  applier,
+	})
+	payload := validWorkerPayload("job-1", "head")
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+	third := httptest.NewRecorder()
+	handler.ServeHTTP(third, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusConflict, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	require.Equal(t, http.StatusAccepted, third.Code)
+	assert.Contains(t, second.Body.String(), `"created":true`)
+	assert.Contains(t, third.Body.String(), `"created":false`)
+	assert.Len(t, applier.requests, 2)
+	assert.Len(t, st.results, 1)
+}
+
+func TestHandlerRetriesReviewResultAfterProcessorFailure(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	processor := &capturingReviewProcessor{errs: []error{assert.AnError, nil}}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+	payload := validReviewPayload("job-1", "head", StatusApproved)
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+	third := httptest.NewRecorder()
+	handler.ServeHTTP(third, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	require.Equal(t, http.StatusAccepted, third.Code)
+	assert.Contains(t, second.Body.String(), `"created":true`)
+	assert.Contains(t, third.Body.String(), `"created":false`)
+	assert.Len(t, processor.calls, 2)
+	assert.Len(t, st.results, 1)
+}
+
 type resultStore struct {
 	mu      sync.Mutex
 	jobs    map[string]store.Job
 	results []store.JobResult
 	seen    map[string]struct{}
+	idem    map[string]store.IdempotencyKey
 
 	mutationAttempts    []store.GitHubMutationAttempt
 	mutationCompletions []mutationCompletion
@@ -377,6 +443,7 @@ func newResultStore() *resultStore {
 	return &resultStore{
 		jobs: map[string]store.Job{},
 		seen: map[string]struct{}{},
+		idem: map[string]store.IdempotencyKey{},
 	}
 }
 
@@ -400,6 +467,56 @@ func (s *resultStore) RecordJobResult(_ context.Context, result store.JobResult)
 	s.seen[key] = struct{}{}
 	s.results = append(s.results, result)
 	return true, nil
+}
+
+func (s *resultStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.idem[key.Key]; ok {
+		return false, nil
+	}
+	s.idem[key.Key] = key
+	return true, nil
+}
+
+func (s *resultStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idem[key]
+	if !ok {
+		return store.IdempotencyKey{}, store.ErrNotFound
+	}
+	return record, nil
+}
+
+func (s *resultStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "completed"
+	record.ResultRef = resultRef
+	record.CompletedAt = &now
+	s.idem[key] = record
+	return nil
+}
+
+func (s *resultStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	record.CompletedAt = &now
+	s.idem[key] = record
+	return nil
 }
 
 func (s *resultStore) RecordGitHubMutationAttempt(_ context.Context, attempt store.GitHubMutationAttempt) error {
@@ -432,6 +549,7 @@ type mutationCompletion struct {
 
 type capturingReviewProcessor struct {
 	calls []reviewProcessorCall
+	errs  []error
 }
 
 type reviewProcessorCall struct {
@@ -441,6 +559,11 @@ type reviewProcessorCall struct {
 
 func (p *capturingReviewProcessor) SubmitReviewResult(_ context.Context, repo review.Repository, result review.ReviewCompletedResult) error {
 	p.calls = append(p.calls, reviewProcessorCall{repo: repo, result: result})
+	if len(p.errs) > 0 {
+		err := p.errs[0]
+		p.errs = p.errs[1:]
+		return err
+	}
 	return nil
 }
 
@@ -477,10 +600,16 @@ type recordingPatchApplier struct {
 	requests []artifacts.ApplyRequest
 	result   artifacts.ApplyResult
 	err      error
+	errs     []error
 }
 
 func (a *recordingPatchApplier) Apply(_ context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
 	a.requests = append(a.requests, req)
+	if len(a.errs) > 0 {
+		err := a.errs[0]
+		a.errs = a.errs[1:]
+		return a.result, err
+	}
 	return a.result, a.err
 }
 

@@ -137,7 +137,7 @@ func TestE2E_DockerComposePostgresSmoke(t *testing.T) {
 		_ = exec.CommandContext(downCtx, "docker", "compose", "-f", composePath, "down", "-v").Run()
 	})
 	if out, err := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d", "--wait", "postgres").CombinedOutput(); err != nil {
-		t.Skipf("Docker Compose/Postgres smoke prerequisites are not available: %s", string(out))
+		require.NoError(t, err, "Docker Compose/Postgres smoke failed: %s", string(out))
 	}
 }
 

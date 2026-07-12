@@ -168,6 +168,33 @@ func TestRegistrationTokenHandlerDuplicateNonceReplaysResponse(t *testing.T) {
 	assert.Equal(t, 1, minter.calls)
 }
 
+func TestRegistrationTokenHandlerReplayRepairsMissingTokenUse(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"herd"}, BootstrapToken: plain, RequestNonce: "nonce-repair"}
+
+	key := registrationIDKey(st.repository.ID, req.RunnerName, req.RunnerLabels, token.ID, req.RequestNonce)
+	resultJSON, err := json.Marshal(minter.response)
+	require.NoError(t, err)
+	st.idempotency[key] = store.IdempotencyKey{
+		Key:       key,
+		Scope:     idempotencyScope,
+		Status:    idempotencyStatusDone,
+		ResultRef: string(resultJSON),
+		CreatedAt: now,
+	}
+
+	rec := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"token":"github-runner-token","expires_at":"2026-07-11T13:00:00Z"}`, rec.Body.String())
+	assert.Equal(t, 0, minter.calls)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+	assert.Equal(t, now, *st.tokens[token.ID].UsedAt)
+}
+
 func TestRegistrationTokenHandlerMinterFailures(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 
@@ -275,6 +302,7 @@ type handlerFakeStore struct {
 	tokensByHash map[string]store.RunnerBootstrapToken
 	idempotency  map[string]store.IdempotencyKey
 	completeErrs []error
+	markUsedErrs []error
 }
 
 func (s *handlerFakeStore) GetRepository(_ context.Context, owner string, name string) (store.Repository, error) {
@@ -293,6 +321,13 @@ func (s *handlerFakeStore) GetRunnerBootstrapTokenByHash(_ context.Context, toke
 }
 
 func (s *handlerFakeStore) MarkRunnerBootstrapTokenUsed(_ context.Context, tokenID int64, usedAt time.Time) error {
+	if len(s.markUsedErrs) > 0 {
+		err := s.markUsedErrs[0]
+		s.markUsedErrs = s.markUsedErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	token, ok := s.tokens[tokenID]
 	if !ok {
 		return store.ErrNotFound
