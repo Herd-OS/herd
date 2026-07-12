@@ -136,6 +136,9 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		Metadata:    metadata,
 	}
 	dispatchable := shouldDispatch(cmd.Kind)
+	if dispatchable && strings.TrimSpace(event.PullRequestURL) == "" {
+		dispatchable = false
+	}
 	repo, dispatchPending, idempotencyKey, err := h.recordAndAck(ctx, event, string(cmd.Kind), acknowledgement(cmd), record, dispatchable)
 	if err != nil {
 		return Result{}, err

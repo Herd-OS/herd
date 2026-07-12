@@ -266,6 +266,7 @@ func TestCallbackWorkflows_RenderControlPlaneURL(t *testing.T) {
 	workflows := []workflowFile{
 		{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true},
 		{SrcName: "herd-monitor.yml.tmpl", DestName: "herd-monitor.yml", Template: true},
+		{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true},
 	}
 
 	for _, tt := range tests {
@@ -281,7 +282,7 @@ func TestCallbackWorkflows_RenderControlPlaneURL(t *testing.T) {
 
 					assert.Contains(t, s, "HERD_CONTROL_PLANE_URL:")
 					assert.Contains(t, s, tt.wantURL)
-					assert.Contains(t, s, "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events")
+					assert.Contains(t, s, "$HERD_CONTROL_PLANE_URL/api/v1/")
 					if tt.wantRepositoryVarURL {
 						assert.Contains(t, s, "vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com'")
 					} else {
@@ -394,7 +395,7 @@ func TestInstallCallbackWorkflowsRenderControlPlaneURL(t *testing.T) {
 		},
 	}
 
-	callbackWorkflows := []string{"herd-integrator.yml", "herd-monitor.yml"}
+	callbackWorkflows := []string{"herd-integrator.yml", "herd-monitor.yml", "herd-worker.yml"}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()

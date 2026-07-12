@@ -77,7 +77,7 @@ jobs:
           HERD_REPOSITORY: ${{`{{`}} inputs.repository {{`}}`}}
           HERD_BATCH_NUMBER: ${{`{{`}} inputs.batch_number {{`}}`}}
           HERD_EXPECTED_HEAD_SHA: ${{`{{`}} inputs.expected_head_sha {{`}}`}}
-          HERD_CONTROL_PLANE_URL: ${{`{{`}} vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' {{`}}`}}
+          HERD_CONTROL_PLANE_URL: {{if .ControlPlaneURL}}{{yamlScalar .ControlPlaneURL}}{{else}}${{`{{`}} vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' {{`}}`}}{{end}}
 {{- if .ControlPlaneURL }}
           HERD_CONFIG_CONTROL_PLANE_URL: {{ yamlScalar .ControlPlaneURL }}
 {{- end }}
@@ -137,7 +137,7 @@ jobs:
           HERD_ISSUE_NUMBER: ${{`{{`}} inputs.issue_number {{`}}`}}
           HERD_BATCH_BRANCH: ${{`{{`}} inputs.batch_branch {{`}}`}}
           HERD_EXPECTED_HEAD_SHA: ${{`{{`}} inputs.expected_head_sha {{`}}`}}
-          HERD_CONTROL_PLANE_URL: ${{`{{`}} vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' {{`}}`}}
+          HERD_CONTROL_PLANE_URL: {{if .ControlPlaneURL}}{{yamlScalar .ControlPlaneURL}}{{else}}${{`{{`}} vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' {{`}}`}}{{end}}
           HERD_JOB_STATUS: ${{`{{`}} job.status {{`}}`}}
           HERD_BASE_SHA: ${{`{{`}} steps.checkout-base.outputs.sha {{`}}`}}
         run: |

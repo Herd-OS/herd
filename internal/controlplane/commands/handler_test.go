@@ -226,6 +226,42 @@ func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestHandlerDoesNotDispatchPRCommandsFromIssueComments(t *testing.T) {
+	tests := []struct {
+		body string
+		kind CommandKind
+	}{
+		{body: "@herd-os review", kind: CommandReview},
+		{body: "@herd-os fix", kind: CommandFix},
+		{body: "@herd-os fix-ci", kind: CommandFixCI},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.kind), func(t *testing.T) {
+			st := newFakeStore()
+			gh := &fakeGitHub{}
+			dispatcher := &fakeDispatcher{}
+			h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+			event := validComment("OWNER", tt.body)
+			event.PullRequestURL = ""
+
+			result, err := h.HandleIssueComment(context.Background(), event)
+			duplicate, duplicateErr := h.HandleIssueComment(context.Background(), event)
+
+			require.NoError(t, err)
+			require.NoError(t, duplicateErr)
+			assert.Equal(t, StatusAcknowledged, result.Status)
+			assert.Equal(t, StatusAcknowledged, duplicate.Status)
+			assert.Len(t, gh.comments, 1)
+			assert.Len(t, st.commandRecords, 1)
+			assert.Empty(t, dispatcher.dispatched)
+			key := "repo:42:comment:123:command:" + string(tt.kind)
+			require.Contains(t, st.idempotencyKeys, key)
+			assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
+		})
+	}
+}
+
 func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeGitHub{}
