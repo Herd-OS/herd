@@ -132,6 +132,28 @@ func TestSubmitPRReviewOnceStartedRecordDoesNotCreateReview(t *testing.T) {
 	assert.Empty(t, gh.reviews)
 }
 
+func TestSubmitPRReviewOnceFailedUnknownOutcomeDoesNotCreateDuplicateReview(t *testing.T) {
+	gh := &fakeReviewGitHub{}
+	mutations := newFakeReviewMutationStore()
+	mutations.completeMutationErrs = []error{errors.New("database down")}
+	svc := ReviewService{GitHub: gh, Mutations: mutations}
+	repo := testRepo(true)
+	result := reviewResult(ResultStatusApproved, "head")
+	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
+
+	firstErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "complete review submission mutation attempt")
+	require.Len(t, gh.reviews, 1)
+	require.NoError(t, mutations.CompleteGitHubMutationAttempt(context.Background(), key, "failed", nil, "reconciled unknown outcome", time.Now().UTC()))
+	require.NoError(t, mutations.FailIdempotencyKey(context.Background(), key, "reconciled unknown outcome"))
+
+	secondErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+
+	require.ErrorIs(t, secondErr, ErrReviewSubmissionInProgress)
+	assert.Len(t, gh.reviews, 1)
+}
+
 func TestSubmitReviewResultStartedSubmissionReturnsRetryableError(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{}
@@ -275,9 +297,10 @@ type fakeReviewGitHub struct {
 }
 
 type fakeReviewMutationStore struct {
-	mu        sync.Mutex
-	idem      map[string]store.IdempotencyKey
-	mutations map[string]store.GitHubMutationAttempt
+	mu                   sync.Mutex
+	idem                 map[string]store.IdempotencyKey
+	mutations            map[string]store.GitHubMutationAttempt
+	completeMutationErrs []error
 }
 
 func newFakeReviewMutationStore() *fakeReviewMutationStore {
@@ -350,6 +373,13 @@ func (s *fakeReviewMutationStore) RecordGitHubMutationAttempt(_ context.Context,
 func (s *fakeReviewMutationStore) CompleteGitHubMutationAttempt(_ context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.completeMutationErrs) > 0 {
+		err := s.completeMutationErrs[0]
+		s.completeMutationErrs = s.completeMutationErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	attempt, ok := s.mutations[idempotencyKey]
 	if !ok {
 		return store.ErrNotFound

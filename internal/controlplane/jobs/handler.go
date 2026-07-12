@@ -514,6 +514,9 @@ func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, w
 	if completed, err := h.repairCompletedPatchApply(ctx, idempotencyKey); completed || err != nil {
 		return false, err
 	}
+	if _, ok := h.store.(MutationReader); !ok {
+		return false, fmt.Errorf("patch apply %q has unknown outcome and mutation repair is not configured", idempotencyKey)
+	}
 	return true, nil
 }
 

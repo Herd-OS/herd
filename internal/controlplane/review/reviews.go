@@ -265,6 +265,13 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		if record.Status == "started" {
 			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
 		}
+		if record.Status == "failed" {
+			if attempt, attemptErr := s.Mutations.GetGitHubMutationAttempt(ctx, key); attemptErr != nil && !errors.Is(attemptErr, store.ErrNotFound) {
+				return fmt.Errorf("get failed review submission mutation attempt: %w", attemptErr)
+			} else if attemptErr == nil && attempt.Status != "completed" {
+				return fmt.Errorf("%w: %s has unknown outcome after failed mutation attempt", ErrReviewSubmissionInProgress, key)
+			}
+		}
 	} else if err := s.Mutations.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
 		IdempotencyKey: key,
 		RepositoryID:   repo.ID,

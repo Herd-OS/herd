@@ -115,6 +115,25 @@ func TestSetHerdReviewStatusRetryAfterCompleteIdempotencyFailureRepairsFromMutat
 	assert.Equal(t, "success", st.states[0].Status)
 }
 
+func TestSetHerdReviewStatusRetryAfterGitHubFailureReusesFailedMutationAttempt(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{}
+	gh := &fakeStatusGitHub{errs: []error{errors.New("github down"), nil}}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	firstErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+	secondErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "github down")
+	require.NoError(t, secondErr)
+	assert.Len(t, gh.statuses, 1)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+	require.Len(t, st.states, 1)
+	assert.Equal(t, "success", st.states[0].Status)
+}
+
 type fakeStatusStore struct {
 	states           []store.ReviewState
 	errs             []error
@@ -175,6 +194,11 @@ func (s *fakeStatusStore) CompleteIdempotencyKey(_ context.Context, key string, 
 }
 
 func (s *fakeStatusStore) RecordGitHubMutationAttempt(_ context.Context, attempt store.GitHubMutationAttempt) error {
+	for _, existing := range s.mutationAttempts {
+		if existing.IdempotencyKey == attempt.IdempotencyKey {
+			return store.ErrAlreadyExists
+		}
+	}
 	s.mutationAttempts = append(s.mutationAttempts, attempt)
 	return nil
 }

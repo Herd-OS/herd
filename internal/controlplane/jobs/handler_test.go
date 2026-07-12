@@ -509,6 +509,36 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureDoesNotReapplyPatch(t *test
 	assert.Equal(t, "completed", st.idem["patch_apply:"+ResultPayloadHash([]byte(payload))].Status)
 }
 
+func TestHandlerRetryAfterPatchApplyCompletionFailureWithoutMutationReaderDoesNotReapplyPatch(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
+	inner := newResultStore()
+	payload := validWorkerPayload("job-1", "head")
+	inner.completeIdemErrs = map[string][]error{"patch_apply:" + ResultPayloadHash([]byte(payload)): {assert.AnError}}
+	inner.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	st := mutationRecorderOnlyResultStore{inner: inner}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Now:           func() time.Time { return now },
+		ArtifactStore: artifactMap(t, metadata, patch),
+		PatchApplier:  applier,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusConflict, first.Code)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "unknown outcome")
+	assert.Len(t, applier.requests, 1)
+	assert.Empty(t, inner.results)
+}
+
 func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
@@ -535,6 +565,42 @@ func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, applier.requests, 1)
 	assert.Len(t, st.results, 1)
+}
+
+type mutationRecorderOnlyResultStore struct {
+	inner *resultStore
+}
+
+func (s mutationRecorderOnlyResultStore) GetJob(ctx context.Context, jobID string) (store.Job, error) {
+	return s.inner.GetJob(ctx, jobID)
+}
+
+func (s mutationRecorderOnlyResultStore) RecordJobResult(ctx context.Context, r store.JobResult) (bool, error) {
+	return s.inner.RecordJobResult(ctx, r)
+}
+
+func (s mutationRecorderOnlyResultStore) AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (bool, error) {
+	return s.inner.AcquireIdempotencyKey(ctx, key)
+}
+
+func (s mutationRecorderOnlyResultStore) GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error) {
+	return s.inner.GetIdempotencyKey(ctx, key)
+}
+
+func (s mutationRecorderOnlyResultStore) CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error {
+	return s.inner.CompleteIdempotencyKey(ctx, key, resultRef)
+}
+
+func (s mutationRecorderOnlyResultStore) FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error {
+	return s.inner.FailIdempotencyKey(ctx, key, errorMessage)
+}
+
+func (s mutationRecorderOnlyResultStore) RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error {
+	return s.inner.RecordGitHubMutationAttempt(ctx, a)
+}
+
+func (s mutationRecorderOnlyResultStore) CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
+	return s.inner.CompleteGitHubMutationAttempt(ctx, idempotencyKey, status, response, errorMessage, completedAt)
 }
 
 func TestHandlerRetriesReviewResultAfterProcessorFailure(t *testing.T) {
