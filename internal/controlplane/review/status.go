@@ -171,7 +171,7 @@ func (s StatusService) ensureStatusMutationAttempt(ctx context.Context, key stri
 		case "started":
 			return nil
 		default:
-			return fmt.Errorf("Herd Review status mutation attempt %q is %s", key, attempt.Status)
+			return fmt.Errorf("herd review status mutation attempt %q is %s", key, attempt.Status)
 		}
 	}
 	if !errors.Is(err, store.ErrNotFound) {
