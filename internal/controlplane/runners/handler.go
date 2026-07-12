@@ -132,6 +132,7 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 	usedAt := h.now()
 	if err := h.store.MarkRunnerBootstrapTokenUsed(r.Context(), token.ID, usedAt); err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record runner bootstrap token use"})
 		return
 	}

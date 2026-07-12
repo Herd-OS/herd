@@ -37,6 +37,7 @@ type Store interface {
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 	RecordCommand(ctx context.Context, c CommandRecord) (created bool, err error)
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (GitHubMutationAttempt, error)
 	SetReviewState(ctx context.Context, s ReviewState) error
 	GetReviewState(ctx context.Context, repoID int64, prNumber int, headSHA string) (ReviewState, error)
 	AcquireReviewLock(ctx context.Context, lock ReviewLock) (created bool, err error)

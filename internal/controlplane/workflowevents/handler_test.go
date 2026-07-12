@@ -95,6 +95,33 @@ func TestHandlerRetriesWorkflowEventAfterProcessorFailure(t *testing.T) {
 	assert.Len(t, processor.calls, 2)
 }
 
+func TestHandlerCompletionFailureRedeliveryDoesNotProcessAgain(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newEventStore()
+	st.completeErrs = []error{errors.New("store down"), nil}
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	processor := &capturingProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(validEventClaims(now)),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+		Processor: processor,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, eventRequest(validEventPayload()))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, eventRequest(validEventPayload()))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, processor.calls, 1)
+	for _, record := range st.idem {
+		assert.Equal(t, "completed", record.Status)
+	}
+}
+
 func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()
@@ -200,10 +227,11 @@ func TestParseRejectsInvalidWorkflowEvents(t *testing.T) {
 }
 
 type eventStore struct {
-	mu       sync.Mutex
-	repos    map[string]store.Repository
-	commands []store.CommandRecord
-	idem     map[string]store.IdempotencyKey
+	mu           sync.Mutex
+	repos        map[string]store.Repository
+	commands     []store.CommandRecord
+	idem         map[string]store.IdempotencyKey
+	completeErrs []error
 }
 
 func newEventStore() *eventStore {
@@ -255,6 +283,13 @@ func (s *eventStore) GetIdempotencyKey(_ context.Context, key string) (store.Ide
 func (s *eventStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.completeErrs) > 0 {
+		err := s.completeErrs[0]
+		s.completeErrs = s.completeErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	record, ok := s.idem[key]
 	if !ok {
 		return store.ErrNotFound
@@ -265,6 +300,31 @@ func (s *eventStore) CompleteIdempotencyKey(_ context.Context, key string, resul
 	record.CompletedAt = &now
 	s.idem[key] = record
 	return nil
+}
+
+func (s *eventStore) GetCommandRecord(_ context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.commands {
+		if existing.RepositoryID == repoID && existing.CommentID == commentID && existing.CommandKey == commandKey {
+			return existing, nil
+		}
+	}
+	return store.CommandRecord{}, store.ErrNotFound
+}
+
+func (s *eventStore) UpdateCommandStatus(_ context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.commands {
+		if existing.RepositoryID == repoID && existing.CommentID == commentID && existing.CommandKey == commandKey {
+			existing.Status = status
+			existing.Metadata = metadata
+			s.commands[i] = existing
+			return nil
+		}
+	}
+	return store.ErrNotFound
 }
 
 func (s *eventStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {

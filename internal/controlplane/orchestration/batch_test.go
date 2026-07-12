@@ -183,9 +183,10 @@ func fixedClock() time.Time {
 }
 
 type fakeStore struct {
-	keys      map[string]store.IdempotencyKey
-	mutations map[string]store.GitHubMutationAttempt
-	results   map[string]store.JobResult
+	keys         map[string]store.IdempotencyKey
+	mutations    map[string]store.GitHubMutationAttempt
+	results      map[string]store.JobResult
+	completeErrs map[string][]error
 }
 
 func newFakeStore() *fakeStore {
@@ -213,6 +214,13 @@ func (s *fakeStore) GetIdempotencyKey(_ context.Context, key string) (store.Idem
 }
 
 func (s *fakeStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	if len(s.completeErrs[key]) > 0 {
+		err := s.completeErrs[key][0]
+		s.completeErrs[key] = s.completeErrs[key][1:]
+		if err != nil {
+			return err
+		}
+	}
 	record, ok := s.keys[key]
 	if !ok {
 		return store.ErrNotFound
@@ -351,7 +359,11 @@ func (s *fakeIssueService) Get(_ context.Context, number int) (*platform.Issue, 
 }
 
 func (s *fakeIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*platform.Issue, error) {
-	return append([]*platform.Issue(nil), s.listResult...), nil
+	out := append([]*platform.Issue(nil), s.listResult...)
+	for _, issue := range s.items {
+		out = append(out, issue)
+	}
+	return out, nil
 }
 
 func (s *fakeIssueService) Update(_ context.Context, number int, changes platform.IssueUpdate) (*platform.Issue, error) {

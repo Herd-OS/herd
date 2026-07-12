@@ -33,6 +33,10 @@ type MutationRecorder interface {
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 }
 
+type MutationReader interface {
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
+}
+
 type PatchApplier interface {
 	Apply(ctx context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error)
 }
@@ -444,10 +448,10 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 	if err != nil {
 		return fmt.Errorf("marshal patch apply result: %w", err)
 	}
+	h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil)
 	if err := h.completePatchApply(ctx, idempotencyKey, response); err != nil {
 		return err
 	}
-	h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil)
 	return nil
 }
 
@@ -483,6 +487,34 @@ func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, w
 	}
 	if record.Status == "completed" {
 		return false, nil
+	}
+	if completed, err := h.repairCompletedPatchApply(ctx, idempotencyKey); completed || err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (h Handler) repairCompletedPatchApply(ctx context.Context, idempotencyKey string) (bool, error) {
+	reader, ok := h.store.(MutationReader)
+	if !ok {
+		return false, nil
+	}
+	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get patch mutation attempt: %w", err)
+	}
+	if attempt.Status != "completed" {
+		return false, nil
+	}
+	response := attempt.Response
+	if len(response) == 0 {
+		response = json.RawMessage(`{"recovered":true}`)
+	}
+	if err := h.completePatchApply(ctx, idempotencyKey, response); err != nil {
+		return false, err
 	}
 	return true, nil
 }

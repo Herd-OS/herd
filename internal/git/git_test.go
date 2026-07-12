@@ -81,6 +81,20 @@ func TestConfigureIdentity_DoesNotOverwrite(t *testing.T) {
 	assert.Equal(t, "test@test.com", email)
 }
 
+func TestGitErrorsRedactCommandScopedAuthConfig(t *testing.T) {
+	token := "ghs_secret_installation_token"
+	err := CloneWithConfig("https://example.invalid/repo.git", filepath.Join(t.TempDir(), "repo"),
+		"http.https://github.com/.extraHeader=Authorization: Bearer "+token)
+
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "git -c")
+	assert.Contains(t, msg, "clone https://example.invalid/repo.git")
+	assert.Contains(t, msg, "extraHeader=<redacted>")
+	assert.NotContains(t, msg, token)
+	assert.NotContains(t, strings.ToLower(msg), "authorization: bearer")
+}
+
 func TestCurrentBranch(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

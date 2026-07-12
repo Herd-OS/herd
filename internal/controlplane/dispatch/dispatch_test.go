@@ -56,7 +56,7 @@ func TestDispatcherDuplicateDispatchIsIdempotent(t *testing.T) {
 	assert.Len(t, st.idempotencyKeys, 1)
 }
 
-func TestDispatcherDuplicateInProgressUsesIdempotencyMetadata(t *testing.T) {
+func TestDispatcherDuplicateStartedWithoutCompletedMutationRetriesWorkflow(t *testing.T) {
 	st := newFakeStore()
 	req := validRequest()
 	key := IdempotencyKey(req)
@@ -68,11 +68,44 @@ func TestDispatcherDuplicateInProgressUsesIdempotencyMetadata(t *testing.T) {
 	}
 	st.jobs["job-existing"] = store.Job{JobID: "job-existing"}
 
-	result, err := Dispatcher{Store: st, GitHub: &fakeWorkflowClient{}}.Dispatch(context.Background(), req)
+	gh := &fakeWorkflowClient{}
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.True(t, result.Created)
+	assert.Equal(t, "job-existing", result.JobID)
+	assert.Len(t, gh.calls, 1)
+	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
+}
+
+func TestDispatcherDuplicateStartedWithCompletedMutationRepairsIdempotency(t *testing.T) {
+	st := newFakeStore()
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.idempotencyKeys[key] = store.IdempotencyKey{
+		Key:      key,
+		Scope:    "workflow_dispatch",
+		Status:   "started",
+		Metadata: json.RawMessage(`{"job_id":"job-existing"}`),
+	}
+	st.jobs["job-existing"] = store.Job{JobID: "job-existing"}
+	resultJSON := json.RawMessage(`{"job_id":"job-existing","url":"https://github.com/octo/herd/actions","created":true}`)
+	st.mutationAttempts = append(st.mutationAttempts, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		MutationType:   "workflow_dispatch",
+		Status:         "completed",
+		Response:       resultJSON,
+	})
+	gh := &fakeWorkflowClient{}
+
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 
 	require.NoError(t, err)
 	assert.False(t, result.Created)
 	assert.Equal(t, "job-existing", result.JobID)
+	assert.Equal(t, "https://github.com/octo/herd/actions", result.URL)
+	assert.Empty(t, gh.calls)
+	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
 }
 
 func TestDispatcherValidationRejectsMissingAndStaleHeadSHA(t *testing.T) {
@@ -319,6 +352,15 @@ func (s *fakeStore) CompleteGitHubMutationAttempt(_ context.Context, idempotency
 		}
 	}
 	return store.ErrNotFound
+}
+
+func (s *fakeStore) GetGitHubMutationAttempt(_ context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error) {
+	for _, attempt := range s.mutationAttempts {
+		if attempt.IdempotencyKey == idempotencyKey {
+			return attempt, nil
+		}
+	}
+	return store.GitHubMutationAttempt{}, store.ErrNotFound
 }
 
 type workflowCall struct {

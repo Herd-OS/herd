@@ -280,7 +280,11 @@ func (s *MemoryStore) UpdateJobStatus(_ context.Context, jobID string, status st
 func (s *MemoryStore) AcquireIdempotencyKey(_ context.Context, key IdempotencyKey) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.idempotencyKeys[key.Key]; ok {
+	if existing, ok := s.idempotencyKeys[key.Key]; ok {
+		if existing.ExpiresAt != nil && time.Now().UTC().After(*existing.ExpiresAt) && existing.Status != "completed" {
+			s.idempotencyKeys[key.Key] = key
+			return true, nil
+		}
 		return false, nil
 	}
 	s.idempotencyKeys[key.Key] = key
@@ -380,6 +384,16 @@ func (s *MemoryStore) CompleteGitHubMutationAttempt(_ context.Context, idempoten
 	return nil
 }
 
+func (s *MemoryStore) GetGitHubMutationAttempt(_ context.Context, idempotencyKey string) (GitHubMutationAttempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attempt, ok := s.mutationAttempts[idempotencyKey]
+	if !ok {
+		return GitHubMutationAttempt{}, ErrNotFound
+	}
+	return attempt, nil
+}
+
 func (s *MemoryStore) ListStartedGitHubMutationAttempts(_ context.Context, createdBefore time.Time, limit int) ([]GitHubMutationAttempt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -445,6 +459,16 @@ func (s *MemoryStore) RecordCommand(_ context.Context, c CommandRecord) (bool, e
 	}
 	s.commandRecords[key] = c
 	return true, nil
+}
+
+func (s *MemoryStore) GetCommandRecord(_ context.Context, repoID int64, commentID int64, commandKey string) (CommandRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.commandRecords[commandKeyFunc(repoID, commentID, commandKey)]
+	if !ok {
+		return CommandRecord{}, ErrNotFound
+	}
+	return record, nil
 }
 
 func (s *MemoryStore) ListReconcileCommands(_ context.Context, createdBefore time.Time, limit int) ([]ReconcileCommand, error) {

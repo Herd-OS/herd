@@ -336,7 +336,17 @@ func (s *PostgresStore) AcquireIdempotencyKey(ctx context.Context, key Idempoten
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO idempotency_keys (key, scope, status, result_ref, expires_at, metadata, created_at, completed_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (key) DO NOTHING`,
+		ON CONFLICT (key) DO UPDATE SET
+			scope = EXCLUDED.scope,
+			status = EXCLUDED.status,
+			result_ref = EXCLUDED.result_ref,
+			expires_at = EXCLUDED.expires_at,
+			metadata = EXCLUDED.metadata,
+			created_at = EXCLUDED.created_at,
+			completed_at = EXCLUDED.completed_at
+		WHERE idempotency_keys.status <> 'completed'
+		  AND idempotency_keys.expires_at IS NOT NULL
+		  AND idempotency_keys.expires_at < now()`,
 		key.Key, key.Scope, key.Status, key.ResultRef, key.ExpiresAt, metadataOrEmpty(key.Metadata), timeOrNow(key.CreatedAt), key.CompletedAt)
 	return createdFromResult(result, err)
 }
@@ -427,6 +437,25 @@ func (s *PostgresStore) CompleteGitHubMutationAttempt(ctx context.Context, idemp
 		return err
 	}
 	return requireAffected(result)
+}
+
+func (s *PostgresStore) GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (GitHubMutationAttempt, error) {
+	var attempt GitHubMutationAttempt
+	var request, response []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, idempotency_key, COALESCE(repository_id, 0), mutation_type, status, request, response, error, created_at, completed_at
+		FROM github_mutation_attempts
+		WHERE idempotency_key = $1`, idempotencyKey).Scan(
+		&attempt.ID, &attempt.IdempotencyKey, &attempt.RepositoryID, &attempt.MutationType, &attempt.Status, &request, &response, &attempt.Error, &attempt.CreatedAt, &attempt.CompletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GitHubMutationAttempt{}, ErrNotFound
+	}
+	if err != nil {
+		return GitHubMutationAttempt{}, err
+	}
+	attempt.Request = json.RawMessage(request)
+	attempt.Response = json.RawMessage(response)
+	return attempt, nil
 }
 
 func (s *PostgresStore) ListStartedGitHubMutationAttempts(ctx context.Context, createdBefore time.Time, limit int) ([]GitHubMutationAttempt, error) {
@@ -529,6 +558,25 @@ func (s *PostgresStore) RecordCommand(ctx context.Context, c CommandRecord) (boo
 		ON CONFLICT (repository_id, comment_id, command_key) DO NOTHING`,
 		c.RepositoryID, c.CommentID, c.CommandKey, c.CommandName, c.Actor, c.Status, metadataOrEmpty(c.Metadata), timeOrNow(c.CreatedAt))
 	return createdFromResult(result, err)
+}
+
+func (s *PostgresStore) GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (CommandRecord, error) {
+	var record CommandRecord
+	var metadata []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, repository_id, comment_id, command_key, command_name, actor, status, metadata, created_at
+		FROM command_records
+		WHERE repository_id = $1 AND comment_id = $2 AND command_key = $3`,
+		repoID, commentID, commandKey).Scan(
+		&record.ID, &record.RepositoryID, &record.CommentID, &record.CommandKey, &record.CommandName, &record.Actor, &record.Status, &metadata, &record.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CommandRecord{}, ErrNotFound
+	}
+	if err != nil {
+		return CommandRecord{}, err
+	}
+	record.Metadata = json.RawMessage(metadata)
+	return record, nil
 }
 
 func (s *PostgresStore) ListReconcileCommands(ctx context.Context, createdBefore time.Time, limit int) ([]ReconcileCommand, error) {

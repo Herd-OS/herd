@@ -426,6 +426,35 @@ func TestHandlerRetryAfterRecordJobResultFailureDoesNotReapplyPatch(t *testing.T
 	assert.Len(t, st.results, 1)
 }
 
+func TestHandlerRetryAfterPatchApplyCompletionFailureDoesNotReapplyPatch(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
+	st := newResultStore()
+	payload := validWorkerPayload("job-1", "head")
+	st.completeIdemErrs = map[string][]error{"patch_apply:" + ResultPayloadHash([]byte(payload)): {assert.AnError, nil}}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Now:           func() time.Time { return now },
+		ArtifactStore: artifactMap(t, metadata, patch),
+		PatchApplier:  applier,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusConflict, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, applier.requests, 1)
+	assert.Len(t, st.results, 1)
+	assert.Equal(t, "completed", st.idem["patch_apply:"+ResultPayloadHash([]byte(payload))].Status)
+}
+
 func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
@@ -609,6 +638,29 @@ func (s *resultStore) CompleteGitHubMutationAttempt(_ context.Context, key strin
 		completedAt:  completedAt,
 	})
 	return nil
+}
+
+func (s *resultStore) GetGitHubMutationAttempt(_ context.Context, key string) (store.GitHubMutationAttempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.mutationCompletions) - 1; i >= 0; i-- {
+		completion := s.mutationCompletions[i]
+		if completion.key == key {
+			return store.GitHubMutationAttempt{
+				IdempotencyKey: key,
+				Status:         completion.status,
+				Response:       completion.response,
+				Error:          completion.errorMessage,
+				CompletedAt:    &completion.completedAt,
+			}, nil
+		}
+	}
+	for _, attempt := range s.mutationAttempts {
+		if attempt.IdempotencyKey == key {
+			return attempt, nil
+		}
+	}
+	return store.GitHubMutationAttempt{}, store.ErrNotFound
 }
 
 type mutationCompletion struct {

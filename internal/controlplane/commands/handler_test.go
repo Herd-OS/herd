@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -249,6 +250,28 @@ func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestHandlerDispatchCompletionFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
+	st := newFakeStore()
+	st.completeErrs = []error{errors.New("store down"), nil}
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os review")
+
+	_, err := h.HandleIssueComment(context.Background(), event)
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "complete command idempotency key")
+	require.NoError(t, retryErr)
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+	key := "repo:42:comment:123:command:review"
+	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	require.Len(t, st.commandRecords, 1)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
+}
+
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeGitHub{}
@@ -350,10 +373,11 @@ func validComment(association, body string) IssueComment {
 type fakeStore struct {
 	repo store.Repository
 
-	getRepoErr  error
-	acquireErr  error
-	recordErr   error
-	completeErr error
+	getRepoErr   error
+	acquireErr   error
+	recordErr    error
+	completeErr  error
+	completeErrs []error
 
 	idempotencyKeys map[string]store.IdempotencyKey
 	commandRecords  []store.CommandRecord
@@ -393,6 +417,13 @@ func (s *fakeStore) AcquireIdempotencyKey(_ context.Context, key store.Idempoten
 }
 
 func (s *fakeStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	if len(s.completeErrs) > 0 {
+		err := s.completeErrs[0]
+		s.completeErrs = s.completeErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	if s.completeErr != nil {
 		return s.completeErr
 	}
@@ -427,6 +458,27 @@ func (s *fakeStore) RecordCommand(_ context.Context, c store.CommandRecord) (boo
 	}
 	s.commandRecords = append(s.commandRecords, c)
 	return true, nil
+}
+
+func (s *fakeStore) GetCommandRecord(_ context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error) {
+	for _, existing := range s.commandRecords {
+		if existing.RepositoryID == repoID && existing.CommentID == commentID && existing.CommandKey == commandKey {
+			return existing, nil
+		}
+	}
+	return store.CommandRecord{}, store.ErrNotFound
+}
+
+func (s *fakeStore) UpdateCommandStatus(_ context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error {
+	for i, existing := range s.commandRecords {
+		if existing.RepositoryID == repoID && existing.CommentID == commentID && existing.CommandKey == commandKey {
+			existing.Status = status
+			existing.Metadata = metadata
+			s.commandRecords[i] = existing
+			return nil
+		}
+	}
+	return store.ErrNotFound
 }
 
 type fakeGitHub struct {

@@ -36,6 +36,11 @@ type CommandDispatcher interface {
 	DispatchCommand(ctx context.Context, cmd DispatchCommand) error
 }
 
+type CommandStateStore interface {
+	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
+	UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error
+}
+
 type DispatchCommand struct {
 	RepositoryID   int64
 	InstallationID int64
@@ -155,6 +160,9 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		}); err != nil {
 			return Result{}, fmt.Errorf("dispatch command: %w", err)
 		}
+		if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, string(cmd.Kind), record.Metadata); err != nil {
+			return Result{}, err
+		}
 		if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed"); err != nil {
 			return Result{}, fmt.Errorf("complete command idempotency key: %w", err)
 		}
@@ -249,6 +257,12 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 		if err != nil {
 			return store.Repository{}, false, "", fmt.Errorf("get command idempotency key: %w", err)
 		}
+		if dispatchable && existing.Status != "completed" && h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
+			if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed"); err != nil {
+				return store.Repository{}, false, "", fmt.Errorf("repair command idempotency key: %w", err)
+			}
+			return repo, false, idempotencyKey, nil
+		}
 		return repo, existing.Status != "completed", idempotencyKey, nil
 	}
 
@@ -267,6 +281,26 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 		}
 	}
 	return repo, true, idempotencyKey, nil
+}
+
+func (h Handler) markCommandDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
+	state, ok := h.Store.(CommandStateStore)
+	if !ok {
+		return nil
+	}
+	if err := state.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "dispatched", metadata); err != nil {
+		return fmt.Errorf("mark command dispatched: %w", err)
+	}
+	return nil
+}
+
+func (h Handler) commandAlreadyDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
+	state, ok := h.Store.(CommandStateStore)
+	if !ok {
+		return false
+	}
+	record, err := state.GetCommandRecord(ctx, repoID, commentID, commandKey)
+	return err == nil && record.Status == "dispatched"
 }
 
 func prepareCommandRecord(repo store.Repository, event IssueComment, commandKey string, record store.CommandRecord) store.CommandRecord {

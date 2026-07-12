@@ -147,3 +147,29 @@ func TestEnsureReviewFixIssueStartedOrFailedIdempotencyIsRepairable(t *testing.T
 		})
 	}
 }
+
+func TestEnsureReviewFixIssueRecoversAfterOuterCompletionFailure(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, nil)
+	repo := review.Repository{ID: 123, InstallationID: 456, Owner: "owner", Name: "repo", DefaultBranch: "main"}
+	result := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 42, BatchBranch: "herd/batch/9-demo", HeadSHA: "head", FixCycle: 1}
+	finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
+	key := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
+	st.completeErrs = map[string][]error{key: {assert.AnError, nil}}
+
+	firstIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "complete idempotency key")
+	assert.Zero(t, firstIssue)
+	assert.False(t, created)
+
+	secondIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, 1, secondIssue)
+	assert.Len(t, fake.issues.created, 1)
+	assert.Equal(t, "completed", st.keys[key].Status)
+	assert.Equal(t, "issue:1", st.keys[key].ResultRef)
+}

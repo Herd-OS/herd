@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,6 +116,52 @@ func TestSubmitReviewResultRetryAfterStatusFailureDoesNotDuplicateReview(t *test
 	}
 }
 
+func TestSubmitPRReviewOnceStartedRecordDoesNotCreateReview(t *testing.T) {
+	gh := &fakeReviewGitHub{}
+	mutations := newFakeReviewMutationStore()
+	svc := ReviewService{GitHub: gh, Mutations: mutations}
+	repo := testRepo(true)
+	result := reviewResult(ResultStatusApproved, "head")
+	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
+	mutations.idem[key] = store.IdempotencyKey{Key: key, Scope: "review_submission", Status: "started"}
+
+	err := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already in progress")
+	assert.Empty(t, gh.reviews)
+}
+
+func TestSubmitPRReviewOnceConcurrentDuplicateCreatesOneReview(t *testing.T) {
+	gh := &fakeReviewGitHub{}
+	mutations := newFakeReviewMutationStore()
+	svc := ReviewService{GitHub: gh, Mutations: mutations}
+	repo := testRepo(true)
+	result := reviewResult(ResultStatusApproved, "head")
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	var inProgress int
+	for err := range errs {
+		if err != nil {
+			assert.Contains(t, err.Error(), "already in progress")
+			inProgress++
+		}
+	}
+	assert.LessOrEqual(t, inProgress, 1)
+	assert.Len(t, gh.reviews, 1)
+}
+
 func TestDispatchReviewSetsPendingAndSuppressesDuplicateWithLock(t *testing.T) {
 	locks := newFakeLockStore()
 	dispatcher := &fakeReviewDispatcher{}
@@ -203,6 +250,7 @@ func TestSubmitReviewResultMaxFixCyclesSetsFailureWithoutDispatch(t *testing.T) 
 }
 
 type fakeReviewGitHub struct {
+	mu        sync.Mutex
 	pr        *platform.PullRequest
 	reviewErr error
 	reviews   []capturedReview
@@ -210,6 +258,7 @@ type fakeReviewGitHub struct {
 }
 
 type fakeReviewMutationStore struct {
+	mu        sync.Mutex
 	idem      map[string]store.IdempotencyKey
 	mutations map[string]store.GitHubMutationAttempt
 }
@@ -222,6 +271,8 @@ func newFakeReviewMutationStore() *fakeReviewMutationStore {
 }
 
 func (s *fakeReviewMutationStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.idem[key.Key]; ok {
 		return false, nil
 	}
@@ -230,6 +281,8 @@ func (s *fakeReviewMutationStore) AcquireIdempotencyKey(_ context.Context, key s
 }
 
 func (s *fakeReviewMutationStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, ok := s.idem[key]
 	if !ok {
 		return store.IdempotencyKey{}, store.ErrNotFound
@@ -238,6 +291,8 @@ func (s *fakeReviewMutationStore) GetIdempotencyKey(_ context.Context, key strin
 }
 
 func (s *fakeReviewMutationStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, ok := s.idem[key]
 	if !ok {
 		return store.ErrNotFound
@@ -251,6 +306,8 @@ func (s *fakeReviewMutationStore) CompleteIdempotencyKey(_ context.Context, key 
 }
 
 func (s *fakeReviewMutationStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, ok := s.idem[key]
 	if !ok {
 		return store.ErrNotFound
@@ -264,6 +321,8 @@ func (s *fakeReviewMutationStore) FailIdempotencyKey(_ context.Context, key stri
 }
 
 func (s *fakeReviewMutationStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.mutations[a.IdempotencyKey]; ok {
 		return errors.New("duplicate mutation")
 	}
@@ -272,6 +331,8 @@ func (s *fakeReviewMutationStore) RecordGitHubMutationAttempt(_ context.Context,
 }
 
 func (s *fakeReviewMutationStore) CompleteGitHubMutationAttempt(_ context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	attempt, ok := s.mutations[idempotencyKey]
 	if !ok {
 		return store.ErrNotFound
@@ -282,6 +343,16 @@ func (s *fakeReviewMutationStore) CompleteGitHubMutationAttempt(_ context.Contex
 	attempt.CompletedAt = &completedAt
 	s.mutations[idempotencyKey] = attempt
 	return nil
+}
+
+func (s *fakeReviewMutationStore) GetGitHubMutationAttempt(_ context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attempt, ok := s.mutations[idempotencyKey]
+	if !ok {
+		return store.GitHubMutationAttempt{}, store.ErrNotFound
+	}
+	return attempt, nil
 }
 
 type fakeLockStore struct {
@@ -349,6 +420,8 @@ func (g *fakeReviewGitHub) GetPullRequest(_ context.Context, _ int64, _, _ strin
 }
 
 func (g *fakeReviewGitHub) CreateReviewForCommit(_ context.Context, _ int64, _, _ string, _ int, _ string, event platform.ReviewEvent, commitID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.reviewErr != nil {
 		return g.reviewErr
 	}

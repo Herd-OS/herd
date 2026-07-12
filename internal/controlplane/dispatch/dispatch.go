@@ -70,6 +70,10 @@ type MutationRecorder interface {
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 }
 
+type MutationReader interface {
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
+}
+
 type GitHubMutationResult struct {
 	Status      string
 	Response    json.RawMessage
@@ -272,7 +276,49 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		}
 		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false, false)
 	}
-	return DispatchResult{JobID: job.JobID, Created: false}, nil
+	if completed, result, recoverErr := d.completedDispatchMutation(ctx, idempotencyKey); recoverErr != nil {
+		return DispatchResult{}, recoverErr
+	} else if completed {
+		if result.JobID == "" {
+			result.JobID = job.JobID
+		}
+		result.Created = false
+		return result, nil
+	}
+	inputs, inputErr := WorkflowInputs(req, metadata.JobID)
+	if inputErr != nil {
+		return DispatchResult{}, inputErr
+	}
+	return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false, false)
+}
+
+func (d Dispatcher) completedDispatchMutation(ctx context.Context, idempotencyKey string) (bool, DispatchResult, error) {
+	reader, ok := d.Store.(MutationReader)
+	if !ok {
+		return false, DispatchResult{}, nil
+	}
+	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, DispatchResult{}, nil
+	}
+	if err != nil {
+		return false, DispatchResult{}, fmt.Errorf("get workflow dispatch mutation attempt: %w", err)
+	}
+	if attempt.Status != "completed" {
+		return false, DispatchResult{}, nil
+	}
+	var result DispatchResult
+	if len(attempt.Response) > 0 {
+		_ = json.Unmarshal(attempt.Response, &result)
+	}
+	resultJSON := attempt.Response
+	if len(resultJSON) == 0 || result.JobID == "" {
+		resultJSON = json.RawMessage(`{"created":false}`)
+	}
+	if err := d.Store.CompleteIdempotencyKey(ctx, idempotencyKey, string(resultJSON)); err != nil {
+		return false, DispatchResult{}, fmt.Errorf("repair dispatch idempotency key: %w", err)
+	}
+	return true, result, nil
 }
 
 func (d Dispatcher) recordMutationResult(ctx context.Context, idempotencyKey string, result GitHubMutationResult) {

@@ -242,6 +242,30 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailure(t *testing.T) {
 	require.NotNil(t, st.tokens[token.ID].UsedAt)
 }
 
+func TestRegistrationTokenHandlerRetriesAfterMarkUsedFailure(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	st.markUsedErrs = []error{errors.New("database down"), nil}
+	minter := &fakeMinter{
+		responses: []RegistrationTokenResponse{
+			{Token: "github-runner-token-1", ExpiresAt: now.Add(time.Hour)},
+			{Token: "github-runner-token-2", ExpiresAt: now.Add(2 * time.Hour)},
+		},
+	}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-mark-used"}
+
+	first := serveRegistrationRequest(t, handler, req)
+	second := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.Contains(t, second.Body.String(), "github-runner-token-2")
+	assert.Equal(t, 2, minter.calls)
+	assert.Equal(t, 1, st.markUsedSuccesses)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+}
+
 func TestRegistrationTokenHandlerCompleteFailureCanRetry(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, token := newHandlerTestStore(t, now)
@@ -297,12 +321,13 @@ func newHandlerTestStore(t *testing.T, now time.Time) (*handlerFakeStore, string
 }
 
 type handlerFakeStore struct {
-	repository   store.Repository
-	tokens       map[int64]store.RunnerBootstrapToken
-	tokensByHash map[string]store.RunnerBootstrapToken
-	idempotency  map[string]store.IdempotencyKey
-	completeErrs []error
-	markUsedErrs []error
+	repository        store.Repository
+	tokens            map[int64]store.RunnerBootstrapToken
+	tokensByHash      map[string]store.RunnerBootstrapToken
+	idempotency       map[string]store.IdempotencyKey
+	completeErrs      []error
+	markUsedErrs      []error
+	markUsedSuccesses int
 }
 
 func (s *handlerFakeStore) GetRepository(_ context.Context, owner string, name string) (store.Repository, error) {
@@ -335,6 +360,7 @@ func (s *handlerFakeStore) MarkRunnerBootstrapTokenUsed(_ context.Context, token
 	token.UsedAt = &usedAt
 	s.tokens[tokenID] = token
 	s.tokensByHash[token.TokenHash] = token
+	s.markUsedSuccesses++
 	return nil
 }
 

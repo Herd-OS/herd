@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -79,12 +80,83 @@ func TestSetHerdReviewStatusAllowsNewHeadPendingAfterSuccess(t *testing.T) {
 	assert.Equal(t, "pending", gh.statuses[1].status.State)
 }
 
+func TestSetHerdReviewStatusRetryAfterStateFailureDoesNotDuplicateGitHubStatus(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{errs: []error{errors.New("database down"), nil}}
+	gh := &fakeStatusGitHub{}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	firstErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+	secondErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "record Herd Review state")
+	require.NoError(t, secondErr)
+	assert.Len(t, gh.statuses, 1)
+	require.Len(t, st.states, 1)
+	assert.Equal(t, "success", st.states[0].Status)
+}
+
 type fakeStatusStore struct {
 	states []store.ReviewState
+	errs   []error
+	idem   map[string]store.IdempotencyKey
 }
 
 func (s *fakeStatusStore) SetReviewState(_ context.Context, state store.ReviewState) error {
+	if len(s.errs) > 0 {
+		err := s.errs[0]
+		s.errs = s.errs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	s.states = append(s.states, state)
+	return nil
+}
+
+func (s *fakeStatusStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
+	if s.idem == nil {
+		s.idem = map[string]store.IdempotencyKey{}
+	}
+	if _, ok := s.idem[key.Key]; ok {
+		return false, nil
+	}
+	s.idem[key.Key] = key
+	return true, nil
+}
+
+func (s *fakeStatusStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	record, ok := s.idem[key]
+	if !ok {
+		return store.IdempotencyKey{}, store.ErrNotFound
+	}
+	return record, nil
+}
+
+func (s *fakeStatusStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "completed"
+	record.ResultRef = resultRef
+	record.CompletedAt = &now
+	s.idem[key] = record
+	return nil
+}
+
+func (s *fakeStatusStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	record.CompletedAt = &now
+	s.idem[key] = record
 	return nil
 }
 

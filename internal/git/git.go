@@ -46,7 +46,7 @@ func CloneWithConfig(repoURL, dst string, config ...string) error {
 	cmd.Args = append([]string{"git"}, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(args), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -308,7 +308,7 @@ func (g *Git) run(args ...string) error {
 	cmd.Dir = g.WorkDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git %s: %w\n%s", strings.Join(cmdArgs, " "), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -320,9 +320,9 @@ func (g *Git) output(args ...string) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("git %s: %w\n%s", strings.Join(cmdArgs, " "), err, strings.TrimSpace(string(exitErr.Stderr)))
+			return "", fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return "", fmt.Errorf("git %s: %w", strings.Join(cmdArgs, " "), err)
+		return "", fmt.Errorf("git %s: %w", gitCommandDisplay(cmdArgs), err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -335,7 +335,7 @@ func (g *Git) outputBytes(args ...string) ([]byte, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w\n%s", strings.Join(cmdArgs, " "), err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }
@@ -353,6 +353,48 @@ func gitArgs(config []string, args ...string) []string {
 	}
 	out = append(out, args...)
 	return out
+}
+
+func gitCommandDisplay(args []string) string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-c" && i+1 < len(args) {
+			out = append(out, "-c", redactGitConfig(args[i+1]))
+			i++
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return strings.Join(out, " ")
+}
+
+func redactGitConfig(entry string) string {
+	key, value, ok := strings.Cut(entry, "=")
+	if !ok {
+		if sensitiveGitConfigKey(entry) {
+			return entry + "=<redacted>"
+		}
+		return entry
+	}
+	if sensitiveGitConfigKey(key) || sensitiveGitConfigValue(value) {
+		return key + "=<redacted>"
+	}
+	return entry
+}
+
+func sensitiveGitConfigKey(key string) bool {
+	key = strings.ToLower(key)
+	for _, marker := range []string{"authorization", "token", "password", "extraheader"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func sensitiveGitConfigValue(value string) bool {
+	value = strings.ToLower(value)
+	return strings.Contains(value, "authorization:") || strings.Contains(value, "bearer ") || strings.Contains(value, "token ")
 }
 
 func parseNameStatus(out string) []NameStatusEntry {

@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
 )
+
+var ErrReviewSubmissionInProgress = errors.New("review submission is already in progress")
 
 const (
 	ResultStatusApproved         = "approved"
@@ -99,6 +102,7 @@ type ReviewMutationStore interface {
 	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
 }
 
 func (s ReviewService) MarkReviewPending(ctx context.Context, repo Repository, prNumber int, headSHA string, description, targetURL string) error {
@@ -204,6 +208,9 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 	event, state, description := reviewEventAndStatus(result)
 	if event != "" {
 		if err := s.submitPRReviewOnce(ctx, repo, result, event); err != nil {
+			if errors.Is(err, ErrReviewSubmissionInProgress) {
+				return nil
+			}
 			statusErr := s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review could not submit a PR review", targetURL(result, current.URL))
 			commentErr := s.GitHub.AddPullRequestComment(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewSubmissionFailureComment(err))
 			if statusErr != nil {
@@ -252,6 +259,12 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		if record.Status == "completed" {
 			return nil
 		}
+		if repaired, repairErr := s.repairCompletedReviewSubmission(ctx, key); repaired || repairErr != nil {
+			return repairErr
+		}
+		if record.Status == "started" {
+			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
+		}
 	} else if err := s.Mutations.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
 		IdempotencyKey: key,
 		RepositoryID:   repo.ID,
@@ -268,13 +281,34 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		return err
 	}
 	response, _ := json.Marshal(map[string]any{"submitted": true, "event": event, "head_sha": result.HeadSHA})
-	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
-		return fmt.Errorf("complete review submission idempotency: %w", err)
-	}
 	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, "completed", response, "", s.now()); err != nil {
 		return fmt.Errorf("complete review submission mutation attempt: %w", err)
 	}
+	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
+		return fmt.Errorf("complete review submission idempotency: %w", err)
+	}
 	return nil
+}
+
+func (s ReviewService) repairCompletedReviewSubmission(ctx context.Context, key string) (bool, error) {
+	attempt, err := s.Mutations.GetGitHubMutationAttempt(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get review submission mutation attempt: %w", err)
+	}
+	if attempt.Status != "completed" {
+		return false, nil
+	}
+	response := attempt.Response
+	if len(response) == 0 {
+		response = json.RawMessage(`{"submitted":true}`)
+	}
+	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
+		return false, fmt.Errorf("repair review submission idempotency: %w", err)
+	}
+	return true, nil
 }
 
 func (s ReviewService) handleChangesWithFixes(ctx context.Context, repo Repository, result ReviewCompletedResult, current *platform.PullRequest) error {

@@ -9,6 +9,7 @@ import (
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/issues"
+	"github.com/herd-os/herd/internal/platform"
 )
 
 // EnsureReviewFixIssue creates one fix issue per review finding fingerprint.
@@ -55,6 +56,9 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 			return 0, false, err
 		}
 		if record.Status != mutationStatusCompleted || strings.TrimSpace(record.ResultRef) == "" {
+			if issueNumber, recovered, recoverErr := s.recoverReviewFixIssue(ctx, req, key); recovered || recoverErr != nil {
+				return issueNumber, false, recoverErr
+			}
 			status := strings.TrimSpace(record.Status)
 			if status == "" {
 				status = "unknown"
@@ -82,6 +86,31 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 		return 0, false, fmt.Errorf("invalid review fix issue result ref %q", resultRef)
 	}
 	return issueNumber, true, nil
+}
+
+func (s Service) recoverReviewFixIssue(ctx context.Context, req TaskIssueRequest, key string) (int, bool, error) {
+	issuesFound, err := s.Platform.Issues().List(ctx, platformIssueFilters(req.BatchNumber))
+	if err != nil {
+		return 0, false, fmt.Errorf("list review fix issues for recovery: %w", err)
+	}
+	for _, issue := range issuesFound {
+		if issue == nil || issue.Title != req.Title {
+			continue
+		}
+		if !strings.Contains(issue.Body, req.Title[len("Review fix: "):]) {
+			continue
+		}
+		resultRef := fmt.Sprintf("issue:%d", issue.Number)
+		if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+			return 0, false, fmt.Errorf("complete recovered review fix issue idempotency key: %w", err)
+		}
+		return issue.Number, true, nil
+	}
+	return 0, false, nil
+}
+
+func platformIssueFilters(batchNumber int) platform.IssueFilters {
+	return platform.IssueFilters{State: "all", Milestone: &batchNumber}
 }
 
 // DispatchReviewFixWorker dispatches a fix worker for a review fix issue.
