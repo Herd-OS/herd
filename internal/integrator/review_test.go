@@ -1016,10 +1016,13 @@ func TestReview_AppendsCoverageWhenPreparedDiffIsLimited(t *testing.T) {
 	assert.True(t, result.Approved)
 	require.NotEmpty(t, prSvc.comments)
 	assert.Contains(t, prSvc.comments[0], "## Diff Coverage")
-	assert.Contains(t, prSvc.comments[0], "Omitted files: 2 (generated: 1, binary: 1)")
-	assert.Contains(t, prSvc.comments[0], "Truncated files: 1")
-	assert.Contains(t, prSvc.comments[0], "dist/app.js: generated file")
-	assert.Contains(t, prSvc.comments[0], "image.png: binary file")
+	assert.Contains(t, prSvc.comments[0], "Files summarized but not reviewed: 2")
+	assert.Contains(t, prSvc.comments[0], "Files reviewed with truncated diffs: 1")
+	assert.Contains(t, prSvc.comments[0], "generated file: 1")
+	assert.Contains(t, prSvc.comments[0], "dist/app.js")
+	assert.Contains(t, prSvc.comments[0], "binary file: 1")
+	assert.Contains(t, prSvc.comments[0], "image.png")
+	assert.Contains(t, prSvc.comments[0], "big.go: file diff exceeds per-file limit and was truncated")
 }
 
 func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {

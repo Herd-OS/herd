@@ -43,6 +43,10 @@ func TestPrepareForReviewFallsBackToFilesWhenRawDiffTooLarge(t *testing.T) {
 	assert.Equal(t, "github-files-api", prepared.DiffSet.Source)
 	assert.Contains(t, prepared.Rendered.Text, "src/app.go")
 	assert.Contains(t, prepared.Rendered.Text, "raw GitHub pull request diff was too large")
+	require.Len(t, prepared.Chunks, 1)
+	assert.Equal(t, "src/app.go", prepared.Chunks[0].IncludedFiles[0].Path)
+	assert.True(t, prepared.Coverage.Complete)
+	assert.Equal(t, 1, prepared.Coverage.FilesReviewed)
 }
 
 func TestPrepareForReviewPrefersLocalGitCollection(t *testing.T) {
