@@ -107,6 +107,7 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 	result := aggregate.Result
 	chunksReviewed := aggregate.ChunksReviewed
 	require.NotNil(t, result)
+	assert.Equal(t, 2, aggregate.ChunksReviewed)
 	assert.Equal(t, 2, chunksReviewed)
 	require.Len(t, aggregate.ChunkStats, 2)
 	assert.Equal(t, chunkReviewStats{
@@ -119,8 +120,16 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 			{Severity: "CRITERIA", Description: "Acceptance criterion not verified"},
 		},
 	}, aggregate.ChunkStats[0])
-	assert.Equal(t, 1, aggregate.ChunkStats[1].HighFindingCount)
-	assert.Equal(t, 2, aggregate.ChunkStats[1].TotalFindingCount)
+	assert.Equal(t, chunkReviewStats{
+		ChunkIndex:        2,
+		TotalChunks:       2,
+		HighFindingCount:  1,
+		TotalFindingCount: 2,
+		Findings: []agent.ReviewFinding{
+			{Severity: "high", Description: "  Missing   nil check  "},
+			{Severity: "LOW", Description: "Small cleanup"},
+		},
+	}, aggregate.ChunkStats[1])
 	assert.False(t, result.Approved)
 	assert.Equal(t, []string{"diff-a", "diff-b"}, ag.diffs)
 	require.Len(t, ag.opts, 2)

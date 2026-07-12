@@ -15,6 +15,7 @@ import (
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
+	"github.com/herd-os/herd/internal/reviewdiff"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2134,32 +2135,281 @@ func TestReview_MaxCyclesHit(t *testing.T) {
 }
 
 func TestReview_SafetyValve(t *testing.T) {
-	mock := newReviewTestPlatform(
-		[]*platform.PullRequest{{Number: 50, Title: "[herd] Batch"}},
-		[]*platform.Issue{
-			{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
-		},
-	)
-
-	// Generate 11 HIGH findings (exceeds safety limit of 10)
-	findings := make([]agent.ReviewFinding, 11)
-	comments := make([]string, 11)
-	for i := range findings {
-		findings[i] = agent.ReviewFinding{Severity: "HIGH", Description: "issue found"}
-		comments[i] = "issue found"
+	dir, g, headSHA := initChunkedReviewRepo(t, 1)
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
 	}
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+	prSvc := newCapturingBatchPRService()
+	mock := newChunkedReviewPlatform(mockCreate, prSvc, headSHA)
+
+	findings := makeHighReviewFindings("single-pass issue", safetyValveLimit+1)
 
 	ag := &mockReviewAgent{
-		reviewResult: &agent.ReviewResult{Approved: false, Findings: findings, Comments: comments},
+		reviewResult: &agent.ReviewResult{Approved: false, Findings: findings, Comments: reviewCommentsFromFindings(findings)},
 	}
 
-	dir, g := initTestRepo(t)
 	result, err := Review(context.Background(), mock, ag, g, &config.Config{
 		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 10},
-	}, ReviewParams{RunID: 100, RepoRoot: dir})
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
 
 	require.NoError(t, err)
+	require.NotNil(t, result)
 	assert.True(t, result.MaxCyclesHit)
+	assert.Empty(t, result.FixIssues)
+	assert.Equal(t, 0, createdIssues)
+	comment := requireCommentContaining(t, prSvc.comments, "safety limit")
+	assert.Contains(t, comment, "single review pass")
+	assert.NotContains(t, comment, "chunk")
+}
+
+func TestReview_ChunkedHighFindingsAcrossChunksDoesNotTripSafetyValve(t *testing.T) {
+	results := make([]*agent.ReviewResult, 0, 7)
+	for chunk := 1; chunk <= 7; chunk++ {
+		findings := makeHighReviewFindings(fmt.Sprintf("chunk %d issue", chunk), 2)
+		results = append(results, &agent.ReviewResult{
+			Approved: false,
+			Summary:  fmt.Sprintf("chunk %d found issues", chunk),
+			Findings: findings,
+			Comments: reviewCommentsFromFindings(findings),
+		})
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	createdIssues := 0
+	var createdBody string
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			createdBody = body
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+
+	result, prSvc, err := runChunkedReviewFixture(t, 7, results, mockCreate)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.MaxCyclesHit)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Equal(t, 1, createdIssues)
+	assert.Contains(t, createdBody, "chunk 1 issue 01")
+	assert.Contains(t, createdBody, "chunk 7 issue 02")
+	for _, comment := range prSvc.comments {
+		assert.NotContains(t, comment, "safety limit")
+	}
+	comment := requireCommentContaining(t, prSvc.comments, "Diff Coverage")
+	assert.Contains(t, comment, "Chunks reviewed")
+}
+
+func TestReview_ChunkedSingleChunkOverLimitTripsSafetyValve(t *testing.T) {
+	results := make([]*agent.ReviewResult, 0, 7)
+	for chunk := 1; chunk <= 7; chunk++ {
+		result := &agent.ReviewResult{Approved: true, Summary: "ok"}
+		if chunk == 4 {
+			findings := makeHighReviewFindings("offending chunk 4 issue", 12)
+			result = &agent.ReviewResult{
+				Approved: false,
+				Summary:  "too many findings",
+				Findings: findings,
+				Comments: reviewCommentsFromFindings(findings),
+			}
+		}
+		results = append(results, result)
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+
+	result, prSvc, err := runChunkedReviewFixture(t, 7, results, mockCreate)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.MaxCyclesHit)
+	assert.Empty(t, result.FixIssues)
+	assert.Equal(t, 0, createdIssues)
+	comment := requireCommentContaining(t, prSvc.comments, "Agent review chunk 4/7 found 12 high-severity issues")
+	assert.Contains(t, comment, "safety limit (10)")
+	assert.Contains(t, comment, "Diff Coverage")
+	assert.NotContains(t, comment, "single pass")
+	assert.NotContains(t, comment, "single review pass")
+	assert.Contains(t, comment, "offending chunk 4 issue 01")
+	assert.Contains(t, comment, "offending chunk 4 issue 02")
+	assert.Contains(t, comment, "offending chunk 4 issue 03")
+}
+
+func TestReview_ChunkedTwoChunksUnderLimitDoesNotTripSafetyValve(t *testing.T) {
+	results := []*agent.ReviewResult{
+		{Approved: false, Summary: "chunk 1", Findings: makeHighReviewFindings("chunk one issue", 9)},
+		{Approved: false, Summary: "chunk 2", Findings: makeHighReviewFindings("chunk two issue", 9)},
+	}
+	for _, result := range results {
+		result.Comments = reviewCommentsFromFindings(result.Findings)
+	}
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	var createdBody string
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdBody = body
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+
+	result, _, err := runChunkedReviewFixture(t, 2, results, mockCreate)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.MaxCyclesHit)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Contains(t, createdBody, "chunk one issue 01")
+	assert.Contains(t, createdBody, "chunk two issue 09")
+}
+
+func TestReview_ChunkedSafetyValveUsesRawChunkCountsBeforeDedup(t *testing.T) {
+	findings := make([]agent.ReviewFinding, 0, safetyValveLimit+1)
+	for i := 0; i < safetyValveLimit+1; i++ {
+		findings = append(findings, agent.ReviewFinding{Severity: "HIGH", Description: "Duplicate chunk finding"})
+	}
+	results := []*agent.ReviewResult{
+		{Approved: false, Summary: "duplicates", Findings: findings, Comments: reviewCommentsFromFindings(findings)},
+		{Approved: true, Summary: "ok"},
+	}
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+
+	result, prSvc, err := runChunkedReviewFixture(t, 2, results, mockCreate)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.MaxCyclesHit)
+	assert.Empty(t, result.FixIssues)
+	assert.Equal(t, 0, createdIssues)
+	comment := requireCommentContaining(t, prSvc.comments, "Agent review chunk 1/2 found 11 high-severity issues")
+	assert.Contains(t, comment, "Duplicate chunk finding")
+}
+
+func TestReview_ChunkedDedupStillRunsAfterAggregation(t *testing.T) {
+	plan := reviewdiff.ChunkPlan{
+		Chunks: []reviewdiff.ReviewChunk{
+			{Index: 1, Total: 2, Text: "diff --git a/a.go b/a.go\n", IncludedFiles: []reviewdiff.ChangedFile{{Path: "a.go"}}},
+			{Index: 2, Total: 2, Text: "diff --git a/b.go b/b.go\n", IncludedFiles: []reviewdiff.ChangedFile{{Path: "b.go"}}},
+		},
+		Coverage: reviewdiff.CoverageSummary{
+			Source:         "test",
+			TotalFiles:     2,
+			ReviewMode:     reviewdiff.CoverageModeChunked,
+			ChunksPlanned:  2,
+			ChunksReviewed: 2,
+			FilesReviewed:  2,
+			Complete:       true,
+		},
+	}
+	results := []*agent.ReviewResult{
+		{Approved: false, Summary: "chunk 1", Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "Existing active finding"},
+		}},
+		{Approved: false, Summary: "chunk 2", Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "Brand new chunked finding"},
+		}},
+	}
+	for _, result := range results {
+		result.Comments = reviewCommentsFromFindings(result.Findings)
+	}
+	baseIssue := &platform.Issue{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"}
+	activeFix := &platform.Issue{
+		Number: 80,
+		State:  "open",
+		Title:  "Review fixes (cycle 1)",
+		Labels: []string{issues.StatusInProgress},
+		Body:   "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  fix_cycle: 1\n---\n\n## Task\n1. Existing active finding\n",
+	}
+	ag := &chunkCaptureAgent{results: results}
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	require.NotNil(t, aggregate.Result)
+	require.Len(t, aggregate.Result.Findings, 2)
+
+	actionableFindings := dedupFindings(aggregate.Result.Findings, activeFixIssues([]*platform.Issue{baseIssue, activeFix}))
+
+	require.Len(t, actionableFindings, 1)
+	assert.Equal(t, "Brand new chunked finding", actionableFindings[0].Description)
+}
+
+func TestReview_MaxCyclesHitStillWinsBeforeChunkedSafetyValve(t *testing.T) {
+	results := []*agent.ReviewResult{
+		{Approved: false, Summary: "too many", Findings: makeHighReviewFindings("over limit", safetyValveLimit+1)},
+		{Approved: true, Summary: "ok"},
+	}
+	results[0].Comments = reviewCommentsFromFindings(results[0].Findings)
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+		{
+			Number: 60,
+			State:  "open",
+			Labels: []string{issues.StatusDone},
+			Body:   "---\nherd:\n  version: 1\n  batch: 1\n  type: fix\n  fix_cycle: 3\n---\n\n## Task\nPrior fix\n",
+		},
+	}
+	mockCreate := &mockIssueServiceWithCreate{mockIssueService: issueSvc}
+	dir, g, headSHA := initChunkedReviewRepo(t, 2)
+	prSvc := newCapturingBatchPRService()
+	mock := newChunkedReviewPlatform(mockCreate, prSvc, headSHA)
+	ag := &chunkCaptureAgent{results: results}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{
+			Review:             true,
+			ReviewMaxFixCycles: 3,
+			ReviewDiff: config.ReviewDiff{
+				MaxFilesPerChunk: 1,
+			},
+		},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.MaxCyclesHit)
+	comment := requireCommentContaining(t, prSvc.comments, "max fix cycles")
+	assert.NotContains(t, comment, "Agent review chunk")
+	assert.NotContains(t, comment, "safety limit")
 }
 
 func TestReview_AutoMerge(t *testing.T) {
@@ -2712,6 +2962,85 @@ func (m *mockIssueServiceWithCreate) Create(ctx context.Context, title, body str
 		return m.onCreate(title, body, labels, milestone)
 	}
 	return nil, nil
+}
+
+func makeHighReviewFindings(prefix string, count int) []agent.ReviewFinding {
+	findings := make([]agent.ReviewFinding, 0, count)
+	for i := 1; i <= count; i++ {
+		findings = append(findings, agent.ReviewFinding{
+			Severity:    "HIGH",
+			Description: fmt.Sprintf("%s %02d", prefix, i),
+		})
+	}
+	return findings
+}
+
+func initChunkedReviewRepo(t *testing.T, files int) (string, *git.Git, string) {
+	t.Helper()
+	dir, g := initTestRepo(t)
+	require.NoError(t, g.Checkout("herd/batch/1-batch"))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0755))
+	for i := 1; i <= files; i++ {
+		path := filepath.Join(dir, "src", fmt.Sprintf("chunk_%02d.go", i))
+		content := fmt.Sprintf("package src\n\nfunc Chunk%02d() string { return \"chunk-%02d\" }\n", i, i)
+		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+		runReviewTestGit(t, dir, "add", path)
+	}
+	runReviewTestGit(t, dir, "commit", "-m", "add chunked review files")
+	headSHA := reviewTestGitOutput(t, dir, "rev-parse", "HEAD")
+	return dir, g, headSHA
+}
+
+func newChunkedReviewPlatform(issueSvc platform.IssueService, prSvc *mockCapturingPRService, headSHA string) *mockPlatform {
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.prs = prSvc
+	mock.workflows = &mockWorkflowService{}
+	mock.repo = &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": headSHA},
+	}
+	return mock
+}
+
+func newCapturingBatchPRService() *mockCapturingPRService {
+	return &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+}
+
+func requireCommentContaining(t *testing.T, comments []string, needle string) string {
+	t.Helper()
+	for _, comment := range comments {
+		if strings.Contains(comment, needle) {
+			return comment
+		}
+	}
+	require.Failf(t, "missing comment", "expected a PR comment containing %q in %#v", needle, comments)
+	return ""
+}
+
+func runChunkedReviewFixture(t *testing.T, files int, results []*agent.ReviewResult, issueSvc platform.IssueService) (*ReviewResult, *mockCapturingPRService, error) {
+	t.Helper()
+	dir, g, headSHA := initChunkedReviewRepo(t, files)
+	prSvc := newCapturingBatchPRService()
+	mock := newChunkedReviewPlatform(issueSvc, prSvc, headSHA)
+	ag := &chunkCaptureAgent{results: results}
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{
+			Review:             true,
+			ReviewMaxFixCycles: 10,
+			ReviewDiff: config.ReviewDiff{
+				MaxFilesPerChunk: 1,
+			},
+		},
+		Workers: config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+	return result, prSvc, err
 }
 
 // --- New Tests ---
