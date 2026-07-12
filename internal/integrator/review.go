@@ -425,7 +425,14 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// stops automated fix dispatch. In chunked mode each chunk is an independent
 	// bounded review pass, so aggregate HIGH findings across chunks are expected on
 	// large PRs and must not trip this guard by themselves.
-	if len(aggregate.ChunkStats) > 1 {
+	hasChunkedStats := false
+	for _, stat := range aggregate.ChunkStats {
+		if stat.TotalChunks > 1 {
+			hasChunkedStats = true
+			break
+		}
+	}
+	if hasChunkedStats {
 		if stat, ok := offendingChunkSafetyValveStats(aggregate.ChunkStats, safetyValveLimit); ok {
 			comment := buildChunkReviewSafetyValveComment(stat, safetyValveLimit)
 			comment = appendDiffCoverageIfLimited(comment, preparedDiff)

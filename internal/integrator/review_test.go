@@ -2324,6 +2324,57 @@ func TestReview_ChunkedSafetyValveUsesRawChunkCountsBeforeDedup(t *testing.T) {
 	assert.Contains(t, comment, "Duplicate chunk finding")
 }
 
+func TestReview_ChunkedSafetyValveUsesSingleReviewedChunkStatsBeforeDedup(t *testing.T) {
+	findings := make([]agent.ReviewFinding, 0, safetyValveLimit+1)
+	for i := 0; i < safetyValveLimit+1; i++ {
+		findings = append(findings, agent.ReviewFinding{Severity: "HIGH", Description: "Duplicate single chunk finding"})
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+	dir, g, headSHA := initChunkedReviewRepo(t, 2)
+	prSvc := newCapturingBatchPRService()
+	mock := newChunkedReviewPlatform(mockCreate, prSvc, headSHA)
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{{
+		Approved: false,
+		Summary:  "duplicates",
+		Findings: findings,
+		Comments: reviewCommentsFromFindings(findings),
+	}}}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{
+			Review:             true,
+			ReviewMaxFixCycles: 10,
+			ReviewDiff: config.ReviewDiff{
+				MaxFilesPerChunk: 1,
+				MaxChunks:        1,
+			},
+		},
+		Workers: config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.MaxCyclesHit)
+	assert.Empty(t, result.FixIssues)
+	assert.Equal(t, 0, createdIssues)
+	comment := requireCommentContaining(t, prSvc.comments, "Agent review chunk 1/2 found 11 high-severity issues")
+	assert.Contains(t, comment, "Duplicate single chunk finding")
+	assert.Contains(t, comment, "Diff Coverage")
+	assert.NotContains(t, comment, "single review pass")
+}
+
 func TestReview_ChunkedDedupStillRunsAfterAggregation(t *testing.T) {
 	plan := reviewdiff.ChunkPlan{
 		Chunks: []reviewdiff.ReviewChunk{
