@@ -118,6 +118,50 @@ func TestAdvanceBatch_OpensPRWhenAllTiersComplete(t *testing.T) {
 	assert.Equal(t, "herd/batch/4-demo", fake.prs.created.Head)
 }
 
+func TestOpenBatchPRStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("batch-pr", "repo", svc.Repo.ID, "batch", 4)
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "pull_request_create", Status: "started", CreatedAt: fixedClock()}
+
+	pr, err := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, pr)
+	assert.Contains(t, err.Error(), "without a completed result")
+	assert.Nil(t, fake.prs.created)
+}
+
+func TestEnsureTaskIssueStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("task-issue", "repo", svc.Repo.ID, "batch", 4, "create", "Task")
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "issue_create", Status: "started", CreatedAt: fixedClock()}
+
+	issue, err := svc.EnsureTaskIssue(ctx, TaskIssueRequest{
+		BatchNumber: 4,
+		Title:       "Task",
+		Body:        "body",
+		Labels:      []string{issues.StatusReady},
+		Milestone:   4,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, issue)
+	assert.Contains(t, err.Error(), "without a completed result")
+	assert.Empty(t, fake.issues.created)
+}
+
 func newTestService(p *fakePlatform, st *fakeStore, dispatcher Dispatcher) Service {
 	return Service{
 		Repo: store.Repository{
@@ -175,6 +219,17 @@ func (s *fakeStore) CompleteIdempotencyKey(_ context.Context, key string, result
 	}
 	record.ResultRef = resultRef
 	record.Status = "completed"
+	s.keys[key] = record
+	return nil
+}
+
+func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	record, ok := s.keys[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	record.ResultRef = errorMessage
+	record.Status = "failed"
 	s.keys[key] = record
 	return nil
 }

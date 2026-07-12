@@ -165,7 +165,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyMetadata, applyErr := h.processWorkerPatch(r.Context(), result, job, payload)
+	patchArtifact, applyMetadata, applyErr := h.validateWorkerPatch(r.Context(), result)
 	if applyErr != nil {
 		metadata, metadataErr := resultMetadata(payload, claims, applyMetadata)
 		if metadataErr != nil {
@@ -203,6 +203,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if created {
+		if applyErr := h.processWorkerPatch(r.Context(), result, job, payload, patchArtifact); applyErr != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
+			return
+		}
 		if err := h.processReviewResult(r.Context(), result, job); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
 			return
@@ -317,16 +321,39 @@ func validateResultAgainstJob(result Result, job store.Job) error {
 	return nil
 }
 
-func (h Handler) processWorkerPatch(ctx context.Context, result Result, job store.Job, payload []byte) (map[string]any, error) {
+func (h Handler) validateWorkerPatch(ctx context.Context, result Result) (*artifacts.ValidatedArtifact, map[string]any, error) {
 	worker, ok := result.(WorkerCompletedResult)
 	if !ok || worker.Status != StatusSuccess || h.artifactStore == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	idempotencyKey := "patch_apply:" + ResultPayloadHash(payload)
 	metadata := map[string]any{
 		"patch_artifact": worker.PatchArtifact,
-		"mutation_key":   idempotencyKey,
 	}
+	artifact, err := artifacts.Validate(ctx, h.artifactStore, artifacts.ValidationRequest{
+		Repository:       worker.Repository,
+		JobID:            worker.JobID,
+		BaseSHA:          worker.BaseSHA,
+		ExpectedHeadSHA:  worker.ExpectedHeadSHA,
+		MetadataArtifact: worker.PatchArtifact,
+	})
+	if err != nil {
+		metadata["error"] = err.Error()
+		return nil, metadata, err
+	}
+	metadata["format"] = artifact.Metadata.Format
+	metadata["sha256"] = artifact.Metadata.SHA256
+	if len(artifact.Data) == 0 {
+		metadata["empty"] = true
+	}
+	return &artifact, metadata, nil
+}
+
+func (h Handler) processWorkerPatch(ctx context.Context, result Result, job store.Job, payload []byte, artifact *artifacts.ValidatedArtifact) error {
+	worker, ok := result.(WorkerCompletedResult)
+	if !ok || worker.Status != StatusSuccess || artifact == nil {
+		return nil
+	}
+	idempotencyKey := "patch_apply:" + ResultPayloadHash(payload)
 	if recorder, ok := h.store.(MutationRecorder); ok {
 		request, err := json.Marshal(map[string]any{
 			"repository":        worker.Repository,
@@ -337,7 +364,7 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 			"patch_artifact":    worker.PatchArtifact,
 		})
 		if err != nil {
-			return metadata, fmt.Errorf("marshal patch mutation request: %w", err)
+			return fmt.Errorf("marshal patch mutation request: %w", err)
 		}
 		if err := recorder.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
 			IdempotencyKey: idempotencyKey,
@@ -347,30 +374,15 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 			Request:        request,
 			CreatedAt:      h.now(),
 		}); err != nil {
-			return metadata, fmt.Errorf("record patch mutation attempt: %w", err)
+			return fmt.Errorf("record patch mutation attempt: %w", err)
 		}
 	}
-	artifact, err := artifacts.Validate(ctx, h.artifactStore, artifacts.ValidationRequest{
-		Repository:       worker.Repository,
-		JobID:            worker.JobID,
-		BaseSHA:          worker.BaseSHA,
-		ExpectedHeadSHA:  worker.ExpectedHeadSHA,
-		MetadataArtifact: worker.PatchArtifact,
-	})
-	if err != nil {
-		h.completePatchMutation(ctx, idempotencyKey, "failed", nil, err)
-		metadata["error"] = err.Error()
-		return metadata, err
-	}
-	metadata["format"] = artifact.Metadata.Format
-	metadata["sha256"] = artifact.Metadata.SHA256
 	if len(artifact.Data) == 0 {
 		h.completePatchMutation(ctx, idempotencyKey, "completed", json.RawMessage(`{"empty":true}`), nil)
-		metadata["empty"] = true
-		return metadata, nil
+		return nil
 	}
 	if h.patchApplier == nil {
-		return metadata, nil
+		return nil
 	}
 	applyResult, err := h.patchApplier.Apply(ctx, artifacts.ApplyRequest{
 		Repository:      worker.Repository,
@@ -379,7 +391,7 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		TargetBranch:    worker.TargetBranch,
 		BaseSHA:         worker.BaseSHA,
 		ExpectedHeadSHA: worker.ExpectedHeadSHA,
-		Artifact:        artifact,
+		Artifact:        *artifact,
 		Identity:        artifacts.DefaultIdentity(h.appLogin, h.appEmail),
 		Human:           humanAttribution(job.Metadata),
 		TokenSource:     h.appTokenSource,
@@ -388,16 +400,14 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 	})
 	if err != nil {
 		h.completePatchMutation(ctx, idempotencyKey, "failed", nil, err)
-		metadata["error"] = err.Error()
-		return metadata, err
+		return err
 	}
 	response, err := json.Marshal(applyResult)
 	if err != nil {
-		return metadata, fmt.Errorf("marshal patch apply result: %w", err)
+		return fmt.Errorf("marshal patch apply result: %w", err)
 	}
 	h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil)
-	metadata["commit_sha"] = applyResult.CommitSHA
-	return metadata, nil
+	return nil
 }
 
 func (h Handler) completePatchMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error) {

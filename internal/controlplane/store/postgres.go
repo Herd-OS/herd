@@ -370,6 +370,17 @@ func (s *PostgresStore) CompleteIdempotencyKey(ctx context.Context, key string, 
 	return requireAffected(result)
 }
 
+func (s *PostgresStore) FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE idempotency_keys
+		SET status = 'failed', result_ref = $2, completed_at = now()
+		WHERE key = $1`, key, errorMessage)
+	if err != nil {
+		return err
+	}
+	return requireAffected(result)
+}
+
 func (s *PostgresStore) ListStartedIdempotencyKeys(ctx context.Context, scope string, createdBefore time.Time, limit int) ([]IdempotencyKey, error) {
 	if limit <= 0 {
 		limit = 100

@@ -587,19 +587,22 @@ func TestCreateRunnerFilesWithBootstrapWritesEnv(t *testing.T) {
 		wantControlPlane  bool
 		wantComposeURL    bool
 		existingEnv       string
+		existingGitignore string
 		wantPreservedLine string
 	}{
 		{
 			name:              "hosted omits default URL",
 			controlPlaneURL:   config.DefaultControlPlaneURL,
 			existingEnv:       "CLAUDE_CODE_OAUTH_TOKEN=claude\nHERD_CONTROL_PLANE_URL=https://old.example\n",
+			existingGitignore: "dist",
 			wantPreservedLine: "CLAUDE_CODE_OAUTH_TOKEN=claude",
 		},
 		{
-			name:             "self-hosted persists URL",
-			controlPlaneURL:  "https://herd.example.com",
-			wantControlPlane: true,
-			wantComposeURL:   true,
+			name:              "self-hosted persists URL",
+			controlPlaneURL:   "https://herd.example.com",
+			existingGitignore: "build\n",
+			wantControlPlane:  true,
+			wantComposeURL:    true,
 		},
 	}
 	for _, tt := range tests {
@@ -607,6 +610,9 @@ func TestCreateRunnerFilesWithBootstrapWritesEnv(t *testing.T) {
 			dir := t.TempDir()
 			if tt.existingEnv != "" {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte(tt.existingEnv), 0600))
+			}
+			if tt.existingGitignore != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(tt.existingGitignore), 0644))
 			}
 
 			require.NoError(t, createRunnerFilesWithBootstrap(dir, "octo", "herd", "hrb_bootstrap", tt.controlPlaneURL))
@@ -631,6 +637,15 @@ func TestCreateRunnerFilesWithBootstrapWritesEnv(t *testing.T) {
 			} else {
 				assert.NotContains(t, string(compose), "HERD_CONTROL_PLANE_URL")
 			}
+
+			gitignore, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+			require.NoError(t, err)
+			assert.Contains(t, string(gitignore), ".env")
+			assert.NotContains(t, string(gitignore), "hrb_bootstrap")
+
+			example, err := os.ReadFile(filepath.Join(dir, ".env.herd.example"))
+			require.NoError(t, err)
+			assert.NotContains(t, string(example), "hrb_bootstrap")
 		})
 	}
 }

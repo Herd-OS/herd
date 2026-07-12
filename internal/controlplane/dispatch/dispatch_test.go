@@ -140,8 +140,43 @@ func TestDispatcherRecordsGitHubDispatchError(t *testing.T) {
 	assert.Equal(t, "failed", st.mutationAttempts[0].Status)
 	assert.Contains(t, st.mutationAttempts[0].Error, "github down")
 	for _, key := range st.idempotencyKeys {
-		assert.Equal(t, "started", key.Status)
+		assert.Equal(t, "failed", key.Status)
 	}
+}
+
+func TestDispatcherRetriesAfterWorkflowDispatchFailure(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeWorkflowClient{errors: []error{errors.New("github down"), nil}}
+	req := validRequest()
+
+	_, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.Error(t, err)
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.True(t, result.Created)
+	assert.Len(t, gh.calls, 1)
+	assert.Len(t, st.jobs, 1)
+	record := st.idempotencyKeys[IdempotencyKey(req)]
+	assert.Equal(t, "completed", record.Status)
+	assert.Contains(t, record.ResultRef, result.JobID)
+}
+
+func TestDispatcherRetriesAfterCreateJobFailure(t *testing.T) {
+	st := newFakeStore()
+	st.createJobErrs = []error{errors.New("database down"), nil}
+	gh := &fakeWorkflowClient{}
+	req := validRequest()
+
+	_, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.Error(t, err)
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.True(t, result.Created)
+	assert.Len(t, gh.calls, 1)
+	assert.Len(t, st.jobs, 1)
+	assert.Equal(t, "completed", st.idempotencyKeys[IdempotencyKey(req)].Status)
 }
 
 func TestAppWorkflowClientPropagatesTokenSourceError(t *testing.T) {
@@ -191,6 +226,7 @@ type fakeStore struct {
 	jobs             map[string]store.Job
 	idempotencyKeys  map[string]store.IdempotencyKey
 	mutationAttempts []store.GitHubMutationAttempt
+	createJobErrs    []error
 }
 
 func newFakeStore() *fakeStore {
@@ -201,6 +237,13 @@ func newFakeStore() *fakeStore {
 }
 
 func (s *fakeStore) CreateJob(_ context.Context, j store.Job) error {
+	if len(s.createJobErrs) > 0 {
+		err := s.createJobErrs[0]
+		s.createJobErrs = s.createJobErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	s.jobs[j.JobID] = j
 	return nil
 }
@@ -242,6 +285,19 @@ func (s *fakeStore) CompleteIdempotencyKey(_ context.Context, key string, result
 	return nil
 }
 
+func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	record.CompletedAt = &now
+	s.idempotencyKeys[key] = record
+	return nil
+}
+
 func (s *fakeStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
 	s.mutationAttempts = append(s.mutationAttempts, a)
 	return nil
@@ -270,11 +326,19 @@ type workflowCall struct {
 }
 
 type fakeWorkflowClient struct {
-	err   error
-	calls []workflowCall
+	err    error
+	errors []error
+	calls  []workflowCall
 }
 
 func (c *fakeWorkflowClient) DispatchWorkflow(_ context.Context, installationID int64, owner, repo, workflowFile, ref string, inputs map[string]string) error {
+	if len(c.errors) > 0 {
+		err := c.errors[0]
+		c.errors = c.errors[1:]
+		if err != nil {
+			return err
+		}
+	}
 	if c.err != nil {
 		return c.err
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -61,6 +62,7 @@ type Store interface {
 	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 }
 
 type MutationRecorder interface {
@@ -121,13 +123,17 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 		return DispatchResult{}, fmt.Errorf("acquire dispatch idempotency key: %w", err)
 	}
 	if !created {
-		return d.duplicateResult(ctx, idempotencyKey)
+		return d.duplicateResult(ctx, req, idempotencyKey)
 	}
 
 	inputs, err := WorkflowInputs(req, jobID)
 	if err != nil {
 		return DispatchResult{}, err
 	}
+	return d.dispatchWithJob(ctx, req, idempotencyKey, jobID, inputs, now, true)
+}
+
+func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, idempotencyKey string, jobID string, inputs map[string]string, now time.Time, createJob bool) (DispatchResult, error) {
 	jobMetadata, err := json.Marshal(map[string]any{
 		"kind":              req.Kind,
 		"workflow_file":     req.WorkflowFile,
@@ -145,19 +151,22 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("marshal job metadata: %w", err)
 	}
-	if err := d.Store.CreateJob(ctx, store.Job{
-		JobID:          jobID,
-		RepositoryID:   req.RepoID,
-		InstallationID: req.InstallationID,
-		PRNumber:       req.PRNumber,
-		HeadSHA:        req.HeadSHA,
-		Status:         "dispatching",
-		WorkerBranch:   req.BatchBranch,
-		Metadata:       jobMetadata,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}); err != nil {
-		return DispatchResult{}, fmt.Errorf("create dispatch job: %w", err)
+	if createJob {
+		if err := d.Store.CreateJob(ctx, store.Job{
+			JobID:          jobID,
+			RepositoryID:   req.RepoID,
+			InstallationID: req.InstallationID,
+			PRNumber:       req.PRNumber,
+			HeadSHA:        req.HeadSHA,
+			Status:         "dispatching",
+			WorkerBranch:   req.BatchBranch,
+			Metadata:       jobMetadata,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}); err != nil {
+			_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
+			return DispatchResult{}, fmt.Errorf("create dispatch job: %w", err)
+		}
 	}
 
 	if recorder, ok := d.Store.(MutationRecorder); ok {
@@ -189,6 +198,7 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 			Error:       err.Error(),
 			CompletedAt: time.Now().UTC(),
 		})
+		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 		return DispatchResult{}, fmt.Errorf("dispatch workflow: %w", err)
 	}
 
@@ -212,12 +222,12 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 	return result, nil
 }
 
-func (d Dispatcher) duplicateResult(ctx context.Context, idempotencyKey string) (DispatchResult, error) {
+func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, idempotencyKey string) (DispatchResult, error) {
 	record, err := d.Store.GetIdempotencyKey(ctx, idempotencyKey)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("get dispatch idempotency key: %w", err)
 	}
-	if record.ResultRef != "" {
+	if record.Status == "completed" && record.ResultRef != "" {
 		var result DispatchResult
 		if err := json.Unmarshal([]byte(record.ResultRef), &result); err == nil && result.JobID != "" {
 			result.Created = false
@@ -234,8 +244,22 @@ func (d Dispatcher) duplicateResult(ctx context.Context, idempotencyKey string) 
 		return DispatchResult{}, fmt.Errorf("dispatch idempotency record is missing job_id")
 	}
 	job, err := d.Store.GetJob(ctx, metadata.JobID)
+	if record.Status == "failed" && errors.Is(err, store.ErrNotFound) {
+		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
+		if inputErr != nil {
+			return DispatchResult{}, inputErr
+		}
+		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), true)
+	}
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("get existing dispatch job: %w", err)
+	}
+	if record.Status == "failed" {
+		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
+		if inputErr != nil {
+			return DispatchResult{}, inputErr
+		}
+		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
 	}
 	return DispatchResult{JobID: job.JobID, Created: false}, nil
 }

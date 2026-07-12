@@ -173,8 +173,7 @@ func TestHandlerRejectsPatchForDifferentRepositoryAndRecordsFailure(t *testing.T
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusFailure, st.results[0].Status)
 	assert.Contains(t, string(st.results[0].Metadata), "patch repository does not match result repository")
-	require.Len(t, st.mutationCompletions, 1)
-	assert.Equal(t, "failed", st.mutationCompletions[0].status)
+	assert.Empty(t, st.mutationCompletions)
 }
 
 func TestHandlerAppliesValidPatchArtifactAndRecordsCommitSHA(t *testing.T) {
@@ -208,7 +207,7 @@ func TestHandlerAppliesValidPatchArtifactAndRecordsCommitSHA(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusSuccess, st.results[0].Status)
-	assert.Contains(t, string(st.results[0].Metadata), strings.Repeat("a", 40))
+	assert.Contains(t, string(st.results[0].Metadata), artifacts.FormatGitDiffBinary)
 	require.Len(t, st.mutationCompletions, 1)
 	assert.Equal(t, "completed", st.mutationCompletions[0].status)
 	assert.Contains(t, string(st.mutationCompletions[0].response), strings.Repeat("a", 40))
@@ -247,7 +246,8 @@ func TestHandlerAppliesBundledWorkerBranchArtifactAndRecordsCommitSHA(t *testing
 	assert.Equal(t, "herd-worker.patch", applier.requests[0].Artifact.Metadata.ArtifactName)
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusSuccess, st.results[0].Status)
-	assert.Contains(t, string(st.results[0].Metadata), strings.Repeat("b", 40))
+	require.Len(t, st.mutationCompletions, 1)
+	assert.Contains(t, string(st.mutationCompletions[0].response), strings.Repeat("b", 40))
 }
 
 func TestHandlerIgnoresPatchArtifactOnFailureResult(t *testing.T) {
@@ -332,6 +332,35 @@ func TestHandlerRejectsOIDCValidatorFailure(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Empty(t, st.results)
+}
+
+func TestHandlerDuplicateWorkerPatchAppliesOnce(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("d", 40)}}
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head"}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Now:           func() time.Time { return now },
+		ArtifactStore: artifactMap(t, metadata, patch),
+		PatchApplier:  applier,
+	})
+	payload := validWorkerPayload("job-1", "head")
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Contains(t, first.Body.String(), `"created":true`)
+	assert.Contains(t, second.Body.String(), `"created":false`)
+	assert.Len(t, applier.requests, 1)
+	assert.Len(t, st.results, 1)
 }
 
 type resultStore struct {

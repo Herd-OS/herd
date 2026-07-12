@@ -802,6 +802,11 @@ func renderDockerComposeWithControlPlane(owner, repo string, controlPlaneURL str
 }
 
 func writeRunnerEnv(dir string, bootstrapToken string, controlPlaneURL string) error {
+	if strings.TrimSpace(bootstrapToken) != "" {
+		if err := ensureGitignore(dir, ".env"); err != nil {
+			return fmt.Errorf("updating .gitignore for .env: %w", err)
+		}
+	}
 	path := filepath.Join(dir, ".env")
 	existing, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {

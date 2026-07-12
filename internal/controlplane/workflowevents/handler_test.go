@@ -35,7 +35,7 @@ func TestHandlerRecordsAndProcessesWorkflowEvent(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	assert.JSONEq(t, `{"status":"accepted","created":true,"kind":"integrator_event","action":"worker_completed"}`, rec.Body.String())
 	require.Len(t, st.commands, 1)
-	assert.Equal(t, "integrator_event:worker_completed", st.commands[0].CommandKey)
+	assert.Contains(t, st.commands[0].CommandKey, "integrator_event:worker_completed:workflow_run:workflow_run:123")
 	assert.Equal(t, "integrator_event", st.commands[0].CommandName)
 	assert.Contains(t, string(st.commands[0].Metadata), `"workflow_run"`)
 	require.Len(t, processor.calls, 1)
@@ -65,6 +65,36 @@ func TestHandlerDuplicateWorkflowEventDoesNotProcessAgain(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Contains(t, second.Body.String(), `"created":false`)
 	assert.Len(t, processor.calls, 1)
+}
+
+func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newEventStore()
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	processor := &capturingProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(validEventClaims(now)),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+		Processor: processor,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, eventRequest(eventPayloadWithWorkflowRunID("123")))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, eventRequest(eventPayloadWithWorkflowRunID("456")))
+	redelivery := httptest.NewRecorder()
+	handler.ServeHTTP(redelivery, eventRequest(eventPayloadWithWorkflowRunID("456")))
+
+	require.Equal(t, http.StatusAccepted, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	require.Equal(t, http.StatusAccepted, redelivery.Code)
+	assert.Contains(t, first.Body.String(), `"created":true`)
+	assert.Contains(t, second.Body.String(), `"created":true`)
+	assert.Contains(t, redelivery.Body.String(), `"created":false`)
+	assert.Len(t, st.commands, 2)
+	assert.Len(t, processor.calls, 2)
 }
 
 func TestHandlerRejectsInvalidOIDCRepository(t *testing.T) {
@@ -177,6 +207,10 @@ func eventRequest(payload string) *http.Request {
 }
 
 func validEventPayload() string {
+	return eventPayloadWithWorkflowRunID("123")
+}
+
+func eventPayloadWithWorkflowRunID(id string) string {
 	payload, _ := json.Marshal(map[string]any{
 		"version":    1,
 		"kind":       KindIntegratorEvent,
@@ -184,7 +218,7 @@ func validEventPayload() string {
 		"event_name": "workflow_run",
 		"action":     "worker_completed",
 		"workflow_run": map[string]any{
-			"id":          "123",
+			"id":          id,
 			"conclusion":  "success",
 			"head_branch": "herd/worker/868",
 			"head_sha":    "abc",

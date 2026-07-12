@@ -43,6 +43,7 @@ type Store interface {
 	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 }
 
 type TokenMinter interface {
@@ -115,16 +116,13 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 
 	result, err := h.minter.CreateRegistrationToken(r.Context(), repo.InstallationID, repo.Owner, repo.Name)
 	if err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create GitHub runner registration token"})
 		return
 	}
 	if strings.TrimSpace(result.Token) == "" || result.ExpiresAt.IsZero() {
+		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, "empty registration token response")
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create GitHub runner registration token: empty response"})
-		return
-	}
-	usedAt := h.now()
-	if err := h.store.MarkRunnerBootstrapTokenUsed(r.Context(), token.ID, usedAt); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record runner bootstrap token use"})
 		return
 	}
 	resultJSON, err := json.Marshal(result)
@@ -133,7 +131,13 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := h.store.CompleteIdempotencyKey(r.Context(), idempotencyKey, string(resultJSON)); err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete runner registration idempotency"})
+		return
+	}
+	usedAt := h.now()
+	if err := h.store.MarkRunnerBootstrapTokenUsed(r.Context(), token.ID, usedAt); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record runner bootstrap token use"})
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -235,6 +239,9 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "lookup runner registration idempotency"})
 		return RegistrationTokenResponse{}, false, false
+	}
+	if record.Status == "failed" {
+		return RegistrationTokenResponse{}, false, true
 	}
 	if record.Status != idempotencyStatusDone {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request is already in progress"})

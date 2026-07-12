@@ -188,8 +188,54 @@ func TestRegistrationTokenHandlerMinterFailures(t *testing.T) {
 
 			assert.Equal(t, http.StatusBadGateway, rec.Code)
 			assert.Nil(t, st.tokens[token.ID].UsedAt)
+			for _, record := range st.idempotency {
+				assert.Equal(t, "failed", record.Status)
+			}
 		})
 	}
+}
+
+func TestRegistrationTokenHandlerRetriesAfterMinterFailure(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	minter := &fakeMinter{
+		responses: []RegistrationTokenResponse{{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}},
+		errors:    []error{errors.New("github failed"), nil},
+	}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-retry"}
+
+	first := serveRegistrationRequest(t, handler, req)
+	second := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusBadGateway, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.JSONEq(t, `{"token":"github-runner-token","expires_at":"2026-07-11T13:00:00Z"}`, second.Body.String())
+	assert.Equal(t, 2, minter.calls)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+}
+
+func TestRegistrationTokenHandlerCompleteFailureCanRetry(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	st.completeErrs = []error{errors.New("database down"), nil}
+	minter := &fakeMinter{
+		responses: []RegistrationTokenResponse{
+			{Token: "github-runner-token-1", ExpiresAt: now.Add(time.Hour)},
+			{Token: "github-runner-token-2", ExpiresAt: now.Add(2 * time.Hour)},
+		},
+	}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-complete"}
+
+	first := serveRegistrationRequest(t, handler, req)
+	second := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.Contains(t, second.Body.String(), "github-runner-token-2")
+	assert.Equal(t, 2, minter.calls)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
 }
 
 func serveRegistrationRequest(t *testing.T, handler http.Handler, body RegistrationTokenRequest) *httptest.ResponseRecorder {
@@ -228,6 +274,7 @@ type handlerFakeStore struct {
 	tokens       map[int64]store.RunnerBootstrapToken
 	tokensByHash map[string]store.RunnerBootstrapToken
 	idempotency  map[string]store.IdempotencyKey
+	completeErrs []error
 }
 
 func (s *handlerFakeStore) GetRepository(_ context.Context, owner string, name string) (store.Repository, error) {
@@ -273,6 +320,13 @@ func (s *handlerFakeStore) GetIdempotencyKey(_ context.Context, key string) (sto
 }
 
 func (s *handlerFakeStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	if len(s.completeErrs) > 0 {
+		err := s.completeErrs[0]
+		s.completeErrs = s.completeErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	record, ok := s.idempotency[key]
 	if !ok {
 		return store.ErrNotFound
@@ -285,9 +339,24 @@ func (s *handlerFakeStore) CompleteIdempotencyKey(_ context.Context, key string,
 	return nil
 }
 
+func (s *handlerFakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	record, ok := s.idempotency[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	record.CompletedAt = &now
+	s.idempotency[key] = record
+	return nil
+}
+
 type fakeMinter struct {
 	response       RegistrationTokenResponse
+	responses      []RegistrationTokenResponse
 	err            error
+	errors         []error
 	calls          int
 	installationID int64
 	owner          string
@@ -299,6 +368,18 @@ func (m *fakeMinter) CreateRegistrationToken(_ context.Context, installationID i
 	m.installationID = installationID
 	m.owner = owner
 	m.repo = repo
+	if len(m.errors) > 0 {
+		err := m.errors[0]
+		m.errors = m.errors[1:]
+		if err != nil {
+			return RegistrationTokenResponse{}, err
+		}
+	}
+	if len(m.responses) > 0 {
+		response := m.responses[0]
+		m.responses = m.responses[1:]
+		return response, nil
+	}
 	return m.response, m.err
 }
 

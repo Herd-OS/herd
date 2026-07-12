@@ -3,6 +3,9 @@ package workflowevents
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -138,8 +141,8 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := h.store.RecordCommand(r.Context(), store.CommandRecord{
 		RepositoryID: repo.ID,
-		CommentID:    syntheticCommentID(event),
-		CommandKey:   event.Kind + ":" + event.Action,
+		CommentID:    workflowEventCommentID(event, payload, claims),
+		CommandKey:   workflowEventCommandKey(event, payload, claims),
 		CommandName:  event.Kind,
 		Actor:        "github-actions",
 		Status:       "acknowledged",
@@ -219,19 +222,58 @@ func eventMetadata(payload []byte, claims jobs.OIDCClaims) (json.RawMessage, err
 	})
 }
 
-func syntheticCommentID(event Event) int64 {
-	key := event.Kind + ":" + event.Action + ":" + event.EventName + ":" + fmt.Sprint(event.BatchNumber) + ":" + fmt.Sprint(event.IssueNumber) + ":" + fmt.Sprint(event.PRNumber)
-	var out int64
-	for _, b := range []byte(key) {
-		out = out*31 + int64(b)
+func workflowEventCommentID(event Event, payload []byte, claims jobs.OIDCClaims) int64 {
+	sum := sha256.Sum256([]byte(event.Kind + ":" + event.Action + ":" + event.EventName + ":" + workflowEventIdentity(event, payload, claims)))
+	id := int64(binary.BigEndian.Uint64(sum[:8]) & 0x7fffffffffffffff)
+	if id == 0 {
+		return 1
 	}
-	if out < 0 {
-		out = -out
+	return id
+}
+
+func workflowEventCommandKey(event Event, payload []byte, claims jobs.OIDCClaims) string {
+	return event.Kind + ":" + event.Action + ":" + workflowEventIdentity(event, payload, claims)
+}
+
+func workflowEventIdentity(event Event, payload []byte, claims jobs.OIDCClaims) string {
+	if id := workflowEventSourceID(event); id != "" {
+		return event.EventName + ":" + id
 	}
-	if out == 0 {
-		out = 1
+	if strings.TrimSpace(claims.RunID) != "" {
+		return event.EventName + ":run:" + strings.TrimSpace(claims.RunID)
 	}
-	return out
+	sum := sha256.Sum256(payload)
+	return event.EventName + ":payload:" + hex.EncodeToString(sum[:])
+}
+
+func workflowEventSourceID(event Event) string {
+	if id := rawObjectID(event.WorkflowRun); id != "" {
+		return "workflow_run:" + id
+	}
+	if id := rawObjectID(event.CheckRun); id != "" {
+		return "check_run:" + id
+	}
+	return ""
+}
+
+func rawObjectID(raw json.RawMessage) string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return ""
+	}
+	var object struct {
+		ID any `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return ""
+	}
+	switch v := object.ID.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		return fmt.Sprintf("%.0f", v)
+	default:
+		return ""
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

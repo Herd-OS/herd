@@ -35,6 +35,7 @@ type Store interface {
 	AcquireIdempotencyKey(ctx context.Context, key IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 	RecordCommand(ctx context.Context, c CommandRecord) (created bool, err error)
 	SetReviewState(ctx context.Context, s ReviewState) error
 	GetReviewState(ctx context.Context, repoID int64, prNumber int, headSHA string) (ReviewState, error)

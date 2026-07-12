@@ -27,6 +27,7 @@ type Store interface {
 	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 	RecordJobResult(ctx context.Context, r store.JobResult) (created bool, err error)
@@ -284,7 +285,14 @@ func (s Service) withIdempotency(ctx context.Context, key string, mutationType s
 		if err != nil {
 			return "", fmt.Errorf("get idempotency key: %w", err)
 		}
-		return record.ResultRef, nil
+		if record.Status == mutationStatusCompleted && strings.TrimSpace(record.ResultRef) != "" {
+			return record.ResultRef, nil
+		}
+		status := strings.TrimSpace(record.Status)
+		if status == "" {
+			status = "unknown"
+		}
+		return "", fmt.Errorf("idempotency key %q for %s is %s without a completed result; retry after reconciliation", key, mutationType, status)
 	}
 	return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
 }
@@ -302,6 +310,7 @@ func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutati
 	resultRef, err := fn()
 	if err != nil {
 		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailed, nil, err.Error(), s.now())
+		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
 		return "", err
 	}
 	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {

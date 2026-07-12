@@ -312,6 +312,21 @@ func (s *MemoryStore) CompleteIdempotencyKey(_ context.Context, key string, resu
 	return nil
 }
 
+func (s *MemoryStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	record.CompletedAt = &now
+	s.idempotencyKeys[key] = record
+	return nil
+}
+
 func (s *MemoryStore) ListStartedIdempotencyKeys(_ context.Context, scope string, createdBefore time.Time, limit int) ([]IdempotencyKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
