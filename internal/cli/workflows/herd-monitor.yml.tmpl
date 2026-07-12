@@ -1,4 +1,27 @@
-name: HerdOS Monitor
+{{define "submitWorkflowEvent"}}          attempt=1
+          delay=1
+          while true; do
+            OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
+            if curl -fsSL -X POST \
+              -H "Authorization: Bearer $OIDC_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data-binary @{{.}} \
+              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"; then
+              echo "Submitted HerdOS workflow event after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS workflow event after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS workflow event callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done{{end}}name: HerdOS Monitor
 on:
   schedule:
     - cron: '*/15 * * * *'
@@ -23,7 +46,6 @@ jobs:
           REPOSITORY: ${{`{{`}} github.repository {{`}}`}}
           EVENT_NAME: ${{`{{`}} github.event_name {{`}}`}}
         run: |
-          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
           jq -n \
             --arg repository "$REPOSITORY" \
             --arg event_name "$EVENT_NAME" \
@@ -35,8 +57,4 @@ jobs:
               action: "patrol"
             }' \
             > /tmp/herd-monitor-event.json
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer $OIDC_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary @/tmp/herd-monitor-event.json \
-            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
+{{template "submitWorkflowEvent" "/tmp/herd-monitor-event.json"}}

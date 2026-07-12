@@ -298,6 +298,78 @@ func TestCallbackWorkflows_RenderControlPlaneURL(t *testing.T) {
 	}
 }
 
+func TestCallbackWorkflows_WorkflowEventPostsUseBoundedOIDCRetry(t *testing.T) {
+	tests := []struct {
+		name              string
+		workflow          workflowFile
+		configure         func(*config.Config)
+		wantCallbackSteps int
+	}{
+		{
+			name:              "integrator default callbacks",
+			workflow:          workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true},
+			wantCallbackSteps: 5,
+		},
+		{
+			name:     "integrator configured CI callbacks",
+			workflow: workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true},
+			configure: func(cfg *config.Config) {
+				cfg.Integrator.CIWorkflows = []string{"CI"}
+			},
+			wantCallbackSteps: 6,
+		},
+		{
+			name:              "monitor callbacks",
+			workflow:          workflowFile{SrcName: "herd-monitor.yml.tmpl", DestName: "herd-monitor.yml", Template: true},
+			wantCallbackSteps: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			if tt.configure != nil {
+				tt.configure(cfg)
+			}
+			rendered, err := RenderWorkflow(tt.workflow, cfg)
+			require.NoError(t, err)
+
+			var workflow githubActionsWorkflow
+			require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+			steps := workflowEventCallbackSteps(workflow)
+			require.Len(t, steps, tt.wantCallbackSteps)
+
+			for _, step := range steps {
+				t.Run(step.Name, func(t *testing.T) {
+					assert.Equal(t, 1, strings.Count(step.Run, "/api/v1/workflow-events"),
+						"each workflow-event callback step should post exactly once inside its retry loop")
+					assert.Contains(t, step.Run, "attempt=1")
+					assert.Contains(t, step.Run, "delay=1")
+					assert.Contains(t, step.Run, "while true; do")
+					assert.Contains(t, step.Run, "if curl -fsSL -X POST")
+					assert.Contains(t, step.Run, "Failed to submit HerdOS workflow event after ${attempt} attempt(s).")
+					assert.Contains(t, step.Run, "HerdOS workflow event callback failed; retrying in ${delay}s (attempt ${attempt}/4).")
+					assert.Contains(t, step.Run, "delay=$((delay * 2))")
+					assert.Contains(t, step.Run, `if [ "$delay" -gt 30 ]; then`)
+					assert.Contains(t, step.Run, "delay=30")
+					assert.Contains(t, step.Run, `if [ "$attempt" -ge 4 ]; then`)
+
+					loopIndex := strings.Index(step.Run, "while true; do")
+					oidcIndex := strings.Index(step.Run, `OIDC_TOKEN="$(curl -fsSL`)
+					postIndex := strings.Index(step.Run, "if curl -fsSL -X POST")
+					require.NotEqual(t, -1, loopIndex)
+					require.NotEqual(t, -1, oidcIndex)
+					require.NotEqual(t, -1, postIndex)
+					assert.Greater(t, oidcIndex, loopIndex, "callback must fetch a fresh OIDC token inside the retry loop")
+					assert.Less(t, oidcIndex, postIndex, "callback must refresh OIDC before each workflow-event POST")
+					assert.NotContains(t, step.Run[:loopIndex], `OIDC_TOKEN="$(curl -fsSL`,
+						"callback must not fetch OIDC once before entering the retry loop")
+				})
+			}
+		})
+	}
+}
+
 func TestInstallCallbackWorkflowsRenderControlPlaneURL(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -451,6 +523,18 @@ func jobPostsWorkflowEvent(job githubActionsJob) bool {
 		}
 	}
 	return false
+}
+
+func workflowEventCallbackSteps(workflow githubActionsWorkflow) []githubActionsStep {
+	var steps []githubActionsStep
+	for _, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, "/api/v1/workflow-events") {
+				steps = append(steps, step)
+			}
+		}
+	}
+	return steps
 }
 
 func namedStep(t *testing.T, job githubActionsJob, name string) githubActionsStep {

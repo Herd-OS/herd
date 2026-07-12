@@ -1,4 +1,27 @@
-name: HerdOS Integrator
+{{define "submitWorkflowEvent"}}          attempt=1
+          delay=1
+          while true; do
+            OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
+            if curl -fsSL -X POST \
+              -H "Authorization: Bearer $OIDC_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data-binary @{{.}} \
+              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"; then
+              echo "Submitted HerdOS workflow event after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS workflow event after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS workflow event callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done{{end}}name: HerdOS Integrator
 on:
   workflow_run:{{if .Integrator.CIWorkflows}}
     workflows:
@@ -48,7 +71,6 @@ jobs:
           RUN_HEAD_SHA: ${{`{{`}} github.event.workflow_run.head_sha {{`}}`}}
           REPOSITORY: ${{`{{`}} github.repository {{`}}`}}
         run: |
-          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
           jq -n \
             --arg repository "$REPOSITORY" \
             --arg event_name "workflow_run" \
@@ -71,11 +93,7 @@ jobs:
               }
             }' \
             > /tmp/herd-integrator-event.json
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer $OIDC_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary @/tmp/herd-integrator-event.json \
-            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
+{{template "submitWorkflowEvent" "/tmp/herd-integrator-event.json"}}
 
 {{if .Integrator.CIWorkflows}}
   check-ci-workflow-completion:
@@ -102,7 +120,6 @@ jobs:
           REPOSITORY: ${{`{{`}} github.repository {{`}}`}}
         run: |
           BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+' || true)
-          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
           jq -n \
             --arg repository "$REPOSITORY" \
             --arg event_name "workflow_run" \
@@ -127,11 +144,7 @@ jobs:
               }
             }' \
             > /tmp/herd-integrator-event.json
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer $OIDC_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary @/tmp/herd-integrator-event.json \
-            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
+{{template "submitWorkflowEvent" "/tmp/herd-integrator-event.json"}}
 
 {{end}}  check-ci-on-completion:
     if: >
@@ -160,7 +173,6 @@ jobs:
           REPOSITORY: ${{`{{`}} github.repository {{`}}`}}
         run: |
           BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+' || true)
-          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
           jq -n \
             --arg repository "$REPOSITORY" \
             --arg event_name "check_run" \
@@ -185,11 +197,7 @@ jobs:
               }
             }' \
             > /tmp/herd-integrator-event.json
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer $OIDC_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary @/tmp/herd-integrator-event.json \
-            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
+{{template "submitWorkflowEvent" "/tmp/herd-integrator-event.json"}}
 
   advance-on-close:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'issues'
@@ -214,7 +222,6 @@ jobs:
           ISSUE_BODY="$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH")"
           BATCH=$(echo "$ISSUE_BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1 || true)
           if [ -n "$BATCH" ]; then
-            OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
             jq -n \
               --arg repository "$REPOSITORY" \
               --arg event_name "issues" \
@@ -231,11 +238,7 @@ jobs:
                 batch_number: $batch_number
               }' \
               > /tmp/herd-integrator-event.json
-            curl -fsSL -X POST \
-              -H "Authorization: Bearer $OIDC_TOKEN" \
-              -H "Content-Type: application/json" \
-              --data-binary @/tmp/herd-integrator-event.json \
-              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
+{{template "submitWorkflowEvent" "/tmp/herd-integrator-event.json"}}
           else
             echo "Not a herd issue — skipping."
           fi
@@ -265,7 +268,6 @@ jobs:
           PR_HEAD_SHA: ${{`{{`}} github.event.pull_request.head.sha {{`}}`}}
           REPOSITORY: ${{`{{`}} github.repository {{`}}`}}
         run: |
-          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
           jq -n \
             --arg repository "$REPOSITORY" \
             --arg event_name "pull_request_review" \
@@ -284,11 +286,7 @@ jobs:
               head_sha: $head_sha
             }' \
             > /tmp/herd-integrator-event.json
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer $OIDC_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary @/tmp/herd-integrator-event.json \
-            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
+{{template "submitWorkflowEvent" "/tmp/herd-integrator-event.json"}}
 
   cleanup:
     if: >
@@ -312,7 +310,6 @@ jobs:
           PR_MERGED: ${{`{{`}} github.event.pull_request.merged {{`}}`}}
           REPOSITORY: ${{`{{`}} github.repository {{`}}`}}
         run: |
-          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
           jq -n \
             --arg repository "$REPOSITORY" \
             --arg event_name "pull_request" \
@@ -329,8 +326,4 @@ jobs:
               merged: $merged
             }' \
             > /tmp/herd-integrator-event.json
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer $OIDC_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary @/tmp/herd-integrator-event.json \
-            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
+{{template "submitWorkflowEvent" "/tmp/herd-integrator-event.json"}}
