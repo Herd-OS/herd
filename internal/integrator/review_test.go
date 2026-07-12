@@ -719,6 +719,76 @@ func TestReview_DiscardsReviewResultWhenHeadAdvances(t *testing.T) {
 	assertReviewLockUnlocked(t, repoSvc)
 }
 
+func TestReview_DiscardsFallbackPreparedDiffReviewResultWhenHeadAdvances(t *testing.T) {
+	issueSvc := newMockIssueService()
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return issueSvc.Create(context.Background(), title, body, labels, milestone)
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			diffErr: platform.ErrPullRequestDiffTooLarge,
+			listFilesResult: []*platform.PullRequestFile{
+				{
+					Path:      "src/fallback.go",
+					Status:    "modified",
+					Additions: 1,
+					Deletions: 1,
+					Changes:   2,
+					Patch:     "@@ -1 +1 @@\n-old\n+fallback\n",
+				},
+			},
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-old"},
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		onReview: func() {
+			repoSvc.branchSHAs["herd/batch/1-batch"] = "sha-new"
+		},
+	}
+	mock := newReviewLockTestPlatform(mockCreate)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = repoSvc
+
+	result, err := Review(context.Background(), mock, ag, nil, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.False(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.True(t, prSvc.getDiffCalled)
+	assert.True(t, prSvc.listFilesCalled)
+	assert.Contains(t, ag.lastDiff, "Source: github-files-api")
+	assert.Contains(t, ag.lastDiff, "src/fallback.go")
+	assert.Empty(t, prSvc.reviews)
+	assert.Equal(t, 0, createdIssues)
+	assert.Empty(t, wf.dispatched)
+	assert.False(t, prSvc.merged)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "sha-old")
+	assert.Contains(t, prSvc.comments[0], "sha-new")
+	assert.Contains(t, strings.ToLower(prSvc.comments[0]), "discarded")
+	assert.Contains(t, strings.ToLower(prSvc.comments[0]), "changed")
+	assertReviewLockUnlocked(t, repoSvc)
+}
+
 func TestReview_DiscardsFindingsWhenHeadAdvances(t *testing.T) {
 	issueSvc := newMockIssueService()
 	createdIssues := 0

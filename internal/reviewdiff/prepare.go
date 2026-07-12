@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/platform"
@@ -215,8 +216,11 @@ func nextDiffPathToken(s string) (string, string, bool) {
 		return "", "", false
 	}
 	if s[0] != '"' {
-		token, rest, _ := strings.Cut(s, " ")
-		return token, rest, true
+		i := strings.IndexFunc(s, unicode.IsSpace)
+		if i < 0 {
+			return s, "", true
+		}
+		return s[:i], s[i:], true
 	}
 
 	escaped := false
@@ -284,9 +288,9 @@ func applyRawDiffLine(file *ChangedFile, line string) {
 }
 
 func diffHeaderPath(line, prefix string) string {
-	path := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-	if i := strings.IndexByte(path, '\t'); i >= 0 {
-		path = path[:i]
+	path, _, ok := nextDiffPathToken(strings.TrimPrefix(line, prefix))
+	if !ok {
+		return ""
 	}
 	return trimDiffPathPrefix(path)
 }

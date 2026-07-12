@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -180,6 +181,66 @@ func TestPrepareForReviewParsesRawDiffIntoFilesBeforeRendering(t *testing.T) {
 	assert.Contains(t, summary, "Truncated files: 1")
 	assert.Contains(t, summary, "Included files: 3")
 	assert.Contains(t, summary, "second.go: per-file diff byte limit reached")
+}
+
+func TestPrepareForReviewParsesQuotedRawDiffPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		oldPath string
+		newPath string
+		status  ChangeStatus
+	}{
+		{
+			name:    "spaces tabs quotes and backslashes",
+			oldPath: "dir/old path\twith \"quote\" and \\ slash.go",
+			newPath: "dir/new path\twith \"quote\" and \\ slash.go",
+			status:  ChangeModified,
+		},
+		{
+			name:    "new file quoted header",
+			oldPath: "",
+			newPath: "added/new file\twith \"quote\" and \\ slash.go",
+			status:  ChangeAdded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldHeaderPath := "/dev/null"
+			oldDiffGitPath := "/dev/null"
+			if tt.oldPath != "" {
+				oldHeaderPath = strconv.Quote("a/" + tt.oldPath)
+				oldDiffGitPath = oldHeaderPath
+			}
+			raw := strings.Join([]string{
+				"diff --git " + oldDiffGitPath + " " + strconv.Quote("b/"+tt.newPath) + "\n",
+				"new file mode 100644\n",
+				"index 0000000..1111111 100644\n",
+				"--- " + oldHeaderPath + "\t2026-07-11 00:00:00 +0000\n",
+				"+++ " + strconv.Quote("b/"+tt.newPath) + "\t2026-07-11 00:00:00 +0000\n",
+				"@@ -0,0 +1 @@\n",
+				"+new\n",
+			}, "")
+			if tt.oldPath != "" {
+				raw = strings.Replace(raw, "new file mode 100644\n", "", 1)
+				raw = strings.Replace(raw, "0000000..1111111", "1111111..2222222", 1)
+			}
+
+			prepared, err := PrepareForReview(context.Background(), PrepareRequest{
+				PRNumber:     7,
+				PullRequests: &mockPreparePRService{diff: raw},
+			})
+
+			require.NoError(t, err)
+			require.Len(t, prepared.DiffSet.Files, 1)
+			file := prepared.DiffSet.Files[0]
+			assert.Equal(t, tt.newPath, file.Path)
+			assert.Equal(t, tt.oldPath, file.OldPath)
+			assert.Equal(t, tt.status, file.Status)
+			assert.Contains(t, prepared.Rendered.Text, "## "+tt.newPath)
+			assert.NotContains(t, prepared.Rendered.Text, "pull-request.diff")
+		})
+	}
 }
 
 func TestFormatCoverageSummaryReportsLimitedFiles(t *testing.T) {
