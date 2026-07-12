@@ -131,9 +131,8 @@ func ChunkForReview(diff DiffSet, opts ChunkOptions) ChunkPlan {
 			current.Index = len(chunks) + 1
 			chunks = append(chunks, current)
 		} else {
-			pendingChunkIndex := len(chunks) + 1
 			for i := range planned {
-				if planned[i].chunkIndex == pendingChunkIndex && planned[i].reviewable && !planned[i].notReviewed {
+				if planned[i].chunkIndex == requiredChunks && planned[i].reviewable && !planned[i].notReviewed {
 					planned[i].reviewed = false
 					planned[i].notReviewed = true
 					planned[i].reviewable = false
@@ -190,22 +189,11 @@ func ChunkForReview(diff DiffSet, opts ChunkOptions) ChunkPlan {
 		if len(current.IncludedFiles) > 0 && (len(current.IncludedFiles) >= opts.MaxFilesPerChunk || current.UsedDiffBytes+usedBytes > opts.MaxChunkBytes) {
 			flush()
 		}
-		if len(chunks) >= opts.MaxChunks {
-			requiredChunks++
-			planned[idx].reviewable = false
-			planned[idx].notReviewed = true
-			planned[idx].truncated = false
-			planned[idx].reason = "max chunks reached"
-			planned[idx].file.Omitted = true
-			planned[idx].file.Truncated = false
-			planned[idx].file.OmitReason = planned[idx].reason
-			continue
-		}
 
 		current.IncludedFiles = append(current.IncludedFiles, planned[idx].file)
 		current.UsedDiffBytes += usedBytes
 		planned[idx].reviewed = true
-		planned[idx].chunkIndex = len(chunks) + 1
+		planned[idx].chunkIndex = requiredChunks + 1
 		planned[idx].usedDiffBytes = usedBytes
 		if planned[idx].truncated {
 			current.TruncatedFiles = append(current.TruncatedFiles, planned[idx].file)
@@ -239,6 +227,8 @@ func ChunkForReview(diff DiffSet, opts ChunkOptions) ChunkPlan {
 
 func chunkReviewability(file ChangedFile) (bool, string) {
 	switch {
+	case file.Omitted:
+		return false, firstReason(file.OmitReason, "patch unavailable from source")
 	case file.Binary:
 		return false, "binary file"
 	case file.Generated:
@@ -247,8 +237,6 @@ func chunkReviewability(file ChangedFile) (bool, string) {
 		return false, "large lockfile diff"
 	case isModeOnly(file):
 		return false, "mode-only change"
-	case file.Omitted:
-		return false, firstReason(file.OmitReason, "patch unavailable from source")
 	default:
 		return true, ""
 	}

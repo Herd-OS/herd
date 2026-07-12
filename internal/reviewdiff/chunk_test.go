@@ -79,6 +79,28 @@ func TestChunkForReviewMultipleChunksIncludesEveryReviewableFileOnce(t *testing.
 	assert.Equal(t, "src/119.go", plan.Chunks[3].IncludedFiles[len(plan.Chunks[3].IncludedFiles)-1].Path)
 }
 
+func TestChunkForReviewRequiredChunksGroupsFilesAfterMaxChunks(t *testing.T) {
+	files := make([]ChangedFile, 0, 8)
+	for i := range 8 {
+		files = append(files, sourceFile(fmt.Sprintf("src/%03d.go", i), strings.Repeat("x", 8)))
+	}
+
+	plan := ChunkForReview(DiffSet{Source: "github", Files: files}, ChunkOptions{
+		MaxChunkBytes:            1000,
+		MaxFileDiffBytes:         100,
+		MaxFilesPerChunk:         3,
+		MaxChunks:                1,
+		MaxOmittedSummaryEntries: 10,
+	})
+
+	require.Len(t, plan.Chunks, 1)
+	assert.Equal(t, 3, plan.Coverage.RequiredChunks)
+	assert.True(t, plan.Coverage.ExceededMaxChunks)
+	assert.Equal(t, 3, plan.Coverage.FilesReviewed)
+	assert.Equal(t, 5, plan.Coverage.FilesNotReviewed)
+	assert.Equal(t, map[string]int{"max chunks reached": 5}, plan.Coverage.OmittedByReason)
+}
+
 func TestChunkForReviewSummarizesNonReviewableFilesWithPreciseReasons(t *testing.T) {
 	largeLockPatch := strings.Repeat("x", LargeLockfileDiffBytes)
 	diff := DiffSet{
@@ -122,6 +144,53 @@ func TestChunkForReviewSummarizesNonReviewableFilesWithPreciseReasons(t *testing
 	assert.Contains(t, summary, "package-lock.json")
 	assert.Contains(t, summary, "script.sh")
 	assert.Contains(t, summary, "src/unavailable.go")
+}
+
+func TestChunkForReviewOmittedGeneratedPathPreservesSourceUnavailableReason(t *testing.T) {
+	tests := []struct {
+		name         string
+		file         ChangedFile
+		wantComplete bool
+	}{
+		{
+			name: "default source unavailable reason",
+			file: ChangedFile{
+				Path:    "dist/app.js",
+				Status:  ChangeModified,
+				Omitted: true,
+			},
+			wantComplete: true,
+		},
+		{
+			name: "custom blocking source unavailable reason",
+			file: ChangedFile{
+				Path:       "dist/material.js",
+				Status:     ChangeModified,
+				Omitted:    true,
+				OmitReason: "source unavailable: material file",
+			},
+			wantComplete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := ChunkForReview(DiffSet{Source: "github", Files: []ChangedFile{tt.file}}, ChunkOptions{
+				MaxChunkBytes:            100,
+				MaxFileDiffBytes:         100,
+				MaxFilesPerChunk:         10,
+				MaxChunks:                8,
+				MaxOmittedSummaryEntries: 10,
+			})
+
+			assert.Empty(t, plan.Chunks)
+			assert.Equal(t, tt.wantComplete, plan.Coverage.Complete)
+			require.Len(t, plan.Coverage.NotReviewedFiles, 1)
+			assert.Equal(t, firstReason(tt.file.OmitReason, "patch unavailable from source"), plan.Coverage.NotReviewedFiles[0].Reason)
+			assert.NotEqual(t, "generated file", plan.Coverage.NotReviewedFiles[0].Reason)
+			assert.Equal(t, 1, plan.Coverage.OmittedByReason[plan.Coverage.NotReviewedFiles[0].Reason])
+		})
+	}
 }
 
 func TestChunkForReviewOversizedSingleFile(t *testing.T) {
