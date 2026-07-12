@@ -340,7 +340,7 @@ func IsAllowableNotReviewedFile(file FileCoverage) bool {
 	case isModeOnly(file.File) && isSummarizedNotReviewedReason(file.Reason):
 		return true
 	default:
-		return isSummarizedNotReviewedReason(file.Reason)
+		return false
 	}
 }
 

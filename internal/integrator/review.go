@@ -573,6 +573,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// Post structured findings comment
 	findingsComment := buildReviewCycleComment(nextCycle, cfg.Integrator.ReviewMaxFixCycles, fixIssueNums, highFindings, mediumFindings, lowFindings, criteriaFindings)
+	if coverageBlocked {
+		findingsComment = appendCoverageApprovalBlockedSection(findingsComment, plan)
+	}
 	findingsComment = appendDiffCoverageIfLimited(findingsComment, preparedDiff)
 	findingsComment, err = markReviewResult(findingsComment, reviewResultStatusChangesRequested, nextCycle, len(actionableFindings))
 	if err != nil {
@@ -723,6 +726,14 @@ func coverageBlocksApproval(plan reviewdiff.ChunkPlan) bool {
 }
 
 func buildCoverageApprovalBlockedComment(prepared reviewdiff.PreparedDiff, plan reviewdiff.ChunkPlan) string {
+	return appendDiffCoverageIfLimited(buildCoverageApprovalBlockedBody(plan), prepared)
+}
+
+func appendCoverageApprovalBlockedSection(comment string, plan reviewdiff.ChunkPlan) string {
+	return strings.TrimRight(comment, "\n") + "\n\n" + buildCoverageApprovalBlockedBody(plan)
+}
+
+func buildCoverageApprovalBlockedBody(plan reviewdiff.ChunkPlan) string {
 	material := materialNotReviewed(plan)
 	var b strings.Builder
 	b.WriteString("⚠️ **HerdOS Integrator**\n\n")
@@ -762,7 +773,7 @@ func buildCoverageApprovalBlockedComment(prepared reviewdiff.PreparedDiff, plan 
 			fmt.Fprintf(&b, "- ... %d additional summarized files not shown\n", len(plan.Coverage.NotReviewedFiles)-limit)
 		}
 	}
-	return appendDiffCoverageIfLimited(b.String(), prepared)
+	return b.String()
 }
 
 func trustedReviewResultMarkerHumanLogins(ctx context.Context, p platform.Platform) []string {

@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -203,10 +204,46 @@ func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) 
 		wantCount  int
 		wantBlocks bool
 	}{
-		{name: "generated", reason: "generated file", wantCount: 0},
-		{name: "binary", reason: "binary file", wantCount: 0},
-		{name: "large lockfile", reason: "large lockfile diff", wantCount: 0},
-		{name: "mode only", reason: "mode-only change", wantCount: 0},
+		{
+			name: "generated",
+			file: reviewdiff.FileCoverage{
+				Path:        "dist/app.js",
+				Reason:      "generated file",
+				NotReviewed: true,
+				File:        reviewdiff.ChangedFile{Path: "dist/app.js", Generated: true, Omitted: true, OmitReason: "generated file"},
+			},
+			wantCount: 0,
+		},
+		{
+			name: "binary",
+			file: reviewdiff.FileCoverage{
+				Path:        "image.png",
+				Reason:      "binary file",
+				NotReviewed: true,
+				File:        reviewdiff.ChangedFile{Path: "image.png", Binary: true, Omitted: true, OmitReason: "binary file"},
+			},
+			wantCount: 0,
+		},
+		{
+			name: "large lockfile",
+			file: reviewdiff.FileCoverage{
+				Path:        "package-lock.json",
+				Reason:      "large lockfile diff",
+				NotReviewed: true,
+				File:        reviewdiff.ChangedFile{Path: "package-lock.json", Patch: strings.Repeat("x", reviewdiff.LargeLockfileDiffBytes), Omitted: true, OmitReason: "large lockfile diff"},
+			},
+			wantCount: 0,
+		},
+		{
+			name: "mode only",
+			file: reviewdiff.FileCoverage{
+				Path:        "script.sh",
+				Reason:      "mode-only change",
+				NotReviewed: true,
+				File:        reviewdiff.ChangedFile{Path: "script.sh", PreviousMode: "100644", CurrentMode: "100755", Omitted: true, OmitReason: "mode-only change"},
+			},
+			wantCount: 0,
+		},
 		{
 			name:   "generated source unavailable",
 			reason: "patch unavailable from source",
@@ -270,7 +307,12 @@ func TestRunChunkedReviewWithRetryApprovesMixedReviewWhenOnlyAllowableFilesAreOm
 			FilesReviewed: 1,
 			Complete:      true,
 			NotReviewedFiles: []reviewdiff.FileCoverage{
-				{Path: "dist/app.js", Reason: "generated file", NotReviewed: true},
+				{
+					Path:        "dist/app.js",
+					Reason:      "generated file",
+					NotReviewed: true,
+					File:        reviewdiff.ChangedFile{Path: "dist/app.js", Generated: true, Omitted: true, OmitReason: "generated file"},
+				},
 			},
 		},
 	}
@@ -293,7 +335,12 @@ func TestRunChunkedReviewWithRetryDoesNotApproveZeroChunksWithOnlyAllowableOmiss
 		ChunksPlanned: 0,
 		Complete:      true,
 		NotReviewedFiles: []reviewdiff.FileCoverage{
-			{Path: "dist/app.js", Reason: "generated file", NotReviewed: true},
+			{
+				Path:        "dist/app.js",
+				Reason:      "generated file",
+				NotReviewed: true,
+				File:        reviewdiff.ChangedFile{Path: "dist/app.js", Generated: true, Omitted: true, OmitReason: "generated file"},
+			},
 		},
 	}}
 

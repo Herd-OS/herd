@@ -979,6 +979,77 @@ func TestReview_PrefersLocalGitDiffOverRawGitHubDiff(t *testing.T) {
 	assert.Contains(t, ag.lastDiff, "+local review")
 }
 
+func TestReview_CoverageBlockedWithActionableFindingsPostsCoverageAndCreatesFixIssue(t *testing.T) {
+	dir, g := initTestRepo(t)
+	require.NoError(t, g.Checkout("herd/batch/1-batch"))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src\n\nfunc A() {}\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "b.go"), []byte("package src\n\nfunc B() {}\n"), 0644))
+	runReviewTestGit(t, dir, "add", "src/a.go", "src/b.go")
+	runReviewTestGit(t, dir, "commit", "-m", "add review files")
+	headSHA := reviewTestGitOutput(t, dir, "rev-parse", "HEAD")
+
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.createResult = &platform.Issue{Number: 100, Title: "Review fixes (cycle 1)"}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": headSHA},
+	}
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = repoSvc
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Summary:  "found issue",
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Critical bug in reviewed chunk"},
+			},
+		},
+	}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{
+			Review:             true,
+			ReviewMaxFixCycles: 3,
+			ReviewDiff: config.ReviewDiff{
+				MaxFilesPerChunk: 1,
+				MaxChunks:        1,
+			},
+		},
+		Workers: config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Equal(t, "Review fixes (cycle 1)", issueSvc.createdTitle)
+	assert.Contains(t, issueSvc.createdBody, "Critical bug in reviewed chunk")
+	assert.Len(t, wf.dispatched, 1)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "Critical bug in reviewed chunk")
+	assert.Contains(t, prSvc.comments[0], "not all material source files were reviewed")
+	assert.Contains(t, prSvc.comments[0], "src/b.go: max chunks reached")
+	assert.Contains(t, prSvc.comments[0], "required 2 review chunk(s)")
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+}
+
 func TestReview_AppendsCoverageWhenPreparedDiffIsLimited(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.listResult = []*platform.Issue{
