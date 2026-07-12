@@ -193,7 +193,7 @@ Head: {{.PRHeadBranch}}
 CI status (head ref): {{.CIStatus}}
 
 ## Diff
-` + "```diff\n{{.Diff}}\n```" + `
+{{.Diff}}
 {{if .Comments}}
 ## PR Conversation Comments
 {{range .Comments}}

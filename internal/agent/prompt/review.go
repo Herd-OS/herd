@@ -59,9 +59,7 @@ The following comments were posted by fix workers in previous cycles. The worker
 {{end}}
 ## Diff
 
-` + "```diff" + `
 {{.Diff}}
-` + "```" + `
 
 Respond with ONLY a JSON object (no markdown fencing, no extra text):
 {"approved": true, "findings": [], "summary": "brief summary"}
