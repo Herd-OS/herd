@@ -115,6 +115,22 @@ func TestSetHerdReviewStatusRetryAfterCompleteIdempotencyFailureRepairsFromMutat
 	assert.Equal(t, "success", st.states[0].Status)
 }
 
+func TestSetHerdReviewStatusReturnsMutationCompletionFailure(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{mutationCompleteErrs: []error{errors.New("database down")}}
+	gh := &fakeStatusGitHub{}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	err := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "complete Herd Review status mutation attempt")
+	assert.Len(t, gh.statuses, 1)
+	assert.Empty(t, st.states)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, "started", st.mutationAttempts[0].Status)
+}
+
 func TestSetHerdReviewStatusRetryAfterGitHubFailureReusesFailedMutationAttempt(t *testing.T) {
 	ctx := context.Background()
 	st := &fakeStatusStore{}
@@ -135,11 +151,12 @@ func TestSetHerdReviewStatusRetryAfterGitHubFailureReusesFailedMutationAttempt(t
 }
 
 type fakeStatusStore struct {
-	states           []store.ReviewState
-	errs             []error
-	completeErrs     []error
-	idem             map[string]store.IdempotencyKey
-	mutationAttempts []store.GitHubMutationAttempt
+	states               []store.ReviewState
+	errs                 []error
+	completeErrs         []error
+	mutationCompleteErrs []error
+	idem                 map[string]store.IdempotencyKey
+	mutationAttempts     []store.GitHubMutationAttempt
 }
 
 func (s *fakeStatusStore) SetReviewState(_ context.Context, state store.ReviewState) error {
@@ -204,6 +221,13 @@ func (s *fakeStatusStore) RecordGitHubMutationAttempt(_ context.Context, attempt
 }
 
 func (s *fakeStatusStore) CompleteGitHubMutationAttempt(_ context.Context, key string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
+	if len(s.mutationCompleteErrs) > 0 {
+		err := s.mutationCompleteErrs[0]
+		s.mutationCompleteErrs = s.mutationCompleteErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	for i := range s.mutationAttempts {
 		if s.mutationAttempts[i].IdempotencyKey == key {
 			s.mutationAttempts[i].Status = status

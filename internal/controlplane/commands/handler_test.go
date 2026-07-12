@@ -95,6 +95,30 @@ func TestEnqueueIssueCommentCommand(t *testing.T) {
 	}
 }
 
+func TestEnqueueIssueCommentCommandIgnoresPRCommandsFromIssueComments(t *testing.T) {
+	tests := []struct {
+		body string
+		kind CommandKind
+	}{
+		{body: "@herd-os review", kind: CommandReview},
+		{body: "@herd-os fix", kind: CommandFix},
+		{body: "@herd-os fix-ci", kind: CommandFixCI},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.kind), func(t *testing.T) {
+			st := newFakeStore()
+			event := validComment("OWNER", tt.body)
+			event.PullRequestURL = ""
+
+			err := EnqueueIssueCommentCommand(context.Background(), st, "herd-os", event)
+
+			require.NoError(t, err)
+			assert.Empty(t, st.commandRecords)
+		})
+	}
+}
+
 func TestHandlerIgnoresBotAuthoredComments(t *testing.T) {
 	tests := []IssueComment{
 		func() IssueComment {

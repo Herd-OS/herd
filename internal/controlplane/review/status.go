@@ -109,11 +109,13 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 			return err
 		}
 		if err := s.GitHub.CreateCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status); err != nil {
-			s.completeStatusMutation(ctx, statusKey, "failed", nil, err, now)
+			_ = s.completeStatusMutation(ctx, statusKey, "failed", nil, err, now)
 			_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
 			return err
 		}
-		s.completeStatusMutation(ctx, statusKey, "completed", json.RawMessage(`{"status":"created"}`), nil, now)
+		if err := s.completeStatusMutation(ctx, statusKey, "completed", json.RawMessage(`{"status":"created"}`), nil, now); err != nil {
+			return err
+		}
 		if err := idem.CompleteIdempotencyKey(ctx, statusKey, "status:created"); err != nil {
 			return fmt.Errorf("complete Herd Review status idempotency: %w", err)
 		}
@@ -180,16 +182,19 @@ func (s StatusService) ensureStatusMutationAttempt(ctx context.Context, key stri
 	return s.recordStatusMutationAttempt(ctx, key, repo, prNumber, headSHA, status, now)
 }
 
-func (s StatusService) completeStatusMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error, now time.Time) {
+func (s StatusService) completeStatusMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error, now time.Time) error {
 	mutations, ok := s.Store.(StatusMutationStore)
 	if !ok {
-		return
+		return nil
 	}
 	errorMessage := ""
 	if resultErr != nil {
 		errorMessage = resultErr.Error()
 	}
-	_ = mutations.CompleteGitHubMutationAttempt(ctx, key, status, response, errorMessage, now)
+	if err := mutations.CompleteGitHubMutationAttempt(ctx, key, status, response, errorMessage, now); err != nil {
+		return fmt.Errorf("complete Herd Review status mutation attempt: %w", err)
+	}
+	return nil
 }
 
 func (s StatusService) repairCompletedStatusMutation(ctx context.Context, idem StatusIdempotencyStore, key string, repo Repository, prNumber int, headSHA string, state ReviewStatusState, description, targetURL string, now time.Time) (bool, error) {

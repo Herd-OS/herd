@@ -28,6 +28,13 @@ const (
 	defaultGitHubAppLogin = "herd-os"
 )
 
+var supportedEnvironments = map[string]struct{}{
+	"production":  {},
+	"staging":     {},
+	"development": {},
+	"test":        {},
+}
+
 type Config struct {
 	GitHubAppID         int64
 	GitHubAppPrivateKey string
@@ -85,8 +92,12 @@ func (cfg Config) Validate() error {
 			validationErrs = append(validationErrs, fmt.Errorf("%s must be a valid duration", envReconcilerInterval))
 		}
 	}
+	env := strings.TrimSpace(cfg.Env)
+	if _, ok := supportedEnvironments[env]; !ok {
+		validationErrs = append(validationErrs, fmt.Errorf("%s must be one of production, staging, development, or test", envEnv))
+	}
 
-	if cfg.Env != "production" {
+	if env != "production" && env != "staging" {
 		return errors.Join(validationErrs...)
 	}
 

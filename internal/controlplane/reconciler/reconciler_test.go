@@ -43,10 +43,11 @@ func TestRunOnceRepairsRecoverableWork(t *testing.T) {
 
 	require.NoError(t, err)
 	counts := report.CountsByClassification()
-	assert.Equal(t, 2, counts[ClassificationFailedSurfaced])
+	assert.Equal(t, 1, counts[ClassificationFailedSurfaced])
 	assert.Equal(t, 3, counts[ClassificationSafeToRetry])
 	assert.Equal(t, 1, counts[ClassificationComplete])
 	assert.Equal(t, 1, counts[ClassificationStaleAbandoned])
+	assert.Equal(t, 1, counts[ClassificationStillNeeded])
 
 	failedJob, err := st.GetJob(ctx, "job-timeout")
 	require.NoError(t, err)
@@ -72,10 +73,11 @@ func TestRunOnceRepairsRecoverableWork(t *testing.T) {
 
 	attempts, err := st.ListStartedGitHubMutationAttempts(ctx, now, 10)
 	require.NoError(t, err)
-	assert.Empty(t, attempts)
+	require.Len(t, attempts, 1)
+	assert.Equal(t, "patch_apply:stuck", attempts[0].IdempotencyKey)
 	mutationKey, err := st.GetIdempotencyKey(ctx, "patch_apply:stuck")
 	require.NoError(t, err)
-	assert.Equal(t, "failed", mutationKey.Status)
+	assert.Equal(t, "started", mutationKey.Status)
 }
 
 func TestRunOnceDoesNotRepeatRecoveredSideEffects(t *testing.T) {
@@ -181,7 +183,49 @@ func TestRunOnceDoesNotFailCompletedIdempotencyForStuckMutationAttempt(t *testin
 	assert.Equal(t, "status:created", idem.ResultRef)
 	attempt, err := st.GetGitHubMutationAttempt(ctx, key)
 	require.NoError(t, err)
-	assert.Equal(t, "failed", attempt.Status)
+	assert.Equal(t, "completed", attempt.Status)
+	assert.Contains(t, string(attempt.Response), "status:created")
+}
+
+func TestRunOnceDoesNotFailUnknownStartedMutationAttempts(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name         string
+		mutationType string
+	}{
+		{name: "review status", mutationType: "review_status"},
+		{name: "review submission", mutationType: "review_submission"},
+		{name: "workflow dispatch", mutationType: "workflow_dispatch"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := store.NewMemoryStore()
+			_ = seedRepo(t, st, ctx)
+			key := tt.mutationType + ":started"
+			_, err := st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{Key: key, Scope: tt.mutationType, Status: "started", CreatedAt: now.Add(-time.Hour)})
+			require.NoError(t, err)
+			require.NoError(t, st.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+				IdempotencyKey: key,
+				MutationType:   tt.mutationType,
+				Status:         "started",
+				CreatedAt:      now.Add(-time.Hour),
+			}))
+			r := &Reconciler{Store: st, Now: func() time.Time { return now }, Config: Config{CallbackTimeout: time.Minute}}
+
+			report, err := r.RunOnce(ctx)
+
+			require.NoError(t, err)
+			assert.Equal(t, 1, report.CountsByClassification()[ClassificationStillNeeded])
+			idem, err := st.GetIdempotencyKey(ctx, key)
+			require.NoError(t, err)
+			assert.Equal(t, "started", idem.Status)
+			attempt, err := st.GetGitHubMutationAttempt(ctx, key)
+			require.NoError(t, err)
+			assert.Equal(t, "started", attempt.Status)
+		})
+	}
 }
 
 func seedReconcilerStore(t *testing.T, now time.Time) *store.MemoryStore {

@@ -293,6 +293,9 @@ func (s Service) withIdempotency(ctx context.Context, key string, mutationType s
 			}
 			return record.ResultRef, nil
 		}
+		if resultRef, repaired, err := s.repairIdempotencyFromCompletedMutation(ctx, key); repaired || err != nil {
+			return resultRef, err
+		}
 		status := strings.TrimSpace(record.Status)
 		if status == "" {
 			status = "unknown"
@@ -344,6 +347,37 @@ func (s Service) repairCompletedMutationAttempt(ctx context.Context, key string,
 		return fmt.Errorf("repair mutation attempt: %w", err)
 	}
 	return nil
+}
+
+func (s Service) repairIdempotencyFromCompletedMutation(ctx context.Context, key string) (string, bool, error) {
+	attempt, err := s.Store.GetGitHubMutationAttempt(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get mutation attempt: %w", err)
+	}
+	if attempt.Status != mutationStatusCompleted {
+		return "", false, nil
+	}
+	resultRef := mutationResultRef(attempt.Response)
+	if strings.TrimSpace(resultRef) == "" {
+		return "", false, fmt.Errorf("completed mutation attempt %q is missing result_ref; retry after reconciliation", key)
+	}
+	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+		return "", true, fmt.Errorf("repair idempotency key: %w", err)
+	}
+	return resultRef, true, nil
+}
+
+func mutationResultRef(response json.RawMessage) string {
+	var body struct {
+		ResultRef string `json:"result_ref"`
+	}
+	if len(response) == 0 || json.Unmarshal(response, &body) != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.ResultRef)
 }
 
 func BuildTiers(allIssues []*platform.Issue) ([][]int, error) {

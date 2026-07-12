@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -165,6 +166,40 @@ func TestOpenBatchPRCompletedIdempotencyRepairsStartedMutationAttempt(t *testing
 	assert.Nil(t, fake.prs.created)
 	assert.Equal(t, "completed", st.mutations[key].Status)
 	assert.Contains(t, string(st.mutations[key].Response), "pr:99")
+}
+
+func TestOpenBatchPRRetryRepairsIdempotencyFromCompletedMutationAttempt(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.prs.items[1] = &platform.PullRequest{Number: 1}
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("batch-pr", "repo", svc.Repo.ID, "batch", 4)
+	st.completeErrs = map[string][]error{key: {errors.New("database down"), nil}}
+
+	first, firstErr := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+	second, secondErr := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+
+	require.Error(t, firstErr)
+	assert.Nil(t, first)
+	require.NoError(t, secondErr)
+	require.NotNil(t, second)
+	assert.Equal(t, 1, second.Number)
+	assert.Equal(t, "completed", st.keys[key].Status)
+	assert.Equal(t, "pr:1", st.keys[key].ResultRef)
+	assert.Equal(t, 1, len(fake.prs.createCalls))
 }
 
 func TestEnsureTaskIssueStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
@@ -453,11 +488,12 @@ func (s *fakeIssueService) ListComments(context.Context, int) ([]*platform.Comme
 func (s *fakeIssueService) CreateCommentReaction(context.Context, int64, string) error { return nil }
 
 type fakePRService struct {
-	items   map[int]*platform.PullRequest
-	created *platform.PullRequest
-	updated int
-	merged  int
-	next    int
+	items       map[int]*platform.PullRequest
+	created     *platform.PullRequest
+	createCalls []*platform.PullRequest
+	updated     int
+	merged      int
+	next        int
 }
 
 func (s *fakePRService) Create(_ context.Context, title, body, head, base string) (*platform.PullRequest, error) {
@@ -465,6 +501,7 @@ func (s *fakePRService) Create(_ context.Context, title, body, head, base string
 	pr := &platform.PullRequest{Number: s.next, Title: title, Body: body, Head: head, Base: base, State: "open"}
 	s.items[pr.Number] = pr
 	s.created = pr
+	s.createCalls = append(s.createCalls, pr)
 	return pr, nil
 }
 

@@ -231,21 +231,21 @@ func (r *Reconciler) runMutationAttempts(ctx context.Context, cfg Config, now ti
 		return
 	}
 	for _, attempt := range attempts {
-		d := r.add(report, "mutation_attempt", attempt.IdempotencyKey, ClassificationFailedSurfaced, "mark_failed", "mutation/callback side effect remained started past timeout")
-		if err := r.Store.CompleteGitHubMutationAttempt(ctx, attempt.IdempotencyKey, "failed", diagnosticMetadata(d), d.Message, now); err != nil {
-			*errs = append(*errs, fmt.Errorf("surface stuck mutation attempt %s: %w", attempt.IdempotencyKey, err))
-		}
 		idem, err := r.Store.GetIdempotencyKey(ctx, attempt.IdempotencyKey)
 		if err == nil && idem.Status == "completed" {
+			d := r.add(report, "mutation_attempt", attempt.IdempotencyKey, ClassificationComplete, "suppress_duplicate", "idempotency key is already completed")
+			response, _ := json.Marshal(map[string]string{"result_ref": idem.ResultRef})
+			if err := r.Store.CompleteGitHubMutationAttempt(ctx, attempt.IdempotencyKey, "completed", response, "", now); err != nil {
+				*errs = append(*errs, fmt.Errorf("repair completed stuck mutation attempt %s: %w", attempt.IdempotencyKey, err))
+			}
+			_ = d
 			continue
 		}
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			*errs = append(*errs, fmt.Errorf("get stuck mutation idempotency key %s: %w", attempt.IdempotencyKey, err))
 			continue
 		}
-		if err := r.Store.FailIdempotencyKey(ctx, attempt.IdempotencyKey, d.Message); err != nil && !errors.Is(err, store.ErrNotFound) {
-			*errs = append(*errs, fmt.Errorf("fail stuck mutation idempotency key %s: %w", attempt.IdempotencyKey, err))
-		}
+		r.add(report, "mutation_attempt", attempt.IdempotencyKey, ClassificationStillNeeded, "inspect_required", "mutation outcome is unknown; current GitHub state must be inspected before retry")
 	}
 }
 

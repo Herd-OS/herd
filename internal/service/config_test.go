@@ -135,6 +135,32 @@ func TestConfigValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "test allows missing operator values",
+			cfg: Config{
+				Env: "test",
+			},
+		},
+		{
+			name: "invalid environment is rejected",
+			cfg: Config{
+				Env: "prod",
+			},
+			wantErr: []string{envEnv, "production, staging, development, or test"},
+		},
+		{
+			name: "staging requires hosted app values",
+			cfg: Config{
+				Env: "staging",
+			},
+			wantErr: []string{
+				envGitHubAppID,
+				envGitHubAppPrivateKey,
+				envWebhookSecret,
+				envPublicURL,
+				envDatabaseURL,
+			},
+		},
+		{
 			name: "invalid public url",
 			cfg: Config{
 				Env:       "development",
