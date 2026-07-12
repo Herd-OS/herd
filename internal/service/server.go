@@ -9,6 +9,7 @@ import (
 
 	cpgithub "github.com/herd-os/herd/internal/controlplane/github"
 	"github.com/herd-os/herd/internal/controlplane/reconciler"
+	"github.com/herd-os/herd/internal/controlplane/workflowevents"
 )
 
 type Dependencies struct {
@@ -17,8 +18,10 @@ type Dependencies struct {
 	RegisterRepositoryRoute      http.Handler
 	RunnerRegistrationTokenRoute http.Handler
 	JobResultsRoute              http.Handler
+	WorkflowEventsRoute          http.Handler
 	IssueCommentCommandHandler   cpgithub.IssueCommentCommandHandler
 	Reconciler                   *reconciler.Reconciler
+	WorkflowEventProcessor       workflowevents.Processor
 }
 
 type Store interface {

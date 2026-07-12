@@ -238,7 +238,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 		"target_branch":     "herd/worker/845",
 		"base_sha":          "base",
 		"expected_head_sha": "worker-head",
-		"patch_artifact":    "patches/worker.diff",
+		"patch_artifact":    "worker-branch",
 		"status":            jobs.StatusSuccess,
 	}
 	workerCallback := postJobResult(t, handler, workerJobID, workerPayload, http.StatusAccepted)
@@ -472,8 +472,8 @@ func (a hostedAppArtifacts) OpenArtifact(_ context.Context, name string) (io.Rea
 		metadata := artifacts.BuildMetadata("octo-org/herd", "job-worker-1", "base", "worker-head", "patch.diff", patch)
 		metadataBytes, _ := json.Marshal(metadata)
 		a = hostedAppArtifacts{
-			"patches/worker.diff": metadataBytes,
-			"patch.diff":          patch,
+			"worker-branch": metadataBytes,
+			"patch.diff":    patch,
 		}
 	}
 	data, ok := a[name]

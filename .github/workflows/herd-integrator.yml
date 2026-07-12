@@ -31,19 +31,44 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Consolidate, advance, and review
+      - name: Request hosted integration
         env:
           HERD_RUNNER: "true"
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
           RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          herd integrator consolidate --run-id "$RUN_ID"
-          herd integrator advance --run-id "$RUN_ID"
-          herd integrator review --run-id "$RUN_ID"
-          herd integrator check-ci --run-id "$RUN_ID"
+          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "workflow_run" \
+            --arg action "worker_completed" \
+            --arg run_id "$RUN_ID" \
+            --arg conclusion "$RUN_CONCLUSION" \
+            --arg head_branch "$RUN_HEAD_BRANCH" \
+            --arg head_sha "$RUN_HEAD_SHA" \
+            '{
+              version: 1,
+              kind: "integrator_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: $action,
+              workflow_run: {
+                id: $run_id,
+                conclusion: $conclusion,
+                head_branch: $head_branch,
+                head_sha: $head_sha
+              }
+            }' \
+            > /tmp/herd-integrator-event.json
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/herd-integrator-event.json \
+            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
 
   check-ci-on-completion:
     if: >
@@ -61,19 +86,47 @@ jobs:
           ref: ${{ github.event.check_run.check_suite.head_branch }}
           fetch-depth: 0
 
-      - name: Check CI and dispatch fix workers
+      - name: Request hosted CI reconciliation
         env:
           HERD_RUNNER: "true"
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
           HEAD_BRANCH: ${{ github.event.check_run.check_suite.head_branch }}
+          CHECK_RUN_ID: ${{ github.event.check_run.id }}
+          CHECK_RUN_CONCLUSION: ${{ github.event.check_run.conclusion }}
+          CHECK_RUN_HEAD_SHA: ${{ github.event.check_run.check_suite.head_sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+')
-          if [ -n "$BATCH" ]; then
-            herd integrator check-ci --batch "$BATCH"
-          fi
+          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "check_run" \
+            --arg action "check_run_completed" \
+            --arg check_run_id "$CHECK_RUN_ID" \
+            --arg batch "$BATCH" \
+            --arg conclusion "$CHECK_RUN_CONCLUSION" \
+            --arg head_branch "$HEAD_BRANCH" \
+            --arg head_sha "$CHECK_RUN_HEAD_SHA" \
+            '{
+              version: 1,
+              kind: "integrator_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: $action,
+              batch_number: (if $batch == "" then null else ($batch | tonumber) end),
+              check_run: {
+                id: $check_run_id,
+                conclusion: $conclusion,
+                head_branch: $head_branch,
+                head_sha: $head_sha
+              }
+            }' \
+            > /tmp/herd-integrator-event.json
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/herd-integrator-event.json \
+            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
 
   advance-on-close:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'issues'
@@ -88,20 +141,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check if herd issue and advance
+      - name: Request hosted issue-close reconciliation
         env:
           HERD_RUNNER: "true"
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
           ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           BATCH=$(echo "$ISSUE_BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1)
           if [ -n "$BATCH" ]; then
-            herd integrator advance --batch "$BATCH"
-            herd integrator review --batch "$BATCH"
-            herd integrator check-ci --batch "$BATCH"
+            OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
+            jq -n \
+              --arg repository "$REPOSITORY" \
+              --arg event_name "issues" \
+              --arg action "issue_closed" \
+              --argjson issue_number "$ISSUE_NUMBER" \
+              --argjson batch_number "$BATCH" \
+              '{
+                version: 1,
+                kind: "integrator_event",
+                repository: $repository,
+                event_name: $event_name,
+                action: $action,
+                issue_number: $issue_number,
+                batch_number: $batch_number
+              }' \
+              > /tmp/herd-integrator-event.json
+            curl -fsSL -X POST \
+              -H "Authorization: Bearer $OIDC_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data-binary @/tmp/herd-integrator-event.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
           else
             echo "Not a herd issue — skipping."
           fi
@@ -122,21 +193,39 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      - name: Handle review
+      - name: Request hosted review reconciliation
         env:
           HERD_RUNNER: "true"
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
           REVIEW_STATE: ${{ github.event.review.state }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          if [ "$REVIEW_STATE" = "approved" ]; then
-            herd integrator merge --pr "$PR_NUMBER"
-          else
-            herd integrator review --pr "$PR_NUMBER"
-          fi
+          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "pull_request_review" \
+            --arg action "review_submitted" \
+            --arg review_state "$REVIEW_STATE" \
+            --argjson pr_number "$PR_NUMBER" \
+            --arg head_sha "$PR_HEAD_SHA" \
+            '{
+              version: 1,
+              kind: "integrator_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: $action,
+              pr_number: $pr_number,
+              review_state: $review_state,
+              head_sha: $head_sha
+            }' \
+            > /tmp/herd-integrator-event.json
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/herd-integrator-event.json \
+            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
 
   cleanup:
     if: >
@@ -152,14 +241,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Post-close cleanup
+      - name: Request hosted cleanup
         env:
           HERD_RUNNER: "true"
+          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_MERGED: ${{ github.event.pull_request.merged }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          MERGED_FLAG=""
-          if [ "$PR_MERGED" = "true" ]; then
-            MERGED_FLAG="--merged"
-          fi
-          herd integrator cleanup --pr "$PR_NUMBER" $MERGED_FLAG
+          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "pull_request" \
+            --arg action "pull_request_closed" \
+            --argjson pr_number "$PR_NUMBER" \
+            --argjson merged "$PR_MERGED" \
+            '{
+              version: 1,
+              kind: "integrator_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: $action,
+              pr_number: $pr_number,
+              merged: $merged
+            }' \
+            > /tmp/herd-integrator-event.json
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/herd-integrator-event.json \
+            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"

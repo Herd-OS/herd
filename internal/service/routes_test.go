@@ -29,6 +29,7 @@ func TestRoutes(t *testing.T) {
 		{name: "repository register", method: http.MethodPost, path: "/api/v1/github/repositories/register", wantStatus: http.StatusNotImplemented},
 		{name: "runner registration token", method: http.MethodPost, path: "/api/v1/runners/registration-token", wantStatus: http.StatusNotImplemented},
 		{name: "job results", method: http.MethodPost, path: "/api/v1/jobs/job-123/results", wantStatus: http.StatusNotImplemented},
+		{name: "workflow events", method: http.MethodPost, path: "/api/v1/workflow-events", wantStatus: http.StatusNotImplemented},
 		{name: "unknown route", method: http.MethodGet, path: "/api/v1/unknown", wantStatus: http.StatusNotFound},
 		{name: "wrong method", method: http.MethodGet, path: "/webhooks/github", wantStatus: http.StatusMethodNotAllowed},
 	}
@@ -74,6 +75,23 @@ func TestJobResultsRouteCanBeInjected(t *testing.T) {
 
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 	assert.JSONEq(t, `{"job_id":"job-123"}`, rec.Body.String())
+}
+
+func TestWorkflowEventsRouteCanBeInjected(t *testing.T) {
+	handler, err := NewServer(Config{Env: "development"}, Dependencies{
+		WorkflowEventsRoute: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+		}),
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow-events", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+	assert.JSONEq(t, `{"status":"accepted"}`, rec.Body.String())
 }
 
 func TestStartReconcilerLoopStartsAndStopsWithContext(t *testing.T) {

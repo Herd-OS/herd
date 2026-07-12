@@ -213,6 +213,34 @@ func TestHandlerAppliesValidPatchArtifactAndRecordsCommitSHA(t *testing.T) {
 	assert.Contains(t, string(st.mutationCompletions[0].response), strings.Repeat("a", 40))
 }
 
+func TestHandlerAcceptsEmptyPatchArtifactWithoutApplying(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base"}
+	patch := []byte{}
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+	applier := fixedPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Audience:      "herd-control-plane",
+		Now:           func() time.Time { return now },
+		ArtifactStore: artifactMap(t, metadata, patch),
+		PatchApplier:  applier,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", validWorkerPayload("job-1", "head")))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Len(t, st.results, 1)
+	assert.Equal(t, StatusSuccess, st.results[0].Status)
+	assert.Contains(t, string(st.results[0].Metadata), `"empty":true`)
+	require.Len(t, st.mutationCompletions, 1)
+	assert.Equal(t, "completed", st.mutationCompletions[0].status)
+	assert.Contains(t, string(st.mutationCompletions[0].response), `"empty":true`)
+}
+
 func TestHandlerRejectsMissingBearerToken(t *testing.T) {
 	st := newResultStore()
 	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head"}

@@ -28,7 +28,10 @@ type githubActionsConcurrency struct {
 }
 
 type githubActionsStep struct {
-	Run string `yaml:"run"`
+	Name string         `yaml:"name"`
+	Uses string         `yaml:"uses"`
+	Run  string         `yaml:"run"`
+	With map[string]any `yaml:"with"`
 }
 
 func TestWorkersExtraEnv_DefaultsEmpty(t *testing.T) {
@@ -148,11 +151,10 @@ func TestIntegratorWorkflow_RendersConfiguredCIWorkflows(t *testing.T) {
 	assert.Contains(t, s, "check-ci-workflow-completion:")
 	assert.Contains(t, s, "github.event.workflow_run.path == '.github/workflows/herd-worker.yml'")
 	assert.Contains(t, s, "github.event.workflow_run.path != '.github/workflows/herd-worker.yml'")
-	checkCIIndex := strings.Index(s, "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
-	reviewIndex := strings.Index(s, "herd integrator review --batch \"$BATCH\"")
-	require.NotEqual(t, -1, checkCIIndex)
-	require.NotEqual(t, -1, reviewIndex)
-	assert.Less(t, checkCIIndex, reviewIndex)
+	assert.Contains(t, s, `"ci_workflow_completed"`)
+	assert.Contains(t, s, "/api/v1/workflow-events")
+	assert.NotContains(t, s, "herd integrator check-ci")
+	assert.NotContains(t, s, "herd integrator review")
 }
 
 func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T) {
@@ -214,17 +216,23 @@ func TestIntegratorWorkflow_ConfiguredCIReviewRetrySharesWorkerCompletionConcurr
 	assert.Equal(t, integrate.Concurrency.Group, checkCIWorkflowCompletion.Concurrency.Group)
 	assert.NotContains(t, checkCIWorkflowCompletion.Concurrency.Group, "herd-check-ci")
 	assert.Contains(t, checkCIWorkflowCompletion.Concurrency.Group, "github.event.workflow_run.head_branch")
-	assert.True(t, jobInvokesIntegratorReview(checkCIWorkflowCompletion))
-	checkCIIndex := strings.Index(string(rendered), "herd integrator check-ci --ci-run-id \"$RUN_ID\"")
-	reviewIndex := strings.Index(string(rendered), "herd integrator review --batch \"$BATCH\"")
-	require.NotEqual(t, -1, checkCIIndex)
-	require.NotEqual(t, -1, reviewIndex)
-	assert.Less(t, checkCIIndex, reviewIndex)
+	assert.True(t, jobPostsWorkflowEvent(checkCIWorkflowCompletion))
+	assert.NotContains(t, string(rendered), "herd integrator check-ci")
+	assert.NotContains(t, string(rendered), "herd integrator review")
 }
 
 func jobInvokesIntegratorReview(job githubActionsJob) bool {
 	for _, step := range job.Steps {
 		if strings.Contains(step.Run, "herd integrator review") {
+			return true
+		}
+	}
+	return false
+}
+
+func jobPostsWorkflowEvent(job githubActionsJob) bool {
+	for _, step := range job.Steps {
+		if strings.Contains(step.Run, "/api/v1/workflow-events") {
 			return true
 		}
 	}
@@ -309,11 +317,54 @@ func TestWorkerWorkflowTemplate_ExcludesProviderAuthEnv(t *testing.T) {
 	assert.Contains(t, s, "repository:", "worker workflow must accept repository identity")
 	assert.Contains(t, s, "expected_head_sha:", "worker workflow must accept expected head SHA")
 	assert.Contains(t, s, "/api/v1/jobs/$HERD_JOB_ID/results", "worker workflow must report results to the control plane")
+	assert.Contains(t, s, "uses: actions/upload-artifact@v4", "worker workflow must upload patch artifacts")
+	assert.Contains(t, s, "name: worker-branch", "worker workflow must upload metadata artifact named by callback")
+	assert.Contains(t, s, "name: worker.patch", "worker workflow must upload patch data artifact")
+	assert.Contains(t, s, "git diff --binary \"$HERD_BASE_SHA\"", "worker workflow must package a binary git patch")
+	assert.Contains(t, s, "format: \"git-diff-binary\"", "worker metadata must declare the artifact format expected by the service")
 	assert.Contains(t, s, "while true; do", "worker workflow must retry result callbacks")
 	assert.Contains(t, s, "Failed to submit HerdOS job result after ${attempt} attempt(s).", "worker workflow must log final callback failure")
 	assert.Contains(t, s, "delay=$((delay * 2))", "worker workflow must use bounded backoff")
 	assert.Contains(t, s, "ISSUE_NUMBER: ${{ inputs.issue_number }}", "ISSUE_NUMBER input must remain")
 	assert.Contains(t, s, "HERD_WORKER_MODE: ${{ inputs.mode }}", "HERD_WORKER_MODE input must remain")
+}
+
+func TestWorkerWorkflowUploadsPatchArtifactBeforeCallback(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true}
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+	execute := workflow.Jobs["execute"]
+	require.NotEmpty(t, execute.Steps)
+
+	var packageIndex, patchUploadIndex, metadataUploadIndex, reportIndex = -1, -1, -1, -1
+	for i, step := range execute.Steps {
+		switch step.Name {
+		case "Package worker patch artifact":
+			packageIndex = i
+		case "Upload worker patch artifact":
+			patchUploadIndex = i
+			assert.Equal(t, "actions/upload-artifact@v4", step.Uses)
+			assert.Equal(t, "worker.patch", step.With["name"])
+		case "Upload worker patch metadata":
+			metadataUploadIndex = i
+			assert.Equal(t, "actions/upload-artifact@v4", step.Uses)
+			assert.Equal(t, "worker-branch", step.With["name"])
+		case "Report result":
+			reportIndex = i
+		}
+	}
+
+	require.NotEqual(t, -1, packageIndex)
+	require.NotEqual(t, -1, patchUploadIndex)
+	require.NotEqual(t, -1, metadataUploadIndex)
+	require.NotEqual(t, -1, reportIndex)
+	assert.Less(t, packageIndex, patchUploadIndex)
+	assert.Less(t, patchUploadIndex, metadataUploadIndex)
+	assert.Less(t, metadataUploadIndex, reportIndex)
 }
 
 func TestRunnerEnvExampleHasSingleBootstrapToken(t *testing.T) {
@@ -337,6 +388,11 @@ func TestGeneratedWorkflowsDoNotUseLegacyPATOrCommentDispatch(t *testing.T) {
 		assert.NotContains(t, s, "secrets.HERD_GITHUB_TOKEN", "%s must not use HERD_GITHUB_TOKEN", wf.DestName)
 		assert.NotContains(t, s, "HERD_GITHUB_TOKEN", "%s must not pass HERD_GITHUB_TOKEN", wf.DestName)
 		assert.NotContains(t, s, "secrets.GITHUB_TOKEN", "%s must not use GITHUB_TOKEN production fallbacks", wf.DestName)
+		assert.NotContains(t, s, "GH_TOKEN", "%s must not use gh CLI auth", wf.DestName)
+		assert.NotContains(t, s, "GITHUB_TOKEN", "%s must not pass GitHub token auth", wf.DestName)
+		assert.NotContains(t, s, "herd integrator ", "%s must not run legacy integrator mutations on the runner", wf.DestName)
+		assert.NotContains(t, s, "herd monitor patrol", "%s must not run legacy monitor mutations on the runner", wf.DestName)
+		assert.NotContains(t, s, " gh ", "%s must not run gh CLI orchestration", wf.DestName)
 		if wf.DestName == "herd-integrator.yml" {
 			assert.NotContains(t, s, "issue_comment")
 			assert.NotContains(t, s, "handle-comment")

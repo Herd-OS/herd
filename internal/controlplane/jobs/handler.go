@@ -364,6 +364,11 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 	}
 	metadata["format"] = artifact.Metadata.Format
 	metadata["sha256"] = artifact.Metadata.SHA256
+	if len(artifact.Data) == 0 {
+		h.completePatchMutation(ctx, idempotencyKey, "completed", json.RawMessage(`{"empty":true}`), nil)
+		metadata["empty"] = true
+		return metadata, nil
+	}
 	if h.patchApplier == nil {
 		return metadata, nil
 	}

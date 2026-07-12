@@ -9,6 +9,7 @@ import (
 	cpgithub "github.com/herd-os/herd/internal/controlplane/github"
 	"github.com/herd-os/herd/internal/controlplane/jobs"
 	"github.com/herd-os/herd/internal/controlplane/runners"
+	"github.com/herd-os/herd/internal/controlplane/workflowevents"
 )
 
 func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
@@ -95,6 +96,27 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) {
 		jobResultsHandler = http.HandlerFunc(notImplementedHandler)
 	}
 	mux.Handle("POST /api/v1/jobs/{job_id}/results", jobResultsHandler)
+	workflowEventsHandler := deps.WorkflowEventsRoute
+	if workflowEventsHandler == nil && deps.Store != nil {
+		eventStore, ok := deps.Store.(workflowevents.Store)
+		if !ok {
+			workflowEventsHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "workflow event storage is not configured",
+				})
+			})
+		} else {
+			workflowEventsHandler = workflowevents.NewHandler(workflowevents.HandlerOptions{
+				Store:     eventStore,
+				Audience:  cfg.OIDCAudience,
+				Processor: deps.WorkflowEventProcessor,
+			})
+		}
+	}
+	if workflowEventsHandler == nil {
+		workflowEventsHandler = http.HandlerFunc(notImplementedHandler)
+	}
+	mux.Handle("POST /api/v1/workflow-events", workflowEventsHandler)
 }
 
 func notImplementedHandler(w http.ResponseWriter, _ *http.Request) {

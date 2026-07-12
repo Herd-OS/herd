@@ -16,8 +16,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Patrol
+      - name: Request hosted monitor patrol
         env:
           HERD_RUNNER: "true"
+          HERD_CONTROL_PLANE_URL: https://api.herd-os.com
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          herd monitor patrol
+          OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "$EVENT_NAME" \
+            '{
+              version: 1,
+              kind: "monitor_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: "patrol"
+            }' \
+            > /tmp/herd-monitor-event.json
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/herd-monitor-event.json \
+            "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"
