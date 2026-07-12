@@ -2,8 +2,10 @@ package integrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
 	agentprompt "github.com/herd-os/herd/internal/agent/prompt"
@@ -119,6 +121,43 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 	assert.Equal(t, "CRITERIA", result.Findings[1].Severity)
 	assert.Equal(t, "LOW", result.Findings[2].Severity)
 	assert.Contains(t, result.Summary, "Chunked review completed across 2 chunk(s)")
+}
+
+func TestRunChunkedReviewWithRetryRepeatedUnparseableReportsNoReviewedChunks(t *testing.T) {
+	old := unparseableRetryDelay
+	unparseableRetryDelay = 1 * time.Millisecond
+	t.Cleanup(func() { unparseableRetryDelay = old })
+
+	plan := reviewdiff.ChunkPlan{
+		Chunks: []reviewdiff.ReviewChunk{
+			{Index: 1, Total: 2, Text: "diff-a", IncludedFiles: []reviewdiff.ChangedFile{{Path: "a.go"}}, UsedDiffBytes: 10},
+			{Index: 2, Total: 2, Text: "diff-b", IncludedFiles: []reviewdiff.ChangedFile{{Path: "b.go"}}, UsedDiffBytes: 10},
+		},
+		Coverage: reviewdiff.CoverageSummary{
+			Source:         "test",
+			TotalFiles:     2,
+			ReviewMode:     reviewdiff.CoverageModeChunked,
+			ChunksPlanned:  2,
+			ChunksReviewed: 2,
+			FilesReviewed:  2,
+			Complete:       true,
+		},
+	}
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+	}}
+
+	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errManualInterventionNeeded))
+	assert.Nil(t, result)
+	assert.Equal(t, 0, chunksReviewed)
+	assert.Equal(t, []string{"diff-a", "diff-a"}, ag.diffs)
+	require.Len(t, ag.opts, 2)
+	assert.Equal(t, 1, ag.opts[0].ChunkIndex)
+	assert.Equal(t, 1, ag.opts[1].ChunkIndex, "retry should reuse the first chunk instead of advancing")
 }
 
 func TestRunChunkedReviewWithRetryMaxChunksDoesNotApprove(t *testing.T) {

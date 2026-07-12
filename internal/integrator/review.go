@@ -626,7 +626,7 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 
 		result, err := runReviewWithRetry(ctx, ag, p, chunk.Text, opts, prNumber)
 		if errors.Is(err, errManualInterventionNeeded) {
-			aggregate.ChunksReviewed = chunk.Index
+			aggregate.ChunksReviewed = chunk.Index - 1
 			aggregate.ManualIntervention = true
 			return nil, aggregate.ChunksReviewed, errManualInterventionNeeded
 		}

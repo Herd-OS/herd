@@ -4359,6 +4359,9 @@ func TestReviewStandalone_ChunkedRepeatedUnparseablePostsManualIntervention(t *t
 	assert.Equal(t, 1, ag.opts[0].ChunkIndex)
 	assert.Equal(t, 2, ag.opts[0].TotalChunks)
 	assert.Equal(t, 1, ag.opts[1].ChunkIndex, "retry should reuse the first chunk instead of advancing")
+	assert.Equal(t, []string{ag.diffs[0], ag.diffs[0]}, ag.diffs, "retry should reuse the same chunk diff")
+	assert.Contains(t, ag.diffs[0], "a.go")
+	assert.NotContains(t, ag.diffs[0], "diff --git a/b.go b/b.go")
 
 	require.Len(t, prSvc.comments, 1)
 	assert.Equal(t, manualInterventionReviewComment, prSvc.comments[0])
