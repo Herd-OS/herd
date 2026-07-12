@@ -1025,6 +1025,63 @@ func TestReview_AppendsCoverageWhenPreparedDiffIsLimited(t *testing.T) {
 	assert.Contains(t, prSvc.comments[0], "big.go: file diff exceeds per-file limit and was truncated")
 }
 
+func TestReview_ZeroChunksWithOnlyAllowableOmissionsRequestsChanges(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			diffErr: platform.ErrPullRequestDiffTooLarge,
+			listFilesResult: []*platform.PullRequestFile{
+				{Path: "dist/app.js", Status: "modified", Patch: "@@ -1 +1 @@\n-old\n+new\n"},
+				{Path: "image.png", Status: "added"},
+			},
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-reviewed"},
+	}
+	mock := newReviewLockTestPlatform(mockCreate)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = repoSvc
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "should not run"}}
+
+	result, err := Review(context.Background(), mock, ag, nil, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, 0, ag.calls)
+	assert.Equal(t, 0, createdIssues)
+	assert.Empty(t, wf.dispatched)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "No review chunks were sent to the review agent")
+	assert.Contains(t, prSvc.comments[0], "Files summarized but not reviewed")
+	assert.Contains(t, prSvc.comments[0], "dist/app.js: generated file")
+	assert.Contains(t, prSvc.comments[0], "image.png: binary file")
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+}
+
 func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
 	issueSvc := newMockIssueService()
 	repoSvc := &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}}
@@ -4068,6 +4125,91 @@ func TestReviewStandalone_Approved(t *testing.T) {
 	assert.Equal(t, platform.ReviewApprove, prSvc.reviews[0].event)
 
 	// No fix issues, no workers
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestReviewStandalone_CoverageBlockedWithFindingsPostsCoverageAndFindings(t *testing.T) {
+	mock, prSvc, issueSvc, wf := newStandalonePlatform()
+	prSvc.diffResult = strings.Join([]string{
+		"diff --git a/a.go b/a.go",
+		"index 1111111..2222222 100644",
+		"--- a/a.go",
+		"+++ b/a.go",
+		"@@ -1 +1 @@",
+		"-oldA",
+		"+newA",
+		"diff --git a/b.go b/b.go",
+		"index 3333333..4444444 100644",
+		"--- a/b.go",
+		"+++ b/b.go",
+		"@@ -1 +1 @@",
+		"-oldB",
+		"+newB",
+		"",
+	}, "\n")
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Summary:  "found issue",
+			Findings: []agent.ReviewFinding{
+				{Severity: "MEDIUM", Description: "Ordinary review finding"},
+			},
+		},
+	}
+
+	result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{
+			Review: true,
+			ReviewDiff: config.ReviewDiff{
+				MaxFilesPerChunk: 1,
+				MaxChunks:        1,
+			},
+		},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, result.FindingsCount)
+	assert.Equal(t, 1, ag.calls)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "not all material source files were reviewed")
+	assert.Contains(t, prSvc.comments[0], "b.go: max chunks reached")
+	assert.Contains(t, prSvc.comments[0], "Ordinary review finding")
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestReviewStandalone_ZeroChunksWithOnlyAllowableOmissionsRequestsChanges(t *testing.T) {
+	mock, prSvc, issueSvc, wf := newStandalonePlatform()
+	prSvc.diffErr = platform.ErrPullRequestDiffTooLarge
+	prSvc.listFilesResult = []*platform.PullRequestFile{
+		{Path: "dist/app.js", Status: "modified", Patch: "@@ -1 +1 @@\n-old\n+new\n"},
+		{Path: "image.png", Status: "added"},
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "should not run"},
+	}
+
+	result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{Review: true},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 0, result.FindingsCount)
+	assert.Equal(t, 0, ag.calls)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "No review chunks were sent to the review agent")
+	assert.Contains(t, prSvc.comments[0], "Files summarized but not reviewed")
+	assert.Contains(t, prSvc.comments[0], "dist/app.js: generated file")
+	assert.Contains(t, prSvc.comments[0], "image.png: binary file")
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
 	assert.Empty(t, issueSvc.createdTitle)
 	assert.Empty(t, wf.dispatched)
 }

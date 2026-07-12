@@ -242,9 +242,12 @@ func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) 
 			if file.Path == "" {
 				file = reviewdiff.FileCoverage{Path: "file.go", Reason: tt.reason, NotReviewed: true}
 			}
-			plan := reviewdiff.ChunkPlan{Coverage: reviewdiff.CoverageSummary{
-				NotReviewedFiles: []reviewdiff.FileCoverage{file},
-			}}
+			plan := reviewdiff.ChunkPlan{
+				Chunks: []reviewdiff.ReviewChunk{{Index: 1, Total: 1}},
+				Coverage: reviewdiff.CoverageSummary{
+					NotReviewedFiles: []reviewdiff.FileCoverage{file},
+				},
+			}
 
 			got := materialNotReviewed(plan)
 
@@ -254,7 +257,35 @@ func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) 
 	}
 }
 
-func TestRunChunkedReviewWithRetryApprovesWhenOnlyAllowableFilesAreOmitted(t *testing.T) {
+func TestRunChunkedReviewWithRetryApprovesMixedReviewWhenOnlyAllowableFilesAreOmitted(t *testing.T) {
+	plan := reviewdiff.ChunkPlan{
+		Chunks: []reviewdiff.ReviewChunk{
+			{Index: 1, Total: 1, Text: "diff-a", IncludedFiles: []reviewdiff.ChangedFile{{Path: "src/app.go"}}, UsedDiffBytes: 10},
+		},
+		Coverage: reviewdiff.CoverageSummary{
+			Source:        "test",
+			TotalFiles:    2,
+			ReviewMode:    reviewdiff.CoverageModeFull,
+			ChunksPlanned: 1,
+			FilesReviewed: 1,
+			Complete:      true,
+			NotReviewedFiles: []reviewdiff.FileCoverage{
+				{Path: "dist/app.js", Reason: "generated file", NotReviewed: true},
+			},
+		},
+	}
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{{Approved: true, Summary: "ok"}}}
+
+	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, chunksReviewed)
+	assert.True(t, result.Approved)
+	assert.Len(t, ag.opts, 1)
+}
+
+func TestRunChunkedReviewWithRetryDoesNotApproveZeroChunksWithOnlyAllowableOmissions(t *testing.T) {
 	plan := reviewdiff.ChunkPlan{Coverage: reviewdiff.CoverageSummary{
 		Source:        "test",
 		TotalFiles:    1,
@@ -271,7 +302,13 @@ func TestRunChunkedReviewWithRetryApprovesWhenOnlyAllowableFilesAreOmitted(t *te
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, 0, chunksReviewed)
-	assert.True(t, result.Approved)
+	assert.False(t, result.Approved)
+	assert.True(t, coverageBlocksApproval(plan))
+
+	comment := buildCoverageApprovalBlockedComment(reviewdiff.PreparedDiff{}, plan)
+	assert.Contains(t, comment, "No review chunks were sent to the review agent")
+	assert.Contains(t, comment, "Files summarized but not reviewed")
+	assert.Contains(t, comment, "dist/app.js: generated file")
 }
 
 func TestRunChunkedReviewWithRetryBlocksSourceUnavailableMaterialFile(t *testing.T) {

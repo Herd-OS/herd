@@ -596,7 +596,7 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 	aggregate := aggregatedReview{}
 	if len(plan.Chunks) == 0 {
 		aggregate.Result = &agent.ReviewResult{
-			Approved: len(materialNotReviewed(plan)) == 0 && !plan.Coverage.ExceededMaxChunks,
+			Approved: false,
 			Summary:  "No reviewable diff content was found.",
 		}
 		return aggregate.Result, aggregate.ChunksReviewed, nil
@@ -719,7 +719,7 @@ func materialNotReviewed(plan reviewdiff.ChunkPlan) []reviewdiff.FileCoverage {
 }
 
 func coverageBlocksApproval(plan reviewdiff.ChunkPlan) bool {
-	return plan.Coverage.ExceededMaxChunks || len(materialNotReviewed(plan)) > 0
+	return len(plan.Chunks) == 0 || plan.Coverage.ExceededMaxChunks || len(materialNotReviewed(plan)) > 0
 }
 
 func buildCoverageApprovalBlockedComment(prepared reviewdiff.PreparedDiff, plan reviewdiff.ChunkPlan) string {
@@ -727,6 +727,9 @@ func buildCoverageApprovalBlockedComment(prepared reviewdiff.PreparedDiff, plan 
 	var b strings.Builder
 	b.WriteString("⚠️ **HerdOS Integrator**\n\n")
 	b.WriteString("HerdOS could not approve this PR because the diff review was partial and not all material source files were reviewed.")
+	if len(plan.Chunks) == 0 {
+		b.WriteString("\n\nNo review chunks were sent to the review agent, so Herd cannot approve this PR without a reviewed chunk.")
+	}
 	if plan.Coverage.ExceededMaxChunks {
 		fmt.Fprintf(&b, "\n\nThe diff required %d review chunk(s), which exceeds the configured maximum of %d. Herd reviewed only the allowed chunk(s).",
 			plan.Coverage.RequiredChunks, plan.Coverage.MaxChunks)
@@ -743,6 +746,20 @@ func buildCoverageApprovalBlockedComment(prepared reviewdiff.PreparedDiff, plan 
 		}
 		if len(material) > limit {
 			fmt.Fprintf(&b, "- ... %d additional material files not shown\n", len(material)-limit)
+		}
+	}
+	if len(material) == 0 && len(plan.Coverage.NotReviewedFiles) > 0 {
+		b.WriteString("\n\nFiles summarized but not reviewed:\n")
+		limit := min(len(plan.Coverage.NotReviewedFiles), reviewdiff.DefaultMaxOmittedSummaryEntries)
+		for _, file := range plan.Coverage.NotReviewedFiles[:limit] {
+			reason := file.Reason
+			if strings.TrimSpace(reason) == "" {
+				reason = "not reviewed"
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", file.Path, reason)
+		}
+		if len(plan.Coverage.NotReviewedFiles) > limit {
+			fmt.Fprintf(&b, "- ... %d additional summarized files not shown\n", len(plan.Coverage.NotReviewedFiles)-limit)
 		}
 	}
 	return appendDiffCoverageIfLimited(b.String(), prepared)
@@ -827,11 +844,14 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	}
 
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
-	if coverageBlocksApproval(plan) && len(reviewResult.Findings) == 0 {
+	if coverageBlocksApproval(plan) {
 		comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
+		if len(reviewResult.Findings) > 0 {
+			comment += "\n\n" + buildReviewCycleComment(0, 0, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
+		}
 		_ = p.PullRequests().AddComment(ctx, params.PRNumber, comment)
 		_ = p.PullRequests().CreateReview(ctx, params.PRNumber, "Review coverage is partial; not all material files were reviewed.", platform.ReviewRequestChanges)
-		return &ReviewStandaloneResult{}, nil
+		return &ReviewStandaloneResult{FindingsCount: len(reviewResult.Findings)}, nil
 	}
 
 	if reviewResult.Approved {
