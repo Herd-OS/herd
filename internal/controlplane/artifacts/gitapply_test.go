@@ -120,15 +120,23 @@ func TestGitAuthEnvKeepsTokenOutOfAskpassScript(t *testing.T) {
 	assert.NotContains(t, strings.ToLower(joined), "x-access-token")
 
 	var tokenFile string
+	var askpassFile string
 	for _, entry := range env {
 		if value, ok := strings.CutPrefix(entry, "HERD_GIT_ASKPASS_TOKEN_FILE="); ok {
 			tokenFile = value
 		}
+		if value, ok := strings.CutPrefix(entry, "GIT_ASKPASS="); ok {
+			askpassFile = value
+		}
 	}
 	require.NotEmpty(t, tokenFile)
+	require.NotEmpty(t, askpassFile)
 	info, err := os.Stat(tokenFile)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	info, err = os.Stat(askpassFile)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), info.Mode().Perm())
 
 	cleanup()
 	_, err = os.Stat(tokenFile)

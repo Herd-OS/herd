@@ -2,6 +2,8 @@ package jobs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -225,7 +227,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if applyErr := h.processWorkerPatch(r.Context(), result, job, payload, patchArtifact, applyMetadata); applyErr != nil {
+	if applyErr := h.processWorkerPatch(r.Context(), result, job, patchArtifact, applyMetadata); applyErr != nil {
 		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
 		writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
 		return
@@ -444,19 +446,19 @@ func transientPatchValidationError(err error) bool {
 		return false
 	}
 	message := err.Error()
-	return strings.Contains(message, "unavailable") || strings.Contains(message, "missing from artifact bundle")
+	return strings.Contains(message, "unavailable")
 }
 
 func workerPatchConfigurationError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "not configured")
 }
 
-func (h Handler) processWorkerPatch(ctx context.Context, result Result, job store.Job, payload []byte, artifact *artifacts.ValidatedArtifact, metadata map[string]any) error {
+func (h Handler) processWorkerPatch(ctx context.Context, result Result, job store.Job, artifact *artifacts.ValidatedArtifact, metadata map[string]any) error {
 	worker, ok := result.(WorkerCompletedResult)
 	if !ok || worker.Status != StatusSuccess || artifact == nil {
 		return nil
 	}
-	idempotencyKey := "patch_apply:" + ResultPayloadHash(payload)
+	idempotencyKey := PatchApplyIdempotencyKey(worker, job)
 	shouldApply, err := h.acquirePatchApply(ctx, idempotencyKey, worker, job)
 	if err != nil {
 		return err
@@ -511,6 +513,19 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		return err
 	}
 	return nil
+}
+
+func PatchApplyIdempotencyKey(worker WorkerCompletedResult, job store.Job) string {
+	parts := []string{
+		worker.Repository,
+		worker.JobID,
+		worker.TargetBranch,
+		worker.PatchArtifact,
+		job.BaseSHA,
+		job.HeadSHA,
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "patch_apply:" + hex.EncodeToString(sum[:])
 }
 
 func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, worker WorkerCompletedResult, job store.Job) (bool, error) {

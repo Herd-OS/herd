@@ -132,8 +132,17 @@ func ResultPayloadHash(payload []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func ResultIdempotencyKey(result Result, payload []byte) string {
-	return result.Envelope().Kind + ":" + ResultPayloadHash(payload)
+func ResultIdempotencyKey(result Result, _ []byte) string {
+	envelope := result.Envelope()
+	parts := []string{envelope.Kind, envelope.Repository, envelope.JobID}
+	switch r := result.(type) {
+	case WorkerCompletedResult:
+		parts = append(parts, r.TargetBranch, r.BaseSHA, r.ExpectedHeadSHA, r.PatchArtifact, r.Status)
+	case ReviewCompletedResult:
+		parts = append(parts, fmt.Sprintf("%d", r.PRNumber), r.HeadSHA, r.Status)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return envelope.Kind + ":" + hex.EncodeToString(sum[:])
 }
 
 func validateEnvelope(envelope ResultEnvelope) error {

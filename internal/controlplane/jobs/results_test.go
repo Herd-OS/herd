@@ -225,14 +225,29 @@ func TestValidateResultAgainstJobRejectsStaleHeadSHA(t *testing.T) {
 	assert.Contains(t, err.Error(), "stale head SHA")
 }
 
-func TestResultIdempotencyKeyUsesKindAndPayloadHash(t *testing.T) {
+func TestResultIdempotencyKeyUsesStableResultIdentity(t *testing.T) {
 	payload := []byte(`{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":1,"pr_number":2,"head_sha":"head","status":"approved","summary":"ok"}`)
 	result, err := ParseResultPayload(payload)
+	require.NoError(t, err)
+	reordered := []byte(`{
+		"summary":"ok",
+		"status":"approved",
+		"head_sha":"head",
+		"pr_number":2,
+		"batch_number":1,
+		"job_id":"job-1",
+		"repository":"acme/widgets",
+		"kind":"review_completed",
+		"version":1
+	}`)
+	reorderedResult, err := ParseResultPayload(reordered)
 	require.NoError(t, err)
 
 	key := ResultIdempotencyKey(result, payload)
 
 	assert.Contains(t, key, KindReviewCompleted+":")
+	assert.Equal(t, key, ResultIdempotencyKey(reorderedResult, reordered))
+	assert.NotEqual(t, ResultPayloadHash(payload), ResultPayloadHash(reordered))
 	assert.Len(t, ResultPayloadHash(payload), 64)
 }
 

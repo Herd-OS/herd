@@ -87,6 +87,9 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 	if !ok {
 		return fmt.Errorf("review status idempotency store is required")
 	}
+	if _, ok := s.Store.(StatusMutationStore); !ok {
+		return fmt.Errorf("review status mutation store is required")
+	}
 	created, err := idem.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       statusKey,
 		Scope:     "review_status",

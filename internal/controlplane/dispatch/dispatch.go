@@ -202,15 +202,20 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("marshal dispatch result: %w", err)
 	}
+	if err := d.Store.CompleteIdempotencyKey(ctx, idempotencyKey, string(resultJSON)); err != nil {
+		_ = d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
+			Status:      "completed",
+			Response:    json.RawMessage(resultJSON),
+			CompletedAt: time.Now().UTC(),
+		})
+		return DispatchResult{}, fmt.Errorf("complete dispatch idempotency key: %w", err)
+	}
 	if err := d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
 		Status:      "completed",
 		Response:    json.RawMessage(resultJSON),
 		CompletedAt: time.Now().UTC(),
 	}); err != nil {
 		return DispatchResult{}, err
-	}
-	if err := d.Store.CompleteIdempotencyKey(ctx, idempotencyKey, string(resultJSON)); err != nil {
-		return DispatchResult{}, fmt.Errorf("complete dispatch idempotency key: %w", err)
 	}
 	return result, nil
 }
@@ -272,6 +277,7 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 	if record.Status == "completed" && record.ResultRef != "" {
 		var result DispatchResult
 		if err := json.Unmarshal([]byte(record.ResultRef), &result); err == nil && result.JobID != "" {
+			_ = d.repairCompletedMutationAttempt(ctx, idempotencyKey, json.RawMessage(record.ResultRef))
 			result.Created = false
 			return result, nil
 		}
@@ -322,6 +328,28 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		return result, nil
 	}
 	return DispatchResult{}, fmt.Errorf("workflow dispatch %q is already in progress", idempotencyKey)
+}
+
+func (d Dispatcher) repairCompletedMutationAttempt(ctx context.Context, idempotencyKey string, resultJSON json.RawMessage) error {
+	reader, ok := d.Store.(MutationReader)
+	if !ok {
+		return nil
+	}
+	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if attempt.Status == "completed" {
+		return nil
+	}
+	return d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
+		Status:      "completed",
+		Response:    resultJSON,
+		CompletedAt: time.Now().UTC(),
+	})
 }
 
 func (d Dispatcher) completedDispatchMutation(ctx context.Context, idempotencyKey string) (bool, DispatchResult, error) {

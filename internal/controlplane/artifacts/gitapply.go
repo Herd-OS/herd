@@ -202,7 +202,7 @@ func gitAuthEnv(root, cloneURL, token string) ([]string, func(), error) {
 		"*Password*) cat \"$HERD_GIT_ASKPASS_TOKEN_FILE\" ;;\n" +
 		"*) printf '\\n' ;;\n" +
 		"esac\n"
-	if err := os.WriteFile(askpass, []byte(script), 0600); err != nil {
+	if err := os.WriteFile(askpass, []byte(script), 0700); err != nil {
 		return nil, func() {}, fmt.Errorf("write git askpass helper: %w", err)
 	}
 	cleanup := func() {

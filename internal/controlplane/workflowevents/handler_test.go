@@ -277,6 +277,35 @@ func TestHandlerProcessingMarkerRedeliveryBlocksDuplicateProcessing(t *testing.T
 	assert.Equal(t, "started", st.idem[processKey].Status)
 }
 
+func TestHandlerProcessorFailureWithResetFailureRetriesOnRedelivery(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newEventStore()
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	st.updateErrs = []error{nil, assert.AnError, nil, nil}
+	processor := &capturingProcessor{errs: []error{assert.AnError, nil}}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(validEventClaims(now)),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+		Processor: processor,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, eventRequest(validEventPayload()))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, eventRequest(validEventPayload()))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, processor.calls, 2)
+	require.Len(t, st.commands, 1)
+	assert.Equal(t, "processed", st.commands[0].Status)
+	for _, record := range st.idem {
+		assert.Equal(t, "completed", record.Status)
+	}
+}
+
 func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()

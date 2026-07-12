@@ -149,6 +149,27 @@ func TestDispatcherRetryAfterCompleteIdempotencyFailureRepairsFromMutation(t *te
 	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
 }
 
+func TestDispatcherRetryAfterCompleteMutationFailureDoesNotRedispatch(t *testing.T) {
+	st := newFakeStore()
+	st.completeMutationErrs = map[string][]error{}
+	gh := &fakeWorkflowClient{}
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.completeMutationErrs[key] = []error{errors.New("database down"), nil}
+
+	first, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.Error(t, err)
+	assert.Empty(t, first.JobID)
+	second, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.False(t, second.Created)
+	assert.Len(t, gh.calls, 1)
+	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+}
+
 func TestDispatcherValidationRejectsMissingAndStaleHeadSHA(t *testing.T) {
 	tests := []struct {
 		name string
@@ -324,12 +345,13 @@ func validRequest() DispatchRequest {
 }
 
 type fakeStore struct {
-	jobs               map[string]store.Job
-	idempotencyKeys    map[string]store.IdempotencyKey
-	mutationAttempts   []store.GitHubMutationAttempt
-	createJobErrs      []error
-	recordMutationErrs []error
-	completeIdemErrs   map[string][]error
+	jobs                 map[string]store.Job
+	idempotencyKeys      map[string]store.IdempotencyKey
+	mutationAttempts     []store.GitHubMutationAttempt
+	createJobErrs        []error
+	recordMutationErrs   []error
+	completeMutationErrs map[string][]error
+	completeIdemErrs     map[string][]error
 }
 
 func newFakeStore() *fakeStore {
@@ -426,6 +448,13 @@ func (s *fakeStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHu
 }
 
 func (s *fakeStore) CompleteGitHubMutationAttempt(_ context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
+	if len(s.completeMutationErrs[idempotencyKey]) > 0 {
+		err := s.completeMutationErrs[idempotencyKey][0]
+		s.completeMutationErrs[idempotencyKey] = s.completeMutationErrs[idempotencyKey][1:]
+		if err != nil {
+			return err
+		}
+	}
 	for i := range s.mutationAttempts {
 		if s.mutationAttempts[i].IdempotencyKey == idempotencyKey {
 			s.mutationAttempts[i].Status = status

@@ -54,14 +54,15 @@ func TestHandlerAuthorization(t *testing.T) {
 
 func TestEnqueueIssueCommentCommand(t *testing.T) {
 	tests := []struct {
-		name      string
-		event     IssueComment
-		wantCount int
-		wantKey   string
-		wantErr   string
+		name       string
+		event      IssueComment
+		wantCount  int
+		wantKey    string
+		wantStatus string
+		wantErr    string
 	}{
-		{name: "valid command", event: validComment("OWNER", "@herd-os review"), wantCount: 1, wantKey: "review"},
-		{name: "legacy migration command", event: validComment("OWNER", "/herd review"), wantCount: 1, wantKey: "migration"},
+		{name: "valid command", event: validComment("OWNER", "@herd-os review"), wantCount: 1, wantKey: "review", wantStatus: StatusAcknowledged},
+		{name: "legacy migration command", event: validComment("OWNER", "/herd review"), wantCount: 1, wantKey: "migration", wantStatus: StatusAcknowledged},
 		{name: "unauthorized ignored", event: validComment("CONTRIBUTOR", "@herd-os review")},
 		{name: "non command ignored", event: validComment("OWNER", "hello")},
 		{name: "bot ignored", event: func() IssueComment {
@@ -69,8 +70,8 @@ func TestEnqueueIssueCommentCommand(t *testing.T) {
 			e.CommentAuthorType = "Bot"
 			return e
 		}()},
-		{name: "bad mention command errors", event: validComment("OWNER", "@herd-os nope"), wantErr: "unknown herd-os command"},
-		{name: "edited command accepted", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "edited"; return e }(), wantCount: 1, wantKey: "fix"},
+		{name: "unknown mention command ignored durably", event: validComment("OWNER", "@herd-os nope"), wantCount: 1, wantKey: "unknown", wantStatus: StatusIgnored},
+		{name: "edited command accepted", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "edited"; return e }(), wantCount: 1, wantKey: "fix", wantStatus: StatusAcknowledged},
 		{name: "deleted command ignored", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "deleted"; return e }()},
 	}
 
@@ -89,7 +90,7 @@ func TestEnqueueIssueCommentCommand(t *testing.T) {
 			assert.Len(t, st.commandRecords, tt.wantCount)
 			if tt.wantCount > 0 {
 				assert.Equal(t, tt.wantKey, st.commandRecords[0].CommandKey)
-				assert.Equal(t, StatusAcknowledged, st.commandRecords[0].Status)
+				assert.Equal(t, tt.wantStatus, st.commandRecords[0].Status)
 			}
 		})
 	}

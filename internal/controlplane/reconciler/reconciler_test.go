@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -151,6 +152,45 @@ func TestDuplicateDispatchIsNotRepeated(t *testing.T) {
 	assert.Equal(t, 1, report.CountsByClassification()[ClassificationComplete])
 }
 
+func TestRunOnceRetriesCommandWhenInitialRequeueFails(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := store.NewMemoryStore()
+	repo := seedRepo(t, st, ctx)
+	_, err := st.RecordCommand(ctx, store.CommandRecord{
+		RepositoryID: repo.ID,
+		CommentID:    201,
+		CommandKey:   "review",
+		CommandName:  "review",
+		Actor:        "octo",
+		Status:       "acknowledged",
+		CreatedAt:    now.Add(-time.Hour),
+	})
+	require.NoError(t, err)
+	_, err = st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       "repo:1:comment:201:command:review",
+		Scope:     "issue_comment_command",
+		Status:    "started",
+		CreatedAt: now.Add(-time.Hour),
+	})
+	require.NoError(t, err)
+	commands := &fakeCommandRequeuer{errs: []error{errors.New("dispatcher down")}}
+	r := &Reconciler{Store: st, Commands: commands, Now: func() time.Time { return now }, Config: Config{CommandTimeout: time.Minute}}
+
+	_, firstErr := r.RunOnce(ctx)
+	_, secondErr := r.RunOnce(ctx)
+
+	require.Error(t, firstErr)
+	require.NoError(t, secondErr)
+	require.Len(t, commands.items, 2)
+	assert.Equal(t, int64(201), commands.items[0].Command.CommentID)
+	assert.Equal(t, int64(201), commands.items[1].Command.CommentID)
+	items, err := st.ListReconcileCommands(ctx, now, 10)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, "retry_needed", items[0].Command.Status)
+}
+
 func TestRunOnceDoesNotFailCompletedIdempotencyForStuckMutationAttempt(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
@@ -281,9 +321,15 @@ func (s *fakeState) EnsureHerdReviewStatus(_ context.Context, _ store.Repository
 
 type fakeCommandRequeuer struct {
 	items []store.ReconcileCommand
+	errs  []error
 }
 
 func (q *fakeCommandRequeuer) RequeueCommand(_ context.Context, item store.ReconcileCommand) error {
 	q.items = append(q.items, item)
+	if len(q.errs) > 0 {
+		err := q.errs[0]
+		q.errs = q.errs[1:]
+		return err
+	}
 	return nil
 }

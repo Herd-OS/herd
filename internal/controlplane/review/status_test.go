@@ -95,6 +95,20 @@ func TestSetHerdReviewStatusRequiresIdempotencyStore(t *testing.T) {
 	assert.Empty(t, st.states)
 }
 
+func TestSetHerdReviewStatusRequiresMutationStore(t *testing.T) {
+	ctx := context.Background()
+	st := &idempotencyOnlyStatusStore{idem: map[string]store.IdempotencyKey{}}
+	gh := &fakeStatusGitHub{}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	err := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "review status mutation store is required")
+	assert.Empty(t, gh.statuses)
+	assert.Empty(t, st.states)
+}
+
 func TestSetHerdReviewStatusRetryAfterStateFailureDoesNotDuplicateGitHubStatus(t *testing.T) {
 	ctx := context.Background()
 	st := &fakeStatusStore{errs: []error{errors.New("database down"), nil}}
@@ -195,8 +209,56 @@ type stateOnlyStatusStore struct {
 	states []store.ReviewState
 }
 
+type idempotencyOnlyStatusStore struct {
+	states []store.ReviewState
+	idem   map[string]store.IdempotencyKey
+}
+
 func (s *stateOnlyStatusStore) SetReviewState(_ context.Context, state store.ReviewState) error {
 	s.states = append(s.states, state)
+	return nil
+}
+
+func (s *idempotencyOnlyStatusStore) SetReviewState(_ context.Context, state store.ReviewState) error {
+	s.states = append(s.states, state)
+	return nil
+}
+
+func (s *idempotencyOnlyStatusStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
+	if _, ok := s.idem[key.Key]; ok {
+		return false, nil
+	}
+	s.idem[key.Key] = key
+	return true, nil
+}
+
+func (s *idempotencyOnlyStatusStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	record, ok := s.idem[key]
+	if !ok {
+		return store.IdempotencyKey{}, store.ErrNotFound
+	}
+	return record, nil
+}
+
+func (s *idempotencyOnlyStatusStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	record.Status = "completed"
+	record.ResultRef = resultRef
+	s.idem[key] = record
+	return nil
+}
+
+func (s *idempotencyOnlyStatusStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	s.idem[key] = record
 	return nil
 }
 

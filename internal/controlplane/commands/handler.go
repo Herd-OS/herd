@@ -201,6 +201,18 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 		if ok && !isAuthorized(event.AuthorAssociation) {
 			return nil
 		}
+		if ok && errors.Is(err, ErrUnknownCommand) {
+			metadata, marshalErr := json.Marshal(map[string]any{
+				"raw":                event.CommentBody,
+				"error":              err.Error(),
+				"author_association": event.AuthorAssociation,
+				"action":             event.Action,
+			})
+			if marshalErr != nil {
+				return fmt.Errorf("marshal unknown command metadata: %w", marshalErr)
+			}
+			return recordQueuedCommandWithStatus(ctx, st, event, "unknown", "unknown", StatusIgnored, metadata)
+		}
 		return err
 	}
 	if !ok || !isAuthorized(event.AuthorAssociation) {
@@ -222,6 +234,10 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 }
 
 func recordQueuedCommand(ctx context.Context, st QueueStore, event IssueComment, commandKey, commandName string, metadata json.RawMessage) error {
+	return recordQueuedCommandWithStatus(ctx, st, event, commandKey, commandName, StatusAcknowledged, metadata)
+}
+
+func recordQueuedCommandWithStatus(ctx context.Context, st QueueStore, event IssueComment, commandKey, commandName, status string, metadata json.RawMessage) error {
 	repo, err := st.GetRepository(ctx, event.Owner, event.Repo)
 	if err != nil {
 		return fmt.Errorf("get repository: %w", err)
@@ -235,7 +251,7 @@ func recordQueuedCommand(ctx context.Context, st QueueStore, event IssueComment,
 		CommandKey:   commandKey,
 		CommandName:  commandName,
 		Actor:        event.SenderLogin,
-		Status:       StatusAcknowledged,
+		Status:       status,
 		Metadata:     metadata,
 		CreatedAt:    time.Now().UTC(),
 	})

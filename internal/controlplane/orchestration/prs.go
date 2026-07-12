@@ -60,7 +60,19 @@ func (s Service) OpenBatchPR(ctx context.Context, req OpenBatchPRRequest) (*plat
 	if !ok {
 		return nil, fmt.Errorf("invalid PR result ref %q", resultRef)
 	}
-	return s.Platform.PullRequests().Get(ctx, prNumber)
+	pr, err := s.Platform.PullRequests().Get(ctx, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	if pr.Head != "" && pr.Head != req.Head {
+		return nil, fmt.Errorf("batch PR #%d head mismatch: expected %s, got %s", pr.Number, req.Head, pr.Head)
+	}
+	if pr.Title != req.Title || pr.Body != req.Body {
+		title := req.Title
+		body := req.Body
+		return s.Platform.PullRequests().Update(ctx, pr.Number, &title, &body)
+	}
+	return pr, nil
 }
 
 // BranchOperationRequest describes an idempotent branch mutation.
@@ -224,9 +236,14 @@ func (s Service) CleanupClosedBatchPR(ctx context.Context, prNumber int, merged 
 	if _, err := s.Platform.Milestones().Update(ctx, msNumber, platform.MilestoneUpdate{State: &closed}); err != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("close milestone %d: %w", msNumber, err))
 	}
+	if strings.TrimSpace(pr.HeadSHA) == "" {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("closed PR #%d head SHA is required for branch cleanup", prNumber))
+		return errors.Join(cleanupErrs...)
+	}
 	if err := s.ApplyBranchOperation(ctx, BranchOperationRequest{
-		OperationKind: "delete",
-		BranchName:    pr.Head,
+		OperationKind:   "delete",
+		BranchName:      pr.Head,
+		ExpectedHeadSHA: pr.HeadSHA,
 	}); err != nil {
 		cleanupErrs = append(cleanupErrs, err)
 	}

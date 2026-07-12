@@ -147,15 +147,15 @@ func (r *Reconciler) runCommands(ctx context.Context, cfg Config, now time.Time,
 			continue
 		}
 		d := r.add(report, "command", item.IdempotencyKey, ClassificationSafeToRetry, "requeue", "acknowledged command did not complete dispatch")
-		if err := r.Store.UpdateCommandStatus(ctx, item.Command.RepositoryID, item.Command.CommentID, item.Command.CommandKey, "retry_needed", diagnosticMetadata(d)); err != nil {
-			*errs = append(*errs, fmt.Errorf("mark command %s retry_needed: %w", item.IdempotencyKey, err))
-			continue
-		}
 		if r.Commands != nil {
 			if err := r.Commands.RequeueCommand(ctx, item); err != nil {
 				*errs = append(*errs, fmt.Errorf("requeue command %s: %w", item.IdempotencyKey, err))
 				continue
 			}
+		}
+		if err := r.Store.UpdateCommandStatus(ctx, item.Command.RepositoryID, item.Command.CommentID, item.Command.CommandKey, "retry_needed", diagnosticMetadata(d)); err != nil {
+			*errs = append(*errs, fmt.Errorf("mark command %s retry_needed: %w", item.IdempotencyKey, err))
+			continue
 		}
 	}
 }

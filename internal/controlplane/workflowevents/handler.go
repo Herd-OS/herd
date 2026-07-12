@@ -214,7 +214,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !created && h.workflowEventProcessingUnknown(r.Context(), repo.ID, commentID, commandKey) {
+	if !created && h.workflowEventProcessingUnknown(r.Context(), repo.ID, commentID, commandKey, processKey) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
 		return
 	}
@@ -286,9 +286,13 @@ func (h Handler) workflowEventProcessedOrRepairable(ctx context.Context, repoID 
 	return err == nil && (record.Status == "processed" || record.Status == "processed_pending")
 }
 
-func (h Handler) workflowEventProcessingUnknown(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
+func (h Handler) workflowEventProcessingUnknown(ctx context.Context, repoID int64, commentID int64, commandKey string, processKey string) bool {
 	record, err := h.store.GetCommandRecord(ctx, repoID, commentID, commandKey)
-	return err == nil && record.Status == "processing"
+	if err != nil || record.Status != "processing" {
+		return false
+	}
+	idem, err := h.store.GetIdempotencyKey(ctx, processKey)
+	return err != nil || idem.Status != "failed"
 }
 
 func (h Handler) markWorkflowEventProcessing(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {

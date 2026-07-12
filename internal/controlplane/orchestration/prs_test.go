@@ -59,6 +59,30 @@ func TestOpenBatchPR_UpdatesExistingHeadInsteadOfDuplicating(t *testing.T) {
 	assert.Nil(t, fake.prs.created)
 }
 
+func TestOpenBatchPR_UpdatesCompletedDuplicateWhenBodyChanges(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	svc := newTestService(fake, newFakeStore(), nil)
+	req := OpenBatchPRRequest{
+		BatchNumber: 5,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/5-demo",
+		Base:        "main",
+	}
+
+	first, err := svc.OpenBatchPR(ctx, req)
+	require.NoError(t, err)
+	req.Body = "updated body"
+	second, err := svc.OpenBatchPR(ctx, req)
+
+	require.NoError(t, err)
+	assert.Equal(t, first.Number, second.Number)
+	assert.Equal(t, "updated body", second.Body)
+	assert.Equal(t, 1, fake.prs.next)
+	assert.Equal(t, 1, fake.prs.updated)
+}
+
 func TestApplyBranchOperation_IdempotencyAndHeadGuard(t *testing.T) {
 	ctx := context.Background()
 
@@ -164,7 +188,7 @@ func TestMergePR_RequiresExpectedHeadAndSuccessfulStatus(t *testing.T) {
 func TestCleanupClosedBatchPR_ClosesIssuesMilestoneAndDeletesBranch(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
-	fake.prs.items[9] = &platform.PullRequest{Number: 9, Title: "[herd] Demo", State: "closed", Head: "herd/batch/9-demo"}
+	fake.prs.items[9] = &platform.PullRequest{Number: 9, Title: "[herd] Demo", State: "closed", Head: "herd/batch/9-demo", HeadSHA: "head"}
 	fake.issues.listResult = []*platform.Issue{
 		{Number: 1, Labels: []string{issues.StatusReady}},
 		{Number: 2, Labels: []string{issues.StatusDone}},
@@ -188,7 +212,7 @@ func TestCleanupClosedBatchPR_ClosesIssuesMilestoneAndDeletesBranch(t *testing.T
 func TestCleanupClosedBatchPR_ReturnsIssueCleanupErrorAndDeletesBranch(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
-	fake.prs.items[9] = &platform.PullRequest{Number: 9, Title: "[herd] Demo", State: "closed", Head: "herd/batch/9-demo"}
+	fake.prs.items[9] = &platform.PullRequest{Number: 9, Title: "[herd] Demo", State: "closed", Head: "herd/batch/9-demo", HeadSHA: "head"}
 	fake.issues.listResult = []*platform.Issue{{Number: 1, Labels: []string{issues.StatusReady}}}
 	fake.issues.items[1] = fake.issues.listResult[0]
 	fake.issues.updateErr = fmt.Errorf("github unavailable")
@@ -201,4 +225,19 @@ func TestCleanupClosedBatchPR_ReturnsIssueCleanupErrorAndDeletesBranch(t *testin
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "close issue 1")
 	assert.Contains(t, fake.repo.deleted, "herd/batch/9-demo")
+}
+
+func TestCleanupClosedBatchPR_DoesNotDeleteBranchWhenHeadSHAChanged(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.prs.items[9] = &platform.PullRequest{Number: 9, Title: "[herd] Demo", State: "closed", Head: "herd/batch/9-demo", HeadSHA: "closed-head"}
+	fake.milestones.items[9] = &platform.Milestone{Number: 9, Title: "Demo"}
+	fake.repo.branches["herd/batch/9-demo"] = "new-head"
+	svc := newTestService(fake, newFakeStore(), nil)
+
+	err := svc.CleanupClosedBatchPR(ctx, 9, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "head mismatch")
+	assert.NotContains(t, fake.repo.deleted, "herd/batch/9-demo")
 }
