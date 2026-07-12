@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/reviewdiff"
 	"github.com/stretchr/testify/assert"
@@ -19,7 +20,10 @@ func TestRenderReviewSystemPrompt_AllSections(t *testing.T) {
 		PRBaseBranch: "main",
 		PRHeadBranch: "fix/flaky-test",
 		Diff:         "diff --git a/foo.go b/foo.go\n+added line\n-removed line",
-		CIStatus:     "failure",
+		CoverageSummary: "## Diff Coverage\n\n" +
+			"- Source: github-raw-diff\n" +
+			"- Review mode: full\n",
+		CIStatus: "failure",
 		Comments: []reviewCmdComment{
 			{Author: "alice", Body: "Looks good overall."},
 			{Author: "bob", Body: "Please add a regression test."},
@@ -39,6 +43,8 @@ func TestRenderReviewSystemPrompt_AllSections(t *testing.T) {
 	assert.Contains(t, out, "Pull Request #42:")
 	assert.Contains(t, out, "Fix flaky integration test")
 	assert.Contains(t, out, "CI status (head ref): failure")
+	assert.Contains(t, out, "## Diff Coverage")
+	assert.Contains(t, out, "- Review mode: full")
 	assert.Contains(t, out, "```diff")
 	assert.Contains(t, out, "diff --git a/foo.go b/foo.go")
 	assert.Contains(t, out, "Looks good overall.")
@@ -121,7 +127,7 @@ func TestRenderReviewSystemPrompt_DoesNotWrapRenderedReviewDiffInOuterFence(t *t
 	})
 	require.NoError(t, err)
 
-	diffStart := strings.Index(out, "## Diff")
+	diffStart := strings.Index(out, "\n## Diff\n")
 	diffEnd := strings.Index(out, "## Your Role")
 	require.GreaterOrEqual(t, diffStart, 0, "diff section must be present")
 	require.Greater(t, diffEnd, diffStart, "role section must follow diff section")
@@ -131,6 +137,34 @@ func TestRenderReviewSystemPrompt_DoesNotWrapRenderedReviewDiffInOuterFence(t *t
 	assert.Contains(t, diffSection, "internal/review.go")
 	assert.Equal(t, 1, strings.Count(diffSection, "```diff"), "prompt should preserve only the rendered per-file diff fence")
 	assert.NotContains(t, diffSection, "## Diff\n```diff\n# Review diff", "prompt must not wrap rendered markdown in an outer diff fence")
+}
+
+func TestRenderReviewSystemPrompt_MultiChunkCoverageWording(t *testing.T) {
+	data := baseReviewData()
+	data.Diff = "# Review diff\n\n## first.go\n\n```diff\n+first\n```\n"
+	data.CoverageSummary = "## Diff Coverage\n\n- Review mode: chunked\n- Chunks included in this prompt: 1/3\n- PR-level planned review chunks: 3\n"
+	data.ReviewMode = string(reviewdiff.CoverageModeChunked)
+	data.ChunkIndex = 1
+	data.TotalChunks = 3
+	data.OnlyFirstChunkIncluded = true
+
+	out, err := renderReviewSystemPrompt(data)
+	require.NoError(t, err)
+
+	assert.Contains(t, out, "## Diff Coverage")
+	assert.Contains(t, out, "- Review mode: chunked")
+	assert.NotContains(t, out, "- Chunks reviewed:")
+	assert.Contains(t, out, "Only chunk 1/3 is included in this interactive prompt")
+	assert.Contains(t, out, "Additional chunks are not hidden as reviewed")
+
+	diffStart := strings.Index(out, "\n## Diff\n")
+	diffEnd := strings.Index(out, "## Your Role")
+	require.GreaterOrEqual(t, diffStart, 0, "diff section must be present")
+	require.Greater(t, diffEnd, diffStart, "role section must follow diff section")
+	diffSection := out[diffStart:diffEnd]
+
+	assert.Equal(t, 1, strings.Count(diffSection, "```diff"), "prompt should preserve only rendered per-file diff fences")
+	assert.NotContains(t, diffSection, "## Diff\n```", "prompt must not wrap rendered markdown in an outer fence")
 }
 
 func TestReviewSystemPrompt_IncludesFixGuidance(t *testing.T) {
@@ -208,9 +242,12 @@ func baseReviewData() *reviewCmdPromptData {
 		PRBaseBranch: "main",
 		PRHeadBranch: "feature/x",
 		Diff:         "diff body",
-		CIStatus:     "success",
-		RepoOwner:    "example",
-		RepoName:     "repo",
+		CoverageSummary: "## Diff Coverage\n\n" +
+			"- Source: github-raw-diff\n" +
+			"- Review mode: full\n",
+		CIStatus:  "success",
+		RepoOwner: "example",
+		RepoName:  "repo",
 	}
 }
 
@@ -282,7 +319,7 @@ func TestBuildReviewPromptDataFallsBackWhenRawDiffTooLarge(t *testing.T) {
 		checks: &mockReviewPromptCheckService{},
 	}
 
-	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir())
+	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.DefaultChunkOptions())
 
 	require.NoError(t, err)
 	assert.True(t, prs.getDiffCalled)
@@ -291,6 +328,197 @@ func TestBuildReviewPromptDataFallsBackWhenRawDiffTooLarge(t *testing.T) {
 	assert.Contains(t, data.Diff, "Source: github-files-api")
 	assert.Contains(t, data.Diff, "src/review.go")
 	assert.Contains(t, data.Diff, "+bounded")
+	assert.Contains(t, data.CoverageSummary, "## Diff Coverage")
+	assert.Contains(t, data.CoverageSummary, "- Source: github-files-api")
+}
+
+func TestBuildReviewPromptDataUsesChunkPlanningForInteractivePrompt(t *testing.T) {
+	prs := &mockReviewPromptPRService{
+		diffErr: platform.ErrPullRequestDiffTooLarge,
+		files: []*platform.PullRequestFile{
+			reviewPromptFile("src/first.go", "+first chunk body\n"),
+			reviewPromptFile("src/second.go", "+second chunk body\n"),
+			reviewPromptFile("src/third.go", "+third chunk body\n"),
+		},
+	}
+	client := &mockReviewPromptPlatform{
+		prs:    prs,
+		issues: &mockReviewPromptIssueService{},
+		checks: &mockReviewPromptCheckService{},
+	}
+
+	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+		MaxChunkBytes:            1000,
+		MaxFileDiffBytes:         1000,
+		MaxFilesPerChunk:         1,
+		MaxChunks:                8,
+		MaxOmittedSummaryEntries: reviewdiff.DefaultMaxOmittedSummaryEntries,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, string(reviewdiff.CoverageModeChunked), data.ReviewMode)
+	assert.Equal(t, 1, data.ChunkIndex)
+	assert.Equal(t, 3, data.TotalChunks)
+	assert.True(t, data.OnlyFirstChunkIncluded)
+	assert.False(t, data.PartialReview)
+	assert.Contains(t, data.CoverageSummary, "## Diff Coverage")
+	assert.Contains(t, data.CoverageSummary, "- Review mode: chunked")
+	assert.Contains(t, data.CoverageSummary, "- Chunks included in this prompt: 1/3")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned review chunks: 3")
+	assert.Contains(t, data.CoverageSummary, "- PR-level file coverage:")
+	assert.Contains(t, data.CoverageSummary, "  - Files included in planned review chunks: 3")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned chunks:")
+	assert.Contains(t, data.CoverageSummary, "  - Chunk 1/3: 1 files")
+	assert.Contains(t, data.CoverageSummary, "  - Chunk 2/3: 1 files")
+	assert.NotContains(t, data.CoverageSummary, "- Chunks reviewed:")
+	assert.NotContains(t, data.CoverageSummary, "- Files reviewed:")
+	assert.Contains(t, data.Diff, "src/first.go")
+	assert.Contains(t, data.Diff, "+first chunk body")
+	assert.NotContains(t, data.Diff, "+second chunk body")
+	assert.NotContains(t, data.Diff, "+third chunk body")
+
+	out, err := renderReviewSystemPrompt(data)
+	require.NoError(t, err)
+	assert.Contains(t, out, "Only chunk 1/3 is included in this interactive prompt")
+	assert.Contains(t, out, "Additional chunks are not hidden as reviewed")
+	assert.NotContains(t, out, "+second chunk body")
+	assert.NotContains(t, out, "+third chunk body")
+	assert.NotContains(t, out, "## Diff\n```", "rendered diff markdown must not be wrapped in an outer fence")
+}
+
+func TestBuildReviewPromptDataMarksPartialCoverage(t *testing.T) {
+	prs := &mockReviewPromptPRService{
+		diffErr: platform.ErrPullRequestDiffTooLarge,
+		files: []*platform.PullRequestFile{
+			reviewPromptFile("src/reviewed.go", "+reviewed body\n"),
+			reviewPromptFile("src/not-reviewed.go", "+not reviewed body\n"),
+		},
+	}
+	client := &mockReviewPromptPlatform{
+		prs:    prs,
+		issues: &mockReviewPromptIssueService{},
+		checks: &mockReviewPromptCheckService{},
+	}
+
+	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+		MaxChunkBytes:            1000,
+		MaxFileDiffBytes:         1000,
+		MaxFilesPerChunk:         1,
+		MaxChunks:                1,
+		MaxOmittedSummaryEntries: reviewdiff.DefaultMaxOmittedSummaryEntries,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, string(reviewdiff.CoverageModePartial), data.ReviewMode)
+	assert.Equal(t, 2, data.TotalChunks)
+	assert.True(t, data.OnlyFirstChunkIncluded)
+	assert.True(t, data.PartialReview)
+	assert.Contains(t, data.CoverageSummary, "- Review mode: partial")
+	assert.Contains(t, data.CoverageSummary, "- Chunks included in this prompt: 1/2")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned review chunks: 2")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned file coverage is partial")
+	assert.Contains(t, data.CoverageSummary, "maximum planned review chunks exceeded")
+	assert.Contains(t, data.CoverageSummary, "- Required chunks: 2; max chunks: 1")
+	assert.NotContains(t, data.CoverageSummary, "- Chunks reviewed:")
+	assert.Contains(t, data.Diff, "+reviewed body")
+	assert.NotContains(t, data.Diff, "+not reviewed body")
+
+	out, err := renderReviewSystemPrompt(data)
+	require.NoError(t, err)
+	assert.Contains(t, out, "Only chunk 1/2 is included in this interactive prompt")
+	assert.Contains(t, out, "Review only the included diffs in this chunk")
+}
+
+func TestBuildReviewPromptDataZeroChunksDoesNotUseLegacyRenderedDiff(t *testing.T) {
+	legacyPatch := "@@ -1 +1 @@\n-old\n+" + strings.Repeat("legacy-rendered-patch-marker", 4) + "\n"
+	prs := &mockReviewPromptPRService{
+		diffErr: platform.ErrPullRequestDiffTooLarge,
+		files: []*platform.PullRequestFile{
+			reviewPromptFile("src/oversized.go", legacyPatch),
+		},
+	}
+	client := &mockReviewPromptPlatform{
+		prs:    prs,
+		issues: &mockReviewPromptIssueService{},
+		checks: &mockReviewPromptCheckService{},
+	}
+
+	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+		MaxChunkBytes:            20,
+		MaxFileDiffBytes:         1000,
+		MaxFilesPerChunk:         10,
+		MaxChunks:                8,
+		MaxOmittedSummaryEntries: reviewdiff.DefaultMaxOmittedSummaryEntries,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, string(reviewdiff.CoverageModePartial), data.ReviewMode)
+	assert.Equal(t, 0, data.ChunkIndex)
+	assert.Equal(t, 0, data.TotalChunks)
+	assert.False(t, data.OnlyFirstChunkIncluded)
+	assert.True(t, data.NoReviewableChunks)
+	assert.True(t, data.PartialReview)
+	assert.Contains(t, data.CoverageSummary, "- Review mode: partial")
+	assert.Contains(t, data.CoverageSummary, "- Chunks included in this prompt: 0/0")
+	assert.Contains(t, data.CoverageSummary, "- PR-level planned review chunks: 0")
+	assert.Contains(t, data.CoverageSummary, "  - Files not included in review chunks: 1")
+	assert.Contains(t, data.CoverageSummary, "file diff exceeds maximum reviewable size")
+	assert.Contains(t, data.CoverageSummary, "src/oversized.go")
+	assert.Contains(t, data.Diff, "No reviewable diff chunks were produced")
+	assert.Contains(t, data.Diff, "- Review mode: partial")
+	assert.NotContains(t, data.Diff, "legacy-rendered-patch-marker")
+
+	out, err := renderReviewSystemPrompt(data)
+	require.NoError(t, err)
+	assert.Contains(t, out, "No reviewable diff chunks were produced")
+	assert.Contains(t, out, "this interactive prompt includes no source diffs to review")
+	assert.Contains(t, out, "The Diff Coverage section is authoritative for omitted paths and reasons")
+	assert.Contains(t, out, "do not conclude that the PR was reviewed")
+	assert.Contains(t, out, "- PR-level planned file coverage is partial")
+	assert.NotContains(t, out, "legacy-rendered-patch-marker")
+	assert.NotContains(t, out, "Review coverage is complete")
+}
+
+func TestReviewDiffChunkOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.ReviewDiff
+		want reviewdiff.ChunkOptions
+	}{
+		{
+			name: "maps configured limits",
+			cfg: config.ReviewDiff{
+				MaxChunkBytes:    123,
+				MaxFileBytes:     45,
+				MaxFilesPerChunk: 6,
+				MaxChunks:        7,
+			},
+			want: reviewdiff.ChunkOptions{
+				MaxChunkBytes:            123,
+				MaxFileDiffBytes:         45,
+				MaxFilesPerChunk:         6,
+				MaxChunks:                7,
+				MaxOmittedSummaryEntries: reviewdiff.DefaultMaxOmittedSummaryEntries,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, reviewDiffChunkOptions(tt.cfg))
+		})
+	}
+}
+
+func reviewPromptFile(path, addedLine string) *platform.PullRequestFile {
+	return &platform.PullRequestFile{
+		Path:      path,
+		Status:    "modified",
+		Additions: 1,
+		Deletions: 0,
+		Changes:   1,
+		Patch:     "@@ -1,0 +1,1 @@\n" + addedLine,
+	}
 }
 
 type mockReviewPromptPlatform struct {

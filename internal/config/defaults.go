@@ -31,8 +31,14 @@ func Default() *Config {
 			ReviewMaxFixCycles:            0,
 			ReviewStrictness:              "standard",
 			ReviewFixSeverity:             "low",
-			CIMaxFixCycles:                0,
-			CIWorkflows:                   nil,
+			ReviewDiff: ReviewDiff{
+				MaxChunkBytes:    180000,
+				MaxFileBytes:     40000,
+				MaxFilesPerChunk: 80,
+				MaxChunks:        8,
+			},
+			CIMaxFixCycles: 0,
+			CIWorkflows:    nil,
 		},
 		Monitor: Monitor{
 			PatrolIntervalMinutes: 15,

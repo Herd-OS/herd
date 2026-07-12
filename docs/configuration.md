@@ -52,6 +52,11 @@ integrator:
   review_max_fix_cycles: 0       # max fix-and-re-review cycles (0 = unlimited)
   review_strictness: "standard"  # standard | strict | lenient
   review_fix_severity: "low"     # minimum severity to create fix workers: high | medium | low
+  review_diff:                   # bounded diff input for agent review
+    max_chunk_bytes: 180000
+    max_file_bytes: 40000
+    max_files_per_chunk: 80
+    max_chunks: 8
   ci_max_fix_cycles: 0           # max CI-failure fix cycles (0 = unlimited)
 
 monitor:
@@ -243,9 +248,9 @@ Controls how aggressively the agent reviewer flags issues:
 Findings are classified by severity:
 - **HIGH**: Bugs, security vulnerabilities, race conditions, missing critical error handling — triggers fix workers
 - **MEDIUM**: Missing edge cases, suboptimal error handling — triggers fix workers
-- **LOW**: Style preferences, naming suggestions — informational only
+- **LOW**: Style preferences, naming suggestions
 
-HIGH and MEDIUM severity findings create fix issues and dispatch workers. LOW findings are listed in the PR comment for reference.
+Findings at or above `integrator.review_fix_severity` create fix issues and dispatch workers. Findings below that threshold are listed in the PR comment for reference.
 
 ## Agent Review
 
@@ -253,7 +258,29 @@ The review agent runs in a strict output mode. It is instructed not to take any 
 
 Review input is bounded so very large PRs can still be reviewed. In runner and local CLI contexts, HerdOS first tries to build the review diff from the local checkout (`local-git`). If local git diff collection is unavailable, it falls back to GitHub's raw PR diff (`github-raw-diff`), and if GitHub refuses that raw diff because it is too large or unavailable, HerdOS falls back to changed-file metadata and bounded patches from the GitHub files API (`github-files-api`). GitHub raw PR diff size limits therefore do not abort review when local git or files API fallback can provide review input.
 
-Generated files, binary files, large lockfile diffs, mode-only changes, and files beyond HerdOS's internal byte/file limits may be summarized, omitted, or truncated before being sent to the agent. When review input is limited, HerdOS posts or logs a **Diff Coverage** summary showing the source, included file count, omitted file count, truncated file count, warnings, and omitted paths with reasons. The same coverage information is included with review comments when omissions or truncation affected what the agent saw.
+Large PRs are split into bounded chunks for headless Integrator reviews and standalone `/herd review` reviews. Each chunk is reviewed by a separate strict-output agent invocation, then HerdOS aggregates findings into one coherent review result.
+
+```yaml
+integrator:
+  review_diff:
+    max_chunk_bytes: 180000
+    max_file_bytes: 40000
+    max_files_per_chunk: 80
+    max_chunks: 8
+```
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `integrator.review_diff.max_chunk_bytes` | `180000` | Maximum rendered diff bytes per review chunk. |
+| `integrator.review_diff.max_file_bytes` | `40000` | Maximum rendered diff bytes for one file before HerdOS may truncate or summarize it. |
+| `integrator.review_diff.max_files_per_chunk` | `80` | Maximum files included in one review chunk. |
+| `integrator.review_diff.max_chunks` | `8` | Maximum chunks reviewed for one PR; validation caps this at `20`. |
+
+All `review_diff` values must be positive. Raising `max_chunks` can improve coverage on very large PRs, but it also increases runtime, token usage, and cost because each chunk is a separate agent review.
+
+Generated files, binary files, large lockfile diffs, mode-only changes, source-unavailable patches, and files beyond HerdOS's internal byte/file limits may be summarized, omitted, or truncated before being sent to the agent. When review input is limited, HerdOS posts or logs a **Diff Coverage** summary showing the source, included file count, omitted file count, truncated file count, warnings, and omitted paths with reasons. The same coverage information is included with review comments when omissions or truncation affected what the agent saw.
+
+Normal approval is blocked when material source files are not reviewed or when the configured `max_chunks` limit prevents complete review coverage. In that case HerdOS requests changes with a coverage warning instead of approving or auto-merging from a partial review.
 
 If the agent returns unparseable output (e.g., the JSON cannot be decoded, or the output is empty/error-like), the integrator retries once after a 5-second delay within the same invocation. If both attempts fail, the integrator posts the following comment on the batch PR and sets the review aside without creating fix workers:
 

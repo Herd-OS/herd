@@ -57,6 +57,16 @@ The following comments were posted by fix workers in previous cycles. The worker
 ---
 {{end}}
 {{end}}
+{{if .ChunkedReview}}
+## Review Chunk
+- Chunk: {{.ChunkIndex}} of {{.TotalChunks}}
+{{if .ChunkIncludedPathRange}}- Included path range: {{.ChunkIncludedPathRange}}{{end}}
+- Scope: Review only the included diffs in this chunk. Do not assume files from other chunks are present here; they are reviewed in separate strict-output runs.
+{{end}}
+{{if .CoverageSummary}}
+## Review Coverage Context
+{{.CoverageSummary}}
+{{end}}
 ## Diff
 
 {{.Diff}}
@@ -110,16 +120,22 @@ Respond with JSON only — no markdown fencing, no surrounding text.`
 
 // ReviewPromptData is the template input for [ReviewPromptTemplate].
 type ReviewPromptData struct {
-	AcceptanceCriteria   []string
-	Diff                 string
-	RoleInstructions     string
-	Strictness           string
-	StrictnessUpper      string
-	MinFixSeverity       string
-	MinFixSeverityDesc   string
-	PriorReviewComments  []string
-	UserFeedbackComments []string
-	WorkerNoOpVerdicts   []string
+	AcceptanceCriteria     []string
+	Diff                   string
+	RoleInstructions       string
+	Strictness             string
+	StrictnessUpper        string
+	MinFixSeverity         string
+	MinFixSeverityDesc     string
+	PriorReviewComments    []string
+	UserFeedbackComments   []string
+	WorkerNoOpVerdicts     []string
+	ChunkIndex             int
+	TotalChunks            int
+	ChunkIncludedPathRange string
+	CoverageSummary        string
+	ChunkedReview          bool
+	PartialReview          bool
 }
 
 // RenderReviewPrompt renders [ReviewPromptTemplate] for the given diff and
@@ -148,15 +164,21 @@ func RenderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 	}
 
 	data := ReviewPromptData{
-		AcceptanceCriteria:   opts.AcceptanceCriteria,
-		Diff:                 diff,
-		Strictness:           strictness,
-		StrictnessUpper:      strings.ToUpper(strictness),
-		MinFixSeverity:       minSev,
-		MinFixSeverityDesc:   sevDesc,
-		PriorReviewComments:  opts.PriorReviewComments,
-		UserFeedbackComments: opts.UserFeedbackComments,
-		WorkerNoOpVerdicts:   opts.WorkerNoOpVerdicts,
+		AcceptanceCriteria:     opts.AcceptanceCriteria,
+		Diff:                   diff,
+		Strictness:             strictness,
+		StrictnessUpper:        strings.ToUpper(strictness),
+		MinFixSeverity:         minSev,
+		MinFixSeverityDesc:     sevDesc,
+		PriorReviewComments:    opts.PriorReviewComments,
+		UserFeedbackComments:   opts.UserFeedbackComments,
+		WorkerNoOpVerdicts:     opts.WorkerNoOpVerdicts,
+		ChunkIndex:             opts.ChunkIndex,
+		TotalChunks:            opts.TotalChunks,
+		ChunkIncludedPathRange: opts.ChunkIncludedPathRange,
+		CoverageSummary:        opts.CoverageSummary,
+		ChunkedReview:          opts.ChunkedReview,
+		PartialReview:          opts.PartialReview,
 	}
 
 	// Use role instructions passed by the caller (integrator loads .herd/integrator.md)

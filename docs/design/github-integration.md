@@ -323,7 +323,7 @@ Batch PRs should go through branch protection. HerdOS does not create or mutate
 branch protection rules; repository administrators configure them in GitHub.
 Two modes:
 
-- **Review required (default):** A human reviews the consolidated batch PR. The reviewer sees the complete feature as one diff. Recommended starting point.
+- **Review required (default):** A human reviews the consolidated batch PR. HerdOS reports review coverage and may split large diffs into bounded review chunks before approval. Recommended starting point.
 - **No review required:** Fully autonomous with `auto_merge: true`. Best for trusted codebases with strong CI.
 
 A middle ground: require review only for PRs touching specific paths (security-sensitive code, configuration).

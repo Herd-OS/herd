@@ -9,6 +9,8 @@ import (
 
 var buildSecretNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+const MaxReviewDiffChunks = 20
+
 // ValidationError holds one or more validation errors.
 type ValidationError struct {
 	Errors   []string
@@ -143,6 +145,21 @@ func Validate(cfg *Config) *ValidationError {
 	}
 	if cfg.Integrator.CIMaxFixCycles < 0 {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.ci_max_fix_cycles must be >= 0 (0 = unlimited), got %d", cfg.Integrator.CIMaxFixCycles))
+	}
+	if cfg.Integrator.ReviewDiff.MaxChunkBytes <= 0 {
+		ve.Errors = append(ve.Errors, "integrator.review_diff.max_chunk_bytes must be > 0")
+	}
+	if cfg.Integrator.ReviewDiff.MaxFileBytes <= 0 {
+		ve.Errors = append(ve.Errors, "integrator.review_diff.max_file_bytes must be > 0")
+	}
+	if cfg.Integrator.ReviewDiff.MaxFilesPerChunk <= 0 {
+		ve.Errors = append(ve.Errors, "integrator.review_diff.max_files_per_chunk must be > 0")
+	}
+	if cfg.Integrator.ReviewDiff.MaxChunks <= 0 {
+		ve.Errors = append(ve.Errors, "integrator.review_diff.max_chunks must be > 0")
+	}
+	if cfg.Integrator.ReviewDiff.MaxChunks > MaxReviewDiffChunks {
+		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.review_diff.max_chunks must be <= %d", MaxReviewDiffChunks))
 	}
 	seenCIWorkflows := map[string]struct{}{}
 	for i, workflow := range cfg.Integrator.CIWorkflows {

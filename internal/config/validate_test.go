@@ -112,6 +112,106 @@ func TestValidate_IntegratorCIWorkflows(t *testing.T) {
 	}
 }
 
+func TestValidate_IntegratorReviewDiff(t *testing.T) {
+	tests := []struct {
+		name      string
+		modify    func(*ReviewDiff)
+		wantError string
+	}{
+		{
+			name: "defaults are valid",
+		},
+		{
+			name: "max chunk bytes zero is invalid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxChunkBytes = 0
+			},
+			wantError: "integrator.review_diff.max_chunk_bytes must be > 0",
+		},
+		{
+			name: "max chunk bytes negative is invalid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxChunkBytes = -1
+			},
+			wantError: "integrator.review_diff.max_chunk_bytes must be > 0",
+		},
+		{
+			name: "max file bytes zero is invalid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxFileBytes = 0
+			},
+			wantError: "integrator.review_diff.max_file_bytes must be > 0",
+		},
+		{
+			name: "max file bytes negative is invalid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxFileBytes = -1
+			},
+			wantError: "integrator.review_diff.max_file_bytes must be > 0",
+		},
+		{
+			name: "max files per chunk zero is invalid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxFilesPerChunk = 0
+			},
+			wantError: "integrator.review_diff.max_files_per_chunk must be > 0",
+		},
+		{
+			name: "max files per chunk negative is invalid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxFilesPerChunk = -1
+			},
+			wantError: "integrator.review_diff.max_files_per_chunk must be > 0",
+		},
+		{
+			name: "max chunks zero is invalid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxChunks = 0
+			},
+			wantError: "integrator.review_diff.max_chunks must be > 0",
+		},
+		{
+			name: "max chunks negative is invalid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxChunks = -1
+			},
+			wantError: "integrator.review_diff.max_chunks must be > 0",
+		},
+		{
+			name: "max chunks upper bound is valid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxChunks = MaxReviewDiffChunks
+			},
+		},
+		{
+			name: "max chunks above upper bound is invalid",
+			modify: func(rd *ReviewDiff) {
+				rd.MaxChunks = MaxReviewDiffChunks + 1
+			},
+			wantError: "integrator.review_diff.max_chunks must be <= 20",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			if tt.modify != nil {
+				tt.modify(&cfg.Integrator.ReviewDiff)
+			}
+
+			ve := Validate(cfg)
+			if tt.wantError != "" {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.wantError)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
 func TestValidate_ImagePublishRunsOn(t *testing.T) {
 	tests := []struct {
 		name       string

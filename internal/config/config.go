@@ -134,16 +134,24 @@ type Workers struct {
 }
 
 type Integrator struct {
-	Strategy                      string   `yaml:"strategy"`
-	OnConflict                    string   `yaml:"on_conflict"`
-	MaxConflictResolutionAttempts int      `yaml:"max_conflict_resolution_attempts"`
-	RequireCI                     bool     `yaml:"require_ci"`
-	Review                        bool     `yaml:"review"`
-	ReviewMaxFixCycles            int      `yaml:"review_max_fix_cycles"`
-	ReviewStrictness              string   `yaml:"review_strictness"`   // "standard", "strict", "lenient"
-	ReviewFixSeverity             string   `yaml:"review_fix_severity"` // minimum severity to fix: "high", "medium", "low" (default: "medium")
-	CIMaxFixCycles                int      `yaml:"ci_max_fix_cycles"`
-	CIWorkflows                   []string `yaml:"ci_workflows,omitempty"`
+	Strategy                      string     `yaml:"strategy"`
+	OnConflict                    string     `yaml:"on_conflict"`
+	MaxConflictResolutionAttempts int        `yaml:"max_conflict_resolution_attempts"`
+	RequireCI                     bool       `yaml:"require_ci"`
+	Review                        bool       `yaml:"review"`
+	ReviewMaxFixCycles            int        `yaml:"review_max_fix_cycles"`
+	ReviewStrictness              string     `yaml:"review_strictness"`   // "standard", "strict", "lenient"
+	ReviewFixSeverity             string     `yaml:"review_fix_severity"` // minimum severity to fix: "high", "medium", "low" (default: "medium")
+	ReviewDiff                    ReviewDiff `yaml:"review_diff"`
+	CIMaxFixCycles                int        `yaml:"ci_max_fix_cycles"`
+	CIWorkflows                   []string   `yaml:"ci_workflows,omitempty"`
+}
+
+type ReviewDiff struct {
+	MaxChunkBytes    int `yaml:"max_chunk_bytes"`
+	MaxFileBytes     int `yaml:"max_file_bytes"`
+	MaxFilesPerChunk int `yaml:"max_files_per_chunk"`
+	MaxChunks        int `yaml:"max_chunks"`
 }
 
 type Monitor struct {

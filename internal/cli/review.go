@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -66,7 +67,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
-	data, err := buildReviewPromptData(ctx, client, prNumber, cfg.Platform.Owner, cfg.Platform.Repo, dir)
+	data, err := buildReviewPromptData(ctx, client, prNumber, cfg.Platform.Owner, cfg.Platform.Repo, dir, reviewDiffChunkOptions(cfg.Integrator.ReviewDiff))
 	if err != nil {
 		return err
 	}
@@ -91,7 +92,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 	})
 }
 
-func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int, owner, repo, repoRoot string) (*reviewCmdPromptData, error) {
+func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int, owner, repo, repoRoot string, opts reviewdiff.ChunkOptions) (*reviewCmdPromptData, error) {
 	pr, err := client.PullRequests().Get(ctx, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("getting PR #%d: %w", prNumber, err)
@@ -106,6 +107,18 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 	})
 	if err != nil {
 		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
+	}
+	plan := reviewdiff.ChunkForReview(preparedDiff.DiffSet, opts)
+	diff := renderZeroChunkReviewDiff(plan)
+	chunkIndex := 0
+	totalChunks := len(plan.Chunks)
+	if plan.Coverage.RequiredChunks > totalChunks {
+		totalChunks = plan.Coverage.RequiredChunks
+	}
+	if len(plan.Chunks) > 0 {
+		firstChunk := plan.Chunks[0]
+		diff = firstChunk.Text
+		chunkIndex = firstChunk.Index
 	}
 
 	var general []reviewCmdComment
@@ -140,33 +153,71 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 	}
 
 	return &reviewCmdPromptData{
-		PRNumber:       prNumber,
-		PRTitle:        pr.Title,
-		PRURL:          pr.URL,
-		PRBaseBranch:   pr.Base,
-		PRHeadBranch:   pr.Head,
-		Diff:           preparedDiff.Rendered.Text,
-		Comments:       general,
-		InlineComments: inline,
-		CIStatus:       ciStatus,
-		RepoOwner:      owner,
-		RepoName:       repo,
+		PRNumber:               prNumber,
+		PRTitle:                pr.Title,
+		PRURL:                  pr.URL,
+		PRBaseBranch:           pr.Base,
+		PRHeadBranch:           pr.Head,
+		Diff:                   diff,
+		ReviewMode:             string(plan.Coverage.ReviewMode),
+		ChunkIndex:             chunkIndex,
+		TotalChunks:            totalChunks,
+		CoverageSummary:        reviewdiff.FormatInteractivePromptCoverageSummary(plan, 1, reviewdiff.DefaultMaxOmittedSummaryEntries),
+		PartialReview:          !plan.Coverage.Complete,
+		OnlyFirstChunkIncluded: totalChunks > 1,
+		NoReviewableChunks:     !plan.Coverage.Complete && len(plan.Chunks) == 0 && chunkIndex == 0,
+		Comments:               general,
+		InlineComments:         inline,
+		CIStatus:               ciStatus,
+		RepoOwner:              owner,
+		RepoName:               repo,
 	}, nil
 }
 
+func renderZeroChunkReviewDiff(plan reviewdiff.ChunkPlan) string {
+	var b strings.Builder
+	source := plan.Coverage.Source
+	if source == "" {
+		source = "unknown"
+	}
+	b.WriteString("# Review diff\n\n")
+	fmt.Fprintf(&b, "- Source: %s\n", source)
+	fmt.Fprintf(&b, "- Total files: %d\n", plan.Coverage.TotalFiles)
+	fmt.Fprintf(&b, "- Review mode: %s\n", plan.Coverage.ReviewMode)
+	b.WriteString("- No reviewable diff chunks were produced; see Diff Coverage for omitted paths and reasons.\n")
+	return b.String()
+}
+
+func reviewDiffChunkOptions(cfg config.ReviewDiff) reviewdiff.ChunkOptions {
+	return reviewdiff.ChunkOptions{
+		MaxChunkBytes:            cfg.MaxChunkBytes,
+		MaxFileDiffBytes:         cfg.MaxFileBytes,
+		MaxFilesPerChunk:         cfg.MaxFilesPerChunk,
+		MaxChunks:                cfg.MaxChunks,
+		MaxOmittedSummaryEntries: reviewdiff.DefaultMaxOmittedSummaryEntries,
+	}
+}
+
 type reviewCmdPromptData struct {
-	PRNumber         int
-	PRTitle          string
-	PRURL            string
-	PRBaseBranch     string
-	PRHeadBranch     string
-	Diff             string
-	Comments         []reviewCmdComment
-	InlineComments   []reviewCmdInlineComment
-	CIStatus         string
-	RoleInstructions string
-	RepoOwner        string
-	RepoName         string
+	PRNumber               int
+	PRTitle                string
+	PRURL                  string
+	PRBaseBranch           string
+	PRHeadBranch           string
+	Diff                   string
+	ReviewMode             string
+	ChunkIndex             int
+	TotalChunks            int
+	CoverageSummary        string
+	PartialReview          bool
+	OnlyFirstChunkIncluded bool
+	NoReviewableChunks     bool
+	Comments               []reviewCmdComment
+	InlineComments         []reviewCmdInlineComment
+	CIStatus               string
+	RoleInstructions       string
+	RepoOwner              string
+	RepoName               string
 }
 
 type reviewCmdComment struct {
@@ -192,6 +243,15 @@ Base: {{.PRBaseBranch}}
 Head: {{.PRHeadBranch}}
 CI status (head ref): {{.CIStatus}}
 
+{{.CoverageSummary}}
+{{if .NoReviewableChunks}}
+No reviewable diff chunks were produced for this pull request, so this interactive prompt includes no source diffs to review. The Diff Coverage section is authoritative for omitted paths and reasons; do not conclude that the PR was reviewed.
+
+{{else if .OnlyFirstChunkIncluded}}
+This pull request was split into {{.TotalChunks}} review chunks. Only chunk 1/{{.TotalChunks}} is included in this interactive prompt. Additional chunks are not hidden as reviewed; inspect them separately before making full-PR conclusions.
+Review only the included diffs in this chunk.
+
+{{end}}
 ## Diff
 {{.Diff}}
 {{if .Comments}}
