@@ -386,6 +386,37 @@ func TestHandlerDuplicateWorkerPatchAppliesOnce(t *testing.T) {
 	assert.Len(t, st.results, 1)
 }
 
+func TestHandlerTransientPatchArtifactValidationRetryRecordsSuccess(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("b", 40)}}
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Now:           func() time.Time { return now },
+		ArtifactStore: &flakyArtifactStore{store: artifactMap(t, metadata, patch), errs: []error{fmt.Errorf("artifact unavailable")}},
+		PatchApplier:  applier,
+	})
+	payload := validWorkerPayload("job-1", "head")
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	require.Equal(t, http.StatusConflict, first.Code)
+	assert.Empty(t, st.results)
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, st.results, 1)
+	assert.Equal(t, StatusSuccess, st.results[0].Status)
+	assert.Len(t, applier.requests, 1)
+	assert.Contains(t, string(st.results[0].Metadata), strings.Repeat("b", 40))
+}
+
 func TestHandlerRetriesWorkerPatchAfterApplyFailure(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
@@ -743,6 +774,22 @@ func (s artifactStore) OpenArtifact(_ context.Context, name string) (io.ReadClos
 		return nil, fmt.Errorf("missing artifact")
 	}
 	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+type flakyArtifactStore struct {
+	store artifactStore
+	errs  []error
+}
+
+func (s *flakyArtifactStore) OpenArtifact(ctx context.Context, name string) (io.ReadCloser, error) {
+	if len(s.errs) > 0 {
+		err := s.errs[0]
+		s.errs = s.errs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s.store.OpenArtifact(ctx, name)
 }
 
 type fixedPatchApplier struct {

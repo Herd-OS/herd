@@ -44,6 +44,12 @@ type StatusIdempotencyStore interface {
 	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 }
 
+type StatusMutationStore interface {
+	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
+	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
+}
+
 type StatusClient interface {
 	CreateCommitStatus(ctx context.Context, installationID int64, owner, repo, sha string, status platform.CommitStatus) error
 }
@@ -92,13 +98,21 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 				return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
 			}
 			if record.Status == "started" {
+				if repaired, err := s.repairCompletedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
+					return err
+				}
 				return fmt.Errorf("herd review status %q is already in progress", statusKey)
 			}
 		}
+		if err := s.recordStatusMutationAttempt(ctx, statusKey, repo, prNumber, headSHA, status, now); err != nil {
+			return err
+		}
 		if err := s.GitHub.CreateCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status); err != nil {
+			s.completeStatusMutation(ctx, statusKey, "failed", nil, err, now)
 			_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
 			return err
 		}
+		s.completeStatusMutation(ctx, statusKey, "completed", json.RawMessage(`{"status":"created"}`), nil, now)
 		if err := idem.CompleteIdempotencyKey(ctx, statusKey, "status:created"); err != nil {
 			return fmt.Errorf("complete Herd Review status idempotency: %w", err)
 		}
@@ -108,6 +122,64 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 		return err
 	}
 	return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
+}
+
+func (s StatusService) recordStatusMutationAttempt(ctx context.Context, key string, repo Repository, prNumber int, headSHA string, status platform.CommitStatus, now time.Time) error {
+	mutations, ok := s.Store.(StatusMutationStore)
+	if !ok {
+		return nil
+	}
+	request, err := json.Marshal(map[string]any{
+		"owner":     repo.Owner,
+		"repo":      repo.Name,
+		"pr_number": prNumber,
+		"head_sha":  headSHA,
+		"status":    status,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal Herd Review status mutation: %w", err)
+	}
+	if err := mutations.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		RepositoryID:   repo.ID,
+		MutationType:   "review_status",
+		Status:         "started",
+		Request:        request,
+		CreatedAt:      now,
+	}); err != nil {
+		return fmt.Errorf("record Herd Review status mutation attempt: %w", err)
+	}
+	return nil
+}
+
+func (s StatusService) completeStatusMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error, now time.Time) {
+	mutations, ok := s.Store.(StatusMutationStore)
+	if !ok {
+		return
+	}
+	errorMessage := ""
+	if resultErr != nil {
+		errorMessage = resultErr.Error()
+	}
+	_ = mutations.CompleteGitHubMutationAttempt(ctx, key, status, response, errorMessage, now)
+}
+
+func (s StatusService) repairCompletedStatusMutation(ctx context.Context, idem StatusIdempotencyStore, key string, repo Repository, prNumber int, headSHA string, state ReviewStatusState, description, targetURL string, now time.Time) (bool, error) {
+	mutations, ok := s.Store.(StatusMutationStore)
+	if !ok {
+		return false, nil
+	}
+	attempt, err := mutations.GetGitHubMutationAttempt(ctx, key)
+	if err != nil {
+		return false, nil
+	}
+	if attempt.Status != "completed" {
+		return false, nil
+	}
+	if err := idem.CompleteIdempotencyKey(ctx, key, "status:created"); err != nil {
+		return true, fmt.Errorf("repair Herd Review status idempotency: %w", err)
+	}
+	return true, s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
 }
 
 func (s StatusService) recordReviewState(ctx context.Context, repo Repository, prNumber int, headSHA string, state ReviewStatusState, description, targetURL string, now time.Time) error {

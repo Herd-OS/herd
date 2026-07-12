@@ -148,6 +148,48 @@ func TestHandlerProcessedMarkerFailureRedeliveryDoesNotProcessAgain(t *testing.T
 	assert.Equal(t, "processed", st.commands[0].Status)
 }
 
+func TestHandlerProcessingMarkerRedeliveryProcessesAgain(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	claims := validEventClaims(now)
+	payload := []byte(validEventPayload())
+	event, err := Parse(payload)
+	require.NoError(t, err)
+	metadata, err := eventMetadata(payload, claims)
+	require.NoError(t, err)
+	commandKey := workflowEventCommandKey(event, payload, claims)
+	commentID := workflowEventCommentID(event, payload, claims)
+	processKey := "workflow_event:" + commandKey
+	st := newEventStore()
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	st.idem[processKey] = store.IdempotencyKey{Key: processKey, Scope: "workflow_event", Status: "started", Metadata: metadata}
+	st.commands = append(st.commands, store.CommandRecord{
+		RepositoryID: 7,
+		CommentID:    commentID,
+		CommandKey:   commandKey,
+		CommandName:  event.Kind,
+		Actor:        "github-actions",
+		Status:       "processing",
+		Metadata:     metadata,
+	})
+	processor := &capturingProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(claims),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+		Processor: processor,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, eventRequest(string(payload)))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Len(t, processor.calls, 1)
+	require.Len(t, st.commands, 1)
+	assert.Equal(t, "processed", st.commands[0].Status)
+	assert.Equal(t, "completed", st.idem[processKey].Status)
+}
+
 func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()

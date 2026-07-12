@@ -170,6 +170,14 @@ func TestRegisterHandlerFailures(t *testing.T) {
 			wantError:  "App installation",
 		},
 		{
+			name:       "app verifier transient failure",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{repo: validSetupRepository()},
+			app:        &fakeAppVerifier{err: errors.New("github 500")},
+			wantStatus: http.StatusBadGateway,
+			wantError:  "GitHub unavailable",
+		},
+		{
 			name:       "wrong app login",
 			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human","app_login":"other-app"}`,
 			setup:      &fakeSetupVerifier{repo: validSetupRepository()},

@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -97,10 +98,29 @@ func TestSetHerdReviewStatusRetryAfterStateFailureDoesNotDuplicateGitHubStatus(t
 	assert.Equal(t, "success", st.states[0].Status)
 }
 
+func TestSetHerdReviewStatusRetryAfterCompleteIdempotencyFailureRepairsFromMutation(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{completeErrs: []error{errors.New("database down"), nil}}
+	gh := &fakeStatusGitHub{}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	firstErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+	secondErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "complete Herd Review status idempotency")
+	require.NoError(t, secondErr)
+	assert.Len(t, gh.statuses, 1)
+	require.Len(t, st.states, 1)
+	assert.Equal(t, "success", st.states[0].Status)
+}
+
 type fakeStatusStore struct {
-	states []store.ReviewState
-	errs   []error
-	idem   map[string]store.IdempotencyKey
+	states           []store.ReviewState
+	errs             []error
+	completeErrs     []error
+	idem             map[string]store.IdempotencyKey
+	mutationAttempts []store.GitHubMutationAttempt
 }
 
 func (s *fakeStatusStore) SetReviewState(_ context.Context, state store.ReviewState) error {
@@ -135,6 +155,13 @@ func (s *fakeStatusStore) GetIdempotencyKey(_ context.Context, key string) (stor
 }
 
 func (s *fakeStatusStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	if len(s.completeErrs) > 0 {
+		err := s.completeErrs[0]
+		s.completeErrs = s.completeErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	record, ok := s.idem[key]
 	if !ok {
 		return store.ErrNotFound
@@ -145,6 +172,33 @@ func (s *fakeStatusStore) CompleteIdempotencyKey(_ context.Context, key string, 
 	record.CompletedAt = &now
 	s.idem[key] = record
 	return nil
+}
+
+func (s *fakeStatusStore) RecordGitHubMutationAttempt(_ context.Context, attempt store.GitHubMutationAttempt) error {
+	s.mutationAttempts = append(s.mutationAttempts, attempt)
+	return nil
+}
+
+func (s *fakeStatusStore) CompleteGitHubMutationAttempt(_ context.Context, key string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
+	for i := range s.mutationAttempts {
+		if s.mutationAttempts[i].IdempotencyKey == key {
+			s.mutationAttempts[i].Status = status
+			s.mutationAttempts[i].Response = response
+			s.mutationAttempts[i].Error = errorMessage
+			s.mutationAttempts[i].CompletedAt = &completedAt
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (s *fakeStatusStore) GetGitHubMutationAttempt(_ context.Context, key string) (store.GitHubMutationAttempt, error) {
+	for _, attempt := range s.mutationAttempts {
+		if attempt.IdempotencyKey == key {
+			return attempt, nil
+		}
+	}
+	return store.GitHubMutationAttempt{}, store.ErrNotFound
 }
 
 func (s *fakeStatusStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {

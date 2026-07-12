@@ -293,11 +293,7 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		result.Created = false
 		return result, nil
 	}
-	inputs, inputErr := WorkflowInputs(req, metadata.JobID)
-	if inputErr != nil {
-		return DispatchResult{}, inputErr
-	}
-	return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false, false)
+	return DispatchResult{}, fmt.Errorf("workflow dispatch %q is already in progress", idempotencyKey)
 }
 
 func (d Dispatcher) completedDispatchMutation(ctx context.Context, idempotencyKey string) (bool, DispatchResult, error) {

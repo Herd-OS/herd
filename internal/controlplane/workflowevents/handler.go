@@ -156,6 +156,14 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !shouldProcess {
+		commandKey := workflowEventCommandKey(event, payload, claims)
+		commentID := workflowEventCommentID(event, payload, claims)
+		if record, recordErr := h.store.GetCommandRecord(r.Context(), repo.ID, commentID, commandKey); recordErr == nil && record.Status != "processed" {
+			if err := h.markWorkflowEventProcessed(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
+				return
+			}
+		}
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"status":  "accepted",
 			"created": false,
@@ -210,6 +218,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := h.markWorkflowEventProcessed(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
+		_ = h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
 		return
 	}
@@ -259,7 +268,7 @@ func (h Handler) acquireWorkflowEvent(ctx context.Context, key string, metadata 
 
 func (h Handler) workflowEventProcessedOrRepairable(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
 	record, err := h.store.GetCommandRecord(ctx, repoID, commentID, commandKey)
-	return err == nil && (record.Status == "processed" || record.Status == "processing")
+	return err == nil && record.Status == "processed"
 }
 
 func (h Handler) markWorkflowEventProcessing(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {

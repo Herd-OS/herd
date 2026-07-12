@@ -104,8 +104,9 @@ func TestWorkersExtraEnv_EmptyOmitted(t *testing.T) {
 	// Sanity: no double blank lines around the env block. With ExtraEnv empty,
 	// the loop collapses to nothing between HERD_CONTROL_PLANE_URL and ISSUE_NUMBER.
 	assert.NotContains(t, string(rendered),
-		"HERD_CONTROL_PLANE_URL: ${{ inputs.control_plane_url || 'https://api.herd-os.com' }}\n\n          ISSUE_NUMBER:",
+		"HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}\n\n          ISSUE_NUMBER:",
 		"empty ExtraEnv produced a stray blank line in env block")
+	assert.NotContains(t, string(rendered), "HERD_CONTROL_PLANE_URL: ${{ inputs.control_plane_url")
 }
 
 func TestWorkersExtraEnv_NilSlice(t *testing.T) {

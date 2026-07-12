@@ -183,6 +183,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	patchArtifact, applyMetadata, applyErr := h.validateWorkerPatch(r.Context(), result)
 	if applyErr != nil {
+		if transientPatchValidationError(applyErr) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
+			return
+		}
 		metadata, metadataErr := resultMetadata(payload, claims, applyMetadata)
 		if metadataErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
@@ -200,11 +204,6 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metadata, err := resultMetadata(payload, claims, applyMetadata)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
-		return
-	}
 	idempotencyKey := ResultIdempotencyKey(result, payload)
 	callbackKey := "job_result:" + idempotencyKey
 	shouldProcess, err := h.acquireResultCallback(r.Context(), callbackKey, envelope.JobID, idempotencyKey)
@@ -222,7 +221,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if applyErr := h.processWorkerPatch(r.Context(), result, job, payload, patchArtifact); applyErr != nil {
+	if applyErr := h.processWorkerPatch(r.Context(), result, job, payload, patchArtifact, applyMetadata); applyErr != nil {
 		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
 		writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
 		return
@@ -230,6 +229,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := h.processReviewResult(r.Context(), result, job); err != nil {
 		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
+		return
+	}
+	metadata, err := resultMetadata(payload, claims, applyMetadata)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
 		return
 	}
 	created, err := h.store.RecordJobResult(r.Context(), store.JobResult{
@@ -406,7 +410,15 @@ func (h Handler) validateWorkerPatch(ctx context.Context, result Result) (*artif
 	return &artifact, metadata, nil
 }
 
-func (h Handler) processWorkerPatch(ctx context.Context, result Result, job store.Job, payload []byte, artifact *artifacts.ValidatedArtifact) error {
+func transientPatchValidationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "unavailable") || strings.Contains(message, "missing from artifact bundle")
+}
+
+func (h Handler) processWorkerPatch(ctx context.Context, result Result, job store.Job, payload []byte, artifact *artifacts.ValidatedArtifact, metadata map[string]any) error {
 	worker, ok := result.(WorkerCompletedResult)
 	if !ok || worker.Status != StatusSuccess || artifact == nil {
 		return nil
@@ -451,6 +463,9 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		h.completePatchMutation(ctx, idempotencyKey, "failed", nil, err)
 		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 		return err
+	}
+	if metadata != nil {
+		metadata["commit_sha"] = applyResult.CommitSHA
 	}
 	response, err = json.Marshal(applyResult)
 	if err != nil {

@@ -56,7 +56,7 @@ func TestDispatcherDuplicateDispatchIsIdempotent(t *testing.T) {
 	assert.Len(t, st.idempotencyKeys, 1)
 }
 
-func TestDispatcherDuplicateStartedWithoutCompletedMutationRetriesWorkflow(t *testing.T) {
+func TestDispatcherDuplicateStartedWithoutCompletedMutationDoesNotRedispatch(t *testing.T) {
 	st := newFakeStore()
 	req := validRequest()
 	key := IdempotencyKey(req)
@@ -64,6 +64,28 @@ func TestDispatcherDuplicateStartedWithoutCompletedMutationRetriesWorkflow(t *te
 		Key:      key,
 		Scope:    "workflow_dispatch",
 		Status:   "started",
+		Metadata: json.RawMessage(`{"job_id":"job-existing"}`),
+	}
+	st.jobs["job-existing"] = store.Job{JobID: "job-existing"}
+
+	gh := &fakeWorkflowClient{}
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already in progress")
+	assert.Empty(t, result.JobID)
+	assert.Empty(t, gh.calls)
+	assert.Equal(t, "started", st.idempotencyKeys[key].Status)
+}
+
+func TestDispatcherDuplicateFailedStartedRecordCanRetry(t *testing.T) {
+	st := newFakeStore()
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.idempotencyKeys[key] = store.IdempotencyKey{
+		Key:      key,
+		Scope:    "workflow_dispatch",
+		Status:   "failed",
 		Metadata: json.RawMessage(`{"job_id":"job-existing"}`),
 	}
 	st.jobs["job-existing"] = store.Job{JobID: "job-existing"}

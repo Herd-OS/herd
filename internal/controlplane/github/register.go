@@ -166,6 +166,10 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.appVerifier.VerifyAppAccess(r.Context(), setupRepo.InstallationID, req.Owner, req.Name); err != nil {
 		h.recordAttempt(r.Context(), setupRepo.ID, setupRepo.InstallationID, req.Owner, req.Name, "rejected", err.Error())
+		if !errors.Is(err, ErrAppInstallationMatch) {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "verify GitHub App installation access: GitHub unavailable, retry repository registration"})
+			return
+		}
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "Herd GitHub App installation cannot access this repository; update the App installation repository selection and retry `herd init`"})
 		return
 	}
@@ -255,7 +259,10 @@ func (githubSetupVerifier) VerifySetupRepository(ctx context.Context, setupToken
 	}
 	installation, _, err := client.Apps.FindRepositoryInstallation(ctx, owner, name)
 	if err != nil {
-		return SetupRepository{}, ErrAppInstallation
+		if githubStatusCode(err) == http.StatusNotFound || githubStatusCode(err) == http.StatusForbidden {
+			return SetupRepository{}, ErrAppInstallation
+		}
+		return SetupRepository{}, fmt.Errorf("find repository installation: %w", err)
 	}
 	out := SetupRepository{
 		ID:             repo.GetID(),
@@ -286,12 +293,23 @@ func (v githubAppVerifier) VerifyAppAccess(ctx context.Context, installationID i
 	}
 	repo, _, err := client.Repositories.Get(ctx, owner, name)
 	if err != nil {
-		return ErrAppInstallationMatch
+		if githubStatusCode(err) == http.StatusNotFound || githubStatusCode(err) == http.StatusForbidden {
+			return ErrAppInstallationMatch
+		}
+		return fmt.Errorf("verify installation repository access: %w", err)
 	}
 	if !strings.EqualFold(repo.GetOwner().GetLogin(), owner) || !strings.EqualFold(repo.GetName(), name) {
 		return ErrAppInstallationMatch
 	}
 	return nil
+}
+
+func githubStatusCode(err error) int {
+	var ghErr *ghapi.ErrorResponse
+	if errors.As(err, &ghErr) && ghErr.Response != nil {
+		return ghErr.Response.StatusCode
+	}
+	return 0
 }
 
 func newBootstrapToken() (plain string, hash string, err error) {

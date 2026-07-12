@@ -272,6 +272,28 @@ func TestHandlerDispatchCompletionFailureRedeliveryDoesNotDispatchAgain(t *testi
 	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
 }
 
+func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t *testing.T) {
+	st := newFakeStore()
+	st.updateErrs = []error{errors.New("store down"), nil}
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os review")
+
+	_, err := h.HandleIssueComment(context.Background(), event)
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mark command dispatched")
+	require.NoError(t, retryErr)
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+	key := "repo:42:comment:123:command:review"
+	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	require.Len(t, st.commandRecords, 1)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
+}
+
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeGitHub{}
@@ -378,6 +400,7 @@ type fakeStore struct {
 	recordErr    error
 	completeErr  error
 	completeErrs []error
+	updateErrs   []error
 
 	idempotencyKeys map[string]store.IdempotencyKey
 	commandRecords  []store.CommandRecord
@@ -470,6 +493,13 @@ func (s *fakeStore) GetCommandRecord(_ context.Context, repoID int64, commentID 
 }
 
 func (s *fakeStore) UpdateCommandStatus(_ context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error {
+	if len(s.updateErrs) > 0 {
+		err := s.updateErrs[0]
+		s.updateErrs = s.updateErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	for i, existing := range s.commandRecords {
 		if existing.RepositoryID == repoID && existing.CommentID == commentID && existing.CommandKey == commandKey {
 			existing.Status = status

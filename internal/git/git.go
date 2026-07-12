@@ -14,6 +14,7 @@ import (
 type Git struct {
 	WorkDir     string
 	ExtraConfig []string
+	Env         []string
 }
 
 type NameStatusEntry struct {
@@ -34,6 +35,10 @@ func NewWithConfig(workDir string, config ...string) *Git {
 	return &Git{WorkDir: workDir, ExtraConfig: append([]string(nil), config...)}
 }
 
+func NewWithConfigAndEnv(workDir string, config []string, env []string) *Git {
+	return &Git{WorkDir: workDir, ExtraConfig: append([]string(nil), config...), Env: append([]string(nil), env...)}
+}
+
 // Clone clones a repository into dst.
 func Clone(repoURL, dst string) error {
 	return CloneWithConfig(repoURL, dst)
@@ -41,9 +46,16 @@ func Clone(repoURL, dst string) error {
 
 // CloneWithConfig clones a repository while passing command-scoped git config.
 func CloneWithConfig(repoURL, dst string, config ...string) error {
+	return CloneWithConfigAndEnv(repoURL, dst, config, nil)
+}
+
+func CloneWithConfigAndEnv(repoURL, dst string, config []string, env []string) error {
 	args := gitArgs(config, "clone", repoURL, dst)
 	cmd := exec.Command("git", "clone", repoURL, dst)
 	cmd.Args = append([]string{"git"}, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(args), err, strings.TrimSpace(string(out)))
@@ -306,6 +318,9 @@ func (g *Git) run(args ...string) error {
 	cmdArgs := gitArgs(g.ExtraConfig, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
+	if len(g.Env) > 0 {
+		cmd.Env = append(os.Environ(), g.Env...)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, strings.TrimSpace(string(out)))
@@ -317,6 +332,9 @@ func (g *Git) output(args ...string) (string, error) {
 	cmdArgs := gitArgs(g.ExtraConfig, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
+	if len(g.Env) > 0 {
+		cmd.Env = append(os.Environ(), g.Env...)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -331,6 +349,9 @@ func (g *Git) outputBytes(args ...string) ([]byte, error) {
 	cmdArgs := gitArgs(g.ExtraConfig, args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
+	if len(g.Env) > 0 {
+		cmd.Env = append(os.Environ(), g.Env...)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

@@ -158,6 +158,7 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 			return Result{}, fmt.Errorf("dispatch command: %w", err)
 		}
 		if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, string(cmd.Kind), record.Metadata); err != nil {
+			_ = h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed")
 			return Result{}, err
 		}
 		if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed"); err != nil {
@@ -259,6 +260,11 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 				return store.Repository{}, false, "", fmt.Errorf("repair command idempotency key: %w", err)
 			}
 			return repo, false, idempotencyKey, nil
+		}
+		if dispatchable && existing.Status == "completed" && !h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
+			if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, commandKey, record.Metadata); err != nil {
+				return store.Repository{}, false, "", err
+			}
 		}
 		return repo, existing.Status != "completed", idempotencyKey, nil
 	}

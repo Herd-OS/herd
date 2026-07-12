@@ -108,6 +108,17 @@ func TestRedactTokenRemovesRawAndExtraHeaderCredentials(t *testing.T) {
 	assert.NotContains(t, err.Error(), "AUTHORIZATION: basic")
 }
 
+func TestGitAuthEnvDoesNotReturnTokenInGitConfig(t *testing.T) {
+	token := "ghs_secret_installation_token"
+	env, cleanup, err := gitAuthEnv(t.TempDir(), "https://github.com/acme/widgets.git", token)
+	defer cleanup()
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, env)
+	assert.NotContains(t, strings.Join(env, "\n"), token)
+	assert.NotContains(t, strings.Join(env, "\n"), "x-access-token")
+}
+
 func TestApplyAuthenticatedCloneDoesNotPersistTokenInTempDir(t *testing.T) {
 	remote, source, base, head := prepareApplyRepos(t)
 	artifact := diffArtifact(t, source, base, head)

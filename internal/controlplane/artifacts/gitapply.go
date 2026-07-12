@@ -67,6 +67,7 @@ func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 
 	cloneURL := req.CloneURL
 	var gitConfig []string
+	var gitEnv []string
 	var tokenValue string
 	if req.TokenSource != nil {
 		token, err := req.TokenSource.InstallationToken(ctx, req.InstallationID)
@@ -74,14 +75,19 @@ func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 			return ApplyResult{}, fmt.Errorf("get installation token: %w", err)
 		}
 		tokenValue = token.Token
-		gitConfig = gitAuthConfig(req.CloneURL, token.Token)
+		authEnv, cleanup, err := gitAuthEnv(root, req.CloneURL, token.Token)
+		if err != nil {
+			return ApplyResult{}, err
+		}
+		defer cleanup()
+		gitEnv = authEnv
 	}
 
 	repoDir := filepath.Join(root, "repo")
-	if err := herdgit.CloneWithConfig(cloneURL, repoDir, gitConfig...); err != nil {
+	if err := herdgit.CloneWithConfigAndEnv(cloneURL, repoDir, gitConfig, gitEnv); err != nil {
 		return ApplyResult{}, redactToken(err, tokenValue)
 	}
-	g := herdgit.NewWithConfig(repoDir, gitConfig...)
+	g := herdgit.NewWithConfigAndEnv(repoDir, gitConfig, gitEnv)
 	if err := g.Fetch("origin"); err != nil {
 		return ApplyResult{}, redactToken(err, tokenValue)
 	}
@@ -178,19 +184,34 @@ func commitMessage(req ApplyRequest) string {
 	return message
 }
 
-func gitAuthConfig(cloneURL, token string) []string {
+func gitAuthEnv(root, cloneURL, token string) ([]string, func(), error) {
 	if strings.TrimSpace(token) == "" || !strings.HasPrefix(cloneURL, "https://") {
-		return nil
+		return nil, func() {}, nil
 	}
-	credential := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-	host := strings.TrimPrefix(cloneURL, "https://")
-	if idx := strings.IndexByte(host, '/'); idx >= 0 {
-		host = host[:idx]
+	if strings.TrimSpace(root) == "" {
+		return nil, func() {}, fmt.Errorf("temporary directory is required for git authentication")
 	}
-	if host == "" {
-		return nil
+	askpass := filepath.Join(root, "git-askpass.sh")
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"*Username*) printf '%s\\n' 'x-access-token' ;;\n" +
+		"*Password*) printf '%s\\n' '" + shellSingleQuote(token) + "' ;;\n" +
+		"*) printf '\\n' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(askpass, []byte(script), 0600); err != nil {
+		return nil, func() {}, fmt.Errorf("write git askpass helper: %w", err)
 	}
-	return []string{"http.https://" + host + "/.extraheader=AUTHORIZATION: basic " + credential}
+	cleanup := func() {
+		_ = os.Remove(askpass)
+	}
+	return []string{
+		"GIT_ASKPASS=" + askpass,
+		"GIT_TERMINAL_PROMPT=0",
+	}, cleanup, nil
+}
+
+func shellSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "'\"'\"'")
 }
 
 func redactToken(err error, token string) error {
