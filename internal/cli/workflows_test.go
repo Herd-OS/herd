@@ -133,6 +133,50 @@ func TestIntegratorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {
 	assert.NotContains(t, string(rendered), "check-ci-workflow-completion")
 }
 
+func TestIntegratorWorkflow_BatchExtractionIsNonFatal(t *testing.T) {
+	tests := []struct {
+		name             string
+		ciWorkflows      []string
+		wantOccurrences  int
+		wantCICompletion bool
+	}{
+		{
+			name:            "default check_run reconciliation",
+			wantOccurrences: 1,
+		},
+		{
+			name:             "configured workflow_run CI reconciliation",
+			ciWorkflows:      []string{"CI"},
+			wantOccurrences:  2,
+			wantCICompletion: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Integrator.CIWorkflows = tt.ciWorkflows
+			wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+			rendered, err := RenderWorkflow(wf, cfg)
+			require.NoError(t, err)
+			s := string(rendered)
+
+			nonFatalParse := "BATCH=$(echo \"$HEAD_BRANCH\" | grep -oP 'herd/batch/\\K[0-9]+' || true)"
+			assert.Equal(t, tt.wantOccurrences, strings.Count(s, nonFatalParse))
+			assert.NotContains(t, s, "BATCH=$(echo \"$HEAD_BRANCH\" | grep -oP 'herd/batch/\\K[0-9]+')\n")
+			assert.Contains(t, s, "batch_number: (if $batch == \"\" then null else ($batch | tonumber) end)")
+			assert.NotContains(t, s, "HERD_GITHUB_TOKEN")
+			assert.NotContains(t, s, "GITHUB_TOKEN")
+			assert.NotContains(t, s, "GH_TOKEN")
+			if tt.wantCICompletion {
+				assert.Contains(t, s, "check-ci-workflow-completion:")
+			} else {
+				assert.NotContains(t, s, "check-ci-workflow-completion:")
+			}
+		})
+	}
+}
+
 func TestMonitorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {
 	cfg := config.Default()
 	wf := workflowFile{SrcName: "herd-monitor.yml.tmpl", DestName: "herd-monitor.yml", Template: true}

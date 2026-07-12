@@ -96,7 +96,7 @@ jobs:
           CHECK_RUN_HEAD_SHA: ${{ github.event.check_run.check_suite.head_sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+')
+          BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+' || true)
           OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -r '.value')"
           jq -n \
             --arg repository "$REPOSITORY" \

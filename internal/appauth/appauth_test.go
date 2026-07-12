@@ -194,6 +194,76 @@ func TestNewInstallationClientRejectsEmptyToken(t *testing.T) {
 	assert.Contains(t, err.Error(), "empty token")
 }
 
+func TestRetryTransportRetriesOnlyReadRequests(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantCalls  int
+		wantStatus int
+	}{
+		{
+			name:       "get retries transient server error",
+			method:     http.MethodGet,
+			path:       "/repos/herd/herd/issues/1",
+			wantCalls:  2,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "create issue comment post is not retried",
+			method:     http.MethodPost,
+			path:       "/repos/herd/herd/issues/1/comments",
+			wantCalls:  1,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "create issue post is not retried",
+			method:     http.MethodPost,
+			path:       "/repos/herd/herd/issues",
+			wantCalls:  1,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "workflow dispatch post is not retried",
+			method:     http.MethodPost,
+			path:       "/repos/herd/herd/actions/workflows/herd-worker.yml/dispatches",
+			wantCalls:  1,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "put mutation is not retried",
+			method:     http.MethodPut,
+			path:       "/repos/herd/herd/issues/1/labels/bug",
+			wantCalls:  1,
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			transport := newRetryTransport(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				assert.Equal(t, tt.method, req.Method)
+				assert.Equal(t, tt.path, req.URL.Path)
+				if calls == 1 {
+					return jsonResponse(http.StatusInternalServerError, `{"message":"server error"}`), nil
+				}
+				return jsonResponse(http.StatusOK, `{}`), nil
+			}), 0)
+
+			req, err := http.NewRequestWithContext(context.Background(), tt.method, "https://api.github.test"+tt.path, strings.NewReader("{}"))
+			require.NoError(t, err)
+
+			resp, err := transport.RoundTrip(req)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			assert.Equal(t, tt.wantCalls, calls)
+			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+		})
+	}
+}
+
 func generatedTestRSAKey(t *testing.T) (*rsa.PrivateKey, []byte) {
 	t.Helper()
 

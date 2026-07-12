@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/go-github/v68/github"
@@ -156,16 +155,17 @@ func newRetryTransport(base http.RoundTripper, baseDelay time.Duration) *retryTr
 	}
 }
 
-func isNonIdempotentDispatch(req *http.Request) bool {
-	if req.Method != http.MethodPost {
+func canRetryRequest(req *http.Request) bool {
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
 		return false
 	}
-	p := req.URL.Path
-	return strings.Contains(p, "/actions/workflows/") && strings.HasSuffix(p, "/dispatches")
 }
 
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if isNonIdempotentDispatch(req) {
+	if !canRetryRequest(req) {
 		return t.base.RoundTrip(req)
 	}
 
