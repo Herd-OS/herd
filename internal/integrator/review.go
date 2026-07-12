@@ -820,7 +820,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 		return &ReviewStandaloneResult{}, nil
 	}
 	if reviewResult == nil {
-		return &ReviewStandaloneResult{}, nil
+		return &ReviewStandaloneResult{ManualInterventionNeeded: true}, nil
 	}
 
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)

@@ -2352,6 +2352,14 @@ type capturedReview struct {
 	event platform.ReviewEvent
 }
 
+func reviewEvents(reviews []capturedReview) []platform.ReviewEvent {
+	events := make([]platform.ReviewEvent, 0, len(reviews))
+	for _, review := range reviews {
+		events = append(events, review.event)
+	}
+	return events
+}
+
 func (m *mockCapturingPRService) AddComment(_ context.Context, _ int, body string) error {
 	m.comments = append(m.comments, body)
 	return nil
@@ -4089,6 +4097,69 @@ func TestReviewStandalone_NoFixIssues(t *testing.T) {
 	// No fix issues and no workers dispatched regardless of severity
 	assert.Empty(t, issueSvc.createdTitle, "standalone review must NOT create fix issues")
 	assert.Empty(t, wf.dispatched, "standalone review must NOT dispatch workers")
+}
+
+func TestReviewStandalone_ChunkedRepeatedUnparseablePostsManualIntervention(t *testing.T) {
+	old := unparseableRetryDelay
+	unparseableRetryDelay = 1 * time.Millisecond
+	t.Cleanup(func() { unparseableRetryDelay = old })
+
+	mock, prSvc, issueSvc, wf := newStandalonePlatform()
+	prSvc.diffResult = strings.Join([]string{
+		"diff --git a/a.go b/a.go",
+		"index 1111111..2222222 100644",
+		"--- a/a.go",
+		"+++ b/a.go",
+		"@@ -1 +1 @@",
+		"-oldA",
+		"+newA",
+		"diff --git a/b.go b/b.go",
+		"index 3333333..4444444 100644",
+		"--- a/b.go",
+		"+++ b/b.go",
+		"@@ -1 +1 @@",
+		"-oldB",
+		"+newB",
+		"",
+	}, "\n")
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+	}}
+
+	result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{
+			Review: true,
+			ReviewDiff: config.ReviewDiff{
+				MaxFilesPerChunk: 1,
+				MaxChunks:        2,
+			},
+		},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.ManualInterventionNeeded)
+	assert.Equal(t, 0, result.FindingsCount)
+	require.Len(t, ag.opts, 2)
+	assert.True(t, ag.opts[0].ChunkedReview)
+	assert.Equal(t, 1, ag.opts[0].ChunkIndex)
+	assert.Equal(t, 2, ag.opts[0].TotalChunks)
+	assert.Equal(t, 1, ag.opts[1].ChunkIndex, "retry should reuse the first chunk instead of advancing")
+
+	require.NotEmpty(t, prSvc.comments)
+	found := false
+	for _, c := range prSvc.comments {
+		if strings.Contains(c, "Agent review failed to produce valid output after 2 attempts") &&
+			strings.Contains(c, "/herd review") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected a manual-intervention comment containing the canonical text and `/herd review`")
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+	assert.Empty(t, issueSvc.createdTitle, "standalone manual intervention must not create fix issues")
+	assert.Empty(t, wf.dispatched, "standalone manual intervention must not dispatch workers")
 }
 
 func TestReviewStandalone_ExtraInstructions(t *testing.T) {
