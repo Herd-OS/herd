@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/commands"
 	"github.com/herd-os/herd/internal/controlplane/reconciler"
 	"github.com/herd-os/herd/internal/controlplane/store"
+	"github.com/herd-os/herd/internal/controlplane/workflowevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -120,6 +122,27 @@ func TestDefaultWorkflowEventsRouteFailsClosedWithoutProcessor(t *testing.T) {
 	assert.JSONEq(t, `{"error":"workflow event processor is not configured"}`, rec.Body.String())
 }
 
+func TestProductionServerRequiresHostedControlPlaneDependencies(t *testing.T) {
+	_, err := NewServer(validProductionConfig(), Dependencies{Store: store.NewMemoryStore()})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "production service dependencies")
+	assert.Contains(t, err.Error(), "issue-comment command handler")
+	assert.Contains(t, err.Error(), "job result processor route")
+	assert.Contains(t, err.Error(), "workflow event processor")
+}
+
+func TestProductionServerAcceptsInjectedHostedControlPlaneDependencies(t *testing.T) {
+	handler, err := NewServer(validProductionConfig(), productionTestDependencies(store.NewMemoryStore()))
+
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job-123/results", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+}
+
 func TestStartReconcilerLoopStartsAndStopsWithContext(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()
@@ -139,4 +162,44 @@ func TestStartReconcilerLoopStartsAndStopsWithContext(t *testing.T) {
 	require.NoError(t, stop())
 
 	assert.False(t, r.LastReport().StartedAt.IsZero())
+}
+
+func validProductionConfig() Config {
+	return Config{
+		GitHubAppID:         123,
+		GitHubAppPrivateKey: "private-key",
+		WebhookSecret:       "secret",
+		PublicURL:           "https://service.example.com",
+		DatabaseURL:         "postgres://user:pass@localhost:5432/herd?sslmode=disable",
+		Env:                 "production",
+	}
+}
+
+func productionTestDependencies(st Store) Dependencies {
+	return Dependencies{
+		Store: st,
+		RegisterRepositoryRoute: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
+		}),
+		RunnerRegistrationTokenRoute: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]string{"token": "runner-token"})
+		}),
+		JobResultsRoute: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+		}),
+		IssueCommentCommandHandler: productionTestCommander{},
+		WorkflowEventProcessor:     productionTestWorkflowProcessor{},
+	}
+}
+
+type productionTestCommander struct{}
+
+func (productionTestCommander) HandleIssueComment(context.Context, commands.IssueComment) (commands.Result, error) {
+	return commands.Result{Status: commands.StatusAcknowledged}, nil
+}
+
+type productionTestWorkflowProcessor struct{}
+
+func (productionTestWorkflowProcessor) ProcessWorkflowEvent(context.Context, store.Repository, workflowevents.Event) error {
+	return nil
 }

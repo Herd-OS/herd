@@ -28,14 +28,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestReadyz(t *testing.T) {
-	validConfig := Config{
-		GitHubAppID:         123,
-		GitHubAppPrivateKey: "private-key",
-		WebhookSecret:       "secret",
-		PublicURL:           "https://service.example.com",
-		DatabaseURL:         "postgres://user:pass@localhost:5432/herd?sslmode=disable",
-		Env:                 "production",
-	}
+	validConfig := validProductionConfig()
 
 	tests := []struct {
 		name       string
@@ -52,8 +45,8 @@ func TestReadyz(t *testing.T) {
 			wantBody:   "configuration not ready",
 		},
 		{
-			name:       "storage dependency missing",
-			cfg:        validConfig,
+			name:       "development storage dependency missing",
+			cfg:        Config{Env: "development"},
 			wantStatus: http.StatusServiceUnavailable,
 			wantBody:   "storage not ready",
 		},
@@ -83,7 +76,11 @@ func TestReadyz(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handler, err := NewServer(tt.cfg, Dependencies{Store: tt.store})
+			deps := Dependencies{Store: tt.store}
+			if tt.cfg.Env == "production" || tt.cfg.Env == "staging" {
+				deps = productionTestDependencies(tt.store)
+			}
+			handler, err := NewServer(tt.cfg, deps)
 			require.NoError(t, err)
 
 			req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
