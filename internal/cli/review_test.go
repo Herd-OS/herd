@@ -403,14 +403,21 @@ func TestBuildReviewPromptDataMarksPartialCoverage(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, string(reviewdiff.CoverageModePartial), data.ReviewMode)
-	assert.Equal(t, 1, data.TotalChunks)
-	assert.False(t, data.OnlyFirstChunkIncluded)
+	assert.Equal(t, 2, data.TotalChunks)
+	assert.True(t, data.OnlyFirstChunkIncluded)
 	assert.True(t, data.PartialReview)
 	assert.Contains(t, data.CoverageSummary, "- Review mode: partial")
+	assert.Contains(t, data.CoverageSummary, "- Chunks reviewed: 1/2")
 	assert.Contains(t, data.CoverageSummary, "- This is a partial review")
 	assert.Contains(t, data.CoverageSummary, "maximum planned review chunks exceeded")
+	assert.Contains(t, data.CoverageSummary, "- Required chunks: 2; max chunks: 1")
 	assert.Contains(t, data.Diff, "+reviewed body")
 	assert.NotContains(t, data.Diff, "+not reviewed body")
+
+	out, err := renderReviewSystemPrompt(data)
+	require.NoError(t, err)
+	assert.Contains(t, out, "Only chunk 1/2 is included in this interactive prompt")
+	assert.Contains(t, out, "Review only the included diffs in this chunk")
 }
 
 func TestReviewDiffChunkOptions(t *testing.T) {

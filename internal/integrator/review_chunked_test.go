@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
+	agentprompt "github.com/herd-os/herd/internal/agent/prompt"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/reviewdiff"
@@ -150,6 +151,44 @@ func TestRunChunkedReviewWithRetryMaxChunksDoesNotApprove(t *testing.T) {
 	assert.Equal(t, 8, chunksReviewed)
 	assert.Len(t, ag.opts, 8)
 	assert.False(t, result.Approved)
+}
+
+func TestRunChunkedReviewWithRetryMaxChunksOneIncludesRequiredChunkScope(t *testing.T) {
+	plan := reviewdiff.ChunkForReview(reviewdiff.DiffSet{
+		Source: "test",
+		Files: []reviewdiff.ChangedFile{
+			{Path: "a.go", Status: reviewdiff.ChangeModified, Patch: "@@ -1 +1 @@\n-old\n+new\n"},
+			{Path: "b.go", Status: reviewdiff.ChangeModified, Patch: "@@ -1 +1 @@\n-old\n+new\n"},
+		},
+	}, reviewdiff.ChunkOptions{
+		MaxChunkBytes:            1000,
+		MaxFileDiffBytes:         1000,
+		MaxFilesPerChunk:         1,
+		MaxChunks:                1,
+		MaxOmittedSummaryEntries: reviewdiff.DefaultMaxOmittedSummaryEntries,
+	})
+	require.Len(t, plan.Chunks, 1)
+	require.True(t, plan.Coverage.ExceededMaxChunks)
+	require.Equal(t, 2, plan.Coverage.RequiredChunks)
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{{Approved: true, Summary: "ok"}}}
+
+	result, chunksReviewed, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, chunksReviewed)
+	require.Len(t, ag.opts, 1)
+	assert.True(t, ag.opts[0].ChunkedReview)
+	assert.Equal(t, 1, ag.opts[0].ChunkIndex)
+	assert.Equal(t, 2, ag.opts[0].TotalChunks)
+	assert.Contains(t, ag.opts[0].CoverageSummary, "Chunks reviewed: 1/2")
+	assert.Contains(t, ag.opts[0].CoverageSummary, "Required chunks: 2; max chunks: 1")
+
+	prompt, err := agentprompt.RenderReviewPrompt(ag.diffs[0], ag.opts[0])
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "## Review Chunk")
+	assert.Contains(t, prompt, "Chunk: 1 of 2")
+	assert.Contains(t, prompt, "Review only the included diffs in this chunk")
 }
 
 func TestMaterialNotReviewedClassifiesAllowableAndMaterialReasons(t *testing.T) {

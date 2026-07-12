@@ -111,6 +111,9 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 	diff := preparedDiff.Rendered.Text
 	chunkIndex := 0
 	totalChunks := len(plan.Chunks)
+	if plan.Coverage.RequiredChunks > totalChunks {
+		totalChunks = plan.Coverage.RequiredChunks
+	}
 	if len(plan.Chunks) > 0 {
 		firstChunk := plan.Chunks[0]
 		diff = firstChunk.Text
@@ -160,7 +163,7 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		TotalChunks:            totalChunks,
 		CoverageSummary:        reviewdiff.FormatChunkedCoverageSummary(plan, 1, reviewdiff.DefaultMaxOmittedSummaryEntries),
 		PartialReview:          !plan.Coverage.Complete,
-		OnlyFirstChunkIncluded: len(plan.Chunks) > 1,
+		OnlyFirstChunkIncluded: totalChunks > 1,
 		Comments:               general,
 		InlineComments:         inline,
 		CIStatus:               ciStatus,
@@ -226,6 +229,7 @@ CI status (head ref): {{.CIStatus}}
 {{.CoverageSummary}}
 {{if .OnlyFirstChunkIncluded}}
 This pull request was split into {{.TotalChunks}} review chunks. Only chunk 1/{{.TotalChunks}} is included in this interactive prompt. Additional chunks are not hidden as reviewed; inspect them separately before making full-PR conclusions.
+Review only the included diffs in this chunk.
 
 {{end}}
 ## Diff

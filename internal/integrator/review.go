@@ -599,12 +599,16 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 	coverageSummary := reviewdiff.FormatChunkedCoverageSummary(plan, len(plan.Chunks), reviewdiff.DefaultMaxOmittedSummaryEntries)
 
 	for _, chunk := range plan.Chunks {
+		totalChunks := chunk.Total
+		if plan.Coverage.RequiredChunks > totalChunks {
+			totalChunks = plan.Coverage.RequiredChunks
+		}
 		opts := baseOpts
 		opts.ChunkIndex = chunk.Index
-		opts.TotalChunks = chunk.Total
+		opts.TotalChunks = totalChunks
 		opts.ChunkIncludedPathRange = chunkIncludedPathRange(chunk)
 		opts.CoverageSummary = coverageSummary
-		opts.ChunkedReview = len(plan.Chunks) > 1
+		opts.ChunkedReview = totalChunks > 1
 		opts.PartialReview = !plan.Coverage.Complete
 
 		result, err := runReviewWithRetry(ctx, ag, p, chunk.Text, opts, prNumber)

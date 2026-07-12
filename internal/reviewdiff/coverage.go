@@ -18,6 +18,10 @@ func FormatChunkedCoverageSummary(plan ChunkPlan, chunksReviewed int, maxEntries
 		chunksReviewed = len(plan.Chunks)
 	}
 	coverage.ChunksReviewed = chunksReviewed
+	chunksPlanned := coverage.ChunksPlanned
+	if coverage.RequiredChunks > chunksPlanned {
+		chunksPlanned = coverage.RequiredChunks
+	}
 	complete := coverage.Complete && chunksReviewed >= coverage.ChunksPlanned
 
 	var b strings.Builder
@@ -25,7 +29,7 @@ func FormatChunkedCoverageSummary(plan ChunkPlan, chunksReviewed int, maxEntries
 	fmt.Fprintf(&b, "- Source: %s\n", valueOrUnknown(coverage.Source))
 	fmt.Fprintf(&b, "- Review mode: %s\n", coverage.ReviewMode)
 	fmt.Fprintf(&b, "- Total files: %d\n", coverage.TotalFiles)
-	fmt.Fprintf(&b, "- Chunks reviewed: %d/%d\n", chunksReviewed, coverage.ChunksPlanned)
+	fmt.Fprintf(&b, "- Chunks reviewed: %d/%d\n", chunksReviewed, chunksPlanned)
 	fmt.Fprintf(&b, "- Files reviewed: %d\n", coverage.FilesReviewed)
 	fmt.Fprintf(&b, "- Files reviewed with truncated diffs: %d\n", coverage.FilesReviewedWithTruncatedDiffs)
 	fmt.Fprintf(&b, "- Files summarized but not reviewed: %d\n", coverage.FilesSummarizedNotReviewed)
