@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,6 +33,7 @@ type githubActionsStep struct {
 	Name string         `yaml:"name"`
 	Uses string         `yaml:"uses"`
 	Run  string         `yaml:"run"`
+	Env  map[string]any `yaml:"env"`
 	With map[string]any `yaml:"with"`
 }
 
@@ -128,6 +131,67 @@ func TestIntegratorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {
 	assert.True(t, bytes.Equal(rendered, onDisk),
 		"rendered integrator template with default config must match committed workflow.\nrendered:\n%s\non-disk:\n%s", rendered, onDisk)
 	assert.NotContains(t, string(rendered), "check-ci-workflow-completion")
+}
+
+func TestMonitorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-monitor.yml.tmpl", DestName: "herd-monitor.yml", Template: true}
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	onDisk, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "herd-monitor.yml"))
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(rendered, onDisk),
+		"rendered monitor template with default config must match committed workflow.\nrendered:\n%s\non-disk:\n%s", rendered, onDisk)
+}
+
+func TestCallbackWorkflows_RenderControlPlaneURL(t *testing.T) {
+	tests := []struct {
+		name           string
+		controlPlane   string
+		wantURL        string
+		wantHostedOnly bool
+	}{
+		{
+			name:           "default hosted",
+			wantURL:        "https://api.herd-os.com",
+			wantHostedOnly: true,
+		},
+		{
+			name:         "self hosted",
+			controlPlane: "https://herd.example.com",
+			wantURL:      "https://herd.example.com",
+		},
+	}
+
+	workflows := []workflowFile{
+		{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true},
+		{SrcName: "herd-monitor.yml.tmpl", DestName: "herd-monitor.yml", Template: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.ControlPlaneURL = tt.controlPlane
+
+			for _, wf := range workflows {
+				t.Run(wf.DestName, func(t *testing.T) {
+					rendered, err := RenderWorkflow(wf, cfg)
+					require.NoError(t, err)
+					s := string(rendered)
+
+					assert.Contains(t, s, "HERD_CONTROL_PLANE_URL:")
+					assert.Contains(t, s, tt.wantURL)
+					assert.Contains(t, s, "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events")
+					if !tt.wantHostedOnly {
+						assert.NotContains(t, s, "HERD_CONTROL_PLANE_URL: https://api.herd-os.com")
+					}
+					assert.NotContains(t, s, "HERD_GITHUB_TOKEN")
+					assert.NotContains(t, s, "GITHUB_TOKEN")
+				})
+			}
+		})
+	}
 }
 
 func TestIntegratorWorkflow_RendersConfiguredCIWorkflows(t *testing.T) {
@@ -239,21 +303,6 @@ func jobPostsWorkflowEvent(job githubActionsJob) bool {
 	return false
 }
 
-func TestRenderWorkflow_StaticPassThrough(t *testing.T) {
-	cfg := config.Default()
-	for _, wf := range workflowFiles() {
-		if wf.Template {
-			continue
-		}
-		out, err := RenderWorkflow(wf, cfg)
-		require.NoError(t, err, "rendering static workflow %s", wf.SrcName)
-
-		raw, err := workflowFS.ReadFile("workflows/" + wf.SrcName)
-		require.NoError(t, err)
-		assert.Equal(t, raw, out, "static workflow %s should pass through unchanged", wf.SrcName)
-	}
-}
-
 func TestRenderWorkflow_UnknownSource(t *testing.T) {
 	cfg := config.Default()
 	wf := workflowFile{SrcName: "does-not-exist.yml", DestName: "x.yml"}
@@ -320,13 +369,124 @@ func TestWorkerWorkflowTemplate_ExcludesProviderAuthEnv(t *testing.T) {
 	assert.Contains(t, s, "uses: actions/upload-artifact@v4", "worker workflow must upload patch artifacts")
 	assert.Contains(t, s, "name: worker-branch", "worker workflow must upload metadata artifact named by callback")
 	assert.Contains(t, s, "name: worker.patch", "worker workflow must upload patch data artifact")
+	assert.Contains(t, s, "echo \"sha=$(git rev-parse HEAD)\" >> \"$GITHUB_OUTPUT\"", "worker workflow must capture checked-out HEAD")
+	assert.Contains(t, s, "HERD_BASE_SHA: ${{ steps.checkout-base.outputs.sha }}", "worker workflow must use captured checkout HEAD")
 	assert.Contains(t, s, "git diff --binary \"$HERD_BASE_SHA\"", "worker workflow must package a binary git patch")
 	assert.Contains(t, s, "format: \"git-diff-binary\"", "worker metadata must declare the artifact format expected by the service")
+	assert.Contains(t, s, "--arg base_sha \"$HERD_BASE_SHA\"", "worker result payload must use captured checkout HEAD")
+	assert.NotContains(t, s, "--arg base_sha \"${{ github.sha }}\"", "worker result payload must not use dispatch event SHA")
 	assert.Contains(t, s, "while true; do", "worker workflow must retry result callbacks")
 	assert.Contains(t, s, "Failed to submit HerdOS job result after ${attempt} attempt(s).", "worker workflow must log final callback failure")
 	assert.Contains(t, s, "delay=$((delay * 2))", "worker workflow must use bounded backoff")
 	assert.Contains(t, s, "ISSUE_NUMBER: ${{ inputs.issue_number }}", "ISSUE_NUMBER input must remain")
 	assert.Contains(t, s, "HERD_WORKER_MODE: ${{ inputs.mode }}", "HERD_WORKER_MODE input must remain")
+}
+
+func TestWorkerWorkflowUsesCapturedCheckoutBaseForArtifactsAndResult(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true}
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+	execute := workflow.Jobs["execute"]
+	require.NotEmpty(t, execute.Steps)
+
+	var checkoutIndex, recordIndex, executeIndex, packageIndex, reportIndex = -1, -1, -1, -1, -1
+	for i, step := range execute.Steps {
+		switch step.Name {
+		case "Checkout":
+			checkoutIndex = i
+		case "Record checkout base":
+			recordIndex = i
+			assert.Contains(t, step.Run, "git rev-parse HEAD")
+			assert.Contains(t, step.Run, "$GITHUB_OUTPUT")
+		case "Execute task":
+			executeIndex = i
+		case "Package worker patch artifact":
+			packageIndex = i
+			require.NotNil(t, step.Env)
+			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_BASE_SHA"])
+			assert.Contains(t, step.Run, "git diff --binary \"$HERD_BASE_SHA\"")
+			assert.Contains(t, step.Run, "--arg base_sha \"$HERD_BASE_SHA\"")
+		case "Report result":
+			reportIndex = i
+			require.NotNil(t, step.Env)
+			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_BASE_SHA"])
+			assert.Contains(t, step.Run, "--arg base_sha \"$HERD_BASE_SHA\"")
+		}
+	}
+
+	require.NotEqual(t, -1, checkoutIndex)
+	require.NotEqual(t, -1, recordIndex)
+	require.NotEqual(t, -1, executeIndex)
+	require.NotEqual(t, -1, packageIndex)
+	require.NotEqual(t, -1, reportIndex)
+	assert.Less(t, checkoutIndex, recordIndex)
+	assert.Less(t, recordIndex, executeIndex)
+	assert.Less(t, executeIndex, packageIndex)
+	assert.Less(t, packageIndex, reportIndex)
+	assert.NotContains(t, string(rendered), "HERD_BASE_SHA: ${{ github.sha }}")
+}
+
+func TestWorkerPatchArtifactUsesCheckedOutBaseWhenDispatchSHADiffers(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true}
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+
+	var packageStep githubActionsStep
+	for _, step := range workflow.Jobs["execute"].Steps {
+		if step.Name == "Package worker patch artifact" {
+			packageStep = step
+			break
+		}
+	}
+	require.NotEmpty(t, packageStep.Run)
+	require.NotContains(t, packageStep.Run, "github.sha")
+
+	repoDir := t.TempDir()
+	runWorkflowGit(t, repoDir, "init")
+	runWorkflowGit(t, repoDir, "config", "user.email", "herd@example.com")
+	runWorkflowGit(t, repoDir, "config", "user.name", "Herd Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "task.txt"), []byte("base\n"), 0644))
+	runWorkflowGit(t, repoDir, "add", "task.txt")
+	runWorkflowGit(t, repoDir, "commit", "-m", "base")
+	checkedOutBase := strings.TrimSpace(runWorkflowGit(t, repoDir, "rev-parse", "HEAD"))
+	dispatchSHA := strings.Repeat("f", 40)
+	require.NotEqual(t, dispatchSHA, checkedOutBase)
+
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "task.txt"), []byte("worker change\n"), 0644))
+	t.Cleanup(func() {
+		_ = os.Remove("/tmp/herd-worker.patch")
+		_ = os.Remove("/tmp/herd-worker-metadata.json")
+	})
+
+	cmd := exec.Command("sh", "-c", packageStep.Run)
+	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(),
+		"HERD_JOB_ID=job-1",
+		"HERD_REPOSITORY=acme/widgets",
+		"HERD_EXPECTED_HEAD_SHA="+strings.Repeat("a", 40),
+		"HERD_BASE_SHA="+checkedOutBase,
+		"GITHUB_SHA="+dispatchSHA,
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+
+	data, err := os.ReadFile("/tmp/herd-worker-metadata.json")
+	require.NoError(t, err)
+
+	var metadata struct {
+		BaseSHA string `json:"base_sha"`
+	}
+	require.NoError(t, json.Unmarshal(data, &metadata))
+	assert.Equal(t, checkedOutBase, metadata.BaseSHA)
+	assert.NotEqual(t, dispatchSHA, metadata.BaseSHA)
 }
 
 func TestWorkerWorkflowUploadsPatchArtifactBeforeCallback(t *testing.T) {
@@ -365,6 +525,16 @@ func TestWorkerWorkflowUploadsPatchArtifactBeforeCallback(t *testing.T) {
 	assert.Less(t, packageIndex, patchUploadIndex)
 	assert.Less(t, patchUploadIndex, metadataUploadIndex)
 	assert.Less(t, metadataUploadIndex, reportIndex)
+}
+
+func runWorkflowGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return string(out)
 }
 
 func TestRunnerEnvExampleHasSingleBootstrapToken(t *testing.T) {
@@ -421,9 +591,10 @@ func TestWorkflowFiles_ContainsExpectedNames(t *testing.T) {
 	assert.True(t, publish.Template, "publish-runner workflow must be marked as template")
 	assert.Equal(t, "herd-publish-runner.yml", publish.DestName)
 
-	monitor, ok := bySrc["herd-monitor.yml"]
+	monitor, ok := bySrc["herd-monitor.yml.tmpl"]
 	require.True(t, ok)
-	assert.False(t, monitor.Template)
+	assert.True(t, monitor.Template, "monitor workflow must be marked as template")
+	assert.Equal(t, "herd-monitor.yml", monitor.DestName)
 
 	integrator, ok := bySrc["herd-integrator.yml.tmpl"]
 	require.True(t, ok)

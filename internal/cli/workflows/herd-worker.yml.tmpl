@@ -65,6 +65,11 @@ jobs:
           ref: ${{`{{`}} inputs.batch_branch || github.event.repository.default_branch {{`}}`}}
           fetch-depth: 0
 
+      - name: Record checkout base
+        id: checkout-base
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Execute task
         env:
           HERD_RUNNER: "true"
@@ -90,7 +95,7 @@ jobs:
           HERD_JOB_ID: ${{`{{`}} inputs.job_id {{`}}`}}
           HERD_REPOSITORY: ${{`{{`}} inputs.repository {{`}}`}}
           HERD_EXPECTED_HEAD_SHA: ${{`{{`}} inputs.expected_head_sha {{`}}`}}
-          HERD_BASE_SHA: ${{`{{`}} github.sha {{`}}`}}
+          HERD_BASE_SHA: ${{`{{`}} steps.checkout-base.outputs.sha {{`}}`}}
         run: |
           git diff --binary "$HERD_BASE_SHA" > /tmp/herd-worker.patch
           PATCH_SHA256="$(sha256sum /tmp/herd-worker.patch | awk '{print $1}')"
@@ -140,6 +145,7 @@ jobs:
           HERD_EXPECTED_HEAD_SHA: ${{`{{`}} inputs.expected_head_sha {{`}}`}}
           HERD_CONTROL_PLANE_URL: ${{`{{`}} inputs.control_plane_url || 'https://api.herd-os.com' {{`}}`}}
           HERD_JOB_STATUS: ${{`{{`}} job.status {{`}}`}}
+          HERD_BASE_SHA: ${{`{{`}} steps.checkout-base.outputs.sha {{`}}`}}
         run: |
           STATUS="success"
           if [ "$HERD_JOB_STATUS" != "success" ]; then
@@ -152,7 +158,7 @@ jobs:
             --argjson batch_number "$HERD_BATCH_NUMBER" \
             --argjson issue_number "$HERD_ISSUE_NUMBER" \
             --arg target_branch "$HERD_BATCH_BRANCH" \
-            --arg base_sha "${{`{{`}} github.sha {{`}}`}}" \
+            --arg base_sha "$HERD_BASE_SHA" \
             --arg expected_head_sha "$HERD_EXPECTED_HEAD_SHA" \
             --arg status "$STATUS" \
             '{
