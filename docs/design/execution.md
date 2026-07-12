@@ -467,9 +467,10 @@ without merging (Integrator cleanup).
 
 ## 5. Agent Review and Fix Cycles
 
-When all tiers complete and the batch PR opens, the Integrator dispatches an
-agent to review the consolidated diff. The agent checks acceptance criteria,
-looks for bugs, security issues, and style violations. When an acceptance
+When all tiers complete and the batch PR opens, the Integrator prepares a
+complete `DiffSet`, plans bounded review chunks, and dispatches the reviewer
+once per chunk. The agent checks acceptance criteria, looks for bugs, security
+issues, and style violations. When an acceptance
 criterion restricts which files may be modified, the reviewer allows supporting
 changes to configuration files, test helpers, test fixtures, and infrastructure
 files if they are clearly required for the primary task to work. Before reviewing, the
@@ -482,9 +483,19 @@ The review agent runs under a strict output contract: it must not call tools,
 shell out to `gh`/`git`/`bash`, create issues or comments, or modify files. Its
 only output is a single JSON object describing findings. The user prompt
 includes a self-check section that asks the agent to confirm it produced JSON
-only and took no action. If unparseable output is returned, the integrator
-retries once in-call (see [Agent Error Resilience](#10-agent-error-resilience))
-before posting a manual-intervention comment.
+only and took no action. In chunked mode, each prompt identifies the chunk
+number and included path range, and instructs the agent to review only that
+chunk; other chunks are reviewed in separate strict-output runs. If unparseable
+output is returned, the integrator retries once in-call (see
+[Agent Error Resilience](#10-agent-error-resilience)) before posting a
+manual-intervention comment.
+
+After all planned chunks finish, HerdOS aggregates findings, deduplicates
+duplicate reports across chunks, and posts one coherent review result marker for
+the PR head SHA. Batch PR review creates one batched fix issue for actionable
+findings instead of one issue per chunk. Standalone `/herd review` uses the same
+chunk aggregation for its findings comment, but it does not create fix issues or
+dispatch workers.
 
 ### User Feedback
 
@@ -510,9 +521,9 @@ Review findings are classified by severity:
 
 | Severity | Examples | Action |
 |----------|----------|--------|
-| HIGH | Bugs, security vulnerabilities, race conditions, missing critical error handling | Creates fix issues, dispatches workers |
-| MEDIUM | Missing edge cases, suboptimal error handling | Creates fix issues, dispatches workers |
-| LOW | Style preferences, naming suggestions | Listed in PR comment, no fix workers |
+| HIGH | Bugs, security vulnerabilities, race conditions, missing critical error handling | Actionable at any `review_fix_severity` |
+| MEDIUM | Missing edge cases, suboptimal error handling | Actionable when `review_fix_severity` is `medium` or `low` |
+| LOW | Style preferences, naming suggestions | Actionable when `review_fix_severity` is `low`; otherwise informational |
 | CRITERIA | Acceptance criterion is wrong, incomplete, or contradictory | Listed in PR comment as requiring human review, no fix workers |
 
 The CRITERIA severity is distinct from code issues. When the reviewer identifies
@@ -528,13 +539,13 @@ The `review_strictness` setting (standard/strict/lenient) controls which issues 
 | Result | Action |
 |--------|--------|
 | Approved | Agent posts a batch summary with statistics (files reviewed, findings by severity, fix cycles used). PR is ready for human review (or auto-merge). |
-| Changes requested | Agent submits a Request Changes review to block merge. Integrator creates a single batch fix issue for all HIGH findings. |
+| Changes requested | Agent submits a Request Changes review to block merge. Integrator creates a single batch fix issue for all actionable findings. |
 
 ### Fix Cycle Flow
 
 ```mermaid
 graph TD
-    A["Agent review finds HIGH severity issues"] --> B["Integrator creates one batch fix issue<br>(all HIGH findings in a single issue)"]
+    A["Agent review finds actionable issues"] --> B["Integrator creates one batch fix issue<br>(all actionable findings in a single issue)"]
     B --> C["Worker executes fixes,<br>pushes to worker branch"]
     C --> D["Integrator consolidates fixes<br>into batch branch"]
     D --> E["Agent re-reviews<br>(with prior review comments as context)"]
@@ -1083,7 +1094,9 @@ on the batch PR and returns `ManualInterventionNeeded=true`, leaving the review 
 
 Review diff preparation is large-PR-safe. In runner and CLI contexts HerdOS first uses local git diff collection from the checkout. If that cannot run, it tries GitHub's raw PR diff; if the raw diff is unavailable or rejected by GitHub's large-diff limit, it falls back to GitHub files API metadata and any bounded per-file patches GitHub provides. Review continues when one of those sources succeeds.
 
-The rendered review input is bounded. Generated files, binary files, large lockfile diffs, mode-only changes, and files that exceed internal byte or file-count limits can be summarized, omitted, or truncated. Whenever the input is limited, the review output includes or logs a **Diff Coverage** summary with the source, included files, omitted files, truncated files, warnings, and omitted paths with reasons so users can see what the agent did not inspect in full.
+The rendered review input is bounded. Generated files, binary files, large lockfile diffs, mode-only changes, source-unavailable patches, and files that exceed internal byte or file-count limits can be summarized, omitted, or truncated. HerdOS then plans review chunks from the complete `DiffSet` and invokes the reviewer once per chunk in strict no-tools mode. Whenever the input is limited, the review output includes or logs a **Diff Coverage** summary with the source, included files, omitted files, truncated files, warnings, and omitted paths with reasons so users can see what the agent did not inspect in full.
+
+Coverage affects approval. HerdOS blocks normal approval when material source files were not reviewed, or when the diff needed more chunks than the configured maximum. The PR receives a coverage warning and request-changes review instead of being approved from incomplete source coverage.
 
 ---
 
@@ -1206,10 +1219,10 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 | `/herd integrate` | Slash | Issue or PR | Run the full integrator cycle: consolidate → check CI → advance → review |
 | `/herd dispatch` | Slash | Issue | Dispatch the current issue (must be ready or blocked) |
 | `/herd dispatch <N>` | Slash | Issue or PR | Dispatch issue #N (must be ready or blocked) |
-| `herd review <pr-number>` | CLI | Local terminal | Open an interactive Claude Code session pre-loaded with the PR's diff, comments, and CI status. The agent acts as a reviewer assistant — you drive the conversation; it can read code and discuss findings, and it drafts `/herd fix` comments for any actionable changes (it never edits files locally). It does NOT auto-dispatch workers or create issues. |
+| `herd review <pr-number>` | CLI | Local terminal | Open an interactive Claude Code session pre-loaded with diff coverage, comments, CI status, and chunk 1/N of the PR diff. The agent acts as a reviewer assistant — you drive the conversation; it can read code and discuss findings, and it drafts `/herd fix` comments for any actionable changes (it never edits files locally). It does NOT auto-dispatch workers or create issues. |
 | `herd dashboard` | CLI | Local terminal | Live read-only TUI showing active workers, open batches, and recent failures. Refreshes on a `--refresh-seconds` timer (default 15, clamp 5–300). Keybinds: `q` quit, `r` refresh, ↑/↓ select batch, Enter to open the batch's PR or milestone. Worker rows render as OSC 8 hyperlinks where supported. Single-repo and read-only in v1. |
 
-Note on `herd review <pr-number>` vs `/herd review`: the CLI command opens an interactive local agent session for discussing a PR — the session is read-only on the working tree, and the only way it enacts changes is by drafting a `/herd fix` comment that you approve and post via `gh pr comment`; herd's batch workers then handle the actual edits. The slash command runs an automated agent review on the PR and posts findings as a comment. Use the CLI when you want a back-and-forth; use the slash command when you want a one-shot pre-screen.
+Note on `herd review <pr-number>` vs `/herd review`: the CLI command opens an interactive local agent session for discussing a PR — the session is read-only on the working tree, and the only way it enacts changes is by drafting a `/herd fix` comment that you approve and post via `gh pr comment`; herd's batch workers then handle the actual edits. For large PRs, the initial interactive prompt includes the coverage summary plus only chunk 1/N so humans can see the limitation before making full-PR conclusions. The slash command runs an automated agent review on the PR and posts aggregated findings as a comment. Use the CLI when you want a back-and-forth; use the slash command when you want a one-shot pre-screen.
 
 The review session is intentionally read-only on the working tree. Local edits during a review would create phantom commits that the integrator does not track and would conflict with any in-flight fix workers in the batch. All changes flow through `/herd fix` comments, which are dispatched to workers like any other batch task.
 
@@ -1219,7 +1232,7 @@ When the interactive `herd review <pr-number>` session reaches a concrete action
 
 #### Non-Batch PR Reviews
 
-`/herd review` works on any PR, not just batch PRs. When used on a non-batch PR, it runs the same agent review and posts a severity-classified findings comment, but skips all batch-specific logic: no fix issues are created, no workers are dispatched, and no fix cycles are tracked. This is useful for getting an AI review on regular PRs without the full Herd orchestration.
+`/herd review` works on any PR, not just batch PRs. When used on a non-batch PR, it runs the same chunked agent review and posts one aggregated severity-classified findings comment, but skips all batch-specific logic: no fix issues are created, no workers are dispatched, and no fix cycles are tracked. This is useful for getting an AI review on regular PRs without the full Herd orchestration.
 
 #### Standalone /herd fix
 
