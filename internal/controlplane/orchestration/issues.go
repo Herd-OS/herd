@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
@@ -101,6 +103,7 @@ func (s Service) updateTaskIssue(ctx context.Context, req TaskIssueRequest, body
 }
 
 func taskIssueFingerprint(req TaskIssueRequest, body, overflow string) string {
+	labels := normalizedTaskIssueLabels(req.Labels)
 	payload, _ := json.Marshal(struct {
 		Title     string   `json:"title"`
 		Body      string   `json:"body"`
@@ -111,11 +114,23 @@ func taskIssueFingerprint(req TaskIssueRequest, body, overflow string) string {
 		Title:     req.Title,
 		Body:      body,
 		Overflow:  overflow,
-		Labels:    req.Labels,
+		Labels:    labels,
 		Milestone: req.Milestone,
 	})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
+}
+
+func normalizedTaskIssueLabels(labels []string) []string {
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label != "" {
+			out = append(out, label)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 func parseIssueResult(ref string) (int, bool) {

@@ -106,6 +106,45 @@ func TestEnsureTaskIssue_CreateAllowsSameTitleWithDifferentBody(t *testing.T) {
 	assert.Len(t, fake.issues.created, 2)
 }
 
+func TestEnsureTaskIssue_DeduplicatesReorderedLabels(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.issues.items[3] = &platform.Issue{Number: 3, Title: "Old"}
+	svc := newTestService(fake, newFakeStore(), nil)
+	create := TaskIssueRequest{
+		BatchNumber: 9,
+		Title:       "Task",
+		Body:        "body",
+		Labels:      []string{issues.StatusReady, issues.TypeFeature},
+		Milestone:   9,
+	}
+
+	first, err := svc.EnsureTaskIssue(ctx, create)
+	require.NoError(t, err)
+	create.Labels = []string{issues.TypeFeature, "", " " + issues.StatusReady + " "}
+	second, err := svc.EnsureTaskIssue(ctx, create)
+	require.NoError(t, err)
+
+	assert.Equal(t, first.Number, second.Number)
+	assert.Len(t, fake.issues.created, 1)
+
+	update := TaskIssueRequest{
+		BatchNumber: 9,
+		IssueNumber: 3,
+		Title:       "Updated task",
+		Body:        "updated body",
+		Labels:      []string{issues.StatusBlocked, issues.TypeFeature},
+		Milestone:   9,
+	}
+	_, err = svc.EnsureTaskIssue(ctx, update)
+	require.NoError(t, err)
+	update.Labels = []string{issues.TypeFeature, issues.StatusBlocked}
+	_, err = svc.EnsureTaskIssue(ctx, update)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{issues.StatusBlocked, issues.TypeFeature}, fake.issues.added[3])
+}
+
 func TestEnsureTaskIssue_UpdateAllowsChangedContent(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()

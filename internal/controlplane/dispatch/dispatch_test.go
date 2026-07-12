@@ -170,6 +170,57 @@ func TestDispatcherRetryAfterCompleteMutationFailureDoesNotRedispatch(t *testing
 	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
 }
 
+func TestDispatcherRetryAfterAcceptedDispatchPersistenceFailuresDoesNotRedispatch(t *testing.T) {
+	st := newFakeStore()
+	st.completeIdemErrs = map[string][]error{}
+	st.completeMutationErrs = map[string][]error{}
+	gh := &fakeWorkflowClient{}
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.completeIdemErrs[key] = []error{errors.New("idempotency down")}
+	st.completeMutationErrs[key] = []error{errors.New("mutation down")}
+
+	_, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "complete workflow dispatch mutation attempt after GitHub accepted dispatch")
+	_, retryErr := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.Error(t, retryErr)
+	assert.Contains(t, retryErr.Error(), "repair required")
+	assert.Len(t, gh.calls, 1)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, "started", st.mutationAttempts[0].Status)
+	assert.Equal(t, "started", st.idempotencyKeys[key].Status)
+}
+
+func TestDispatcherFailedIdempotencyWithCompletedMutationRepairsWithoutRedispatch(t *testing.T) {
+	st := newFakeStore()
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.idempotencyKeys[key] = store.IdempotencyKey{
+		Key:      key,
+		Scope:    "workflow_dispatch",
+		Status:   "failed",
+		Metadata: json.RawMessage(`{"job_id":"job-existing"}`),
+	}
+	st.jobs["job-existing"] = store.Job{JobID: "job-existing"}
+	st.mutationAttempts = append(st.mutationAttempts, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		MutationType:   "workflow_dispatch",
+		Status:         "completed",
+		Response:       json.RawMessage(`{"job_id":"job-existing","url":"https://github.com/octo/herd/actions","created":true}`),
+	})
+	gh := &fakeWorkflowClient{}
+
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.False(t, result.Created)
+	assert.Equal(t, "job-existing", result.JobID)
+	assert.Empty(t, gh.calls)
+	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
+}
+
 func TestDispatcherValidationRejectsMissingAndStaleHeadSHA(t *testing.T) {
 	tests := []struct {
 		name string

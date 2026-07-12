@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -300,7 +301,7 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 		if dispatchable && existing.Status != "completed" && h.commandDispatchOutcomeUnknown(ctx, repo.ID, event.CommentID, commandKey) {
 			return store.Repository{}, false, "", nil, fmt.Errorf("command dispatch %q has unknown outcome after started dispatcher call", idempotencyKey)
 		}
-		if dispatchable && existing.Status == "completed" && !h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
+		if dispatchable && existing.Status == "completed" && existing.ResultRef == "dispatch:completed" && !h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
 			if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, commandKey, record.Metadata); err != nil {
 				return store.Repository{}, false, "", nil, err
 			}
@@ -322,17 +323,31 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 				return store.Repository{}, false, "", nil, fmt.Errorf("add acknowledgement comment: %w", err)
 			}
 			ackMetadata := commandMetadataWithAck(record.Metadata, ackID)
+			ackResultRef := fmt.Sprintf("issue_comment:%d", ackID)
+			if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef); err != nil {
+				return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement intent: %w", err)
+			}
 			if err := h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata); err != nil {
 				return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement comment: %w", err)
 			}
 			if !dispatchable {
-				ackResultRef := fmt.Sprintf("issue_comment:%d", ackID)
-				if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef); err != nil {
-					return store.Repository{}, false, "", nil, fmt.Errorf("complete command idempotency key: %w", err)
-				}
 				return repo, false, idempotencyKey, ackMetadata, nil
 			}
 			return repo, true, idempotencyKey, ackMetadata, nil
+		}
+		if ackID, ok := parseAckResultRef(existing.ResultRef); ok {
+			ackMetadata := commandMetadataWithAck(commandRecord.Metadata, ackID)
+			if dispatchable && h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
+				if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed"); err != nil {
+					return store.Repository{}, false, "", nil, fmt.Errorf("repair command idempotency key: %w", err)
+				}
+				return repo, false, idempotencyKey, ackMetadata, nil
+			}
+			_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata)
+			if dispatchable {
+				return repo, true, idempotencyKey, ackMetadata, nil
+			}
+			return repo, false, idempotencyKey, ackMetadata, nil
 		}
 		return repo, existing.Status != "completed", idempotencyKey, commandRecord.Metadata, nil
 	}
@@ -349,17 +364,12 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 		return store.Repository{}, false, "", nil, fmt.Errorf("add acknowledgement comment: %w", err)
 	}
 	ackMetadata := commandMetadataWithAck(record.Metadata, ackID)
-	if err := h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata); err != nil {
-		if !dispatchable {
-			_ = h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, fmt.Sprintf("issue_comment:%d", ackID))
-		}
-		return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement comment: %w", err)
+	ackResultRef := fmt.Sprintf("issue_comment:%d", ackID)
+	if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef); err != nil {
+		return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement intent: %w", err)
 	}
-	if !dispatchable {
-		ackResultRef := fmt.Sprintf("issue_comment:%d", ackID)
-		if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef); err != nil {
-			return store.Repository{}, false, "", nil, fmt.Errorf("complete command idempotency key: %w", err)
-		}
+	if err := h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata); err != nil {
+		return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement comment: %w", err)
 	}
 	return repo, true, idempotencyKey, ackMetadata, nil
 }
@@ -385,6 +395,15 @@ func commandAckResultRef(metadata json.RawMessage) string {
 		return ""
 	}
 	return fmt.Sprintf("issue_comment:%d", body.AckCommentID)
+}
+
+func parseAckResultRef(resultRef string) (int64, bool) {
+	raw := strings.TrimPrefix(resultRef, "issue_comment:")
+	if raw == resultRef || raw == "" {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	return id, err == nil && id > 0
 }
 
 func (h Handler) markCommandDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {

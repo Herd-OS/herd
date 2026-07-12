@@ -138,6 +138,15 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 }
 
 func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, idempotencyKey string, jobID string, inputs map[string]string, now time.Time, createJob bool, recordMutation bool) (DispatchResult, error) {
+	if recordMutation {
+		if completed, result, err := d.completedDispatchMutation(ctx, idempotencyKey); completed || err != nil {
+			if result.JobID == "" {
+				result.JobID = jobID
+			}
+			result.Created = false
+			return result, err
+		}
+	}
 	jobMetadata, err := json.Marshal(map[string]any{
 		"kind":              req.Kind,
 		"workflow_file":     req.WorkflowFile,
@@ -203,11 +212,14 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		return DispatchResult{}, fmt.Errorf("marshal dispatch result: %w", err)
 	}
 	if err := d.Store.CompleteIdempotencyKey(ctx, idempotencyKey, string(resultJSON)); err != nil {
-		_ = d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
+		mutationErr := d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
 			Status:      "completed",
 			Response:    json.RawMessage(resultJSON),
 			CompletedAt: time.Now().UTC(),
 		})
+		if mutationErr != nil {
+			return DispatchResult{}, fmt.Errorf("complete dispatch idempotency key: %w; complete workflow dispatch mutation attempt after GitHub accepted dispatch: %v", err, mutationErr)
+		}
 		return DispatchResult{}, fmt.Errorf("complete dispatch idempotency key: %w", err)
 	}
 	if err := d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
@@ -363,6 +375,9 @@ func (d Dispatcher) completedDispatchMutation(ctx context.Context, idempotencyKe
 	}
 	if err != nil {
 		return false, DispatchResult{}, fmt.Errorf("get workflow dispatch mutation attempt: %w", err)
+	}
+	if attempt.Status == "started" {
+		return false, DispatchResult{}, fmt.Errorf("workflow dispatch %q outcome is unknown after GitHub accepted dispatch; repair required", idempotencyKey)
 	}
 	if attempt.Status != "completed" {
 		return false, DispatchResult{}, nil

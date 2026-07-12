@@ -700,6 +700,7 @@ func TestHandlerRetryAfterRecordJobResultFailureDoesNotReapplyPatch(t *testing.T
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, applier.requests, 1)
 	assert.Len(t, st.results, 1)
+	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("f", 40))
 }
 
 func TestHandlerRetryAfterPatchApplyCompletionFailureDoesNotReapplyPatch(t *testing.T) {
@@ -731,6 +732,7 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureDoesNotReapplyPatch(t *test
 	assert.Len(t, applier.requests, 1)
 	assert.Len(t, st.results, 1)
 	assert.Equal(t, "completed", st.idem[patchApplyKeyForTest(t, payload, job)].Status)
+	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("a", 40))
 }
 
 func TestHandlerRetryAfterPatchApplyCompletionFailureWithoutMutationReaderDoesNotReapplyPatch(t *testing.T) {
@@ -796,6 +798,7 @@ func TestHandlerRetryAfterPatchMutationCompletionFailureDoesNotReapplyPatch(t *t
 	assert.Len(t, st.results, 1)
 	require.Equal(t, "completed", st.idem[patchKey].Status)
 	assert.Contains(t, st.idem[patchKey].ResultRef, strings.Repeat("a", 40))
+	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("a", 40))
 	attempt, err := st.GetGitHubMutationAttempt(context.Background(), patchKey)
 	require.NoError(t, err)
 	assert.Equal(t, "completed", attempt.Status)
@@ -828,6 +831,18 @@ func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, applier.requests, 1)
 	assert.Len(t, st.results, 1)
+	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("a", 40))
+}
+
+func assertJobResultCommitSHA(t *testing.T, result store.JobResult, want string) {
+	t.Helper()
+	var metadata struct {
+		PatchApply struct {
+			CommitSHA string `json:"commit_sha"`
+		} `json:"patch_apply"`
+	}
+	require.NoError(t, json.Unmarshal(result.Metadata, &metadata))
+	assert.Equal(t, want, metadata.PatchApply.CommitSHA)
 }
 
 type mutationRecorderOnlyResultStore struct {

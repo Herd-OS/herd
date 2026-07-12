@@ -287,9 +287,9 @@ func TestHandlerDoesNotDispatchPRCommandsFromIssueComments(t *testing.T) {
 	}
 }
 
-func TestHandlerNonDispatchableCompletionFailureRedeliveryDoesNotAckAgain(t *testing.T) {
+func TestHandlerNonDispatchableAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing.T) {
 	st := newFakeStore()
-	st.completeErrs = []error{errors.New("store down"), nil}
+	st.updateErrs = []error{errors.New("store down"), nil}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
@@ -299,7 +299,7 @@ func TestHandlerNonDispatchableCompletionFailureRedeliveryDoesNotAckAgain(t *tes
 	_, retryErr := h.HandleIssueComment(context.Background(), event)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "complete command idempotency key")
+	assert.Contains(t, err.Error(), "record acknowledgement comment")
 	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
 	assert.Empty(t, dispatcher.dispatched)
@@ -357,9 +357,33 @@ func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(
 	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
+func TestHandlerAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing.T) {
+	st := newFakeStore()
+	st.updateErrs = []error{errors.New("store down"), nil, nil, nil}
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os review")
+
+	_, err := h.HandleIssueComment(context.Background(), event)
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "record acknowledgement comment")
+	require.NoError(t, retryErr)
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+	key := "repo:42:comment:123:command:review"
+	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
+	require.Len(t, st.commandRecords, 1)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
+}
+
 func TestHandlerDispatchCompletionFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
 	st := newFakeStore()
-	st.completeErrs = []error{errors.New("store down"), nil}
+	st.completeErrs = []error{nil, errors.New("store down"), nil}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
@@ -402,7 +426,6 @@ func TestHandlerRecordFailureRetryPostsOneAcknowledgement(t *testing.T) {
 func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t *testing.T) {
 	st := newFakeStore()
 	st.updateErrs = []error{nil, nil, errors.New("store down")}
-	st.completeErrs = []error{errors.New("store down")}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
@@ -413,14 +436,13 @@ func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t 
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mark command dispatched")
-	require.Error(t, retryErr)
-	assert.Contains(t, retryErr.Error(), "unknown outcome")
+	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
 	assert.Len(t, dispatcher.dispatched, 1)
 	key := "repo:42:comment:123:command:review"
-	require.Equal(t, "started", st.idempotencyKeys[key].Status)
+	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
 	require.Len(t, st.commandRecords, 1)
-	assert.Equal(t, "dispatching", st.commandRecords[0].Status)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
 }
 
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {
@@ -490,7 +512,7 @@ func TestHandlerStoreAndGitHubFailures(t *testing.T) {
 			body:    "@herd-os plan",
 			store:   func() *fakeStore { s := newFakeStore(); s.completeErr = errors.New("down"); return s }(),
 			github:  &fakeGitHub{},
-			wantErr: "complete command idempotency key",
+			wantErr: "record acknowledgement intent",
 		},
 	}
 
