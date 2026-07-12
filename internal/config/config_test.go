@@ -25,6 +25,12 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, true, cfg.Integrator.Review)
 	assert.Equal(t, 0, cfg.Integrator.ReviewMaxFixCycles)
 	assert.Equal(t, "standard", cfg.Integrator.ReviewStrictness)
+	assert.Equal(t, ReviewDiff{
+		MaxChunkBytes:    180000,
+		MaxFileBytes:     40000,
+		MaxFilesPerChunk: 80,
+		MaxChunks:        8,
+	}, cfg.Integrator.ReviewDiff)
 	assert.Equal(t, 0, cfg.Integrator.CIMaxFixCycles)
 	assert.Empty(t, cfg.Integrator.CIWorkflows)
 	assert.Nil(t, cfg.Integrator.CIWorkflows)
@@ -57,6 +63,11 @@ integrator:
   require_ci: false
   review: true
   review_max_fix_cycles: 2
+  review_diff:
+    max_chunk_bytes: 90000
+    max_file_bytes: 20000
+    max_files_per_chunk: 40
+    max_chunks: 4
   ci_max_fix_cycles: 1
   ci_workflows:
     - "CI - ServiceKit Ruby"
@@ -92,6 +103,12 @@ image_publish:
 	assert.Equal(t, "rebase", cfg.Integrator.Strategy)
 	assert.Equal(t, "dispatch-resolver", cfg.Integrator.OnConflict)
 	assert.Equal(t, false, cfg.Integrator.RequireCI)
+	assert.Equal(t, ReviewDiff{
+		MaxChunkBytes:    90000,
+		MaxFileBytes:     20000,
+		MaxFilesPerChunk: 40,
+		MaxChunks:        4,
+	}, cfg.Integrator.ReviewDiff)
 	assert.Equal(t, []string{"CI - ServiceKit Ruby", "CI — Accounts"}, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, 10, cfg.Monitor.PatrolIntervalMinutes)
 	assert.Equal(t, false, cfg.Monitor.AutoRedispatch)
@@ -221,6 +238,12 @@ platform:
 	assert.Equal(t, 3, cfg.Workers.MaxConcurrent)
 	assert.Equal(t, "herd-worker", cfg.Workers.RunnerLabel)
 	assert.Equal(t, "squash", cfg.Integrator.Strategy)
+	assert.Equal(t, ReviewDiff{
+		MaxChunkBytes:    180000,
+		MaxFileBytes:     40000,
+		MaxFilesPerChunk: 80,
+		MaxChunks:        8,
+	}, cfg.Integrator.ReviewDiff)
 	assert.Nil(t, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
 	assert.Equal(t, []string{"ubuntu-latest"}, cfg.ImagePublish.RunsOn)

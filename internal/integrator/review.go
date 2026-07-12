@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,8 +21,19 @@ import (
 
 const safetyValveLimit = 10
 
+var errManualInterventionNeeded = errors.New("manual intervention needed")
+
+const manualInterventionReviewComment = "⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry."
+
 type authenticatedLoginProvider interface {
 	AuthenticatedLogin(ctx context.Context) (string, error)
+}
+
+type aggregatedReview struct {
+	Result             *agent.ReviewResult
+	ChunksReviewed     int
+	ManualIntervention bool
+	AgentError         error
 }
 
 func duplicateApprovedReviewSkipReason(prNumber int, headSHA string) string {
@@ -221,6 +233,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if err != nil {
 		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
 	}
+	plan := reviewdiff.ChunkForReview(preparedDiff.DiffSet, chunkOptionsFromConfig(cfg))
+	preparedDiff.Chunks = plan.Chunks
+	preparedDiff.Coverage = plan.Coverage
 	logDiffCoverageIfLimited(preparedDiff)
 
 	// Collect acceptance criteria from all milestone issues
@@ -299,7 +314,14 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		reviewOpts.SystemPrompt += params.ExtraInstructions
 	}
 
-	reviewResult, err := runReviewWithRetry(ctx, ag, p, preparedDiff.Rendered.Text, reviewOpts, pr.Number)
+	reviewResult, _, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, pr.Number)
+	if errors.Is(err, errManualInterventionNeeded) {
+		_ = postManualInterventionReviewComment(ctx, p, pr.Number)
+		return &ReviewResult{
+			BatchPRNumber:            pr.Number,
+			ManualInterventionNeeded: true,
+		}, nil
+	}
 	if err != nil {
 		// Agent failed (e.g., API error, suspicious output). Don't propagate the
 		// error — return a neutral result so the workflow succeeds and the review
@@ -308,8 +330,6 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
 	if reviewResult == nil {
-		// Both attempts produced unparseable output. A manual-intervention
-		// comment was already posted by runReviewWithRetry.
 		return &ReviewResult{
 			BatchPRNumber:            pr.Number,
 			ManualInterventionNeeded: true,
@@ -337,12 +357,23 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		}
 		return markedComment, nil
 	}
+	coverageBlocked := coverageBlocksApproval(plan)
 
 	// Partition findings by severity
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
 
 	// Handle approved
 	if reviewResult.Approved {
+		if coverageBlocked {
+			comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
+			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, findMaxFixCycle(allIssues), len(reviewResult.Findings))
+			if err != nil {
+				return nil, err
+			}
+			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+			_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "Review coverage is partial; not all material files were reviewed.", platform.ReviewRequestChanges)
+			return &ReviewResult{BatchPRNumber: pr.Number, FindingsCount: len(reviewResult.Findings)}, nil
+		}
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
 		summaryComment = appendDiffCoverageIfLimited(summaryComment, preparedDiff)
 		summaryComment, err = markReviewResult(summaryComment, reviewResultStatusApproved, findMaxFixCycle(allIssues), 0)
@@ -410,6 +441,16 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// No actionable findings — approve with informational comment and batch summary
 	if len(actionableFindings) == 0 {
+		if coverageBlocked {
+			comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
+			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
+			if err != nil {
+				return nil, err
+			}
+			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+			_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "Review coverage is partial; not all material files were reviewed.", platform.ReviewRequestChanges)
+			return &ReviewResult{BatchPRNumber: pr.Number, FindingsCount: len(reviewResult.Findings)}, nil
+		}
 		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
 		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 		comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
@@ -435,6 +476,16 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	actionableFindings = dedupFindings(actionableFindings, openFixIssues)
 	if len(actionableFindings) == 0 {
+		if coverageBlocked {
+			comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
+			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
+			if err != nil {
+				return nil, err
+			}
+			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+			_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "Review coverage is partial; not all material files were reviewed.", platform.ReviewRequestChanges)
+			return &ReviewResult{BatchPRNumber: pr.Number, FindingsCount: len(reviewResult.Findings)}, nil
+		}
 		// All findings are covered by existing fix issues — approve to unblock
 		// any previous REQUEST_CHANGES review and post an informational comment.
 		fmt.Println("All actionable findings are duplicates of existing fix issues, approving.")
@@ -522,6 +573,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// Post structured findings comment
 	findingsComment := buildReviewCycleComment(nextCycle, cfg.Integrator.ReviewMaxFixCycles, fixIssueNums, highFindings, mediumFindings, lowFindings, criteriaFindings)
+	if coverageBlocked {
+		findingsComment = appendCoverageApprovalBlockedSection(findingsComment, plan)
+	}
 	findingsComment = appendDiffCoverageIfLimited(findingsComment, preparedDiff)
 	findingsComment, err = markReviewResult(findingsComment, reviewResultStatusChangesRequested, nextCycle, len(actionableFindings))
 	if err != nil {
@@ -538,6 +592,188 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		FixCycle:      nextCycle,
 		BatchPRNumber: pr.Number,
 	}, nil
+}
+
+func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform, plan reviewdiff.ChunkPlan, baseOpts agent.ReviewOptions, prNumber int) (*agent.ReviewResult, int, error) {
+	fmt.Printf("Running agent review in %d chunk(s)\n", len(plan.Chunks))
+	aggregate := aggregatedReview{}
+	if len(plan.Chunks) == 0 {
+		aggregate.Result = &agent.ReviewResult{
+			Approved: false,
+			Summary:  "No reviewable diff content was found.",
+		}
+		return aggregate.Result, aggregate.ChunksReviewed, nil
+	}
+
+	approved := true
+	summaries := make([]string, 0, len(plan.Chunks))
+	findings := make([]agent.ReviewFinding, 0)
+	seenFindings := make(map[string]struct{})
+	coverageSummary := reviewdiff.FormatChunkedCoverageSummary(plan, len(plan.Chunks), reviewdiff.DefaultMaxOmittedSummaryEntries)
+
+	for _, chunk := range plan.Chunks {
+		totalChunks := chunk.Total
+		if plan.Coverage.RequiredChunks > totalChunks {
+			totalChunks = plan.Coverage.RequiredChunks
+		}
+		opts := baseOpts
+		opts.ChunkIndex = chunk.Index
+		opts.TotalChunks = totalChunks
+		opts.ChunkIncludedPathRange = chunkIncludedPathRange(chunk)
+		opts.CoverageSummary = coverageSummary
+		opts.ChunkedReview = totalChunks > 1
+		opts.PartialReview = !plan.Coverage.Complete
+
+		result, err := runReviewWithRetry(ctx, ag, p, chunk.Text, opts, prNumber)
+		if errors.Is(err, errManualInterventionNeeded) {
+			aggregate.ChunksReviewed = chunk.Index - 1
+			aggregate.ManualIntervention = true
+			return nil, aggregate.ChunksReviewed, errManualInterventionNeeded
+		}
+		if err != nil {
+			aggregate.ChunksReviewed = chunk.Index - 1
+			aggregate.AgentError = err
+			return nil, aggregate.ChunksReviewed, aggregate.AgentError
+		}
+		if result == nil {
+			aggregate.ChunksReviewed = chunk.Index
+			aggregate.ManualIntervention = true
+			return nil, aggregate.ChunksReviewed, nil
+		}
+		if !result.Approved {
+			approved = false
+		}
+		if strings.TrimSpace(result.Summary) != "" {
+			summaries = append(summaries, fmt.Sprintf("Chunk %d/%d: %s", chunk.Index, totalChunks, strings.TrimSpace(result.Summary)))
+		}
+		chunkFindingKeys := make(map[string]struct{})
+		for _, finding := range result.Findings {
+			key := normalizedFindingKey(finding)
+			if _, ok := seenFindings[key]; ok {
+				continue
+			}
+			chunkFindingKeys[key] = struct{}{}
+			findings = append(findings, finding)
+		}
+		for key := range chunkFindingKeys {
+			seenFindings[key] = struct{}{}
+		}
+	}
+
+	if len(materialNotReviewed(plan)) > 0 || plan.Coverage.ExceededMaxChunks {
+		approved = false
+	}
+
+	summary := strings.Join(summaries, "\n\n")
+	if len(plan.Chunks) > 1 {
+		summary = fmt.Sprintf("Chunked review completed across %d chunk(s).", len(plan.Chunks)) + optionalSummarySuffix(summary)
+	}
+	aggregate.Result = &agent.ReviewResult{
+		Approved: approved,
+		Findings: findings,
+		Comments: reviewCommentsFromFindings(findings),
+		Summary:  summary,
+	}
+	aggregate.ChunksReviewed = len(plan.Chunks)
+	return aggregate.Result, aggregate.ChunksReviewed, nil
+}
+
+func chunkIncludedPathRange(chunk reviewdiff.ReviewChunk) string {
+	if len(chunk.IncludedFiles) == 0 {
+		return ""
+	}
+	first := chunk.IncludedFiles[0].Path
+	lastFile := chunk.IncludedFiles[len(chunk.IncludedFiles)-1]
+	last := lastFile.Path
+	if first == last {
+		return first
+	}
+	return first + " through " + last
+}
+
+func normalizedFindingKey(finding agent.ReviewFinding) string {
+	return strings.ToLower(strings.TrimSpace(finding.Severity)) + "\x00" + strings.ToLower(strings.Join(strings.Fields(finding.Description), " "))
+}
+
+func reviewCommentsFromFindings(findings []agent.ReviewFinding) []string {
+	comments := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		comments = append(comments, finding.Description)
+	}
+	return comments
+}
+
+func optionalSummarySuffix(summary string) string {
+	if strings.TrimSpace(summary) == "" {
+		return ""
+	}
+	return "\n\n" + summary
+}
+
+func materialNotReviewed(plan reviewdiff.ChunkPlan) []reviewdiff.FileCoverage {
+	var material []reviewdiff.FileCoverage
+	for _, file := range plan.Coverage.NotReviewedFiles {
+		if reviewdiff.IsAllowableNotReviewedFile(file) {
+			continue
+		}
+		material = append(material, file)
+	}
+	return material
+}
+
+func coverageBlocksApproval(plan reviewdiff.ChunkPlan) bool {
+	return len(plan.Chunks) == 0 || plan.Coverage.ExceededMaxChunks || len(materialNotReviewed(plan)) > 0
+}
+
+func buildCoverageApprovalBlockedComment(prepared reviewdiff.PreparedDiff, plan reviewdiff.ChunkPlan) string {
+	return appendDiffCoverageIfLimited(buildCoverageApprovalBlockedBody(plan), prepared)
+}
+
+func appendCoverageApprovalBlockedSection(comment string, plan reviewdiff.ChunkPlan) string {
+	return strings.TrimRight(comment, "\n") + "\n\n" + buildCoverageApprovalBlockedBody(plan)
+}
+
+func buildCoverageApprovalBlockedBody(plan reviewdiff.ChunkPlan) string {
+	material := materialNotReviewed(plan)
+	var b strings.Builder
+	b.WriteString("⚠️ **HerdOS Integrator**\n\n")
+	b.WriteString("HerdOS could not approve this PR because the diff review was partial and not all material source files were reviewed.")
+	if len(plan.Chunks) == 0 {
+		b.WriteString("\n\nNo review chunks were sent to the review agent, so Herd cannot approve this PR without a reviewed chunk.")
+	}
+	if plan.Coverage.ExceededMaxChunks {
+		fmt.Fprintf(&b, "\n\nThe diff required %d review chunk(s), which exceeds the configured maximum of %d. Herd reviewed only the allowed chunk(s).",
+			plan.Coverage.RequiredChunks, plan.Coverage.MaxChunks)
+	}
+	if len(material) > 0 {
+		b.WriteString("\n\nMaterial files not reviewed:\n")
+		limit := min(len(material), reviewdiff.DefaultMaxOmittedSummaryEntries)
+		for _, file := range material[:limit] {
+			reason := file.Reason
+			if strings.TrimSpace(reason) == "" {
+				reason = "not reviewed"
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", file.Path, reason)
+		}
+		if len(material) > limit {
+			fmt.Fprintf(&b, "- ... %d additional material files not shown\n", len(material)-limit)
+		}
+	}
+	if len(material) == 0 && len(plan.Coverage.NotReviewedFiles) > 0 {
+		b.WriteString("\n\nFiles summarized but not reviewed:\n")
+		limit := min(len(plan.Coverage.NotReviewedFiles), reviewdiff.DefaultMaxOmittedSummaryEntries)
+		for _, file := range plan.Coverage.NotReviewedFiles[:limit] {
+			reason := file.Reason
+			if strings.TrimSpace(reason) == "" {
+				reason = "not reviewed"
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", file.Path, reason)
+		}
+		if len(plan.Coverage.NotReviewedFiles) > limit {
+			fmt.Fprintf(&b, "- ... %d additional summarized files not shown\n", len(plan.Coverage.NotReviewedFiles)-limit)
+		}
+	}
+	return b.String()
 }
 
 func trustedReviewResultMarkerHumanLogins(ctx context.Context, p platform.Platform) []string {
@@ -575,6 +811,9 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	if err != nil {
 		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
 	}
+	plan := reviewdiff.ChunkForReview(preparedDiff.DiffSet, chunkOptionsFromConfig(cfg))
+	preparedDiff.Chunks = plan.Chunks
+	preparedDiff.Coverage = plan.Coverage
 	logDiffCoverageIfLimited(preparedDiff)
 
 	reviewOpts := agent.ReviewOptions{
@@ -602,18 +841,29 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 		reviewOpts.WorkerNoOpVerdicts = collectWorkerNoOpVerdicts(prComments)
 	}
 
-	reviewResult, err := ag.Review(ctx, preparedDiff.Rendered.Text, reviewOpts)
+	reviewResult, _, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, params.PRNumber)
+	if errors.Is(err, errManualInterventionNeeded) {
+		_ = postManualInterventionReviewComment(ctx, p, params.PRNumber)
+		return &ReviewStandaloneResult{ManualInterventionNeeded: true}, nil
+	}
 	if err != nil {
 		fmt.Printf("Review agent failed: %s\n", err)
 		return &ReviewStandaloneResult{}, nil
 	}
-
-	if strings.HasPrefix(reviewResult.Summary, "Failed to parse") {
-		fmt.Printf("Review agent returned unparseable output.\n")
-		return &ReviewStandaloneResult{}, nil
+	if reviewResult == nil {
+		return &ReviewStandaloneResult{ManualInterventionNeeded: true}, nil
 	}
 
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
+	if coverageBlocksApproval(plan) {
+		comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
+		if len(reviewResult.Findings) > 0 {
+			comment += "\n\n" + buildReviewCycleComment(0, 0, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
+		}
+		_ = p.PullRequests().AddComment(ctx, params.PRNumber, comment)
+		_ = p.PullRequests().CreateReview(ctx, params.PRNumber, "Review coverage is partial; not all material files were reviewed.", platform.ReviewRequestChanges)
+		return &ReviewStandaloneResult{FindingsCount: len(reviewResult.Findings)}, nil
+	}
 
 	if reviewResult.Approved {
 		comment := fmt.Sprintf("✅ **HerdOS Agent Review**\n\n%s\n", reviewResult.Summary)
@@ -626,6 +876,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	findingsComment := buildReviewCycleComment(0, 0, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
 	findingsComment = appendDiffCoverageIfLimited(findingsComment, preparedDiff)
 	_ = p.PullRequests().AddComment(ctx, params.PRNumber, findingsComment)
+	_ = p.PullRequests().CreateReview(ctx, params.PRNumber, "Agent review found issues.", platform.ReviewRequestChanges)
 
 	return &ReviewStandaloneResult{FindingsCount: len(reviewResult.Findings)}, nil
 }
@@ -824,10 +1075,10 @@ func findMaxFixCycle(allIssues []*platform.Issue) int {
 var unparseableRetryDelay = 5 * time.Second
 
 // runReviewWithRetry runs ag.Review and retries once on unparseable
-// output. If both attempts fail, it posts a manual-intervention comment
-// on the batch PR and returns (nil, nil). On agent-side error it
-// returns (nil, err). On success it returns the parsed result.
-func runReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform, diff string, opts agent.ReviewOptions, prNumber int) (*agent.ReviewResult, error) {
+// output. If both attempts fail, it returns errManualInterventionNeeded.
+// On agent-side error it returns (nil, err). On success it returns the
+// parsed result.
+func runReviewWithRetry(ctx context.Context, ag agent.Agent, _ platform.Platform, diff string, opts agent.ReviewOptions, _ int) (*agent.ReviewResult, error) {
 	res, err := ag.Review(ctx, diff, opts)
 	if err != nil {
 		return nil, err
@@ -848,9 +1099,11 @@ func runReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform
 	if !isUnparseable(res2) {
 		return res2, nil
 	}
-	comment := "⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry."
-	_ = p.PullRequests().AddComment(ctx, prNumber, comment)
-	return nil, nil
+	return nil, errManualInterventionNeeded
+}
+
+func postManualInterventionReviewComment(ctx context.Context, p platform.Platform, prNumber int) error {
+	return p.PullRequests().AddComment(ctx, prNumber, manualInterventionReviewComment)
 }
 
 // isUnparseable returns true when the agent layer signaled an

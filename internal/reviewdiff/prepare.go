@@ -29,6 +29,8 @@ type PrepareRequest struct {
 type PreparedDiff struct {
 	DiffSet  DiffSet
 	Rendered RenderResult
+	Chunks   []ReviewChunk
+	Coverage CoverageSummary
 }
 
 func PrepareForReview(ctx context.Context, req PrepareRequest) (PreparedDiff, error) {
@@ -132,9 +134,12 @@ func FormatCoverageSummary(diff DiffSet, rendered RenderResult, maxOmittedEntrie
 }
 
 func renderPrepared(diff DiffSet) PreparedDiff {
+	plan := ChunkForReview(diff, DefaultChunkOptions())
 	return PreparedDiff{
 		DiffSet:  diff,
 		Rendered: RenderForReview(diff, DefaultRenderOptions()),
+		Chunks:   plan.Chunks,
+		Coverage: plan.Coverage,
 	}
 }
 

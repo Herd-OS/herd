@@ -40,9 +40,9 @@ type PlanOptions struct {
 }
 
 type TaskSpec struct {
-	IssueNumber        int      // GitHub issue number (for commit messages)
+	IssueNumber        int // GitHub issue number (for commit messages)
 	Title              string
-	Body               string   // Full issue body (raw markdown, passed verbatim to agent)
+	Body               string // Full issue body (raw markdown, passed verbatim to agent)
 	AcceptanceCriteria []string
 	Scope              []string
 }
@@ -66,11 +66,11 @@ type PlannedTask struct {
 	Scope                   []string `json:"scope" yaml:"scope"`
 	Conventions             []string `json:"conventions" yaml:"conventions"`
 	ContextFromDependencies []string `json:"context_from_dependencies" yaml:"context_from_dependencies"`
-	Complexity              string   `json:"complexity" yaml:"complexity"`       // "low", "medium", "high"
-	Type                    string   `json:"type" yaml:"type"`                   // "feature", "bugfix" (default: "feature")
-	RunnerLabel             string   `json:"runner_label" yaml:"runner_label"`   // Runner label override; empty = use config default
-	DependsOn               []int    `json:"depends_on" yaml:"depends_on"`      // Indices into the Tasks slice
-	Manual                  bool     `json:"manual" yaml:"manual"`              // Requires human action, not dispatched to workers
+	Complexity              string   `json:"complexity" yaml:"complexity"`     // "low", "medium", "high"
+	Type                    string   `json:"type" yaml:"type"`                 // "feature", "bugfix" (default: "feature")
+	RunnerLabel             string   `json:"runner_label" yaml:"runner_label"` // Runner label override; empty = use config default
+	DependsOn               []int    `json:"depends_on" yaml:"depends_on"`     // Indices into the Tasks slice
+	Manual                  bool     `json:"manual" yaml:"manual"`             // Requires human action, not dispatched to workers
 }
 
 type ExecResult struct {
@@ -80,18 +80,24 @@ type ExecResult struct {
 
 // ReviewFinding represents a single finding from a code review with severity.
 type ReviewFinding struct {
-	Severity    string `json:"severity"`    // "HIGH", "MEDIUM", "LOW"
+	Severity    string `json:"severity"` // "HIGH", "MEDIUM", "LOW"
 	Description string `json:"description"`
 }
 
 type ReviewOptions struct {
-	AcceptanceCriteria   []string
-	RepoRoot             string
-	SystemPrompt         string
-	Strictness           string   // "standard", "strict", "lenient" — controls review aggressiveness
-	MinFixSeverity       string   // minimum severity that blocks approval: "high", "medium", "low"
-	PriorReviewComments  []string // Full text of previous HerdOS review comments on this PR
-	UserFeedbackComments []string // User-authored comments on this PR (authoritative)
+	AcceptanceCriteria     []string
+	RepoRoot               string
+	SystemPrompt           string
+	Strictness             string   // "standard", "strict", "lenient" — controls review aggressiveness
+	MinFixSeverity         string   // minimum severity that blocks approval: "high", "medium", "low"
+	PriorReviewComments    []string // Full text of previous HerdOS review comments on this PR
+	UserFeedbackComments   []string // User-authored comments on this PR (authoritative)
+	ChunkIndex             int
+	TotalChunks            int
+	ChunkIncludedPathRange string
+	CoverageSummary        string
+	ChunkedReview          bool
+	PartialReview          bool
 	// WorkerNoOpVerdicts contains the bodies of structured verdict
 	// comments posted by fix workers on the batch PR in previous cycles.
 	// Each entry is one full verdict comment body (header + reasoning).

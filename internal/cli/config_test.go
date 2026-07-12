@@ -35,6 +35,10 @@ func TestGetConfigValue(t *testing.T) {
 	val, err = getConfigValue(cfg, "image_publish.build_secrets")
 	require.NoError(t, err)
 	assert.Equal(t, "[]", val)
+
+	val, err = getConfigValue(cfg, "integrator.review_diff.max_chunk_bytes")
+	require.NoError(t, err)
+	assert.Equal(t, "180000", val)
 }
 
 func TestGetConfigValueImagePublishRunsOn(t *testing.T) {
@@ -321,6 +325,10 @@ func TestFlattenConfig(t *testing.T) {
 	kvs := flattenConfig(cfg)
 	assert.True(t, len(kvs) > 20, "should have many keys, got %d", len(kvs))
 	got := keyValueMap(kvs)
+	assert.Equal(t, "180000", got["integrator.review_diff.max_chunk_bytes"])
+	assert.Equal(t, "40000", got["integrator.review_diff.max_file_bytes"])
+	assert.Equal(t, "80", got["integrator.review_diff.max_files_per_chunk"])
+	assert.Equal(t, "8", got["integrator.review_diff.max_chunks"])
 	assert.Equal(t, "[ubuntu-latest]", got["image_publish.runs_on"])
 	assert.Equal(t, "[linux/amd64, linux/arm64]", got["image_publish.platforms"])
 	assert.Equal(t, "[]", got["image_publish.build_secrets"])
@@ -460,6 +468,17 @@ func TestSetGetConfigValue_AgentExecRoundTrip(t *testing.T) {
 	val, err = getConfigValue(cfg, "agent.exec_image")
 	require.NoError(t, err)
 	assert.Equal(t, "example/foo:bar", val)
+}
+
+func TestSetGetConfigValue_IntegratorReviewDiffRoundTrip(t *testing.T) {
+	cfg := config.Default()
+
+	require.NoError(t, setConfigValue(cfg, "integrator.review_diff.max_chunks", "12"))
+	assert.Equal(t, 12, cfg.Integrator.ReviewDiff.MaxChunks)
+
+	val, err := getConfigValue(cfg, "integrator.review_diff.max_chunks")
+	require.NoError(t, err)
+	assert.Equal(t, "12", val)
 }
 
 func TestSetGetConfigValue_AgentEmbeddedRoleRoundTrip(t *testing.T) {

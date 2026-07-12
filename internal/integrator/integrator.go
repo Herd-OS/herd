@@ -97,7 +97,8 @@ type ReviewStandaloneParams struct {
 
 // ReviewStandaloneResult holds the result of a standalone PR review.
 type ReviewStandaloneResult struct {
-	FindingsCount int
+	FindingsCount            int
+	ManualInterventionNeeded bool
 }
 
 // Consolidate merges completed worker branches into the batch branch.

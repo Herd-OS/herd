@@ -979,6 +979,77 @@ func TestReview_PrefersLocalGitDiffOverRawGitHubDiff(t *testing.T) {
 	assert.Contains(t, ag.lastDiff, "+local review")
 }
 
+func TestReview_CoverageBlockedWithActionableFindingsPostsCoverageAndCreatesFixIssue(t *testing.T) {
+	dir, g := initTestRepo(t)
+	require.NoError(t, g.Checkout("herd/batch/1-batch"))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "a.go"), []byte("package src\n\nfunc A() {}\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "b.go"), []byte("package src\n\nfunc B() {}\n"), 0644))
+	runReviewTestGit(t, dir, "add", "src/a.go", "src/b.go")
+	runReviewTestGit(t, dir, "commit", "-m", "add review files")
+	headSHA := reviewTestGitOutput(t, dir, "rev-parse", "HEAD")
+
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.createResult = &platform.Issue{Number: 100, Title: "Review fixes (cycle 1)"}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": headSHA},
+	}
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = repoSvc
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Summary:  "found issue",
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "Critical bug in reviewed chunk"},
+			},
+		},
+	}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{
+			Review:             true,
+			ReviewMaxFixCycles: 3,
+			ReviewDiff: config.ReviewDiff{
+				MaxFilesPerChunk: 1,
+				MaxChunks:        1,
+			},
+		},
+		Workers: config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Equal(t, "Review fixes (cycle 1)", issueSvc.createdTitle)
+	assert.Contains(t, issueSvc.createdBody, "Critical bug in reviewed chunk")
+	assert.Len(t, wf.dispatched, 1)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "Critical bug in reviewed chunk")
+	assert.Contains(t, prSvc.comments[0], "not all material source files were reviewed")
+	assert.Contains(t, prSvc.comments[0], "src/b.go: max chunks reached")
+	assert.Contains(t, prSvc.comments[0], "required 2 review chunk(s)")
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+}
+
 func TestReview_AppendsCoverageWhenPreparedDiffIsLimited(t *testing.T) {
 	issueSvc := newMockIssueService()
 	issueSvc.listResult = []*platform.Issue{
@@ -1016,10 +1087,70 @@ func TestReview_AppendsCoverageWhenPreparedDiffIsLimited(t *testing.T) {
 	assert.True(t, result.Approved)
 	require.NotEmpty(t, prSvc.comments)
 	assert.Contains(t, prSvc.comments[0], "## Diff Coverage")
-	assert.Contains(t, prSvc.comments[0], "Omitted files: 2 (generated: 1, binary: 1)")
-	assert.Contains(t, prSvc.comments[0], "Truncated files: 1")
+	assert.Contains(t, prSvc.comments[0], "Files summarized but not reviewed: 2")
+	assert.Contains(t, prSvc.comments[0], "Files reviewed with truncated diffs: 1")
+	assert.Contains(t, prSvc.comments[0], "generated file: 1")
+	assert.Contains(t, prSvc.comments[0], "dist/app.js")
+	assert.Contains(t, prSvc.comments[0], "binary file: 1")
+	assert.Contains(t, prSvc.comments[0], "image.png")
+	assert.Contains(t, prSvc.comments[0], "big.go: file diff exceeds per-file limit and was truncated")
+}
+
+func TestReview_ZeroChunksWithOnlyAllowableOmissionsRequestsChanges(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return &platform.Issue{Number: 100, Title: title}, nil
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			diffErr: platform.ErrPullRequestDiffTooLarge,
+			listFilesResult: []*platform.PullRequestFile{
+				{Path: "dist/app.js", Status: "modified", Patch: "@@ -1 +1 @@\n-old\n+new\n"},
+				{Path: "image.png", Status: "added"},
+			},
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-reviewed"},
+	}
+	mock := newReviewLockTestPlatform(mockCreate)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = repoSvc
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "should not run"}}
+
+	result, err := Review(context.Background(), mock, ag, nil, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, 0, ag.calls)
+	assert.Equal(t, 0, createdIssues)
+	assert.Empty(t, wf.dispatched)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "No review chunks were sent to the review agent")
+	assert.Contains(t, prSvc.comments[0], "Files summarized but not reviewed")
 	assert.Contains(t, prSvc.comments[0], "dist/app.js: generated file")
 	assert.Contains(t, prSvc.comments[0], "image.png: binary file")
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
 }
 
 func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
@@ -2347,6 +2478,14 @@ type mockCapturingPRService struct {
 type capturedReview struct {
 	body  string
 	event platform.ReviewEvent
+}
+
+func reviewEvents(reviews []capturedReview) []platform.ReviewEvent {
+	events := make([]platform.ReviewEvent, 0, len(reviews))
+	for _, review := range reviews {
+		events = append(events, review.event)
+	}
+	return events
 }
 
 func (m *mockCapturingPRService) AddComment(_ context.Context, _ int, body string) error {
@@ -4028,10 +4167,8 @@ func TestReviewStandalone_PostsComment(t *testing.T) {
 	assert.Empty(t, issueSvc.createdTitle, "standalone review must not create fix issues")
 	assert.Empty(t, wf.dispatched, "standalone review must not dispatch workers")
 
-	// No review event should be a request-changes one (Approved path posts CreateReview)
-	for _, r := range prSvc.reviews {
-		assert.NotEqual(t, platform.ReviewRequestChanges, r.event, "standalone review must not create request-changes review")
-	}
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
 }
 
 func TestReviewStandalone_Approved(t *testing.T) {
@@ -4063,6 +4200,91 @@ func TestReviewStandalone_Approved(t *testing.T) {
 	assert.Empty(t, wf.dispatched)
 }
 
+func TestReviewStandalone_CoverageBlockedWithFindingsPostsCoverageAndFindings(t *testing.T) {
+	mock, prSvc, issueSvc, wf := newStandalonePlatform()
+	prSvc.diffResult = strings.Join([]string{
+		"diff --git a/a.go b/a.go",
+		"index 1111111..2222222 100644",
+		"--- a/a.go",
+		"+++ b/a.go",
+		"@@ -1 +1 @@",
+		"-oldA",
+		"+newA",
+		"diff --git a/b.go b/b.go",
+		"index 3333333..4444444 100644",
+		"--- a/b.go",
+		"+++ b/b.go",
+		"@@ -1 +1 @@",
+		"-oldB",
+		"+newB",
+		"",
+	}, "\n")
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Summary:  "found issue",
+			Findings: []agent.ReviewFinding{
+				{Severity: "MEDIUM", Description: "Ordinary review finding"},
+			},
+		},
+	}
+
+	result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{
+			Review: true,
+			ReviewDiff: config.ReviewDiff{
+				MaxFilesPerChunk: 1,
+				MaxChunks:        1,
+			},
+		},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, result.FindingsCount)
+	assert.Equal(t, 1, ag.calls)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "not all material source files were reviewed")
+	assert.Contains(t, prSvc.comments[0], "b.go: max chunks reached")
+	assert.Contains(t, prSvc.comments[0], "Ordinary review finding")
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestReviewStandalone_ZeroChunksWithOnlyAllowableOmissionsRequestsChanges(t *testing.T) {
+	mock, prSvc, issueSvc, wf := newStandalonePlatform()
+	prSvc.diffErr = platform.ErrPullRequestDiffTooLarge
+	prSvc.listFilesResult = []*platform.PullRequestFile{
+		{Path: "dist/app.js", Status: "modified", Patch: "@@ -1 +1 @@\n-old\n+new\n"},
+		{Path: "image.png", Status: "added"},
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "should not run"},
+	}
+
+	result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{Review: true},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 0, result.FindingsCount)
+	assert.Equal(t, 0, ag.calls)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "No review chunks were sent to the review agent")
+	assert.Contains(t, prSvc.comments[0], "Files summarized but not reviewed")
+	assert.Contains(t, prSvc.comments[0], "dist/app.js: generated file")
+	assert.Contains(t, prSvc.comments[0], "image.png: binary file")
+	require.Len(t, prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+}
+
 func TestReviewStandalone_NoFixIssues(t *testing.T) {
 	mock, prSvc, issueSvc, wf := newStandalonePlatform()
 
@@ -4088,6 +4310,64 @@ func TestReviewStandalone_NoFixIssues(t *testing.T) {
 	// No fix issues and no workers dispatched regardless of severity
 	assert.Empty(t, issueSvc.createdTitle, "standalone review must NOT create fix issues")
 	assert.Empty(t, wf.dispatched, "standalone review must NOT dispatch workers")
+}
+
+func TestReviewStandalone_ChunkedRepeatedUnparseablePostsManualIntervention(t *testing.T) {
+	old := unparseableRetryDelay
+	unparseableRetryDelay = 1 * time.Millisecond
+	t.Cleanup(func() { unparseableRetryDelay = old })
+
+	mock, prSvc, issueSvc, wf := newStandalonePlatform()
+	prSvc.diffResult = strings.Join([]string{
+		"diff --git a/a.go b/a.go",
+		"index 1111111..2222222 100644",
+		"--- a/a.go",
+		"+++ b/a.go",
+		"@@ -1 +1 @@",
+		"-oldA",
+		"+newA",
+		"diff --git a/b.go b/b.go",
+		"index 3333333..4444444 100644",
+		"--- a/b.go",
+		"+++ b/b.go",
+		"@@ -1 +1 @@",
+		"-oldB",
+		"+newB",
+		"",
+	}, "\n")
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+		{IsUnparseable: true, Summary: "Failed to parse ..."},
+	}}
+
+	result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{
+			Review: true,
+			ReviewDiff: config.ReviewDiff{
+				MaxFilesPerChunk: 1,
+				MaxChunks:        2,
+			},
+		},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.ManualInterventionNeeded)
+	assert.Equal(t, 0, result.FindingsCount)
+	require.Len(t, ag.opts, 2)
+	assert.True(t, ag.opts[0].ChunkedReview)
+	assert.Equal(t, 1, ag.opts[0].ChunkIndex)
+	assert.Equal(t, 2, ag.opts[0].TotalChunks)
+	assert.Equal(t, 1, ag.opts[1].ChunkIndex, "retry should reuse the first chunk instead of advancing")
+	assert.Equal(t, []string{ag.diffs[0], ag.diffs[0]}, ag.diffs, "retry should reuse the same chunk diff")
+	assert.Contains(t, ag.diffs[0], "a.go")
+	assert.NotContains(t, ag.diffs[0], "diff --git a/b.go b/b.go")
+
+	require.Len(t, prSvc.comments, 1)
+	assert.Equal(t, manualInterventionReviewComment, prSvc.comments[0])
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+	assert.Empty(t, issueSvc.createdTitle, "standalone manual intervention must not create fix issues")
+	assert.Empty(t, wf.dispatched, "standalone manual intervention must not dispatch workers")
 }
 
 func TestReviewStandalone_ExtraInstructions(t *testing.T) {
@@ -4244,16 +4524,8 @@ func TestReview_PostsCommentOnRepeatedUnparseable(t *testing.T) {
 	assert.Equal(t, 50, res.BatchPRNumber)
 	assert.Equal(t, 2, ag.calls)
 
-	require.NotEmpty(t, prSvc.comments)
-	found := false
-	for _, c := range prSvc.comments {
-		if strings.Contains(c, "Agent review failed to produce valid output after 2 attempts") &&
-			strings.Contains(c, "/herd review") {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "expected a manual-intervention comment containing the canonical text and `/herd review`")
+	require.Len(t, prSvc.comments, 1)
+	assert.Equal(t, manualInterventionReviewComment, prSvc.comments[0])
 }
 
 func TestReview_DoesNotSilentlyDrop(t *testing.T) {
