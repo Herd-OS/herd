@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -93,6 +94,25 @@ func TestSubmitReviewResultFailureStillSetsStatusAndComment(t *testing.T) {
 	require.Len(t, gh.comments, 1)
 	assert.Contains(t, gh.comments[0], "could not submit")
 	assert.Contains(t, gh.comments[0], "secondary rate limit")
+}
+
+func TestSubmitReviewResultRetryAfterStatusFailureDoesNotDuplicateReview(t *testing.T) {
+	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
+	statusGH := &fakeStatusGitHub{errs: []error{errors.New("status down"), nil}}
+	mutations := newFakeReviewMutationStore()
+	svc := ReviewService{GitHub: gh, Status: StatusService{GitHub: statusGH}, Mutations: mutations}
+	result := reviewResult(ResultStatusApproved, "head")
+
+	firstErr := svc.SubmitReviewResult(context.Background(), testRepo(true), result)
+	secondErr := svc.SubmitReviewResult(context.Background(), testRepo(true), result)
+
+	require.Error(t, firstErr)
+	require.NoError(t, secondErr)
+	assert.Len(t, gh.reviews, 1)
+	require.Len(t, statusGH.statuses, 1)
+	for _, record := range mutations.idem {
+		assert.Equal(t, "completed", record.Status)
+	}
 }
 
 func TestDispatchReviewSetsPendingAndSuppressesDuplicateWithLock(t *testing.T) {
@@ -187,6 +207,81 @@ type fakeReviewGitHub struct {
 	reviewErr error
 	reviews   []capturedReview
 	comments  []string
+}
+
+type fakeReviewMutationStore struct {
+	idem      map[string]store.IdempotencyKey
+	mutations map[string]store.GitHubMutationAttempt
+}
+
+func newFakeReviewMutationStore() *fakeReviewMutationStore {
+	return &fakeReviewMutationStore{
+		idem:      map[string]store.IdempotencyKey{},
+		mutations: map[string]store.GitHubMutationAttempt{},
+	}
+}
+
+func (s *fakeReviewMutationStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
+	if _, ok := s.idem[key.Key]; ok {
+		return false, nil
+	}
+	s.idem[key.Key] = key
+	return true, nil
+}
+
+func (s *fakeReviewMutationStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	record, ok := s.idem[key]
+	if !ok {
+		return store.IdempotencyKey{}, store.ErrNotFound
+	}
+	return record, nil
+}
+
+func (s *fakeReviewMutationStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "completed"
+	record.ResultRef = resultRef
+	record.CompletedAt = &now
+	s.idem[key] = record
+	return nil
+}
+
+func (s *fakeReviewMutationStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	record.CompletedAt = &now
+	s.idem[key] = record
+	return nil
+}
+
+func (s *fakeReviewMutationStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
+	if _, ok := s.mutations[a.IdempotencyKey]; ok {
+		return errors.New("duplicate mutation")
+	}
+	s.mutations[a.IdempotencyKey] = a
+	return nil
+}
+
+func (s *fakeReviewMutationStore) CompleteGitHubMutationAttempt(_ context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
+	attempt, ok := s.mutations[idempotencyKey]
+	if !ok {
+		return store.ErrNotFound
+	}
+	attempt.Status = status
+	attempt.Response = response
+	attempt.Error = errorMessage
+	attempt.CompletedAt = &completedAt
+	s.mutations[idempotencyKey] = attempt
+	return nil
 }
 
 type fakeLockStore struct {

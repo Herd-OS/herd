@@ -3,6 +3,7 @@ package workflowevents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -67,6 +68,33 @@ func TestHandlerDuplicateWorkflowEventDoesNotProcessAgain(t *testing.T) {
 	assert.Len(t, processor.calls, 1)
 }
 
+func TestHandlerRetriesWorkflowEventAfterProcessorFailure(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newEventStore()
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	processor := &capturingProcessor{errs: []error{errors.New("temporary failure"), nil}}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(validEventClaims(now)),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+		Processor: processor,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, eventRequest(validEventPayload()))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, eventRequest(validEventPayload()))
+	third := httptest.NewRecorder()
+	handler.ServeHTTP(third, eventRequest(validEventPayload()))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	require.Equal(t, http.StatusAccepted, third.Code)
+	assert.Contains(t, third.Body.String(), `"created":false`)
+	assert.Len(t, processor.calls, 2)
+}
+
 func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()
@@ -95,6 +123,41 @@ func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {
 	assert.Contains(t, redelivery.Body.String(), `"created":false`)
 	assert.Len(t, st.commands, 2)
 	assert.Len(t, processor.calls, 2)
+}
+
+func TestHandlerRestrictsOIDCWorkflowByEventKind(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		payload    string
+		workflow   string
+		wantStatus int
+	}{
+		{name: "reject unrelated integrator workflow", payload: validEventPayload(), workflow: ".github/workflows/other.yml", wantStatus: http.StatusUnauthorized},
+		{name: "accept integrator workflow", payload: validEventPayload(), workflow: ".github/workflows/herd-integrator.yml", wantStatus: http.StatusAccepted},
+		{name: "accept monitor workflow", payload: monitorEventPayload(), workflow: ".github/workflows/herd-monitor.yml", wantStatus: http.StatusAccepted},
+		{name: "reject unrelated monitor workflow", payload: monitorEventPayload(), workflow: ".github/workflows/herd-integrator.yml", wantStatus: http.StatusUnauthorized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newEventStore()
+			st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+			claims := validEventClaims(now)
+			claims.Workflow = tt.workflow
+			handler := NewHandler(HandlerOptions{
+				Store:     st,
+				Validator: fixedValidator(claims),
+				Audience:  "herd-control-plane",
+				Now:       func() time.Time { return now },
+				Processor: &capturingProcessor{},
+			})
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, eventRequest(tt.payload))
+
+			assert.Equal(t, tt.wantStatus, rec.Code)
+		})
+	}
 }
 
 func TestHandlerRejectsInvalidOIDCRepository(t *testing.T) {
@@ -140,10 +203,11 @@ type eventStore struct {
 	mu       sync.Mutex
 	repos    map[string]store.Repository
 	commands []store.CommandRecord
+	idem     map[string]store.IdempotencyKey
 }
 
 func newEventStore() *eventStore {
-	return &eventStore{repos: map[string]store.Repository{}}
+	return &eventStore{repos: map[string]store.Repository{}, idem: map[string]store.IdempotencyKey{}}
 }
 
 func (s *eventStore) GetRepository(_ context.Context, owner string, name string) (store.Repository, error) {
@@ -168,8 +232,59 @@ func (s *eventStore) RecordCommand(_ context.Context, c store.CommandRecord) (bo
 	return true, nil
 }
 
+func (s *eventStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.idem[key.Key]; ok {
+		return false, nil
+	}
+	s.idem[key.Key] = key
+	return true, nil
+}
+
+func (s *eventStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idem[key]
+	if !ok {
+		return store.IdempotencyKey{}, store.ErrNotFound
+	}
+	return record, nil
+}
+
+func (s *eventStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "completed"
+	record.ResultRef = resultRef
+	record.CompletedAt = &now
+	s.idem[key] = record
+	return nil
+}
+
+func (s *eventStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idem[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	record.CompletedAt = &now
+	s.idem[key] = record
+	return nil
+}
+
 type capturingProcessor struct {
 	calls []processorCall
+	errs  []error
 }
 
 type processorCall struct {
@@ -179,6 +294,11 @@ type processorCall struct {
 
 func (p *capturingProcessor) ProcessWorkflowEvent(_ context.Context, repo store.Repository, event Event) error {
 	p.calls = append(p.calls, processorCall{repo: repo, event: event})
+	if len(p.errs) > 0 {
+		err := p.errs[0]
+		p.errs = p.errs[1:]
+		return err
+	}
 	return nil
 }
 
@@ -223,6 +343,17 @@ func eventPayloadWithWorkflowRunID(id string) string {
 			"head_branch": "herd/worker/868",
 			"head_sha":    "abc",
 		},
+	})
+	return string(payload)
+}
+
+func monitorEventPayload() string {
+	payload, _ := json.Marshal(map[string]any{
+		"version":    1,
+		"kind":       KindMonitorEvent,
+		"repository": "octo/herd",
+		"event_name": "schedule",
+		"action":     "patrol",
 	})
 	return string(payload)
 }

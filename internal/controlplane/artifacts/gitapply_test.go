@@ -2,12 +2,14 @@ package artifacts
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/herd-os/herd/internal/appauth"
 	herdgit "github.com/herd-os/herd/internal/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,6 +63,61 @@ func TestApplyCommitsWithAppIdentityAndTrailers(t *testing.T) {
 	assert.Equal(t, "herd-os[bot] <herd@example.com>", strings.TrimSpace(author))
 	assert.Equal(t, "changed\n", readFile(t, filepath.Join(clone, "file.txt")))
 	assert.Equal(t, []byte{0x00, 0x01, 0xfe, 0xff}, []byte(readFile(t, filepath.Join(clone, "binary.bin"))))
+}
+
+func TestApplyAuthenticatedCloneErrorRedactsInstallationToken(t *testing.T) {
+	token := "ghs_secret_installation_token"
+	_, err := Apply(context.Background(), ApplyRequest{
+		Repository:      "acme/widgets",
+		CloneURL:        "https://example.invalid/acme/widgets.git",
+		InstallationID:  123,
+		TargetBranch:    "main",
+		BaseSHA:         "base",
+		ExpectedHeadSHA: "head",
+		Artifact: ValidatedArtifact{
+			Metadata: PatchMetadata{
+				Repository:      "acme/widgets",
+				JobID:           "job-1",
+				BaseSHA:         "base",
+				ExpectedHeadSHA: "head",
+				Format:          FormatGitDiffBinary,
+			},
+			Data: []byte("diff --git a/file.txt b/file.txt\n"),
+		},
+		Identity:    DefaultIdentity("HerdOS", "herd@example.com"),
+		TokenSource: fixedTokenSource{token: token},
+		TempDir:     t.TempDir(),
+	})
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), token)
+	assert.NotContains(t, err.Error(), "x-access-token")
+	assert.NotContains(t, err.Error(), base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)))
+}
+
+func TestApplyAuthenticatedCloneDoesNotPersistTokenInTempDir(t *testing.T) {
+	remote, source, base, head := prepareApplyRepos(t)
+	artifact := diffArtifact(t, source, base, head)
+	tempDir := t.TempDir()
+	token := "ghs_secret_installation_token"
+
+	_, err := Apply(context.Background(), ApplyRequest{
+		Repository:      "acme/widgets",
+		CloneURL:        remote,
+		InstallationID:  123,
+		TargetBranch:    "main",
+		BaseSHA:         base,
+		ExpectedHeadSHA: base,
+		Artifact:        artifact,
+		Identity:        DefaultIdentity("HerdOS", "herd@example.com"),
+		TokenSource:     fixedTokenSource{token: token},
+		TempDir:         tempDir,
+	})
+
+	require.NoError(t, err)
+	assertTempDirDoesNotContain(t, tempDir, token)
+	assertTempDirDoesNotContain(t, tempDir, "x-access-token")
+	assert.NotEqual(t, head, "")
 }
 
 func prepareApplyRepos(t *testing.T) (string, string, string, string) {
@@ -151,4 +208,26 @@ func readFile(t *testing.T, path string) string {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	return string(data)
+}
+
+type fixedTokenSource struct {
+	token string
+}
+
+func (s fixedTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+	return appauth.InstallationToken{Token: s.token}, nil
+}
+
+func assertTempDirDoesNotContain(t *testing.T, root string, needle string) {
+	t.Helper()
+	require.NoError(t, filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		require.NoError(t, err)
+		if d.IsDir() {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		require.NoError(t, readErr)
+		assert.NotContains(t, string(data), needle, path)
+		return nil
+	}))
 }

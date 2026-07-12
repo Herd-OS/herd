@@ -12,7 +12,8 @@ import (
 
 // Git wraps the git CLI for repository operations.
 type Git struct {
-	WorkDir string
+	WorkDir     string
+	ExtraConfig []string
 }
 
 type NameStatusEntry struct {
@@ -26,12 +27,26 @@ func New(workDir string) *Git {
 	return &Git{WorkDir: workDir}
 }
 
+// NewWithConfig creates a Git wrapper that passes -c config entries to each git
+// invocation. It is intended for ephemeral, command-scoped options such as
+// authentication headers that must not be written to .git/config.
+func NewWithConfig(workDir string, config ...string) *Git {
+	return &Git{WorkDir: workDir, ExtraConfig: append([]string(nil), config...)}
+}
+
 // Clone clones a repository into dst.
 func Clone(repoURL, dst string) error {
+	return CloneWithConfig(repoURL, dst)
+}
+
+// CloneWithConfig clones a repository while passing command-scoped git config.
+func CloneWithConfig(repoURL, dst string, config ...string) error {
+	args := gitArgs(config, "clone", repoURL, dst)
 	cmd := exec.Command("git", "clone", repoURL, dst)
+	cmd.Args = append([]string{"git"}, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git clone: %w\n%s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -288,38 +303,56 @@ func (g *Git) RemoteBranchSHA(remote, branch string) (string, error) {
 }
 
 func (g *Git) run(args ...string) error {
-	cmd := exec.Command("git", args...)
+	cmdArgs := gitArgs(g.ExtraConfig, args...)
+	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("git %s: %w\n%s", strings.Join(cmdArgs, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
 func (g *Git) output(args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmdArgs := gitArgs(g.ExtraConfig, args...)
+	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(exitErr.Stderr)))
+			return "", fmt.Errorf("git %s: %w\n%s", strings.Join(cmdArgs, " "), err, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return "", fmt.Errorf("git %s: %w", strings.Join(cmdArgs, " "), err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
 func (g *Git) outputBytes(args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
+	cmdArgs := gitArgs(g.ExtraConfig, args...)
+	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("git %s: %w\n%s", strings.Join(cmdArgs, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
+}
+
+func gitArgs(config []string, args ...string) []string {
+	if len(config) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(config)*2+len(args))
+	for _, entry := range config {
+		if strings.TrimSpace(entry) == "" {
+			continue
+		}
+		out = append(out, "-c", entry)
+	}
+	out = append(out, args...)
+	return out
 }
 
 func parseNameStatus(out string) []NameStatusEntry {

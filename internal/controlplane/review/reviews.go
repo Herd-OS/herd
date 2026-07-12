@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -84,10 +85,20 @@ type FixCoordinator interface {
 type ReviewService struct {
 	Status     StatusService
 	GitHub     PullRequestClient
+	Mutations  ReviewMutationStore
 	Locks      LockStore
 	Dispatcher Dispatcher
 	Fixes      FixCoordinator
 	Now        func() time.Time
+}
+
+type ReviewMutationStore interface {
+	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
+	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
+	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
+	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
+	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 }
 
 func (s ReviewService) MarkReviewPending(ctx context.Context, repo Repository, prNumber int, headSHA string, description, targetURL string) error {
@@ -192,7 +203,7 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 
 	event, state, description := reviewEventAndStatus(result)
 	if event != "" {
-		if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA); err != nil {
+		if err := s.submitPRReviewOnce(ctx, repo, result, event); err != nil {
 			statusErr := s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review could not submit a PR review", targetURL(result, current.URL))
 			commentErr := s.GitHub.AddPullRequestComment(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewSubmissionFailureComment(err))
 			if statusErr != nil {
@@ -205,6 +216,65 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 		}
 	}
 	return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, state, description, targetURL(result, current.URL))
+}
+
+func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) error {
+	key := reviewSubmissionKey(repo, result, event)
+	if s.Mutations == nil {
+		return s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA)
+	}
+	request, err := json.Marshal(map[string]any{
+		"repository": repo.Owner + "/" + repo.Name,
+		"pr_number":  result.PRNumber,
+		"head_sha":   result.HeadSHA,
+		"status":     result.Status,
+		"event":      event,
+		"job_id":     result.JobID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal review submission request: %w", err)
+	}
+	created, err := s.Mutations.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "review_submission",
+		Status:    "started",
+		Metadata:  request,
+		CreatedAt: s.now(),
+	})
+	if err != nil {
+		return fmt.Errorf("acquire review submission idempotency: %w", err)
+	}
+	if !created {
+		record, err := s.Mutations.GetIdempotencyKey(ctx, key)
+		if err != nil {
+			return fmt.Errorf("get review submission idempotency: %w", err)
+		}
+		if record.Status == "completed" {
+			return nil
+		}
+	} else if err := s.Mutations.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		RepositoryID:   repo.ID,
+		MutationType:   "review_submission",
+		Status:         "started",
+		Request:        request,
+		CreatedAt:      s.now(),
+	}); err != nil {
+		return fmt.Errorf("record review submission mutation attempt: %w", err)
+	}
+	if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA); err != nil {
+		_ = s.Mutations.CompleteGitHubMutationAttempt(ctx, key, "failed", nil, err.Error(), s.now())
+		_ = s.Mutations.FailIdempotencyKey(ctx, key, err.Error())
+		return err
+	}
+	response, _ := json.Marshal(map[string]any{"submitted": true, "event": event, "head_sha": result.HeadSHA})
+	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
+		return fmt.Errorf("complete review submission idempotency: %w", err)
+	}
+	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, "completed", response, "", s.now()); err != nil {
+		return fmt.Errorf("complete review submission mutation attempt: %w", err)
+	}
+	return nil
 }
 
 func (s ReviewService) handleChangesWithFixes(ctx context.Context, repo Repository, result ReviewCompletedResult, current *platform.PullRequest) error {
@@ -285,6 +355,10 @@ func reviewBody(result ReviewCompletedResult) string {
 		body = "Herd Review completed."
 	}
 	return body
+}
+
+func reviewSubmissionKey(repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) string {
+	return fmt.Sprintf("review_submission:%d:%d:%s:%s:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.Status, event, result.JobID)
 }
 
 func reviewSubmissionFailureComment(err error) string {

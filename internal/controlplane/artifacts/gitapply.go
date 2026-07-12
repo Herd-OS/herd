@@ -2,6 +2,8 @@ package artifacts
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,21 +66,24 @@ func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 	}
 
 	cloneURL := req.CloneURL
+	var gitConfig []string
+	var tokenValue string
 	if req.TokenSource != nil {
 		token, err := req.TokenSource.InstallationToken(ctx, req.InstallationID)
 		if err != nil {
 			return ApplyResult{}, fmt.Errorf("get installation token: %w", err)
 		}
-		cloneURL = authenticatedCloneURL(cloneURL, token.Token)
+		tokenValue = token.Token
+		gitConfig = gitAuthConfig(req.CloneURL, token.Token)
 	}
 
 	repoDir := filepath.Join(root, "repo")
-	if err := herdgit.Clone(cloneURL, repoDir); err != nil {
-		return ApplyResult{}, err
+	if err := herdgit.CloneWithConfig(cloneURL, repoDir, gitConfig...); err != nil {
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
-	g := herdgit.New(repoDir)
+	g := herdgit.NewWithConfig(repoDir, gitConfig...)
 	if err := g.Fetch("origin"); err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
 	current, err := g.RemoteBranchSHA("origin", req.TargetBranch)
 	if err != nil {
@@ -118,7 +123,7 @@ func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 	if err := g.PushHEAD("origin", req.TargetBranch, req.ExpectedHeadSHA); err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, redactToken(err, tokenValue)
 	}
 	return ApplyResult{CommitSHA: commitSHA}, nil
 }
@@ -173,9 +178,26 @@ func commitMessage(req ApplyRequest) string {
 	return message
 }
 
-func authenticatedCloneURL(cloneURL, token string) string {
-	if token == "" || !strings.HasPrefix(cloneURL, "https://") {
-		return cloneURL
+func gitAuthConfig(cloneURL, token string) []string {
+	if strings.TrimSpace(token) == "" || !strings.HasPrefix(cloneURL, "https://") {
+		return nil
 	}
-	return "https://x-access-token:" + token + "@" + strings.TrimPrefix(cloneURL, "https://")
+	credential := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	host := strings.TrimPrefix(cloneURL, "https://")
+	if idx := strings.IndexByte(host, '/'); idx >= 0 {
+		host = host[:idx]
+	}
+	if host == "" {
+		return nil
+	}
+	return []string{"http.https://" + host + "/.extraheader=AUTHORIZATION: basic " + credential}
+}
+
+func redactToken(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	message := strings.ReplaceAll(err.Error(), token, "[REDACTED]")
+	message = strings.ReplaceAll(message, base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)), "[REDACTED]")
+	return errors.New(message)
 }

@@ -400,34 +400,25 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		return nil
 	}
 	idempotencyKey := "patch_apply:" + ResultPayloadHash(payload)
-	if recorder, ok := h.store.(MutationRecorder); ok {
-		request, err := json.Marshal(map[string]any{
-			"repository":        worker.Repository,
-			"job_id":            worker.JobID,
-			"target_branch":     worker.TargetBranch,
-			"base_sha":          worker.BaseSHA,
-			"expected_head_sha": worker.ExpectedHeadSHA,
-			"patch_artifact":    worker.PatchArtifact,
-		})
-		if err != nil {
-			return fmt.Errorf("marshal patch mutation request: %w", err)
-		}
-		if err := recorder.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
-			IdempotencyKey: idempotencyKey,
-			RepositoryID:   job.RepositoryID,
-			MutationType:   "patch_apply",
-			Status:         "started",
-			Request:        request,
-			CreatedAt:      h.now(),
-		}); err != nil {
-			return fmt.Errorf("record patch mutation attempt: %w", err)
-		}
+	shouldApply, err := h.acquirePatchApply(ctx, idempotencyKey, worker, job)
+	if err != nil {
+		return err
 	}
+	if !shouldApply {
+		return nil
+	}
+	response := json.RawMessage(`{"empty":true}`)
 	if len(artifact.Data) == 0 {
-		h.completePatchMutation(ctx, idempotencyKey, "completed", json.RawMessage(`{"empty":true}`), nil)
+		if err := h.completePatchApply(ctx, idempotencyKey, response); err != nil {
+			return err
+		}
+		h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil)
 		return nil
 	}
 	if h.patchApplier == nil {
+		if err := h.completePatchApply(ctx, idempotencyKey, json.RawMessage(`{"skipped":true}`)); err != nil {
+			return err
+		}
 		return nil
 	}
 	applyResult, err := h.patchApplier.Apply(ctx, artifacts.ApplyRequest{
@@ -446,13 +437,76 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 	})
 	if err != nil {
 		h.completePatchMutation(ctx, idempotencyKey, "failed", nil, err)
+		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 		return err
 	}
-	response, err := json.Marshal(applyResult)
+	response, err = json.Marshal(applyResult)
 	if err != nil {
 		return fmt.Errorf("marshal patch apply result: %w", err)
 	}
+	if err := h.completePatchApply(ctx, idempotencyKey, response); err != nil {
+		return err
+	}
 	h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil)
+	return nil
+}
+
+func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, worker WorkerCompletedResult, job store.Job) (bool, error) {
+	metadata, err := json.Marshal(map[string]any{
+		"repository":        worker.Repository,
+		"job_id":            worker.JobID,
+		"target_branch":     worker.TargetBranch,
+		"base_sha":          worker.BaseSHA,
+		"expected_head_sha": worker.ExpectedHeadSHA,
+		"patch_artifact":    worker.PatchArtifact,
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal patch apply metadata: %w", err)
+	}
+	created, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       idempotencyKey,
+		Scope:     "patch_apply",
+		Status:    "started",
+		ResultRef: worker.JobID,
+		Metadata:  metadata,
+		CreatedAt: h.now(),
+	})
+	if err != nil {
+		return false, fmt.Errorf("acquire patch apply idempotency: %w", err)
+	}
+	if created {
+		return true, h.recordPatchMutationAttempt(ctx, idempotencyKey, job.RepositoryID, metadata)
+	}
+	record, err := h.store.GetIdempotencyKey(ctx, idempotencyKey)
+	if err != nil {
+		return false, fmt.Errorf("get patch apply idempotency: %w", err)
+	}
+	if record.Status == "completed" {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (h Handler) recordPatchMutationAttempt(ctx context.Context, idempotencyKey string, repositoryID int64, request json.RawMessage) error {
+	if recorder, ok := h.store.(MutationRecorder); ok {
+		if err := recorder.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+			IdempotencyKey: idempotencyKey,
+			RepositoryID:   repositoryID,
+			MutationType:   "patch_apply",
+			Status:         "started",
+			Request:        request,
+			CreatedAt:      h.now(),
+		}); err != nil {
+			return fmt.Errorf("record patch mutation attempt: %w", err)
+		}
+	}
+	return nil
+}
+
+func (h Handler) completePatchApply(ctx context.Context, idempotencyKey string, response json.RawMessage) error {
+	if err := h.store.CompleteIdempotencyKey(ctx, idempotencyKey, string(response)); err != nil {
+		return fmt.Errorf("complete patch apply idempotency: %w", err)
+	}
 	return nil
 }
 

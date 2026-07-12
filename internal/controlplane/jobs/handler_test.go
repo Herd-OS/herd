@@ -398,6 +398,62 @@ func TestHandlerRetriesWorkerPatchAfterApplyFailure(t *testing.T) {
 	assert.Len(t, st.results, 1)
 }
 
+func TestHandlerRetryAfterRecordJobResultFailureDoesNotReapplyPatch(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("f", 40)}}
+	st := newResultStore()
+	st.recordJobResultErrs = []error{assert.AnError, nil}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Now:           func() time.Time { return now },
+		ArtifactStore: artifactMap(t, metadata, patch),
+		PatchApplier:  applier,
+	})
+	payload := validWorkerPayload("job-1", "head")
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, applier.requests, 1)
+	assert.Len(t, st.results, 1)
+}
+
+func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
+	st := newResultStore()
+	payload := validWorkerPayload("job-1", "head")
+	st.completeIdemErrs = map[string][]error{"job_result:" + ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload)): []error{assert.AnError, nil}}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base"}
+	handler := NewHandler(HandlerOptions{
+		Store:         st,
+		Validator:     fixedOIDCValidator(validClaims(now)),
+		Now:           func() time.Time { return now },
+		ArtifactStore: artifactMap(t, metadata, patch),
+		PatchApplier:  applier,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, applier.requests, 1)
+	assert.Len(t, st.results, 1)
+}
+
 func TestHandlerRetriesReviewResultAfterProcessorFailure(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -437,6 +493,8 @@ type resultStore struct {
 
 	mutationAttempts    []store.GitHubMutationAttempt
 	mutationCompletions []mutationCompletion
+	recordJobResultErrs []error
+	completeIdemErrs    map[string][]error
 }
 
 func newResultStore() *resultStore {
@@ -460,6 +518,13 @@ func (s *resultStore) GetJob(_ context.Context, jobID string) (store.Job, error)
 func (s *resultStore) RecordJobResult(_ context.Context, result store.JobResult) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.recordJobResultErrs) > 0 {
+		err := s.recordJobResultErrs[0]
+		s.recordJobResultErrs = s.recordJobResultErrs[1:]
+		if err != nil {
+			return false, err
+		}
+	}
 	key := result.JobID + "\x00" + result.IdempotencyKey
 	if _, ok := s.seen[key]; ok {
 		return false, nil
@@ -492,6 +557,13 @@ func (s *resultStore) GetIdempotencyKey(_ context.Context, key string) (store.Id
 func (s *resultStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.completeIdemErrs[key]) > 0 {
+		err := s.completeIdemErrs[key][0]
+		s.completeIdemErrs[key] = s.completeIdemErrs[key][1:]
+		if err != nil {
+			return err
+		}
+	}
 	record, ok := s.idem[key]
 	if !ok {
 		return store.ErrNotFound
@@ -671,6 +743,13 @@ func resultRequest(jobID string, payload string) *http.Request {
 
 func validWorkerPayload(jobID string, headSHA string) string {
 	return `{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"` + jobID + `","batch_number":106,"issue_number":837,"target_branch":"herd/worker/837","base_sha":"base","expected_head_sha":"` + headSHA + `","patch_artifact":"patches/job.diff","status":"success"}`
+}
+
+func parsedResultPayload(t *testing.T, payload string) Result {
+	t.Helper()
+	result, err := ParseResultPayload([]byte(payload))
+	require.NoError(t, err)
+	return result
 }
 
 func validReviewPayload(jobID string, headSHA string, status string) string {

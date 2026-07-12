@@ -299,6 +299,11 @@ func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessa
 }
 
 func (s *fakeStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
+	for _, existing := range s.mutationAttempts {
+		if existing.IdempotencyKey == a.IdempotencyKey {
+			return errors.New("duplicate mutation idempotency key")
+		}
+	}
 	s.mutationAttempts = append(s.mutationAttempts, a)
 	return nil
 }

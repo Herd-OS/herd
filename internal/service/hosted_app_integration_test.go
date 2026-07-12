@@ -75,6 +75,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 			Now:    func() time.Time { return now },
 		},
 		GitHub:     gh,
+		Mutations:  st,
 		Locks:      st,
 		Dispatcher: dispatcher,
 		Now:        func() time.Time { return now },

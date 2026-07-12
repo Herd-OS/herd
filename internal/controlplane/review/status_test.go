@@ -91,6 +91,7 @@ func (s *fakeStatusStore) SetReviewState(_ context.Context, state store.ReviewSt
 type fakeStatusGitHub struct {
 	statuses []capturedStatus
 	err      error
+	errs     []error
 }
 
 type capturedStatus struct {
@@ -102,6 +103,13 @@ type capturedStatus struct {
 }
 
 func (g *fakeStatusGitHub) CreateCommitStatus(_ context.Context, installationID int64, owner, repo, sha string, status platform.CommitStatus) error {
+	if len(g.errs) > 0 {
+		err := g.errs[0]
+		g.errs = g.errs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	if g.err != nil {
 		return g.err
 	}

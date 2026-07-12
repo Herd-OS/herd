@@ -54,6 +54,13 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 		if err != nil {
 			return 0, false, err
 		}
+		if record.Status != mutationStatusCompleted || strings.TrimSpace(record.ResultRef) == "" {
+			status := strings.TrimSpace(record.Status)
+			if status == "" {
+				status = "unknown"
+			}
+			return 0, false, fmt.Errorf("idempotency key %q for review_fix_issue_create is %s without a completed issue result; retry after reconciliation", key, status)
+		}
 		issueNumber, ok := parseIssueResult(record.ResultRef)
 		if !ok {
 			return 0, false, fmt.Errorf("invalid review fix issue result ref %q", record.ResultRef)

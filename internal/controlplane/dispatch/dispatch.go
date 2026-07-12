@@ -130,10 +130,10 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 	if err != nil {
 		return DispatchResult{}, err
 	}
-	return d.dispatchWithJob(ctx, req, idempotencyKey, jobID, inputs, now, true)
+	return d.dispatchWithJob(ctx, req, idempotencyKey, jobID, inputs, now, true, true)
 }
 
-func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, idempotencyKey string, jobID string, inputs map[string]string, now time.Time, createJob bool) (DispatchResult, error) {
+func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, idempotencyKey string, jobID string, inputs map[string]string, now time.Time, createJob bool, recordMutation bool) (DispatchResult, error) {
 	jobMetadata, err := json.Marshal(map[string]any{
 		"kind":              req.Kind,
 		"workflow_file":     req.WorkflowFile,
@@ -169,26 +169,9 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		}
 	}
 
-	if recorder, ok := d.Store.(MutationRecorder); ok {
-		requestJSON, marshalErr := json.Marshal(map[string]any{
-			"owner":         req.Owner,
-			"repo":          req.Repo,
-			"workflow_file": req.WorkflowFile,
-			"ref":           req.Ref,
-			"inputs":        inputs,
-		})
-		if marshalErr != nil {
-			return DispatchResult{}, fmt.Errorf("marshal mutation request: %w", marshalErr)
-		}
-		if err := recorder.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
-			IdempotencyKey: idempotencyKey,
-			RepositoryID:   req.RepoID,
-			MutationType:   "workflow_dispatch",
-			Status:         "started",
-			Request:        requestJSON,
-			CreatedAt:      now,
-		}); err != nil {
-			return DispatchResult{}, fmt.Errorf("record workflow dispatch mutation attempt: %w", err)
+	if recordMutation {
+		if err := d.recordMutationAttempt(ctx, req, idempotencyKey, inputs, now); err != nil {
+			return DispatchResult{}, err
 		}
 	}
 
@@ -222,6 +205,34 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 	return result, nil
 }
 
+func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchRequest, idempotencyKey string, inputs map[string]string, now time.Time) error {
+	recorder, ok := d.Store.(MutationRecorder)
+	if !ok {
+		return nil
+	}
+	requestJSON, marshalErr := json.Marshal(map[string]any{
+		"owner":         req.Owner,
+		"repo":          req.Repo,
+		"workflow_file": req.WorkflowFile,
+		"ref":           req.Ref,
+		"inputs":        inputs,
+	})
+	if marshalErr != nil {
+		return fmt.Errorf("marshal mutation request: %w", marshalErr)
+	}
+	if err := recorder.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+		IdempotencyKey: idempotencyKey,
+		RepositoryID:   req.RepoID,
+		MutationType:   "workflow_dispatch",
+		Status:         "started",
+		Request:        requestJSON,
+		CreatedAt:      now,
+	}); err != nil {
+		return fmt.Errorf("record workflow dispatch mutation attempt: %w", err)
+	}
+	return nil
+}
+
 func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, idempotencyKey string) (DispatchResult, error) {
 	record, err := d.Store.GetIdempotencyKey(ctx, idempotencyKey)
 	if err != nil {
@@ -249,7 +260,7 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		if inputErr != nil {
 			return DispatchResult{}, inputErr
 		}
-		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), true)
+		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), true, true)
 	}
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("get existing dispatch job: %w", err)
@@ -259,7 +270,7 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		if inputErr != nil {
 			return DispatchResult{}, inputErr
 		}
-		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
+		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false, false)
 	}
 	return DispatchResult{JobID: job.JobID, Created: false}, nil
 }

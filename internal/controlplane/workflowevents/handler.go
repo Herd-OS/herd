@@ -28,6 +28,10 @@ const (
 type Store interface {
 	GetRepository(ctx context.Context, owner string, name string) (store.Repository, error)
 	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
+	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
+	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
+	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 }
 
 type Processor interface {
@@ -117,9 +121,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "validate OIDC token"})
 		return
 	}
-	if err := jobs.ValidateOIDCClaims(claims, jobs.ExpectedOIDCIdentity{
-		Repository: event.Repository,
-	}, jobs.OIDCOptions{Audience: h.audience, Now: h.now}); err != nil {
+	expected, err := expectedOIDCIdentity(event)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	expected.Repository = event.Repository
+	if err := jobs.ValidateOIDCClaims(claims, expected, jobs.OIDCOptions{Audience: h.audience, Now: h.now}); err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
@@ -139,6 +147,21 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build workflow event metadata"})
 		return
 	}
+	processKey := "workflow_event:" + workflowEventCommandKey(event, payload, claims)
+	shouldProcess, err := h.acquireWorkflowEvent(r.Context(), processKey, metadata)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "acquire workflow event idempotency"})
+		return
+	}
+	if !shouldProcess {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status":  "accepted",
+			"created": false,
+			"kind":    event.Kind,
+			"action":  event.Action,
+		})
+		return
+	}
 	created, err := h.store.RecordCommand(r.Context(), store.CommandRecord{
 		RepositoryID: repo.ID,
 		CommentID:    workflowEventCommentID(event, payload, claims),
@@ -153,11 +176,16 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record workflow event"})
 		return
 	}
-	if created && h.processor != nil {
+	if h.processor != nil {
 		if err := h.processor.ProcessWorkflowEvent(r.Context(), repo, event); err != nil {
+			_ = h.store.FailIdempotencyKey(r.Context(), processKey, err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process workflow event"})
 			return
 		}
+	}
+	if err := h.store.CompleteIdempotencyKey(r.Context(), processKey, workflowEventCommandKey(event, payload, claims)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete workflow event idempotency"})
+		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":  "accepted",
@@ -165,6 +193,38 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"kind":    event.Kind,
 		"action":  event.Action,
 	})
+}
+
+func expectedOIDCIdentity(event Event) (jobs.ExpectedOIDCIdentity, error) {
+	switch event.Kind {
+	case KindIntegratorEvent:
+		return jobs.ExpectedOIDCIdentity{Workflow: ".github/workflows/herd-integrator.yml"}, nil
+	case KindMonitorEvent:
+		return jobs.ExpectedOIDCIdentity{Workflow: ".github/workflows/herd-monitor.yml"}, nil
+	default:
+		return jobs.ExpectedOIDCIdentity{}, fmt.Errorf("unsupported workflow event kind %q", event.Kind)
+	}
+}
+
+func (h Handler) acquireWorkflowEvent(ctx context.Context, key string, metadata json.RawMessage) (bool, error) {
+	created, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "workflow_event",
+		Status:    "started",
+		Metadata:  metadata,
+		CreatedAt: h.now(),
+	})
+	if err != nil {
+		return false, err
+	}
+	if created {
+		return true, nil
+	}
+	record, err := h.store.GetIdempotencyKey(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	return record.Status != "completed", nil
 }
 
 func Parse(payload []byte) (Event, error) {
