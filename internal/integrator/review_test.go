@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,23 @@ func initTestRepo(t *testing.T) (string, *git.Git) {
 	return dir, git.New(dir)
 }
 
+func runReviewTestGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v failed: %s", args, string(out))
+}
+
+func reviewTestGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v failed: %s", args, string(out))
+	return strings.TrimSpace(string(out))
+}
+
 // --- Mock Agent ---
 
 type mockReviewAgent struct {
@@ -45,8 +63,9 @@ type mockReviewAgent struct {
 	onReview     func()
 	// results, when non-nil, returns scripted ReviewResults on successive
 	// calls. After the slice is exhausted, the last entry is repeated.
-	results []*agent.ReviewResult
-	calls   int
+	results  []*agent.ReviewResult
+	calls    int
+	lastDiff string
 }
 
 func (m *mockReviewAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
@@ -55,7 +74,8 @@ func (m *mockReviewAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions)
 func (m *mockReviewAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOptions) (*agent.ExecResult, error) {
 	return nil, nil
 }
-func (m *mockReviewAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+func (m *mockReviewAgent) Review(_ context.Context, diff string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	m.lastDiff = diff
 	if m.onReview != nil {
 		m.onReview()
 	}
@@ -699,6 +719,76 @@ func TestReview_DiscardsReviewResultWhenHeadAdvances(t *testing.T) {
 	assertReviewLockUnlocked(t, repoSvc)
 }
 
+func TestReview_DiscardsFallbackPreparedDiffReviewResultWhenHeadAdvances(t *testing.T) {
+	issueSvc := newMockIssueService()
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			return issueSvc.Create(context.Background(), title, body, labels, milestone)
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			diffErr: platform.ErrPullRequestDiffTooLarge,
+			listFilesResult: []*platform.PullRequestFile{
+				{
+					Path:      "src/fallback.go",
+					Status:    "modified",
+					Additions: 1,
+					Deletions: 1,
+					Changes:   2,
+					Patch:     "@@ -1 +1 @@\n-old\n+fallback\n",
+				},
+			},
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-old"},
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		onReview: func() {
+			repoSvc.branchSHAs["herd/batch/1-batch"] = "sha-new"
+		},
+	}
+	mock := newReviewLockTestPlatform(mockCreate)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = repoSvc
+
+	result, err := Review(context.Background(), mock, ag, nil, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.False(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.True(t, prSvc.getDiffCalled)
+	assert.True(t, prSvc.listFilesCalled)
+	assert.Contains(t, ag.lastDiff, "Source: github-files-api")
+	assert.Contains(t, ag.lastDiff, "src/fallback.go")
+	assert.Empty(t, prSvc.reviews)
+	assert.Equal(t, 0, createdIssues)
+	assert.Empty(t, wf.dispatched)
+	assert.False(t, prSvc.merged)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "sha-old")
+	assert.Contains(t, prSvc.comments[0], "sha-new")
+	assert.Contains(t, strings.ToLower(prSvc.comments[0]), "discarded")
+	assert.Contains(t, strings.ToLower(prSvc.comments[0]), "changed")
+	assertReviewLockUnlocked(t, repoSvc)
+}
+
 func TestReview_DiscardsFindingsWhenHeadAdvances(t *testing.T) {
 	issueSvc := newMockIssueService()
 	createdIssues := 0
@@ -796,6 +886,140 @@ func TestReview_AutoMergeDoesNotRunWhenHeadAdvances(t *testing.T) {
 	assert.Contains(t, prSvc.comments[0], "sha-old")
 	assert.Contains(t, prSvc.comments[0], "sha-new")
 	assertReviewLockUnlocked(t, repoSvc)
+}
+
+func TestReview_PreparesFallbackDiffWhenRawDiffTooLarge(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			diffErr: platform.ErrPullRequestDiffTooLarge,
+			listFilesResult: []*platform.PullRequestFile{
+				{
+					Path:      "src/fallback.go",
+					Status:    "modified",
+					Additions: 1,
+					Deletions: 1,
+					Changes:   2,
+					Patch:     "@@ -1 +1 @@\n-old\n+fallback\n",
+				},
+			},
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-reviewed"},
+	}
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.prs = prSvc
+	mock.repo = repoSvc
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	result, err := Review(context.Background(), mock, ag, nil, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.True(t, prSvc.getDiffCalled)
+	assert.True(t, prSvc.listFilesCalled)
+	assert.Contains(t, ag.lastDiff, "Source: github-files-api")
+	assert.Contains(t, ag.lastDiff, "src/fallback.go")
+	assert.Contains(t, ag.lastDiff, "+fallback")
+}
+
+func TestReview_PrefersLocalGitDiffOverRawGitHubDiff(t *testing.T) {
+	dir, g := initTestRepo(t)
+	require.NoError(t, g.Checkout("herd/batch/1-batch"))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "local-review.txt"), []byte("local review\n"), 0644))
+	runReviewTestGit(t, dir, "add", "local-review.txt")
+	runReviewTestGit(t, dir, "commit", "-m", "local review change")
+	headSHA := reviewTestGitOutput(t, dir, "rev-parse", "HEAD")
+
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			diffErr: platform.ErrPullRequestDiffTooLarge,
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": headSHA},
+	}
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.prs = prSvc
+	mock.repo = repoSvc
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.False(t, prSvc.getDiffCalled)
+	assert.False(t, prSvc.listFilesCalled)
+	assert.Contains(t, ag.lastDiff, "Source: local-git")
+	assert.Contains(t, ag.lastDiff, "local-review.txt")
+	assert.Contains(t, ag.lastDiff, "+local review")
+}
+
+func TestReview_AppendsCoverageWhenPreparedDiffIsLimited(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			diffErr: platform.ErrPullRequestDiffTooLarge,
+			listFilesResult: []*platform.PullRequestFile{
+				{Path: "dist/app.js", Status: "modified", Patch: "@@ -1 +1 @@\n-old\n+new\n"},
+				{Path: "image.png", Status: "added"},
+				{Path: "big.go", Status: "modified", Patch: strings.Repeat("+x\n", 20000)},
+			},
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "sha-reviewed"},
+	}
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.prs = prSvc
+	mock.repo = repoSvc
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+
+	result, err := Review(context.Background(), mock, ag, nil, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	require.NotEmpty(t, prSvc.comments)
+	assert.Contains(t, prSvc.comments[0], "## Diff Coverage")
+	assert.Contains(t, prSvc.comments[0], "Omitted files: 2 (generated: 1, binary: 1)")
+	assert.Contains(t, prSvc.comments[0], "Truncated files: 1")
+	assert.Contains(t, prSvc.comments[0], "dist/app.js: generated file")
+	assert.Contains(t, prSvc.comments[0], "image.png: binary file")
 }
 
 func TestReview_ReleasesReviewLockAfterApprovedReview(t *testing.T) {
@@ -2303,6 +2527,7 @@ func TestTruncate(t *testing.T) {
 type capturingMockAgent struct {
 	result       *agent.ReviewResult
 	capturedOpts *agent.ReviewOptions
+	capturedDiff *string
 }
 
 func (m *capturingMockAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
@@ -2311,7 +2536,10 @@ func (m *capturingMockAgent) Plan(_ context.Context, _ string, _ agent.PlanOptio
 func (m *capturingMockAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOptions) (*agent.ExecResult, error) {
 	return nil, nil
 }
-func (m *capturingMockAgent) Review(_ context.Context, _ string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
+func (m *capturingMockAgent) Review(_ context.Context, diff string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
+	if m.capturedDiff != nil {
+		*m.capturedDiff = diff
+	}
 	*m.capturedOpts = opts
 	return m.result, nil
 }
@@ -3750,7 +3978,12 @@ func TestBuildBatchSummaryComment(t *testing.T) {
 func newStandalonePlatform() (*mockPlatform, *mockCapturingPRService, *mockIssueService, *mockWorkflowService) {
 	issueSvc := newMockIssueService()
 	prSvc := &mockCapturingPRService{
-		mockPRService: &mockPRService{diffResult: "diff --git a/main.go b/main.go\n"},
+		mockPRService: &mockPRService{
+			diffResult: "diff --git a/main.go b/main.go\n",
+			getResult: map[int]*platform.PullRequest{
+				77: {Number: 77, Title: "Standalone", Base: "main", Head: "feature"},
+			},
+		},
 	}
 	wf := &mockWorkflowService{}
 	mock := &mockPlatform{
@@ -3860,7 +4093,12 @@ func TestReviewStandalone_NoFixIssues(t *testing.T) {
 func TestReviewStandalone_ExtraInstructions(t *testing.T) {
 	issueSvc := newMockIssueService()
 	prSvc := &mockCapturingPRService{
-		mockPRService: &mockPRService{diffResult: "diff --git a/main.go b/main.go\n"},
+		mockPRService: &mockPRService{
+			diffResult: "diff --git a/main.go b/main.go\n",
+			getResult: map[int]*platform.PullRequest{
+				77: {Number: 77, Title: "Standalone", Base: "main", Head: "feature"},
+			},
+		},
 	}
 	wf := &mockWorkflowService{}
 	mock := &mockPlatform{
@@ -3899,7 +4137,12 @@ func TestReviewStandalone_UserFeedbackPassedToAgent(t *testing.T) {
 		{Body: "/herd fix something"},
 	}
 	prSvc := &mockCapturingPRService{
-		mockPRService: &mockPRService{diffResult: "diff --git a/main.go b/main.go\n"},
+		mockPRService: &mockPRService{
+			diffResult: "diff --git a/main.go b/main.go\n",
+			getResult: map[int]*platform.PullRequest{
+				77: {Number: 77, Title: "Standalone", Base: "main", Head: "feature"},
+			},
+		},
 	}
 	mock := &mockPlatform{
 		issues:     issueSvc,

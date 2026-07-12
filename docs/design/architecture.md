@@ -54,6 +54,8 @@ Agent review collects `/herd fix` comments from the batch PR before reviewing, s
 
 Each review cycle creates at most one batch fix issue containing all HIGH findings, rather than one issue per finding. The agent submits a Request Changes review to block merge while fix cycles are active. When the review passes, the agent approves and posts a batch summary with statistics (files reviewed, findings by severity, fix cycles used).
 
+Large PR review uses bounded diff input. HerdOS prefers local git diff data from the checkout, then falls back to GitHub raw PR diff, then to GitHub changed-file metadata and bounded patches when the raw diff is too large or unavailable. Generated, binary, very large, mode-only, or limit-exceeding file diffs may be omitted or truncated; HerdOS reports the diff source, included count, omitted count, truncated count, and affected paths/reasons when coverage is limited.
+
 After Herd has posted an approved review result for a PR head SHA, later automatic review triggers for that same head skip the agent; a new commit or manual `/herd review` requests a fresh pass.
 
 Workers run pre-push validation before pushing changes. For Go repositories, this includes `go build`, `go test`, `go vet`, and `golangci-lint` (if available); build and test disable Go VCS stamping. If validation fails, the agent is retried once with the error output. Workers post structured reports on their issues with files changed, a summary of work done, and validation results.

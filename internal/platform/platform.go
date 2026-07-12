@@ -12,6 +12,12 @@ func IsRefUpdateConflict(err error) bool {
 	return errors.Is(err, ErrRefUpdateConflict)
 }
 
+var ErrPullRequestDiffTooLarge = errors.New("pull request diff too large")
+
+func IsPullRequestDiffTooLarge(err error) bool {
+	return errors.Is(err, ErrPullRequestDiffTooLarge)
+}
+
 // Platform abstracts all interactions with the hosting platform (GitHub, GitLab, etc.).
 type Platform interface {
 	Issues() IssueService
@@ -49,6 +55,7 @@ type PullRequestService interface {
 	CreateReview(ctx context.Context, number int, body string, event ReviewEvent) error
 	AddComment(ctx context.Context, number int, body string) error
 	ListReviewComments(ctx context.Context, number int) ([]*ReviewComment, error)
+	ListFiles(ctx context.Context, number int) ([]*PullRequestFile, error)
 	GetDiff(ctx context.Context, number int) (string, error)
 	Close(ctx context.Context, number int) error
 }

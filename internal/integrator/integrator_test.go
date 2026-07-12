@@ -190,6 +190,11 @@ type mockPRService struct {
 	mergedNumber           int
 	mergeMethod            platform.MergeMethod
 	diffResult             string
+	diffErr                error
+	listFilesResult        []*platform.PullRequestFile
+	listFilesErr           error
+	getDiffCalled          bool
+	listFilesCalled        bool
 	comments               map[int][]string
 	reviews                []capturedReview
 	onCreateErr            error // if set, Create returns this error
@@ -244,7 +249,18 @@ func (m *mockPRService) AddComment(ctx context.Context, number int, body string)
 func (m *mockPRService) ListReviewComments(_ context.Context, _ int) ([]*platform.ReviewComment, error) {
 	return nil, nil
 }
+func (m *mockPRService) ListFiles(_ context.Context, _ int) ([]*platform.PullRequestFile, error) {
+	m.listFilesCalled = true
+	if m.listFilesErr != nil {
+		return nil, m.listFilesErr
+	}
+	return m.listFilesResult, nil
+}
 func (m *mockPRService) GetDiff(_ context.Context, _ int) (string, error) {
+	m.getDiffCalled = true
+	if m.diffErr != nil {
+		return "", m.diffErr
+	}
 	if m.diffResult != "" {
 		return m.diffResult, nil
 	}
@@ -1947,6 +1963,9 @@ func (s *statefulMockPRService) AddComment(ctx context.Context, number int, body
 }
 func (s *statefulMockPRService) ListReviewComments(ctx context.Context, n int) ([]*platform.ReviewComment, error) {
 	return s.inner.ListReviewComments(ctx, n)
+}
+func (s *statefulMockPRService) ListFiles(ctx context.Context, n int) ([]*platform.PullRequestFile, error) {
+	return s.inner.ListFiles(ctx, n)
 }
 func (s *statefulMockPRService) GetDiff(ctx context.Context, n int) (string, error) {
 	return s.inner.GetDiff(ctx, n)

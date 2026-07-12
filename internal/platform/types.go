@@ -28,6 +28,20 @@ type PullRequest struct {
 	CreatedAt      time.Time
 }
 
+type PullRequestFile struct {
+	Path         string
+	PreviousPath string
+	Status       string
+	Additions    int
+	Deletions    int
+	Changes      int
+	Patch        string
+	SHA          string
+	BlobURL      string
+	RawURL       string
+	ContentsURL  string
+}
+
 type Run struct {
 	ID           int64
 	WorkflowID   int64

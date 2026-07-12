@@ -15,6 +15,7 @@ import (
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/planner"
 	"github.com/herd-os/herd/internal/platform"
+	"github.com/herd-os/herd/internal/reviewdiff"
 )
 
 const safetyValveLimit = 10
@@ -208,14 +209,19 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 	}
 
-	// Use the PR diff from GitHub API — this shows exactly what will be
-	// merged, excluding commits already on main. Using git diff was unreliable
-	// because merging main into the batch branch caused the reviewer to see
-	// changes that were already on main.
-	diff, err := p.PullRequests().GetDiff(ctx, pr.Number)
+	preparedDiff, err := reviewdiff.PrepareForReview(ctx, reviewdiff.PrepareRequest{
+		PRNumber:     pr.Number,
+		BaseRef:      pr.Base,
+		HeadRef:      pr.Head,
+		HeadSHA:      reviewedHeadSHA,
+		RepoRoot:     params.RepoRoot,
+		Git:          g,
+		PullRequests: p.PullRequests(),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("getting PR diff: %w", err)
+		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
 	}
+	logDiffCoverageIfLimited(preparedDiff)
 
 	// Collect acceptance criteria from all milestone issues
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
@@ -293,7 +299,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		reviewOpts.SystemPrompt += params.ExtraInstructions
 	}
 
-	reviewResult, err := runReviewWithRetry(ctx, ag, p, diff, reviewOpts, pr.Number)
+	reviewResult, err := runReviewWithRetry(ctx, ag, p, preparedDiff.Rendered.Text, reviewOpts, pr.Number)
 	if err != nil {
 		// Agent failed (e.g., API error, suspicious output). Don't propagate the
 		// error — return a neutral result so the workflow succeeds and the review
@@ -338,6 +344,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// Handle approved
 	if reviewResult.Approved {
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
+		summaryComment = appendDiffCoverageIfLimited(summaryComment, preparedDiff)
 		summaryComment, err = markReviewResult(summaryComment, reviewResultStatusApproved, findMaxFixCycle(allIssues), 0)
 		if err != nil {
 			return nil, err
@@ -364,6 +371,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		for _, f := range reviewResult.Findings {
 			comment += fmt.Sprintf("- **%s** %s\n", f.Severity, f.Description)
 		}
+		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 		comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, len(reviewResult.Findings))
 		if err != nil {
 			return nil, err
@@ -377,6 +385,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		comment := fmt.Sprintf("⚠️ **HerdOS Integrator**\n\nAgent review found %d high-severity issues in a single pass. "+
 			"This exceeds the safety limit (%d). Creating fix workers was skipped to prevent runaway agent invocations.",
 			len(highFindings), safetyValveLimit)
+		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 		comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, len(highFindings))
 		if err != nil {
 			return nil, err
@@ -402,12 +411,14 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// No actionable findings — approve with informational comment and batch summary
 	if len(actionableFindings) == 0 {
 		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
+		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 		comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
 		if err != nil {
 			return nil, err
 		}
 		_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
+		summaryComment = appendDiffCoverageIfLimited(summaryComment, preparedDiff)
 		summaryComment, err = markReviewResult(summaryComment, reviewResultStatusApproved, currentCycle, 0)
 		if err != nil {
 			return nil, err
@@ -428,6 +439,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		// any previous REQUEST_CHANGES review and post an informational comment.
 		fmt.Println("All actionable findings are duplicates of existing fix issues, approving.")
 		comment := "✅ **HerdOS Agent Review**\n\nAll findings are already covered by existing fix workers. Approving to unblock the PR."
+		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 		comment, err = markReviewResult(comment, reviewResultStatusApproved, currentCycle, 0)
 		if err != nil {
 			return nil, err
@@ -446,6 +458,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		if len(blocked) > 0 {
 			_ = p.Issues().AddLabels(postReviewCtx, pr.Number, []string{issues.StableDisagreement})
 			comment := buildStableDisagreementComment(blocked, verdictIdx, workerNoOpVerdicts)
+			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(blocked))
 			if err != nil {
 				return nil, err
@@ -509,6 +522,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// Post structured findings comment
 	findingsComment := buildReviewCycleComment(nextCycle, cfg.Integrator.ReviewMaxFixCycles, fixIssueNums, highFindings, mediumFindings, lowFindings, criteriaFindings)
+	findingsComment = appendDiffCoverageIfLimited(findingsComment, preparedDiff)
 	findingsComment, err = markReviewResult(findingsComment, reviewResultStatusChangesRequested, nextCycle, len(actionableFindings))
 	if err != nil {
 		return nil, err
@@ -546,10 +560,22 @@ func trustedReviewResultMarkerHumanLogins(ctx context.Context, p platform.Platfo
 // It posts a findings comment but does NOT create fix issues, dispatch workers,
 // look up milestones, or track fix cycles.
 func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.Config, params ReviewStandaloneParams) (*ReviewStandaloneResult, error) {
-	diff, err := p.PullRequests().GetDiff(ctx, params.PRNumber)
+	pr, err := p.PullRequests().Get(ctx, params.PRNumber)
 	if err != nil {
-		return nil, fmt.Errorf("getting PR diff: %w", err)
+		return nil, fmt.Errorf("getting PR #%d: %w", params.PRNumber, err)
 	}
+	preparedDiff, err := reviewdiff.PrepareForReview(ctx, reviewdiff.PrepareRequest{
+		PRNumber:     params.PRNumber,
+		BaseRef:      pr.Base,
+		HeadRef:      pr.Head,
+		RepoRoot:     params.RepoRoot,
+		Git:          git.New(params.RepoRoot),
+		PullRequests: p.PullRequests(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
+	}
+	logDiffCoverageIfLimited(preparedDiff)
 
 	reviewOpts := agent.ReviewOptions{
 		RepoRoot:       params.RepoRoot,
@@ -576,7 +602,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 		reviewOpts.WorkerNoOpVerdicts = collectWorkerNoOpVerdicts(prComments)
 	}
 
-	reviewResult, err := ag.Review(ctx, diff, reviewOpts)
+	reviewResult, err := ag.Review(ctx, preparedDiff.Rendered.Text, reviewOpts)
 	if err != nil {
 		fmt.Printf("Review agent failed: %s\n", err)
 		return &ReviewStandaloneResult{}, nil
@@ -591,12 +617,14 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 
 	if reviewResult.Approved {
 		comment := fmt.Sprintf("✅ **HerdOS Agent Review**\n\n%s\n", reviewResult.Summary)
+		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 		_ = p.PullRequests().AddComment(ctx, params.PRNumber, comment)
 		_ = p.PullRequests().CreateReview(ctx, params.PRNumber, "", platform.ReviewApprove)
 		return &ReviewStandaloneResult{}, nil
 	}
 
 	findingsComment := buildReviewCycleComment(0, 0, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
+	findingsComment = appendDiffCoverageIfLimited(findingsComment, preparedDiff)
 	_ = p.PullRequests().AddComment(ctx, params.PRNumber, findingsComment)
 
 	return &ReviewStandaloneResult{FindingsCount: len(reviewResult.Findings)}, nil

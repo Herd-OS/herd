@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/reviewdiff"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,6 +79,38 @@ func TestRenderReviewPrompt_EmbedsDiffAndCriteria(t *testing.T) {
 	assert.Contains(t, prompt, "a diff body")
 	assert.Contains(t, prompt, "first criterion")
 	assert.Contains(t, prompt, "second criterion")
+}
+
+func TestRenderReviewPrompt_DoesNotWrapRenderedReviewDiffInOuterFence(t *testing.T) {
+	rendered := reviewdiff.RenderForReview(reviewdiff.DiffSet{
+		Source: "github-files-api",
+		Files: []reviewdiff.ChangedFile{
+			{
+				Path:      "internal/review.go",
+				Status:    reviewdiff.ChangeModified,
+				Additions: 1,
+				Deletions: 1,
+				Patch:     "@@ -1 +1 @@\n-old\n+new\n",
+			},
+		},
+	}, reviewdiff.DefaultRenderOptions())
+	require.Contains(t, rendered.Text, "```diff", "rendered review diff should contain an internal file fence")
+
+	prompt, err := RenderReviewPrompt(rendered.Text, agent.ReviewOptions{
+		AcceptanceCriteria: []string{"review rendered diff"},
+	})
+	require.NoError(t, err)
+
+	diffStart := strings.Index(prompt, "## Diff")
+	diffEnd := strings.Index(prompt, "Respond with ONLY a JSON object")
+	require.GreaterOrEqual(t, diffStart, 0, "diff section must be present")
+	require.Greater(t, diffEnd, diffStart, "response instructions must follow diff section")
+	diffSection := prompt[diffStart:diffEnd]
+
+	assert.Contains(t, diffSection, "# Review diff")
+	assert.Contains(t, diffSection, "internal/review.go")
+	assert.Equal(t, 1, strings.Count(diffSection, "```diff"), "prompt should preserve only the rendered per-file diff fence")
+	assert.NotContains(t, diffSection, "## Diff\n\n```diff\n# Review diff", "prompt must not wrap rendered markdown in an outer diff fence")
 }
 
 func TestRenderReviewPrompt_EmptyCriteria(t *testing.T) {

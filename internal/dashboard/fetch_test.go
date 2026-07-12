@@ -113,6 +113,9 @@ func (s *fakePRService) AddComment(ctx context.Context, number int, body string)
 func (s *fakePRService) ListReviewComments(ctx context.Context, number int) ([]*platform.ReviewComment, error) {
 	return nil, nil
 }
+func (s *fakePRService) ListFiles(ctx context.Context, number int) ([]*platform.PullRequestFile, error) {
+	return nil, nil
+}
 func (s *fakePRService) GetDiff(ctx context.Context, number int) (string, error) { return "", nil }
 func (s *fakePRService) Close(ctx context.Context, number int) error             { return nil }
 

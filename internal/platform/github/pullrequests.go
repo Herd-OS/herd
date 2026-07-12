@@ -161,9 +161,31 @@ func (s *pullRequestService) ListReviewComments(ctx context.Context, number int)
 	return out, nil
 }
 
+func (s *pullRequestService) ListFiles(ctx context.Context, number int) ([]*platform.PullRequestFile, error) {
+	opts := &gh.ListOptions{PerPage: 100}
+	var out []*platform.PullRequestFile
+	for {
+		files, resp, err := s.c.gh.PullRequests.ListFiles(ctx, s.c.owner, s.c.repo, number, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing files for pull request #%d: %w", number, err)
+		}
+		for _, file := range files {
+			out = append(out, mapPullRequestFile(file))
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return out, nil
+}
+
 func (s *pullRequestService) GetDiff(ctx context.Context, number int) (string, error) {
 	diff, _, err := s.c.gh.PullRequests.GetRaw(ctx, s.c.owner, s.c.repo, number, gh.RawOptions{Type: gh.Diff})
 	if err != nil {
+		if isGitHubDiffTooLarge(err) {
+			return "", fmt.Errorf("getting diff for pull request #%d: %w: %v", number, platform.ErrPullRequestDiffTooLarge, err)
+		}
 		return "", fmt.Errorf("getting diff for pull request #%d: %w", number, err)
 	}
 	return diff, nil
@@ -202,5 +224,24 @@ func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 		MergeableKnown: pr.Mergeable != nil,
 		URL:            pr.GetHTMLURL(),
 		CreatedAt:      pr.GetCreatedAt().Time,
+	}
+}
+
+func mapPullRequestFile(file *gh.CommitFile) *platform.PullRequestFile {
+	if file == nil {
+		return nil
+	}
+	return &platform.PullRequestFile{
+		Path:         file.GetFilename(),
+		PreviousPath: file.GetPreviousFilename(),
+		Status:       file.GetStatus(),
+		Additions:    file.GetAdditions(),
+		Deletions:    file.GetDeletions(),
+		Changes:      file.GetChanges(),
+		Patch:        file.GetPatch(),
+		SHA:          file.GetSHA(),
+		BlobURL:      file.GetBlobURL(),
+		RawURL:       file.GetRawURL(),
+		ContentsURL:  file.GetContentsURL(),
 	}
 }
