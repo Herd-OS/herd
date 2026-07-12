@@ -1052,8 +1052,9 @@ func cleanupBranch(dir, branch string) {
 func printNextSteps(owner, repo string) {
 	fmt.Println()
 	fmt.Println("Set up runners:")
-	fmt.Println("  1. cp .env.herd.example .env")
-	fmt.Println("  2. Confirm HERD_RUNNER_BOOTSTRAP_TOKEN is present in .env")
+	fmt.Println("  1. Review the .env created by herd init; add model/provider credentials there")
+	fmt.Println("     If .env is missing, copy .env.herd.example to .env first")
+	fmt.Println("  2. Confirm HERD_RUNNER_BOOTSTRAP_TOKEN is present in .env; do not overwrite it")
 	fmt.Println("  3. Run: claude setup-token (uses your subscription, no API cost)")
 	fmt.Println("     Add the token as CLAUDE_CODE_OAUTH_TOKEN in .env")
 	fmt.Println("  4. docker compose -f docker-compose.herd.yml up -d")

@@ -354,11 +354,12 @@ type fakeStore struct {
 }
 
 func (s *fakeStore) RecordWebhookDelivery(_ context.Context, d store.WebhookDelivery) (bool, error) {
-	s.deliveries = append(s.deliveries, d)
 	if s.recordErr != nil {
+		s.deliveries = append(s.deliveries, d)
 		return false, s.recordErr
 	}
 	if s.recordCreated != nil {
+		s.deliveries = append(s.deliveries, d)
 		if !*s.recordCreated {
 			s.deliveries[len(s.deliveries)-1].Status = "processed"
 		}
@@ -366,9 +367,14 @@ func (s *fakeStore) RecordWebhookDelivery(_ context.Context, d store.WebhookDeli
 	}
 	for _, existing := range s.deliveries {
 		if existing.DeliveryID == d.DeliveryID {
+			if existing.Status != "processed" {
+				s.deliveries = append(s.deliveries, d)
+				return true, nil
+			}
 			return false, nil
 		}
 	}
+	s.deliveries = append(s.deliveries, d)
 	return true, nil
 }
 

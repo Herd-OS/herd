@@ -207,16 +207,18 @@ func TestEnsureTaskIssueStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
 	fake := newFakePlatform()
 	st := newFakeStore()
 	svc := newTestService(fake, st, &fakeDispatcher{})
-	key := idempotencyKey("task-issue", "repo", svc.Repo.ID, "batch", 4, "create", "Task")
-	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "issue_create", Status: "started", CreatedAt: fixedClock()}
-
-	issue, err := svc.EnsureTaskIssue(ctx, TaskIssueRequest{
+	req := TaskIssueRequest{
 		BatchNumber: 4,
 		Title:       "Task",
 		Body:        "body",
 		Labels:      []string{issues.StatusReady},
 		Milestone:   4,
-	})
+	}
+	body, overflow := issues.TruncateIssueBody(req.Body)
+	key := idempotencyKey("task-issue", "repo", svc.Repo.ID, "batch", 4, "create", "Task", taskIssueFingerprint(req, body, overflow))
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "issue_create", Status: "started", CreatedAt: fixedClock()}
+
+	issue, err := svc.EnsureTaskIssue(ctx, req)
 
 	require.Error(t, err)
 	assert.Nil(t, issue)

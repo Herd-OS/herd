@@ -154,6 +154,29 @@ func TestSubmitPRReviewOnceFailedUnknownOutcomeDoesNotCreateDuplicateReview(t *t
 	assert.Len(t, gh.reviews, 1)
 }
 
+func TestSubmitPRReviewOnceRetryAfterMutationCompletionFailureRepairsStartedAttempt(t *testing.T) {
+	gh := &fakeReviewGitHub{}
+	mutations := newFakeReviewMutationStore()
+	mutations.completeMutationErrs = []error{errors.New("database down"), nil}
+	svc := ReviewService{GitHub: gh, Mutations: mutations}
+	repo := testRepo(true)
+	result := reviewResult(ResultStatusApproved, "head")
+	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
+
+	firstErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+	secondErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+
+	require.Error(t, firstErr)
+	require.NoError(t, secondErr)
+	assert.Len(t, gh.reviews, 1)
+	record, err := mutations.GetIdempotencyKey(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", record.Status)
+	attempt, err := mutations.GetGitHubMutationAttempt(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", attempt.Status)
+}
+
 func TestSubmitReviewResultStartedSubmissionReturnsRetryableError(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{}

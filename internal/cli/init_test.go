@@ -1715,3 +1715,14 @@ func TestComputeManagedDrift_ReturnsRenderedFilesAndDrift(t *testing.T) {
 	}
 	assert.True(t, foundDrift, "drift should include the tampered workflow")
 }
+
+func TestPrintNextStepsDoesNotOverwriteGeneratedEnv(t *testing.T) {
+	stdout, _ := captureStdio(t, func() {
+		printNextSteps("octo", "repo")
+	})
+
+	assert.NotContains(t, stdout, "cp .env.herd.example .env")
+	assert.Contains(t, stdout, "Review the .env created by herd init")
+	assert.Contains(t, stdout, "Confirm HERD_RUNNER_BOOTSTRAP_TOKEN is present in .env")
+	assert.Contains(t, stdout, "do not overwrite it")
+}

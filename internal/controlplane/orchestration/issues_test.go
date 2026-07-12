@@ -82,6 +82,58 @@ func TestEnsureTaskIssue_RejectsMissingMilestone(t *testing.T) {
 	assert.Contains(t, err.Error(), "milestone")
 }
 
+func TestEnsureTaskIssue_CreateAllowsSameTitleWithDifferentBody(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	svc := newTestService(fake, newFakeStore(), nil)
+
+	first, err := svc.EnsureTaskIssue(ctx, TaskIssueRequest{
+		BatchNumber: 9,
+		Title:       "Task",
+		Body:        "first body",
+		Milestone:   9,
+	})
+	require.NoError(t, err)
+	second, err := svc.EnsureTaskIssue(ctx, TaskIssueRequest{
+		BatchNumber: 9,
+		Title:       "Task",
+		Body:        "second body",
+		Milestone:   9,
+	})
+	require.NoError(t, err)
+
+	assert.NotEqual(t, first.Number, second.Number)
+	assert.Len(t, fake.issues.created, 2)
+}
+
+func TestEnsureTaskIssue_UpdateAllowsChangedContent(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.issues.items[3] = &platform.Issue{Number: 3, Title: "Old", Body: "old"}
+	svc := newTestService(fake, newFakeStore(), nil)
+
+	_, err := svc.EnsureTaskIssue(ctx, TaskIssueRequest{
+		BatchNumber: 9,
+		IssueNumber: 3,
+		Title:       "Task",
+		Body:        "first body",
+		Milestone:   9,
+	})
+	require.NoError(t, err)
+	_, err = svc.EnsureTaskIssue(ctx, TaskIssueRequest{
+		BatchNumber: 9,
+		IssueNumber: 3,
+		Title:       "Task",
+		Body:        "second body",
+		Labels:      []string{issues.StatusBlocked},
+		Milestone:   9,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "second body", fake.issues.items[3].Body)
+	assert.Contains(t, fake.issues.added[3], issues.StatusBlocked)
+}
+
 func TestEnsureReviewFixIssueAndDispatchAreIdempotentByFingerprint(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()

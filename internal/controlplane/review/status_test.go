@@ -131,6 +131,24 @@ func TestSetHerdReviewStatusReturnsMutationCompletionFailure(t *testing.T) {
 	assert.Equal(t, "started", st.mutationAttempts[0].Status)
 }
 
+func TestSetHerdReviewStatusRetryAfterMutationCompletionFailureRepairsStartedAttempt(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{mutationCompleteErrs: []error{errors.New("database down"), nil}}
+	gh := &fakeStatusGitHub{}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	firstErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+	secondErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, firstErr)
+	require.NoError(t, secondErr)
+	assert.Len(t, gh.statuses, 1)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+	require.Len(t, st.states, 1)
+	assert.Equal(t, "success", st.states[0].Status)
+}
+
 func TestSetHerdReviewStatusRetryAfterGitHubFailureReusesFailedMutationAttempt(t *testing.T) {
 	ctx := context.Background()
 	st := &fakeStatusStore{}

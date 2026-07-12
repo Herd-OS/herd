@@ -384,11 +384,28 @@ func (s *PostgresStore) FailIdempotencyKey(ctx context.Context, key string, erro
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE idempotency_keys
 		SET status = 'failed', result_ref = $2, completed_at = now()
-		WHERE key = $1`, key, errorMessage)
+		WHERE key = $1 AND status <> 'completed'`, key, errorMessage)
 	if err != nil {
 		return err
 	}
-	return requireAffected(result)
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows > 0 {
+		return nil
+	}
+	record, err := s.GetIdempotencyKey(ctx, key)
+	if errors.Is(err, ErrNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if record.Status == "completed" {
+		return nil
+	}
+	return ErrNotFound
 }
 
 func (s *PostgresStore) ListStartedIdempotencyKeys(ctx context.Context, scope string, createdBefore time.Time, limit int) ([]IdempotencyKey, error) {

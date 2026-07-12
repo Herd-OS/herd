@@ -2,6 +2,9 @@ package orchestration
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	"github.com/herd-os/herd/internal/issues"
@@ -39,7 +42,7 @@ func (s Service) EnsureTaskIssue(ctx context.Context, req TaskIssueRequest) (*pl
 }
 
 func (s Service) createTaskIssue(ctx context.Context, req TaskIssueRequest, body, overflow string) (*platform.Issue, error) {
-	key := idempotencyKey("task-issue", "repo", s.Repo.ID, "batch", req.BatchNumber, "create", req.Title)
+	key := idempotencyKey("task-issue", "repo", s.Repo.ID, "batch", req.BatchNumber, "create", req.Title, taskIssueFingerprint(req, body, overflow))
 	resultRef, err := s.withIdempotency(ctx, key, "issue_create", func() (string, error) {
 		created, err := s.Platform.Issues().Create(ctx, req.Title, body, req.Labels, &req.Milestone)
 		if err != nil {
@@ -63,7 +66,7 @@ func (s Service) createTaskIssue(ctx context.Context, req TaskIssueRequest, body
 }
 
 func (s Service) updateTaskIssue(ctx context.Context, req TaskIssueRequest, body, overflow string) (*platform.Issue, error) {
-	key := idempotencyKey("task-issue", "repo", s.Repo.ID, "batch", req.BatchNumber, "issue", req.IssueNumber, "update")
+	key := idempotencyKey("task-issue", "repo", s.Repo.ID, "batch", req.BatchNumber, "issue", req.IssueNumber, "update", taskIssueFingerprint(req, body, overflow))
 	resultRef, err := s.withIdempotency(ctx, key, "issue_update", func() (string, error) {
 		title := req.Title
 		milestone := req.Milestone
@@ -95,6 +98,24 @@ func (s Service) updateTaskIssue(ctx context.Context, req TaskIssueRequest, body
 		return nil, fmt.Errorf("invalid issue result ref %q", resultRef)
 	}
 	return s.Platform.Issues().Get(ctx, issueNumber)
+}
+
+func taskIssueFingerprint(req TaskIssueRequest, body, overflow string) string {
+	payload, _ := json.Marshal(struct {
+		Title     string   `json:"title"`
+		Body      string   `json:"body"`
+		Overflow  string   `json:"overflow"`
+		Labels    []string `json:"labels"`
+		Milestone int      `json:"milestone"`
+	}{
+		Title:     req.Title,
+		Body:      body,
+		Overflow:  overflow,
+		Labels:    req.Labels,
+		Milestone: req.Milestone,
+	})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func parseIssueResult(ref string) (int, bool) {

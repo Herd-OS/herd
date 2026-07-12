@@ -323,6 +323,9 @@ func (s *MemoryStore) FailIdempotencyKey(_ context.Context, key string, errorMes
 	if !ok {
 		return ErrNotFound
 	}
+	if record.Status == "completed" {
+		return nil
+	}
 	now := time.Now().UTC()
 	record.Status = "failed"
 	record.ResultRef = errorMessage
