@@ -117,6 +117,9 @@ func (c LocalCollector) resolveRef(sha, ref, remote string, prNumber int) (strin
 		if sha != "" && c.hasCommit(sha) {
 			return sha, nil
 		}
+		if sha != "" {
+			return "", fmt.Errorf("commit %s is not available locally", sha)
+		}
 		remoteCandidate := "refs/remotes/" + remote + "/" + ref
 		if resolved, err := c.Git.RevParse(remoteCandidate + "^{commit}"); err == nil {
 			return resolved, nil
@@ -140,6 +143,9 @@ func (c LocalCollector) resolvePullRequestHead(sha, remote string, prNumber int)
 	_ = c.Git.FetchRef(remote, fmt.Sprintf("pull/%d/head:refs/remotes/%s/pr/%d", prNumber, remote, prNumber))
 	if sha != "" && c.hasCommit(sha) {
 		return sha, true
+	}
+	if sha != "" {
+		return "", false
 	}
 	candidate := fmt.Sprintf("refs/remotes/%s/pr/%d^{commit}", remote, prNumber)
 	if resolved, err := c.Git.RevParse(candidate); err == nil {

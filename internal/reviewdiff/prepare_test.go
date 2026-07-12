@@ -115,6 +115,50 @@ exit 1
 	assert.Contains(t, strings.Join(prepared.Rendered.Warnings, "\n"), "local git diff collection failed")
 }
 
+func TestPrepareForReviewFallsBackWhenPullRequestHeadDiffersFromSuppliedHeadSHA(t *testing.T) {
+	diffMarker := filepath.Join(t.TempDir(), "diff-called")
+	withFakeGit(t, `#!/bin/sh
+if [ "$1" = "rev-parse" ]; then
+  case "$2" in
+    base^{commit}) echo base; exit 0 ;;
+    refs/remotes/origin/pr/42^{commit}) echo other; exit 0 ;;
+  esac
+  exit 1
+fi
+if [ "$1" = "fetch" ]; then
+  exit 0
+fi
+if [ "$1" = "diff" ]; then
+  touch "$DIFF_MARKER"
+  echo diff should not run >&2
+  exit 1
+fi
+exit 1
+`)
+	t.Setenv("DIFF_MARKER", diffMarker)
+	repoRoot := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(repoRoot, ".git"), 0755))
+	prs := &mockPreparePRService{diff: "diff --git a/fallback.go b/fallback.go\n+fallback\n"}
+
+	prepared, err := PrepareForReview(context.Background(), PrepareRequest{
+		PRNumber:     42,
+		BaseSHA:      "base",
+		HeadSHA:      "wanted",
+		RepoRoot:     repoRoot,
+		Git:          git.New(repoRoot),
+		PullRequests: prs,
+	})
+
+	require.NoError(t, err)
+	assert.True(t, prs.getDiffCalled)
+	assert.False(t, prs.listFilesCalled)
+	assert.Equal(t, GitHubRawDiffSource, prepared.DiffSet.Source)
+	assert.Equal(t, "wanted", prepared.DiffSet.HeadSHA)
+	assert.Contains(t, prepared.Rendered.Text, "fallback.go")
+	assert.NoFileExists(t, diffMarker)
+	assert.Contains(t, strings.Join(prepared.Rendered.Warnings, "\n"), "local git diff collection failed")
+}
+
 func TestPrepareForReviewUsesRawDiffWhenAvailable(t *testing.T) {
 	prs := &mockPreparePRService{diff: "diff --git a/a.go b/a.go\n+raw\n"}
 
