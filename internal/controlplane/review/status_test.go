@@ -196,10 +196,31 @@ func TestSetHerdReviewStatusRetryAfterGitHubFailureReusesFailedMutationAttempt(t
 	assert.Equal(t, "success", st.states[0].Status)
 }
 
+func TestSetHerdReviewStatusRetriesAfterMutationAttemptRecordFailure(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{recordMutationErrs: []error{errors.New("database down"), nil}}
+	gh := &fakeStatusGitHub{}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	firstErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+	secondErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "record Herd Review status mutation attempt")
+	require.NoError(t, secondErr)
+	require.Len(t, gh.statuses, 1)
+	assert.Equal(t, HerdReviewContext, gh.statuses[0].status.Context)
+	require.Len(t, st.states, 1)
+	assert.Equal(t, "success", st.states[0].Status)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+}
+
 type fakeStatusStore struct {
 	states               []store.ReviewState
 	errs                 []error
 	completeErrs         []error
+	recordMutationErrs   []error
 	mutationCompleteErrs []error
 	idem                 map[string]store.IdempotencyKey
 	mutationAttempts     []store.GitHubMutationAttempt
@@ -314,6 +335,13 @@ func (s *fakeStatusStore) CompleteIdempotencyKey(_ context.Context, key string, 
 }
 
 func (s *fakeStatusStore) RecordGitHubMutationAttempt(_ context.Context, attempt store.GitHubMutationAttempt) error {
+	if len(s.recordMutationErrs) > 0 {
+		err := s.recordMutationErrs[0]
+		s.recordMutationErrs = s.recordMutationErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	for _, existing := range s.mutationAttempts {
 		if existing.IdempotencyKey == attempt.IdempotencyKey {
 			return store.ErrAlreadyExists

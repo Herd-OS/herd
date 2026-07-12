@@ -280,6 +280,9 @@ func (githubSetupVerifier) VerifySetupRepository(ctx context.Context, setupToken
 	}
 	installation, _, err := client.Apps.FindRepositoryInstallation(ctx, owner, name)
 	if err != nil {
+		if githubRateLimitError(err) {
+			return SetupRepository{}, fmt.Errorf("find repository installation: %w", err)
+		}
 		if githubStatusCode(err) == http.StatusNotFound || githubStatusCode(err) == http.StatusForbidden {
 			return SetupRepository{}, ErrAppInstallation
 		}
@@ -314,6 +317,9 @@ func (v githubAppVerifier) VerifyAppAccess(ctx context.Context, installationID i
 	}
 	repo, _, err := client.Repositories.Get(ctx, owner, name)
 	if err != nil {
+		if githubRateLimitError(err) {
+			return fmt.Errorf("verify installation repository access: %w", err)
+		}
 		if githubStatusCode(err) == http.StatusNotFound || githubStatusCode(err) == http.StatusForbidden {
 			return ErrAppInstallationMatch
 		}
@@ -331,6 +337,15 @@ func githubStatusCode(err error) int {
 		return ghErr.Response.StatusCode
 	}
 	return 0
+}
+
+func githubRateLimitError(err error) bool {
+	var rateLimitErr *ghapi.RateLimitError
+	if errors.As(err, &rateLimitErr) {
+		return true
+	}
+	var abuseErr *ghapi.AbuseRateLimitError
+	return errors.As(err, &abuseErr)
 }
 
 func newBootstrapToken() (plain string, hash string, err error) {

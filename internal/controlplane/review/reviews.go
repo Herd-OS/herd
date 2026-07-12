@@ -301,6 +301,7 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		Request:        request,
 		CreatedAt:      s.now(),
 	}); err != nil {
+		_ = s.Mutations.FailIdempotencyKey(ctx, key, err.Error())
 		if errors.Is(err, store.ErrAlreadyExists) {
 			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
 		}

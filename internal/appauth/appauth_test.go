@@ -238,6 +238,29 @@ func TestNewInstallationClient(t *testing.T) {
 	assert.Equal(t, "Bearer installation-token", capture.authorization)
 }
 
+func TestInstallationOAuthTokenSourceRefreshesExpiredInstallationToken(t *testing.T) {
+	current := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	source := &fakeTokenSource{tokens: []InstallationToken{
+		{Token: "installation-token-1", ExpiresAt: current.Add(time.Hour)},
+		{Token: "installation-token-2", ExpiresAt: current.Add(2 * time.Hour)},
+	}}
+	ts := newInstallationOAuthTokenSource(context.Background(), source, 77, func() time.Time { return current })
+
+	first, err := ts.Token()
+	require.NoError(t, err)
+	current = current.Add(time.Hour - installationTokenLeeway - time.Second)
+	second, err := ts.Token()
+	require.NoError(t, err)
+	current = current.Add(2 * time.Second)
+	third, err := ts.Token()
+	require.NoError(t, err)
+
+	assert.Equal(t, "installation-token-1", first.AccessToken)
+	assert.Equal(t, "installation-token-1", second.AccessToken)
+	assert.Equal(t, "installation-token-2", third.AccessToken)
+	assert.Equal(t, []int64{77, 77}, source.installationIDs)
+}
+
 func TestNewInstallationClientErrorPropagation(t *testing.T) {
 	sourceErr := errors.New("token source unavailable")
 	source := &fakeTokenSource{err: sourceErr}
@@ -408,15 +431,23 @@ func jsonResponse(status int, body string) *http.Response {
 }
 
 type fakeTokenSource struct {
-	token          InstallationToken
-	err            error
-	installationID int64
+	token           InstallationToken
+	tokens          []InstallationToken
+	err             error
+	installationID  int64
+	installationIDs []int64
 }
 
 func (s *fakeTokenSource) InstallationToken(_ context.Context, installationID int64) (InstallationToken, error) {
 	s.installationID = installationID
+	s.installationIDs = append(s.installationIDs, installationID)
 	if s.err != nil {
 		return InstallationToken{}, s.err
+	}
+	if len(s.tokens) > 0 {
+		token := s.tokens[0]
+		s.tokens = s.tokens[1:]
+		return token, nil
 	}
 	return s.token, nil
 }

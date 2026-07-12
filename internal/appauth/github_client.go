@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	defaultMaxRetries    = 3
-	githubAppJWTLifetime = 9 * time.Minute
-	githubAppJWTLeeway   = 30 * time.Second
+	defaultMaxRetries       = 3
+	githubAppJWTLifetime    = 9 * time.Minute
+	githubAppJWTLeeway      = 30 * time.Second
+	installationTokenLeeway = 1 * time.Minute
 )
 
 var retryableStatusCodes = map[int]bool{
@@ -83,23 +84,69 @@ func NewInstallationClient(ctx context.Context, source TokenSource, installation
 		return nil, nil, fmt.Errorf("GitHub App token source is required")
 	}
 
-	token, err := source.InstallationToken(ctx, installationID)
+	ts := newInstallationOAuthTokenSource(ctx, source, installationID, time.Now)
+	token, err := ts.Token()
 	if err != nil {
 		return nil, nil, fmt.Errorf("getting GitHub App installation token for installation %d: %w", installationID, err)
 	}
-	if token.Token == "" {
+	if token.AccessToken == "" {
 		return nil, nil, fmt.Errorf("getting GitHub App installation token for installation %d: empty token", installationID)
 	}
-
-	ts := oauth2.StaticTokenSource(&oauth2.Token{
-		AccessToken: token.Token,
-		TokenType:   "Bearer",
-		Expiry:      token.ExpiresAt,
-	})
 	httpClient := oauth2.NewClient(ctx, ts)
 	httpClient.Transport = newRetryTransport(httpClient.Transport, time.Second)
 
 	return github.NewClient(httpClient), httpClient, nil
+}
+
+type installationOAuthTokenSource struct {
+	mu             sync.Mutex
+	ctx            context.Context
+	source         TokenSource
+	installationID int64
+	now            func() time.Time
+	cached         *oauth2.Token
+}
+
+func newInstallationOAuthTokenSource(ctx context.Context, source TokenSource, installationID int64, now func() time.Time) *installationOAuthTokenSource {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &installationOAuthTokenSource{
+		ctx:            ctx,
+		source:         source,
+		installationID: installationID,
+		now:            now,
+	}
+}
+
+func (s *installationOAuthTokenSource) Token() (*oauth2.Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now()
+	if s.cached != nil && now.Before(s.cached.Expiry.Add(-installationTokenLeeway)) {
+		token := *s.cached
+		return &token, nil
+	}
+
+	token, err := s.source.InstallationToken(s.ctx, s.installationID)
+	if err != nil {
+		return nil, err
+	}
+	if token.Token == "" {
+		return nil, fmt.Errorf("empty token")
+	}
+	cached := &oauth2.Token{
+		AccessToken: token.Token,
+		TokenType:   "Bearer",
+		Expiry:      token.ExpiresAt,
+	}
+	s.cached = cached
+	tokenCopy := *cached
+	return &tokenCopy, nil
 }
 
 func convertInstallationToken(token *github.InstallationToken) InstallationToken {

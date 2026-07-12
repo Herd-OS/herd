@@ -119,6 +119,9 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 		}
 	}
 	if err := s.ensureStatusMutationAttempt(ctx, statusKey, repo, prNumber, headSHA, status, now); err != nil {
+		if created {
+			_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
+		}
 		return err
 	}
 	if err := s.GitHub.CreateCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status); err != nil {

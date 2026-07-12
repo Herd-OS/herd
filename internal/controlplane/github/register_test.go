@@ -259,6 +259,24 @@ func TestSetupVerificationErrorResponseRateLimitsAreRetryable(t *testing.T) {
 	}
 }
 
+func TestGitHubRateLimitErrorClassifiesTypedForbiddenRateLimits(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "core rate limit", err: &ghapi.RateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}, want: true},
+		{name: "abuse rate limit", err: &ghapi.AbuseRateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}, want: true},
+		{name: "plain forbidden", err: &ghapi.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, githubRateLimitError(tt.err))
+		})
+	}
+}
+
 func registerRequest(body string) *http.Request {
 	return httptest.NewRequest(http.MethodPost, "/api/v1/github/repositories/register", bytes.NewBufferString(body))
 }

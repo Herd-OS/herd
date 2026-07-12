@@ -294,6 +294,22 @@ func TestEnsureTaskIssueStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
 	assert.Empty(t, fake.issues.created)
 }
 
+func TestMutateVoidLabelCompletedIdempotencyDoesNotCallGitHubAgain(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("issue-label", svc.Repo.ID, 11, issues.StatusReady, "remove")
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "issue_label_remove", Status: "completed", CreatedAt: fixedClock()}
+
+	err := svc.mutate(ctx, key, "issue_label_remove", func() (string, error) {
+		return "", fake.issues.RemoveLabels(ctx, 11, []string{issues.StatusReady})
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, fake.issues.removed)
+}
+
 func newTestService(p *fakePlatform, st *fakeStore, dispatcher Dispatcher) Service {
 	return Service{
 		Repo: store.Repository{

@@ -209,6 +209,30 @@ func TestSubmitPRReviewOnceRetryAfterMutationCompletionFailureRepairsStartedAtte
 	assert.Equal(t, "completed", attempt.Status)
 }
 
+func TestSubmitPRReviewOnceRetriesAfterMutationAttemptRecordFailure(t *testing.T) {
+	gh := &fakeReviewGitHub{}
+	mutations := newFakeReviewMutationStore()
+	mutations.recordMutationErrs = []error{errors.New("database down"), nil}
+	svc := ReviewService{GitHub: gh, Mutations: mutations}
+	repo := testRepo(true)
+	result := reviewResult(ResultStatusApproved, "head")
+	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
+
+	firstErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+	secondErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "record review submission mutation attempt")
+	require.NoError(t, secondErr)
+	assert.Len(t, gh.reviews, 1)
+	record, err := mutations.GetIdempotencyKey(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", record.Status)
+	attempt, err := mutations.GetGitHubMutationAttempt(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", attempt.Status)
+}
+
 func TestSubmitReviewResultStartedSubmissionReturnsRetryableError(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{}
@@ -355,6 +379,7 @@ type fakeReviewMutationStore struct {
 	mu                   sync.Mutex
 	idem                 map[string]store.IdempotencyKey
 	mutations            map[string]store.GitHubMutationAttempt
+	recordMutationErrs   []error
 	completeMutationErrs []error
 }
 
@@ -418,6 +443,13 @@ func (s *fakeReviewMutationStore) FailIdempotencyKey(_ context.Context, key stri
 func (s *fakeReviewMutationStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.recordMutationErrs) > 0 {
+		err := s.recordMutationErrs[0]
+		s.recordMutationErrs = s.recordMutationErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	if _, ok := s.mutations[a.IdempotencyKey]; ok {
 		return store.ErrAlreadyExists
 	}

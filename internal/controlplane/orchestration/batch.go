@@ -268,7 +268,16 @@ type WorkerCallbackRequest struct {
 }
 
 func (s Service) mutate(ctx context.Context, key string, mutationType string, fn func() (string, error)) error {
-	_, err := s.withIdempotency(ctx, key, mutationType, fn)
+	_, err := s.withIdempotency(ctx, key, mutationType, func() (string, error) {
+		resultRef, err := fn()
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(resultRef) == "" {
+			return "void:" + mutationType, nil
+		}
+		return resultRef, nil
+	})
 	return err
 }
 
@@ -293,7 +302,10 @@ func (s Service) withIdempotency(ctx context.Context, key string, mutationType s
 			}
 			return record.ResultRef, nil
 		}
-		if resultRef, repaired, err := s.repairIdempotencyFromCompletedMutation(ctx, key); repaired || err != nil {
+		if record.Status == mutationStatusCompleted && isVoidMutationType(mutationType) {
+			return "", nil
+		}
+		if resultRef, repaired, err := s.repairIdempotencyFromCompletedMutation(ctx, key, mutationType); repaired || err != nil {
 			return resultRef, err
 		}
 		status := strings.TrimSpace(record.Status)
@@ -360,7 +372,7 @@ func (s Service) repairCompletedMutationAttempt(ctx context.Context, key string,
 	return nil
 }
 
-func (s Service) repairIdempotencyFromCompletedMutation(ctx context.Context, key string) (string, bool, error) {
+func (s Service) repairIdempotencyFromCompletedMutation(ctx context.Context, key string, mutationType string) (string, bool, error) {
 	attempt, err := s.Store.GetGitHubMutationAttempt(ctx, key)
 	if errors.Is(err, store.ErrNotFound) {
 		return "", false, nil
@@ -373,12 +385,24 @@ func (s Service) repairIdempotencyFromCompletedMutation(ctx context.Context, key
 	}
 	resultRef := mutationResultRef(attempt.Response)
 	if strings.TrimSpace(resultRef) == "" {
-		return "", false, fmt.Errorf("completed mutation attempt %q is missing result_ref; retry after reconciliation", key)
+		if !isVoidMutationType(mutationType) {
+			return "", false, fmt.Errorf("completed mutation attempt %q is missing result_ref; retry after reconciliation", key)
+		}
+		resultRef = "void:" + mutationType
 	}
 	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
 		return "", true, fmt.Errorf("repair idempotency key: %w", err)
 	}
 	return resultRef, true, nil
+}
+
+func isVoidMutationType(mutationType string) bool {
+	switch mutationType {
+	case "issue_label_add", "issue_label_remove":
+		return true
+	default:
+		return false
+	}
 }
 
 func mutationResultRef(response json.RawMessage) string {
