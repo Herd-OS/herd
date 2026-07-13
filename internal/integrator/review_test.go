@@ -464,6 +464,7 @@ type mockReviewAgent struct {
 	results  []*agent.ReviewResult
 	calls    int
 	lastDiff string
+	lastOpts agent.ReviewOptions
 }
 
 func (m *mockReviewAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions) (*agent.Plan, error) {
@@ -472,8 +473,9 @@ func (m *mockReviewAgent) Plan(_ context.Context, _ string, _ agent.PlanOptions)
 func (m *mockReviewAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOptions) (*agent.ExecResult, error) {
 	return nil, nil
 }
-func (m *mockReviewAgent) Review(_ context.Context, diff string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+func (m *mockReviewAgent) Review(_ context.Context, diff string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
 	m.lastDiff = diff
+	m.lastOpts = opts
 	if m.onReview != nil {
 		m.onReview()
 	}
@@ -2431,6 +2433,7 @@ func TestReview_CleanStatusKnownUnmergeablePreservesCascadeFindingAndLabel(t *te
 }
 
 func TestReview_RefetchedBlockedPRPreservesCascadeFindingAndLabel(t *testing.T) {
+	var prompt string
 	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
 		pr: platform.PullRequest{
 			MergeableKnown:   true,
@@ -2444,7 +2447,8 @@ func TestReview_RefetchedBlockedPRPreservesCascadeFindingAndLabel(t *testing.T) 
 			MergeStateStatus: "BLOCKED",
 			Labels:           []string{issues.CascadeFailed},
 		},
-		finding: agent.ReviewFinding{Severity: "HIGH", Description: "herd/cascade-failed indicates an unresolved merge conflict on this PR"},
+		finding:       agent.ReviewFinding{Severity: "HIGH", Description: "herd/cascade-failed indicates an unresolved merge conflict on this PR"},
+		capturePrompt: &prompt,
 	})
 
 	require.NotNil(t, result)
@@ -2457,6 +2461,9 @@ func TestReview_RefetchedBlockedPRPreservesCascadeFindingAndLabel(t *testing.T) 
 	assert.Contains(t, requireCommentContaining(t, prSvc.comments, "unresolved merge conflict on this PR"), "fix worker dispatched")
 	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
 	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "Stale PR-state findings ignored")
+	assert.Contains(t, prompt, "Merge state status: CLEAN")
+	assert.NotContains(t, prompt, "Merge state status: BLOCKED")
+	assertPromptDescribesInvocationTimePRMetadata(t, prompt)
 }
 
 func TestReview_RefetchedCleanPRFiltersCascadeFindingAndRemovesLabel(t *testing.T) {
@@ -2725,7 +2732,10 @@ func TestReview_HistoricalCommentsDoNotOverrideCleanLivePRMetadata(t *testing.T)
 	require.GreaterOrEqual(t, currentIdx, 0)
 	require.GreaterOrEqual(t, historyIdx, 0)
 	assert.Less(t, currentIdx, historyIdx)
-	assert.Contains(t, prompt, "fetched fresh immediately before this review and is authoritative for current PR state")
+	assert.Contains(t, prompt, "fetched immediately before the agent review began")
+	assert.Contains(t, prompt, "HerdOS refreshes live GitHub PR metadata again before applying review results")
+	assert.Contains(t, prompt, "that later live refresh wins if it differs")
+	assert.NotContains(t, prompt, "fetched fresh immediately before this review and is authoritative for current PR state")
 	assert.Contains(t, prompt, "Mergeable known: true")
 	assert.Contains(t, prompt, "Mergeable: true")
 	assert.Contains(t, prompt, "Merge state status: CLEAN")
@@ -2881,6 +2891,7 @@ type staleCascadeReviewCase struct {
 	finding         agent.ReviewFinding
 	findings        []agent.ReviewFinding
 	removeLabelsErr error
+	capturePrompt   *string
 }
 
 func runStaleCascadeReview(t *testing.T, tc staleCascadeReviewCase) (*ReviewResult, *mockIssueService, *mockCapturingPRService, *mockWorkflowService) {
@@ -2953,6 +2964,11 @@ func runStaleCascadeReview(t *testing.T, tc staleCascadeReviewCase) (*ReviewResu
 		Workers:    config.Workers{TimeoutMinutes: 30},
 	}, ReviewParams{RunID: 100, RepoRoot: dir})
 	require.NoError(t, err)
+	if tc.capturePrompt != nil {
+		prompt, renderErr := agentprompt.RenderReviewPrompt(ag.lastDiff, ag.lastOpts)
+		require.NoError(t, renderErr)
+		*tc.capturePrompt = prompt
+	}
 	return result, issueSvc, prSvc, wf
 }
 
@@ -4313,6 +4329,15 @@ func requireCommentContaining(t *testing.T, comments []string, needle string) st
 	}
 	require.Failf(t, "missing comment", "expected a PR comment containing %q in %#v", needle, comments)
 	return ""
+}
+
+func assertPromptDescribesInvocationTimePRMetadata(t *testing.T, prompt string) {
+	t.Helper()
+
+	assert.Contains(t, prompt, "fetched immediately before the agent review began")
+	assert.Contains(t, prompt, "HerdOS refreshes live GitHub PR metadata again before applying review results")
+	assert.Contains(t, prompt, "that later live refresh wins if it differs")
+	assert.NotContains(t, prompt, "fetched fresh immediately before this review and is authoritative for current PR state")
 }
 
 func runChunkedReviewFixture(t *testing.T, files int, results []*agent.ReviewResult, issueSvc platform.IssueService) (*ReviewResult, *mockCapturingPRService, error) {
@@ -6093,6 +6118,13 @@ func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
 				assert.Contains(t, prSvc.comments[0], "- Stale PR-state findings ignored: 1")
 			} else {
 				assert.NotContains(t, prSvc.comments[0], "- Stale PR-state findings ignored:")
+			}
+			if tt.postReviewPR != nil {
+				prompt, renderErr := agentprompt.RenderReviewPrompt(ag.lastDiff, ag.lastOpts)
+				require.NoError(t, renderErr)
+				assert.Contains(t, prompt, "Merge state status: "+tt.initialPR.MergeStateStatus)
+				assert.NotContains(t, prompt, "Merge state status: "+tt.postReviewPR.MergeStateStatus)
+				assertPromptDescribesInvocationTimePRMetadata(t, prompt)
 			}
 		})
 	}

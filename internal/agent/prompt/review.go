@@ -24,7 +24,7 @@ When an acceptance criterion says no other files are modified or lists specific 
 
 {{if .CurrentPRMetadata}}
 ## Current PR Metadata
-The following metadata was fetched fresh immediately before this review and is authoritative for current PR state:
+The following metadata was fetched immediately before the agent review began. Treat it as the freshest PR state available to this prompt, and prefer it over historical comments. HerdOS refreshes live GitHub PR metadata again before applying review results; that later live refresh wins if it differs:
 {{.CurrentPRMetadata}}
 
 {{end}}

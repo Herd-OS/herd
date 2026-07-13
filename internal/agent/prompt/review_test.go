@@ -528,7 +528,10 @@ func TestRenderReviewPrompt_CurrentPRMetadataPrecedesHistoryAndDiff(t *testing.T
 	require.GreaterOrEqual(t, diffIdx, 0, "diff section must be present")
 	assert.Less(t, currentIdx, priorIdx, "current metadata must precede prior history")
 	assert.Less(t, currentIdx, diffIdx, "current metadata must precede diff")
-	assert.Contains(t, prompt, "fetched fresh immediately before this review and is authoritative for current PR state")
+	assert.Contains(t, prompt, "fetched immediately before the agent review began")
+	assert.Contains(t, prompt, "HerdOS refreshes live GitHub PR metadata again before applying review results")
+	assert.Contains(t, prompt, "that later live refresh wins if it differs")
+	assert.NotContains(t, prompt, "fetched fresh immediately before this review and is authoritative for current PR state")
 	assert.Contains(t, prompt, "CI status: success")
 }
 
