@@ -401,6 +401,13 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 	coverageBlocked := coverageBlocksApproval(plan)
 
+	finalDedupedFindings, finalDedupeStats := dedupeReviewFindings(reviewResult.Findings)
+	reviewResult.Findings = finalDedupedFindings
+	reviewResult.Comments = reviewCommentsFromFindings(finalDedupedFindings)
+	if aggregate.DedupeStats.RawFindings == 0 {
+		aggregate.DedupeStats = finalDedupeStats
+	}
+
 	originalFindingsCount := len(reviewResult.Findings)
 	reconciledFindings, stateFilterStats := reconcileReviewFindingsWithLivePRState(postReviewCtx, p.Issues(), pr, reviewResult.Findings)
 	appendReviewMetadata := func(comment string) string {
@@ -536,6 +543,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				return nil, err
 			}
 			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+			_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "", platform.ReviewApprove)
+			return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 		} else if stateFilterStats.CascadeLabelRemoveError != "" {
 			comment := buildStalePRStateFindingsIgnoredComment()
 			comment = appendReviewMetadataAndCoverage(comment)

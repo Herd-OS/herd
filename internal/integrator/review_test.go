@@ -2135,6 +2135,8 @@ func TestReview_CleanPRFiltersStaleCascadeFindingWhenLabelCleanupFails(t *testin
 	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
 	assert.Contains(t, comment, "- Stale cascade label cleanup: failed (github label API failed)")
 	assert.NotContains(t, comment, "Stale finding was still ignored")
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
 }
 
 func TestReview_HistoricalCommentsDoNotOverrideCleanLivePRMetadata(t *testing.T) {
@@ -2229,6 +2231,8 @@ func TestReview_PostedCommentIncludesDedupeAggregationMetadata(t *testing.T) {
 	comment := requireCommentContaining(t, prSvc.comments, "## Review Aggregation")
 	assert.Contains(t, comment, "- Raw findings before dedupe: 3")
 	assert.Contains(t, comment, "- Findings after dedupe: 1")
+	assert.Equal(t, 1, strings.Count(comment, "src/chunk_01.go: missing nil check in LoadConfig"))
+	assert.Equal(t, 1, strings.Count(issueSvc.createdBody, "src/chunk_01.go: missing nil check in LoadConfig"))
 }
 
 func TestReview_PostedCommentOmitsAggregationMetadataForNormalFinding(t *testing.T) {
