@@ -2174,7 +2174,7 @@ func TestReview_SafetyValve(t *testing.T) {
 func TestReview_ChunkedHighFindingsAcrossChunksDoesNotTripSafetyValve(t *testing.T) {
 	results := make([]*agent.ReviewResult, 0, 7)
 	for chunk := 1; chunk <= 7; chunk++ {
-		findings := makeHighReviewFindings(fmt.Sprintf("chunk %d issue", chunk), 2)
+		findings := makeHighReviewFindings(fmt.Sprintf("src/chunk_%02d.go: chunk %d issue", chunk, chunk), 2)
 		results = append(results, &agent.ReviewResult{
 			Approved: false,
 			Summary:  fmt.Sprintf("chunk %d found issues", chunk),
