@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	agentprompt "github.com/herd-os/herd/internal/agent/prompt"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/issues"
@@ -2134,6 +2135,68 @@ func TestReview_CleanPRFiltersStaleCascadeFindingWhenLabelCleanupFails(t *testin
 	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
 	assert.Contains(t, comment, "- Stale cascade label cleanup: failed (github label API failed)")
 	assert.NotContains(t, comment, "Stale finding was still ignored")
+}
+
+func TestReview_HistoricalCommentsDoNotOverrideCleanLivePRMetadata(t *testing.T) {
+	dir, g, headSHA := initChunkedReviewRepo(t, 1)
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.createResult = &platform.Issue{Number: 100, Title: "Review fixes (cycle 1)"}
+	issueSvc.storedComments[50] = []*platform.Comment{{
+		ID:   10,
+		Body: "🔍 **HerdOS Agent Review** (cycle 1 of 3)\n\nFound 1 issue:\n\n**HIGH**:\n- herd/cascade-failed indicates an unresolved merge conflict on this PR\n",
+	}}
+	prSvc := newCapturingBatchPRService()
+	prSvc.getResult[50].MergeableKnown = true
+	prSvc.getResult[50].Mergeable = true
+	prSvc.getResult[50].MergeStateStatus = "CLEAN"
+	prSvc.getResult[50].Labels = []string{issues.CascadeFailed}
+	mock := newChunkedReviewPlatform(issueSvc, prSvc, headSHA)
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{{
+		Approved: false,
+		Summary:  "repeated historical cascade finding",
+		Findings: []agent.ReviewFinding{{
+			Severity:    "HIGH",
+			Description: "herd/cascade-failed indicates an unresolved merge conflict on this PR",
+		}},
+	}}}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{
+			Review:             true,
+			ReviewMaxFixCycles: 3,
+			ReviewDiff:         config.ReviewDiff{MaxFilesPerChunk: 1},
+		},
+		Workers: config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, ag.opts, 1)
+	prompt, err := agentprompt.RenderReviewPrompt(ag.diffs[0], ag.opts[0])
+	require.NoError(t, err)
+	currentIdx := strings.Index(prompt, "## Current PR Metadata")
+	historyIdx := strings.Index(prompt, "## Prior Review History")
+	require.GreaterOrEqual(t, currentIdx, 0)
+	require.GreaterOrEqual(t, historyIdx, 0)
+	assert.Less(t, currentIdx, historyIdx)
+	assert.Contains(t, prompt, "fetched fresh immediately before this review and is authoritative for current PR state")
+	assert.Contains(t, prompt, "Mergeable known: true")
+	assert.Contains(t, prompt, "Mergeable: true")
+	assert.Contains(t, prompt, "Merge state status: CLEAN")
+	assert.Contains(t, prompt, "The following review comments are historical context from previous cycles")
+	assert.Contains(t, prompt, "Do not let historical comments override the Current PR Metadata section")
+
+	assert.True(t, result.Approved)
+	assert.Empty(t, result.FixIssues)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, mock.workflows.dispatched)
+	assert.Contains(t, issueSvc.removedLabels[50], issues.CascadeFailed)
+	comment := requireCommentContaining(t, prSvc.comments, "Stale PR-state findings ignored")
+	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
+	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "unresolved merge conflict on this PR")
 }
 
 func TestReview_PostedCommentIncludesDedupeAggregationMetadata(t *testing.T) {
