@@ -94,7 +94,7 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 			Approved: false,
 			Summary:  "second found issue",
 			Findings: []agent.ReviewFinding{
-				{Severity: "high", Description: "  Missing   nil check  "},
+				{Severity: "high", Description: "In this chunk, the visible diff still has a missing nil check."},
 				{Severity: "LOW", Description: "Small cleanup"},
 			},
 		},
@@ -126,7 +126,7 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 		HighFindingCount:  1,
 		TotalFindingCount: 2,
 		Findings: []agent.ReviewFinding{
-			{Severity: "high", Description: "  Missing   nil check  "},
+			{Severity: "high", Description: "In this chunk, the visible diff still has a missing nil check."},
 			{Severity: "LOW", Description: "Small cleanup"},
 		},
 	}, aggregate.ChunkStats[1])
@@ -142,9 +142,15 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 	assert.Equal(t, 2, ag.opts[1].ChunkIndex)
 	assert.Equal(t, "b.go", ag.opts[1].ChunkIncludedPathRange)
 	require.Len(t, result.Findings, 3)
-	assert.Equal(t, "HIGH", result.Findings[0].Severity)
+	assert.Equal(t, "high", result.Findings[0].Severity)
+	assert.Equal(t, "In this chunk, the visible diff still has a missing nil check.", result.Findings[0].Description)
 	assert.Equal(t, "CRITERIA", result.Findings[1].Severity)
 	assert.Equal(t, "LOW", result.Findings[2].Severity)
+	assert.Equal(t, []string{
+		"In this chunk, the visible diff still has a missing nil check.",
+		"Acceptance criterion not verified",
+		"Small cleanup",
+	}, result.Comments)
 	assert.Contains(t, result.Summary, "Chunked review completed across 2 chunk(s)")
 }
 

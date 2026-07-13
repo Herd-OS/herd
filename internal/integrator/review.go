@@ -666,7 +666,6 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 	approved := true
 	summaries := make([]string, 0, len(plan.Chunks))
 	findings := make([]agent.ReviewFinding, 0)
-	seenFindings := make(map[string]struct{})
 	coverageSummary := reviewdiff.FormatChunkedCoverageSummary(plan, len(plan.Chunks), reviewdiff.DefaultMaxOmittedSummaryEntries)
 
 	for _, chunk := range plan.Chunks {
@@ -705,18 +704,7 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 		if strings.TrimSpace(result.Summary) != "" {
 			summaries = append(summaries, fmt.Sprintf("Chunk %d/%d: %s", chunk.Index, totalChunks, strings.TrimSpace(result.Summary)))
 		}
-		chunkFindingKeys := make(map[string]struct{})
-		for _, finding := range result.Findings {
-			key := normalizedFindingKey(finding)
-			if _, ok := seenFindings[key]; ok {
-				continue
-			}
-			chunkFindingKeys[key] = struct{}{}
-			findings = append(findings, finding)
-		}
-		for key := range chunkFindingKeys {
-			seenFindings[key] = struct{}{}
-		}
+		findings = append(findings, result.Findings...)
 	}
 
 	if len(materialNotReviewed(plan)) > 0 || plan.Coverage.ExceededMaxChunks {
@@ -727,10 +715,11 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 	if len(plan.Chunks) > 1 {
 		summary = fmt.Sprintf("Chunked review completed across %d chunk(s).", len(plan.Chunks)) + optionalSummarySuffix(summary)
 	}
+	dedupedFindings, _ := dedupeReviewFindings(findings)
 	aggregate.Result = &agent.ReviewResult{
 		Approved: approved,
-		Findings: findings,
-		Comments: reviewCommentsFromFindings(findings),
+		Findings: dedupedFindings,
+		Comments: reviewCommentsFromFindings(dedupedFindings),
 		Summary:  summary,
 	}
 	aggregate.ChunksReviewed = len(plan.Chunks)
@@ -763,10 +752,6 @@ func chunkIncludedPathRange(chunk reviewdiff.ReviewChunk) string {
 		return first
 	}
 	return first + " through " + last
-}
-
-func normalizedFindingKey(finding agent.ReviewFinding) string {
-	return strings.ToLower(strings.TrimSpace(finding.Severity)) + "\x00" + strings.ToLower(strings.Join(strings.Fields(finding.Description), " "))
 }
 
 func reviewCommentsFromFindings(findings []agent.ReviewFinding) []string {
