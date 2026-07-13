@@ -5840,6 +5840,115 @@ func TestReviewStandalone_PostsComment(t *testing.T) {
 	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
 }
 
+func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
+	tests := []struct {
+		name              string
+		pr                platform.PullRequest
+		finding           agent.ReviewFinding
+		wantFiltered      bool
+		wantReviewEvent   platform.ReviewEvent
+		wantStaleMetadata bool
+	}{
+		{
+			name: "clean filters unanchored merge conflict",
+			pr: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "CLEAN",
+				Labels:           []string{issues.CascadeFailed},
+			},
+			finding:           agent.ReviewFinding{Severity: "HIGH", Description: "Unresolved merge conflict blocks merge"},
+			wantFiltered:      true,
+			wantReviewEvent:   platform.ReviewApprove,
+			wantStaleMetadata: true,
+		},
+		{
+			name: "dirty preserves unanchored merge conflict",
+			pr: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "DIRTY",
+			},
+			finding:         agent.ReviewFinding{Severity: "HIGH", Description: "Unresolved merge conflict blocks merge"},
+			wantReviewEvent: platform.ReviewRequestChanges,
+		},
+		{
+			name: "blocked preserves unanchored merge conflict",
+			pr: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "BLOCKED",
+			},
+			finding:         agent.ReviewFinding{Severity: "HIGH", Description: "Unresolved merge conflict blocks merge"},
+			wantReviewEvent: platform.ReviewRequestChanges,
+		},
+		{
+			name: "unknown preserves unanchored merge conflict",
+			pr: platform.PullRequest{
+				MergeableKnown:   false,
+				MergeStateStatus: "UNKNOWN",
+			},
+			finding:         agent.ReviewFinding{Severity: "HIGH", Description: "Unresolved merge conflict blocks merge"},
+			wantReviewEvent: platform.ReviewRequestChanges,
+		},
+		{
+			name: "clean preserves file-level merge conflict logic",
+			pr: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "CLEAN",
+			},
+			finding:         agent.ReviewFinding{Severity: "HIGH", Description: "internal/merge/resolver.go: resolve merge conflicts ignores errors"},
+			wantReviewEvent: platform.ReviewRequestChanges,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock, prSvc, issueSvc, wf := newStandalonePlatform()
+			pr := tt.pr
+			pr.Number = 77
+			pr.Title = "Standalone"
+			pr.Base = "main"
+			pr.Head = "feature"
+			prSvc.getResult[77] = &pr
+			ag := &mockReviewAgent{
+				reviewResult: &agent.ReviewResult{
+					Approved: false,
+					Findings: []agent.ReviewFinding{tt.finding},
+				},
+			}
+
+			result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+				Integrator: config.Integrator{Review: true},
+			}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Len(t, prSvc.comments, 1)
+			require.Len(t, prSvc.reviews, 1)
+			assert.Equal(t, tt.wantReviewEvent, prSvc.reviews[0].event)
+			assert.Empty(t, issueSvc.createdTitle, "standalone review must not create fix issues")
+			assert.Empty(t, issueSvc.removedLabels[77], "standalone review must not clean up labels")
+			assert.Empty(t, wf.dispatched, "standalone review must not dispatch workers")
+
+			if tt.wantFiltered {
+				assert.Equal(t, 0, result.FindingsCount)
+				assert.NotContains(t, prSvc.comments[0], tt.finding.Description)
+			} else {
+				assert.Equal(t, 1, result.FindingsCount)
+				assert.Contains(t, prSvc.comments[0], tt.finding.Description)
+			}
+			if tt.wantStaleMetadata {
+				assert.Contains(t, prSvc.comments[0], "Stale PR-state findings ignored")
+				assert.Contains(t, prSvc.comments[0], "- Stale PR-state findings ignored: 1")
+			} else {
+				assert.NotContains(t, prSvc.comments[0], "- Stale PR-state findings ignored:")
+			}
+		})
+	}
+}
+
 func TestReviewStandalone_Approved(t *testing.T) {
 	mock, prSvc, issueSvc, wf := newStandalonePlatform()
 

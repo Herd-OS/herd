@@ -19,7 +19,10 @@ type reviewStateFilterStats struct {
 
 func reconcileReviewFindingsWithLivePRState(ctx context.Context, issueSvc platform.IssueService, pr *platform.PullRequest, findings []agent.ReviewFinding) ([]agent.ReviewFinding, reviewStateFilterStats) {
 	state := livePRMergeState(pr)
-	stats := cleanupStaleCascadeLabel(ctx, issueSvc, pr, state)
+	var stats reviewStateFilterStats
+	if issueSvc != nil {
+		stats = cleanupStaleCascadeLabel(ctx, issueSvc, pr, state)
+	}
 	if !state.Clean {
 		return findings, stats
 	}

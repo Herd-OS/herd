@@ -1037,8 +1037,15 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 		return &ReviewStandaloneResult{ManualInterventionNeeded: true}, nil
 	}
 	reviewResult := aggregate.Result
+	originalFindingsCount := len(reviewResult.Findings)
+	reconciledFindings, stateFilterStats := reconcileReviewFindingsWithLivePRState(ctx, nil, pr, reviewResult.Findings)
+	reviewResult.Findings = reconciledFindings
+	reviewResult.Comments = reviewCommentsFromFindings(reconciledFindings)
+	staleStateOnlyFindings := originalFindingsCount > 0 &&
+		stateFilterStats.StalePRStateFindingsIgnored == originalFindingsCount &&
+		len(reviewResult.Findings) == 0
 	appendReviewMetadataAndCoverage := func(comment string) string {
-		return appendDiffCoverageIfLimited(appendReviewAggregationMetadata(comment, aggregate.DedupeStats, reviewStateFilterStats{}), preparedDiff)
+		return appendDiffCoverageIfLimited(appendReviewAggregationMetadata(comment, aggregate.DedupeStats, stateFilterStats), preparedDiff)
 	}
 
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
@@ -1056,6 +1063,14 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	if reviewResult.Approved {
 		comment := fmt.Sprintf("✅ **HerdOS Agent Review**\n\n%s\n", reviewResult.Summary)
 		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+		_ = p.PullRequests().AddComment(ctx, params.PRNumber, comment)
+		_ = p.PullRequests().CreateReview(ctx, params.PRNumber, "", platform.ReviewApprove)
+		return &ReviewStandaloneResult{}, nil
+	}
+
+	if staleStateOnlyFindings {
+		comment := buildStalePRStateFindingsIgnoredComment()
+		comment = appendReviewMetadataAndCoverage(comment)
 		_ = p.PullRequests().AddComment(ctx, params.PRNumber, comment)
 		_ = p.PullRequests().CreateReview(ctx, params.PRNumber, "", platform.ReviewApprove)
 		return &ReviewStandaloneResult{}, nil
