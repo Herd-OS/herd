@@ -15,17 +15,18 @@ type Issue struct {
 }
 
 type PullRequest struct {
-	Number         int
-	Title          string
-	Body           string
-	State          string // "open", "closed", "merged"
-	Head           string // branch name
-	Base           string // target branch
-	Labels         []string
-	Mergeable      bool
-	MergeableKnown bool // false when GitHub is still computing mergeability
-	URL            string
-	CreatedAt      time.Time
+	Number           int
+	Title            string
+	Body             string
+	State            string // "open", "closed", "merged"
+	Head             string // branch name
+	Base             string // target branch
+	Labels           []string
+	Mergeable        bool
+	MergeableKnown   bool // false when GitHub is still computing mergeability
+	MergeStateStatus string
+	URL              string
+	CreatedAt        time.Time
 }
 
 type PullRequestFile struct {

@@ -36,7 +36,12 @@ func (m *testPlatform) Labels() platform.LabelService             { return nil }
 func (m *testPlatform) Milestones() platform.MilestoneService     { return m.milestones }
 func (m *testPlatform) Runners() platform.RunnerService           { return nil }
 func (m *testPlatform) Repository() platform.RepositoryService    { return m.repo }
-func (m *testPlatform) Checks() platform.CheckService             { return m.checks }
+func (m *testPlatform) Checks() platform.CheckService {
+	if m.checks == nil {
+		return nil
+	}
+	return m.checks
+}
 
 // --- Mock IssueService ---
 

@@ -25,6 +25,7 @@ type mockPlatform struct {
 	workflows          *mockWorkflowService
 	repo               *mockRepoService
 	milestones         *mockMilestoneService
+	checks             platform.CheckService
 	authenticatedLogin string
 	authenticatedErr   error
 }
@@ -36,7 +37,7 @@ func (m *mockPlatform) Labels() platform.LabelService             { return nil }
 func (m *mockPlatform) Milestones() platform.MilestoneService     { return m.milestones }
 func (m *mockPlatform) Runners() platform.RunnerService           { return nil }
 func (m *mockPlatform) Repository() platform.RepositoryService    { return m.repo }
-func (m *mockPlatform) Checks() platform.CheckService             { return nil }
+func (m *mockPlatform) Checks() platform.CheckService             { return m.checks }
 func (m *mockPlatform) AuthenticatedLogin(_ context.Context) (string, error) {
 	return m.authenticatedLogin, m.authenticatedErr
 }

@@ -2963,6 +2963,139 @@ func TestTruncate(t *testing.T) {
 	assert.Equal(t, "first line", truncate("first line\nsecond line", 60))
 }
 
+func TestBuildCurrentPRMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		pr       *platform.PullRequest
+		headSHA  string
+		labels   []string
+		ciStatus string
+		want     []string
+	}{
+		{
+			name: "complete metadata",
+			pr: &platform.PullRequest{
+				Number:           50,
+				Head:             "feature",
+				Base:             "main",
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "clean",
+			},
+			headSHA:  "abc123",
+			labels:   []string{"herd/status:done", "reviewed"},
+			ciStatus: "success",
+			want: []string{
+				"PR number: #50",
+				"Head branch: feature",
+				"Base branch: main",
+				"Head SHA: abc123",
+				"Mergeable known: true",
+				"Mergeable: true",
+				"Merge state status: clean",
+				"Labels: herd/status:done, reviewed",
+				"CI status: success",
+			},
+		},
+		{
+			name: "missing optional data",
+			pr: &platform.PullRequest{
+				Number: 77,
+			},
+			want: []string{
+				"PR number: #77",
+				"Head branch: unavailable",
+				"Base branch: unavailable",
+				"Head SHA: unavailable",
+				"Mergeable known: false",
+				"Mergeable: false",
+				"Merge state status: unavailable",
+				"Labels: (none)",
+				"CI status: unavailable",
+			},
+		},
+		{
+			name:     "nil PR still records external state",
+			headSHA:  "def456",
+			labels:   []string{"bug"},
+			ciStatus: "pending",
+			want: []string{
+				"Head SHA: def456",
+				"Labels: bug",
+				"CI status: pending",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildCurrentPRMetadata(tt.pr, tt.headSHA, tt.labels, tt.ciStatus)
+			for _, want := range tt.want {
+				assert.Contains(t, got, want)
+			}
+		})
+	}
+}
+
+func TestCurrentPRCIStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		checks     *metadataCheckService
+		headSHA    string
+		headRef    string
+		wantStatus string
+		wantRef    string
+	}{
+		{
+			name:       "nil checks unavailable",
+			wantStatus: "unavailable",
+		},
+		{
+			name:       "empty ref unavailable",
+			checks:     &metadataCheckService{status: "success"},
+			wantStatus: "unavailable",
+		},
+		{
+			name:       "uses head sha before branch",
+			checks:     &metadataCheckService{status: "success"},
+			headSHA:    "abc123",
+			headRef:    "feature",
+			wantStatus: "success",
+			wantRef:    "abc123",
+		},
+		{
+			name:       "falls back to branch",
+			checks:     &metadataCheckService{status: "pending"},
+			headRef:    "feature",
+			wantStatus: "pending",
+			wantRef:    "feature",
+		},
+		{
+			name:       "error unavailable",
+			checks:     &metadataCheckService{err: fmt.Errorf("boom")},
+			headSHA:    "abc123",
+			wantStatus: "unavailable",
+			wantRef:    "abc123",
+		},
+		{
+			name:       "empty status unavailable",
+			checks:     &metadataCheckService{status: " "},
+			headSHA:    "abc123",
+			wantStatus: "unavailable",
+			wantRef:    "abc123",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockPlatform{checks: tt.checks}
+			got := currentPRCIStatus(context.Background(), mock, tt.headSHA, tt.headRef)
+			assert.Equal(t, tt.wantStatus, got)
+			if tt.checks != nil {
+				assert.Equal(t, tt.wantRef, tt.checks.ref)
+			}
+		})
+	}
+}
+
 // capturingMockAgent captures ReviewOptions for assertions
 type capturingMockAgent struct {
 	result       *agent.ReviewResult
@@ -2984,6 +3117,21 @@ func (m *capturingMockAgent) Review(_ context.Context, diff string, opts agent.R
 	return m.result, nil
 }
 func (m *capturingMockAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
+	return nil
+}
+
+type metadataCheckService struct {
+	status string
+	err    error
+	ref    string
+}
+
+func (m *metadataCheckService) GetCombinedStatus(_ context.Context, ref string) (string, error) {
+	m.ref = ref
+	return m.status, m.err
+}
+
+func (m *metadataCheckService) RerunFailedChecks(_ context.Context, _ string) error {
 	return nil
 }
 
@@ -4274,6 +4422,48 @@ func TestReview_NoPriorReviewComments_EmptyField(t *testing.T) {
 	assert.Nil(t, capturedOpts.PriorReviewComments)
 }
 
+func TestReview_CurrentPRMetadataPassedToAgent(t *testing.T) {
+	var capturedOpts agent.ReviewOptions
+	captureAgent := &capturingMockAgent{
+		result:       &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+		capturedOpts: &capturedOpts,
+	}
+
+	mock := newReviewTestPlatform(
+		[]*platform.PullRequest{{
+			Number:           50,
+			Title:            "[herd] Batch",
+			Head:             "herd/batch/1-batch",
+			Base:             "main",
+			Labels:           []string{"herd/status:done", "reviewed"},
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "clean",
+		}},
+		[]*platform.Issue{
+			{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+		},
+	)
+	mock.checks = &metadataCheckService{status: "success"}
+	mock.repo.branchSHAs = map[string]string{"herd/batch/1-batch": "abc123"}
+
+	dir, g := initTestRepo(t)
+	_, err := Review(context.Background(), mock, captureAgent, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "PR number: #50")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Head branch: herd/batch/1-batch")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Base branch: main")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Head SHA: abc123")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Mergeable known: true")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Mergeable: true")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Merge state status: clean")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Labels: herd/status:done, reviewed")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "CI status: success")
+}
+
 func TestCollectUserFeedbackComments(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -4500,7 +4690,14 @@ func newStandalonePlatform() (*mockPlatform, *mockCapturingPRService, *mockIssue
 		mockPRService: &mockPRService{
 			diffResult: "diff --git a/main.go b/main.go\n",
 			getResult: map[int]*platform.PullRequest{
-				77: {Number: 77, Title: "Standalone", Base: "main", Head: "feature"},
+				77: {
+					Number:           77,
+					Title:            "Standalone",
+					Base:             "main",
+					Head:             "feature",
+					Labels:           []string{"needs-review"},
+					MergeStateStatus: "blocked",
+				},
 			},
 		},
 	}
@@ -4756,7 +4953,14 @@ func TestReviewStandalone_ExtraInstructions(t *testing.T) {
 		mockPRService: &mockPRService{
 			diffResult: "diff --git a/main.go b/main.go\n",
 			getResult: map[int]*platform.PullRequest{
-				77: {Number: 77, Title: "Standalone", Base: "main", Head: "feature"},
+				77: {
+					Number:           77,
+					Title:            "Standalone",
+					Base:             "main",
+					Head:             "feature",
+					Labels:           []string{"needs-review"},
+					MergeStateStatus: "blocked",
+				},
 			},
 		},
 	}
@@ -4800,7 +5004,14 @@ func TestReviewStandalone_UserFeedbackPassedToAgent(t *testing.T) {
 		mockPRService: &mockPRService{
 			diffResult: "diff --git a/main.go b/main.go\n",
 			getResult: map[int]*platform.PullRequest{
-				77: {Number: 77, Title: "Standalone", Base: "main", Head: "feature"},
+				77: {
+					Number:           77,
+					Title:            "Standalone",
+					Base:             "main",
+					Head:             "feature",
+					Labels:           []string{"needs-review"},
+					MergeStateStatus: "blocked",
+				},
 			},
 		},
 	}
@@ -4824,6 +5035,13 @@ func TestReviewStandalone_UserFeedbackPassedToAgent(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"This nil check finding is a false positive"}, capturedOpts.UserFeedbackComments)
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "PR number: #77")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Head branch: feature")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Base branch: main")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Head SHA: unavailable")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Merge state status: blocked")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "Labels: needs-review")
+	assert.Contains(t, capturedOpts.CurrentPRMetadata, "CI status: unavailable")
 }
 
 // --- Unparseable-output retry tests ---
