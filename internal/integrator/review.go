@@ -400,6 +400,14 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 	coverageBlocked := coverageBlocksApproval(plan)
 
+	originalFindingsCount := len(reviewResult.Findings)
+	reconciledFindings, stateFilterStats := reconcileReviewFindingsWithLivePRState(postReviewCtx, p.Issues(), pr, reviewResult.Findings)
+	reviewResult.Findings = reconciledFindings
+	reviewResult.Comments = reviewCommentsFromFindings(reconciledFindings)
+	staleStateOnlyFindings := originalFindingsCount > 0 &&
+		stateFilterStats.StalePRStateFindingsIgnored == originalFindingsCount &&
+		len(reviewResult.Findings) == 0
+
 	// Partition findings by severity
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
 
@@ -407,6 +415,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if reviewResult.Approved {
 		if coverageBlocked {
 			comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
+			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, findMaxFixCycle(allIssues), len(reviewResult.Findings))
 			if err != nil {
 				return nil, err
@@ -443,6 +452,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		for _, f := range reviewResult.Findings {
 			comment += fmt.Sprintf("- **%s** %s\n", f.Severity, f.Description)
 		}
+		comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
 		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 		comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, len(reviewResult.Findings))
 		if err != nil {
@@ -466,6 +476,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if hasChunkedStats {
 		if stat, ok := offendingChunkSafetyValveStats(aggregate.ChunkStats, safetyValveLimit); ok {
 			comment := buildChunkReviewSafetyValveComment(stat, safetyValveLimit)
+			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
 			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 			comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, stat.HighFindingCount)
 			if err != nil {
@@ -476,6 +487,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		}
 	} else if len(highFindings) > safetyValveLimit {
 		comment := buildReviewSafetyValveComment(len(highFindings), safetyValveLimit)
+		comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
 		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 		comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, len(highFindings))
 		if err != nil {
@@ -503,6 +515,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if len(actionableFindings) == 0 {
 		if coverageBlocked {
 			comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
+			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
 			if err != nil {
 				return nil, err
@@ -510,6 +523,23 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 			_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "Review coverage is partial; not all material files were reviewed.", platform.ReviewRequestChanges)
 			return &ReviewResult{BatchPRNumber: pr.Number, FindingsCount: len(reviewResult.Findings)}, nil
+		}
+		if staleStateOnlyFindings {
+			comment := buildStalePRStateFindingsIgnoredComment(stateFilterStats)
+			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+			comment, err = markReviewResult(comment, reviewResultStatusApproved, currentCycle, 0)
+			if err != nil {
+				return nil, err
+			}
+			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+		} else if stateFilterStats.CascadeLabelRemoveError != "" {
+			comment := buildStalePRStateFindingsIgnoredComment(stateFilterStats)
+			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
+			if err != nil {
+				return nil, err
+			}
+			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		}
 		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
 		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
@@ -538,6 +568,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if len(actionableFindings) == 0 {
 		if coverageBlocked {
 			comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
+			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
 			if err != nil {
 				return nil, err
@@ -569,6 +600,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		if len(blocked) > 0 {
 			_ = p.Issues().AddLabels(postReviewCtx, pr.Number, []string{issues.StableDisagreement})
 			comment := buildStableDisagreementComment(blocked, verdictIdx, workerNoOpVerdicts)
+			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
 			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(blocked))
 			if err != nil {
@@ -636,6 +668,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if coverageBlocked {
 		findingsComment = appendCoverageApprovalBlockedSection(findingsComment, plan)
 	}
+	findingsComment = appendStalePRStateCleanupFailureNote(findingsComment, stateFilterStats)
 	findingsComment = appendDiffCoverageIfLimited(findingsComment, preparedDiff)
 	findingsComment, err = markReviewResult(findingsComment, reviewResultStatusChangesRequested, nextCycle, len(actionableFindings))
 	if err != nil {

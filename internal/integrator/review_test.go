@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -148,6 +149,125 @@ func TestLivePRMergeState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, livePRMergeState(tt.pr))
+		})
+	}
+}
+
+func TestIsCascadeOrMergeConflictFinding(t *testing.T) {
+	tests := []struct {
+		name string
+		desc string
+		want bool
+	}{
+		{name: "cascade label", desc: "herd/cascade-failed is present", want: true},
+		{name: "unresolved merge conflict", desc: "Unresolved merge conflict blocks this PR", want: true},
+		{name: "branch conflict", desc: "Branch conflict remains between batch and base", want: true},
+		{name: "conflict in business logic only", desc: "The new option conflicts with documented behavior in settings.go", want: false},
+		{name: "empty", desc: " ", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isCascadeOrMergeConflictFinding(agent.ReviewFinding{Description: tt.desc}))
+		})
+	}
+}
+
+func TestReconcileReviewFindingsWithLivePRState(t *testing.T) {
+	cascadeFinding := agent.ReviewFinding{Severity: "HIGH", Description: "unresolved merge conflict with the base branch"}
+	codeFinding := agent.ReviewFinding{Severity: "HIGH", Description: "auth.go: missing nil check after conflict-free refactor"}
+
+	tests := []struct {
+		name              string
+		pr                *platform.PullRequest
+		wantDescriptions  []string
+		wantRemovedLabel  bool
+		wantIgnoredCount  int
+		wantStaleLabel    bool
+		wantLabelRemoved  bool
+		wantRemoveErrText string
+		removeErr         error
+	}{
+		{
+			name: "clean removes label and filters only cascade finding",
+			pr: &platform.PullRequest{
+				Number:           50,
+				MergeStateStatus: "CLEAN",
+				Labels:           []string{issues.CascadeFailed},
+			},
+			wantDescriptions: []string{codeFinding.Description},
+			wantRemovedLabel: true,
+			wantIgnoredCount: 1,
+			wantStaleLabel:   true,
+			wantLabelRemoved: true,
+		},
+		{
+			name: "clean keeps non-cascade conflict mention",
+			pr: &platform.PullRequest{
+				Number:           50,
+				MergeStateStatus: "CLEAN",
+				Labels:           []string{issues.CascadeFailed},
+			},
+			wantDescriptions: []string{codeFinding.Description},
+			wantRemovedLabel: true,
+			wantIgnoredCount: 1,
+			wantStaleLabel:   true,
+			wantLabelRemoved: true,
+		},
+		{
+			name: "blocked preserves all findings and label",
+			pr: &platform.PullRequest{
+				Number:           50,
+				MergeStateStatus: "BLOCKED",
+				Labels:           []string{issues.CascadeFailed},
+			},
+			wantDescriptions: []string{cascadeFinding.Description, codeFinding.Description},
+		},
+		{
+			name:             "unknown nil PR preserves all findings",
+			wantDescriptions: []string{cascadeFinding.Description, codeFinding.Description},
+		},
+		{
+			name: "clean cleanup error still filters",
+			pr: &platform.PullRequest{
+				Number:           50,
+				MergeStateStatus: "CLEAN",
+				Labels:           []string{issues.CascadeFailed},
+			},
+			removeErr:         errors.New("remove failed"),
+			wantDescriptions:  []string{codeFinding.Description},
+			wantRemovedLabel:  true,
+			wantIgnoredCount:  1,
+			wantStaleLabel:    true,
+			wantRemoveErrText: "remove failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.removeLabelsErr = tt.removeErr
+
+			got, stats := reconcileReviewFindingsWithLivePRState(context.Background(), issueSvc, tt.pr, []agent.ReviewFinding{cascadeFinding, codeFinding})
+
+			gotDescriptions := make([]string, 0, len(got))
+			for _, finding := range got {
+				gotDescriptions = append(gotDescriptions, finding.Description)
+			}
+			assert.Equal(t, tt.wantDescriptions, gotDescriptions)
+			assert.Equal(t, tt.wantIgnoredCount, stats.StalePRStateFindingsIgnored)
+			assert.Equal(t, tt.wantStaleLabel, stats.CascadeLabelWasStale)
+			assert.Equal(t, tt.wantLabelRemoved, stats.CascadeLabelRemoved)
+			if tt.wantRemoveErrText == "" {
+				assert.Empty(t, stats.CascadeLabelRemoveError)
+			} else {
+				assert.Contains(t, stats.CascadeLabelRemoveError, tt.wantRemoveErrText)
+			}
+			if tt.wantRemovedLabel {
+				assert.Contains(t, issueSvc.removedLabels[50], issues.CascadeFailed)
+			} else {
+				assert.Empty(t, issueSvc.removedLabels[50])
+			}
 		})
 	}
 }
@@ -1958,6 +2078,156 @@ func TestReview_ChangesRequested_CreatesFixes(t *testing.T) {
 	assert.Len(t, createdIssues, 1)
 	assert.Len(t, wf.dispatched, 1)
 	assert.Equal(t, "Review fixes (cycle 1)", createdIssues[0].Title)
+}
+
+func TestReview_CleanPRFiltersStaleCascadeFindingAndRemovesLabel(t *testing.T) {
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "CLEAN",
+			Labels:           []string{issues.CascadeFailed},
+		},
+		finding: agent.ReviewFinding{Severity: "HIGH", Description: "herd/cascade-failed indicates an unresolved merge conflict on this PR"},
+	})
+
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Empty(t, result.FixIssues)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+	assert.Contains(t, issueSvc.removedLabels[50], issues.CascadeFailed)
+	assert.Contains(t, requireCommentContaining(t, prSvc.comments, "Stale PR-state findings ignored"), "did not dispatch a fix worker")
+	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "unresolved merge conflict on this PR")
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
+func TestReview_CleanPRFiltersStaleCascadeFindingWhenLabelCleanupFails(t *testing.T) {
+	cleanupErr := errors.New("github label API failed")
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "CLEAN",
+			Labels:           []string{issues.CascadeFailed},
+		},
+		finding:         agent.ReviewFinding{Severity: "HIGH", Description: "Conflict-resolution cascade state says a branch conflict remains"},
+		removeLabelsErr: cleanupErr,
+	})
+
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Empty(t, result.FixIssues)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+	assert.Contains(t, issueSvc.removedLabels[50], issues.CascadeFailed)
+	comment := requireCommentContaining(t, prSvc.comments, "cleanup failed")
+	assert.Contains(t, comment, cleanupErr.Error())
+	assert.Contains(t, comment, "Stale finding was still ignored")
+}
+
+func TestReview_NonCleanPRPreservesCascadeFinding(t *testing.T) {
+	tests := []struct {
+		name string
+		pr   platform.PullRequest
+	}{
+		{
+			name: "blocked",
+			pr: platform.PullRequest{
+				MergeableKnown:   true,
+				MergeStateStatus: "BLOCKED",
+				Labels:           []string{issues.CascadeFailed},
+			},
+		},
+		{
+			name: "unknown",
+			pr: platform.PullRequest{
+				MergeStateStatus: "UNKNOWN",
+				Labels:           []string{issues.CascadeFailed},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+				pr:      tt.pr,
+				finding: agent.ReviewFinding{Severity: "HIGH", Description: "unresolved merge conflict between batch branch and base branch"},
+			})
+
+			require.NotNil(t, result)
+			assert.False(t, result.Approved)
+			assert.Equal(t, []int{100}, result.FixIssues)
+			assert.Contains(t, issueSvc.createdBody, "unresolved merge conflict")
+			assert.Empty(t, issueSvc.removedLabels[50])
+			require.Len(t, wf.dispatched, 1)
+			assert.Equal(t, "100", wf.dispatched[0]["issue_number"])
+			assert.Contains(t, requireCommentContaining(t, prSvc.comments, "unresolved merge conflict"), "fix worker dispatched")
+			assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+		})
+	}
+}
+
+type staleCascadeReviewCase struct {
+	pr              platform.PullRequest
+	finding         agent.ReviewFinding
+	removeLabelsErr error
+}
+
+func runStaleCascadeReview(t *testing.T, tc staleCascadeReviewCase) (*ReviewResult, *mockIssueService, *mockCapturingPRService, *mockWorkflowService) {
+	t.Helper()
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	issueSvc.createResult = &platform.Issue{Number: 100, Title: "Review fixes (cycle 1)"}
+	issueSvc.removeLabelsErr = tc.removeLabelsErr
+
+	pr := tc.pr
+	pr.Number = 50
+	pr.Title = "[herd] Batch"
+	pr.Head = "herd/batch/1-batch"
+	pr.Base = "main"
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{&pr},
+		},
+	}
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+		},
+	}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
+		milestones: &mockMilestoneService{},
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Summary:  "found stale cascade state",
+			Findings: []agent.ReviewFinding{tc.finding},
+			Comments: []string{tc.finding.Description},
+		},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+	require.NoError(t, err)
+	return result, issueSvc, prSvc, wf
 }
 
 func TestReview_LowSeverityIncludedWhenConfigured(t *testing.T) {

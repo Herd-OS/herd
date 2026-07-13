@@ -55,6 +55,7 @@ type mockIssueService struct {
 	listCommentsErr        error
 	createResult           *platform.Issue
 	createErr              error
+	removeLabelsErr        error
 	createdTitle           string
 	createdBody            string
 	respectCanceledContext bool
@@ -112,6 +113,9 @@ func (m *mockIssueService) AddLabels(ctx context.Context, number int, labels []s
 }
 func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []string) error {
 	m.removedLabels[number] = append(m.removedLabels[number], labels...)
+	if m.removeLabelsErr != nil {
+		return m.removeLabelsErr
+	}
 	return nil
 }
 func (m *mockIssueService) AddComment(ctx context.Context, number int, body string) error {
