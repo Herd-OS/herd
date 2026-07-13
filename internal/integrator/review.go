@@ -395,6 +395,10 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if err != nil {
 		return nil, fmt.Errorf("refreshing PR #%d after review for current merge state: %w", pr.Number, err)
 	}
+	livePR, err = refreshedPRWithOriginalIdentity(pr, livePR)
+	if err != nil {
+		return nil, fmt.Errorf("refreshing PR #%d after review for current merge state: %w", pr.Number, err)
+	}
 	pr = livePR
 	markReviewResult := func(comment, status string, cycle, findingsCount int) (string, error) {
 		marker := newReviewResultMarker(pr.Number, ms.Number, currentHeadSHA, status, cycle, findingsCount, time.Now())
@@ -551,13 +555,15 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "", platform.ReviewApprove)
 			return &ReviewResult{Approved: true, BatchPRNumber: pr.Number}, nil
 		} else if stateFilterStats.CascadeLabelRemoveError != "" {
-			comment := buildStalePRStateFindingsIgnoredComment()
+			comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
 			comment = appendReviewMetadataAndCoverage(comment)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
 			if err != nil {
 				return nil, err
 			}
 			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+			_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, "Stale cascade label cleanup failed; manual cleanup is required before approval.", platform.ReviewRequestChanges)
+			return &ReviewResult{BatchPRNumber: pr.Number, FindingsCount: len(reviewResult.Findings)}, nil
 		}
 		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
 		comment = appendReviewMetadataAndCoverage(comment)
@@ -701,6 +707,30 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		FixCycle:      nextCycle,
 		BatchPRNumber: pr.Number,
 	}, nil
+}
+
+func refreshedPRWithOriginalIdentity(original, refreshed *platform.PullRequest) (*platform.PullRequest, error) {
+	if refreshed == nil {
+		if original == nil {
+			return nil, errors.New("platform returned nil PR")
+		}
+		return nil, fmt.Errorf("platform returned nil PR for #%d", original.Number)
+	}
+	if original == nil {
+		return refreshed, nil
+	}
+	if refreshed.Number == 0 {
+		refreshed.Number = original.Number
+	} else if original.Number != 0 && refreshed.Number != original.Number {
+		return nil, fmt.Errorf("platform returned PR #%d while refreshing PR #%d", refreshed.Number, original.Number)
+	}
+	if refreshed.Head == "" {
+		refreshed.Head = original.Head
+	}
+	if refreshed.Base == "" {
+		refreshed.Base = original.Base
+	}
+	return refreshed, nil
 }
 
 func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform, plan reviewdiff.ChunkPlan, baseOpts agent.ReviewOptions, prNumber int) (*aggregatedReview, error) {

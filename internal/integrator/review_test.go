@@ -492,6 +492,14 @@ func (m *mockReviewAgent) Discuss(_ context.Context, _ agent.DiscussOptions) err
 	return nil
 }
 
+type nilRefreshPRService struct {
+	*mockPRService
+}
+
+func (m *nilRefreshPRService) Get(context.Context, int) (*platform.PullRequest, error) {
+	return nil, nil
+}
+
 // Helper to build a standard test platform for review tests
 func newReviewTestPlatform(prList []*platform.PullRequest, milestoneIssues []*platform.Issue) *mockPlatform {
 	issueSvc := newMockIssueService()
@@ -2261,6 +2269,94 @@ func TestReview_ChangesRequested_CreatesFixes(t *testing.T) {
 	assert.Equal(t, "Review fixes (cycle 1)", createdIssues[0].Title)
 }
 
+func TestReview_ReturnsErrorWhenRefetchedPRIsNil(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	prSvc := &nilRefreshPRService{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{{Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"}},
+		},
+	}
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
+		milestones: &mockMilestoneService{},
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+	}
+
+	dir, g := initTestRepo(t)
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "platform returned nil PR for #50")
+}
+
+func TestRefreshedPRWithOriginalIdentity(t *testing.T) {
+	tests := []struct {
+		name      string
+		original  *platform.PullRequest
+		refreshed *platform.PullRequest
+		want      *platform.PullRequest
+		wantErr   string
+	}{
+		{
+			name:      "nil refreshed PR returns clear error",
+			original:  &platform.PullRequest{Number: 50, Head: "herd/batch/1-batch", Base: "main"},
+			refreshed: nil,
+			wantErr:   "platform returned nil PR for #50",
+		},
+		{
+			name:      "partial refreshed PR preserves original identity fields",
+			original:  &platform.PullRequest{Number: 50, Head: "herd/batch/1-batch", Base: "main"},
+			refreshed: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "CLEAN"},
+			want:      &platform.PullRequest{Number: 50, Head: "herd/batch/1-batch", Base: "main", MergeableKnown: true, Mergeable: true, MergeStateStatus: "CLEAN"},
+		},
+		{
+			name:      "full refreshed PR keeps live identity",
+			original:  &platform.PullRequest{Number: 50, Head: "old-head", Base: "old-base"},
+			refreshed: &platform.PullRequest{Number: 50, Head: "herd/batch/1-batch", Base: "main", MergeStateStatus: "BLOCKED"},
+			want:      &platform.PullRequest{Number: 50, Head: "herd/batch/1-batch", Base: "main", MergeStateStatus: "BLOCKED"},
+		},
+		{
+			name:      "mismatched PR number is rejected",
+			original:  &platform.PullRequest{Number: 50, Head: "herd/batch/1-batch", Base: "main"},
+			refreshed: &platform.PullRequest{Number: 51, Head: "herd/batch/1-batch", Base: "main"},
+			wantErr:   "platform returned PR #51 while refreshing PR #50",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := refreshedPRWithOriginalIdentity(tt.original, tt.refreshed)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestReview_CleanPRFiltersStaleCascadeFindingAndRemovesLabel(t *testing.T) {
 	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
 		pr: platform.PullRequest{
@@ -2547,6 +2643,41 @@ func TestReview_CleanPRFiltersStaleCascadeFindingWhenLabelCleanupFails(t *testin
 	assert.NotContains(t, comment, "Stale finding was still ignored")
 	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
 	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
+func TestReview_CleanupFailureWithNonActionableFindingPostsSingleMarker(t *testing.T) {
+	cleanupErr := errors.New("github label API failed")
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "CLEAN",
+			Labels:           []string{issues.CascadeFailed},
+		},
+		findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "herd/cascade-failed indicates an unresolved merge conflict on this PR"},
+			{Severity: "LOW", Description: "docs/review.md: minor wording nit"},
+		},
+		removeLabelsErr: cleanupErr,
+	})
+
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Empty(t, result.FixIssues)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+	assert.Contains(t, issueSvc.removedLabels[50], issues.CascadeFailed)
+	require.Len(t, prSvc.comments, 1)
+	assert.Equal(t, 1, strings.Count(strings.Join(prSvc.comments, "\n"), reviewResultMarkerPrefix))
+	comment := prSvc.comments[0]
+	assert.Contains(t, comment, "docs/review.md: minor wording nit")
+	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
+	assert.Contains(t, comment, "- Stale cascade label cleanup: failed (github label API failed)")
+	marker, ok := parseReviewResultMarker(comment)
+	require.True(t, ok)
+	assert.Equal(t, reviewResultStatusChangesRequested, marker.Status)
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
 }
 
 func TestReview_HistoricalCommentsDoNotOverrideCleanLivePRMetadata(t *testing.T) {
