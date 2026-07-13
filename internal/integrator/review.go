@@ -45,6 +45,35 @@ type chunkReviewStats struct {
 	Findings          []agent.ReviewFinding
 }
 
+type prMergeState struct {
+	MergeableKnown   bool
+	Mergeable        bool
+	MergeStateStatus string
+	Clean            bool
+	Blocking         bool
+	Unknown          bool
+}
+
+func livePRMergeState(pr *platform.PullRequest) prMergeState {
+	if pr == nil {
+		return prMergeState{Unknown: true}
+	}
+
+	status := strings.ToUpper(strings.TrimSpace(pr.MergeStateStatus))
+	state := prMergeState{
+		MergeableKnown:   pr.MergeableKnown,
+		Mergeable:        pr.Mergeable,
+		MergeStateStatus: status,
+		Clean:            (pr.MergeableKnown && pr.Mergeable) || status == "CLEAN",
+		Unknown:          (!pr.MergeableKnown && status == "") || status == "UNKNOWN",
+	}
+	switch status {
+	case "DIRTY", "BLOCKED", "BEHIND", "UNKNOWN":
+		state.Blocking = true
+	}
+	return state
+}
+
 func duplicateApprovedReviewSkipReason(prNumber int, headSHA string) string {
 	return fmt.Sprintf("Skipping agent review for PR #%d: head %s already has an approved Herd review result.", prNumber, headSHA)
 }

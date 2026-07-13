@@ -56,6 +56,102 @@ func reviewTestGitOutput(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func TestLivePRMergeState(t *testing.T) {
+	tests := []struct {
+		name string
+		pr   *platform.PullRequest
+		want prMergeState
+	}{
+		{
+			name: "nil PR is unknown",
+			want: prMergeState{Unknown: true},
+		},
+		{
+			name: "known mergeable is clean",
+			pr: &platform.PullRequest{
+				MergeableKnown: true,
+				Mergeable:      true,
+			},
+			want: prMergeState{
+				MergeableKnown: true,
+				Mergeable:      true,
+				Clean:          true,
+			},
+		},
+		{
+			name: "clean status is clean",
+			pr: &platform.PullRequest{
+				MergeStateStatus: " clean ",
+			},
+			want: prMergeState{
+				MergeStateStatus: "CLEAN",
+				Clean:            true,
+			},
+		},
+		{
+			name: "dirty status is blocking",
+			pr: &platform.PullRequest{
+				MergeableKnown:   true,
+				MergeStateStatus: "DIRTY",
+			},
+			want: prMergeState{
+				MergeableKnown:   true,
+				MergeStateStatus: "DIRTY",
+				Blocking:         true,
+			},
+		},
+		{
+			name: "blocked status is blocking",
+			pr: &platform.PullRequest{
+				MergeStateStatus: "BLOCKED",
+			},
+			want: prMergeState{
+				MergeStateStatus: "BLOCKED",
+				Blocking:         true,
+			},
+		},
+		{
+			name: "behind status is blocking",
+			pr: &platform.PullRequest{
+				MergeStateStatus: "BEHIND",
+			},
+			want: prMergeState{
+				MergeStateStatus: "BEHIND",
+				Blocking:         true,
+			},
+		},
+		{
+			name: "unknown status is blocking and unknown",
+			pr: &platform.PullRequest{
+				MergeStateStatus: "UNKNOWN",
+			},
+			want: prMergeState{
+				MergeStateStatus: "UNKNOWN",
+				Blocking:         true,
+				Unknown:          true,
+			},
+		},
+		{
+			name: "absent mergeability is unknown",
+			pr:   &platform.PullRequest{},
+			want: prMergeState{Unknown: true},
+		},
+		{
+			name: "known unmergeable without status is not clean or unknown",
+			pr: &platform.PullRequest{
+				MergeableKnown: true,
+			},
+			want: prMergeState{MergeableKnown: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, livePRMergeState(tt.pr))
+		})
+	}
+}
+
 // --- Mock Agent ---
 
 type mockReviewAgent struct {
