@@ -260,6 +260,9 @@ func TestIsCascadeOrMergeConflictFinding(t *testing.T) {
 		{name: "unresolved merge conflict", desc: "Unresolved merge conflict blocks this PR", want: true},
 		{name: "unresolved merge conflict without pr phrase", desc: "Unresolved merge conflict blocks merge", want: true},
 		{name: "branch conflict", desc: "Branch conflict remains between batch and base", want: true},
+		{name: "file-level cascade label docs", desc: "docs/design/execution.md: herd/cascade-failed docs still imply the label can only be removed manually", want: false},
+		{name: "symbol-level cascade label behavior", desc: "function CascadeFailed cleanup is inconsistent with label behavior", want: false},
+		{name: "file-level current pr merge state", desc: "internal/merge/resolver.go: GitHub reports this PR has an unresolved merge conflict", want: true},
 		{name: "file-level merge conflict logic", desc: "internal/merge/resolver.go: resolve merge conflicts ignores errors", want: false},
 		{name: "symbol-level merge conflict logic", desc: "function resolveConflicts ignores errors while resolving merge conflicts", want: false},
 		{name: "conflict in business logic only", desc: "The new option conflicts with documented behavior in settings.go", want: false},
@@ -2317,6 +2320,28 @@ func TestReview_CleanPRPreservesFileLevelMergeConflictFinding(t *testing.T) {
 	require.Len(t, wf.dispatched, 1)
 	assert.Equal(t, "100", wf.dispatched[0]["issue_number"])
 	assert.Contains(t, requireCommentContaining(t, prSvc.comments, "internal/merge/resolver.go"), "fix worker dispatched")
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
+func TestReview_CleanPRPreservesFileLevelCascadeLabelFinding(t *testing.T) {
+	finding := "docs/design/execution.md: herd/cascade-failed docs still imply the label can only be removed manually"
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "CLEAN",
+		},
+		finding: agent.ReviewFinding{Severity: "MEDIUM", Description: finding},
+	})
+
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Contains(t, issueSvc.createdBody, finding)
+	assert.Empty(t, issueSvc.removedLabels[50])
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "100", wf.dispatched[0]["issue_number"])
+	assert.Contains(t, requireCommentContaining(t, prSvc.comments, "docs/design/execution.md"), "fix worker dispatched")
 	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
 }
 

@@ -41,6 +41,8 @@ func isCascadeOrMergeConflictFinding(f agent.ReviewFinding) bool {
 		return false
 	}
 
+	hasAnchor := extractFindingPath(f.Description) != "" || extractFindingSymbol(f.Description) != ""
+	hasCascadeEvidence := false
 	for _, phrase := range []string{
 		issues.CascadeFailed,
 		"cascade failed",
@@ -53,7 +55,8 @@ func isCascadeOrMergeConflictFinding(f agent.ReviewFinding) bool {
 		"previous review says the herd cascade",
 	} {
 		if strings.Contains(text, phrase) {
-			return true
+			hasCascadeEvidence = true
+			break
 		}
 	}
 
@@ -62,12 +65,10 @@ func isCascadeOrMergeConflictFinding(f agent.ReviewFinding) bool {
 		strings.Contains(text, "mergeability") ||
 		strings.Contains(text, "merge state")
 	if !hasConflictEvidence {
-		return false
+		return hasCascadeEvidence && !hasAnchor
 	}
 
-	if extractFindingPath(f.Description) == "" &&
-		extractFindingSymbol(f.Description) == "" &&
-		hasPRLevelMergeConflictText(text) {
+	if !hasAnchor && (hasCascadeEvidence || hasPRLevelMergeConflictText(text)) {
 		return true
 	}
 
@@ -89,10 +90,34 @@ func isCascadeOrMergeConflictFinding(f agent.ReviewFinding) bool {
 		"pr state",
 	} {
 		if strings.Contains(text, phrase) {
+			if hasAnchor && !hasCurrentPRStateText(text) {
+				return false
+			}
 			return true
 		}
 	}
 
+	return false
+}
+
+func hasCurrentPRStateText(text string) bool {
+	for _, phrase := range []string{
+		"current pr",
+		"this pr",
+		"pull request",
+		"batch pr",
+		"pr state",
+		"github reports",
+		"github mergeability",
+		"currently reports",
+		"current mergeability",
+		"current merge state",
+		"not mergeable",
+	} {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
 	return false
 }
 
