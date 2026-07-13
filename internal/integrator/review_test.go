@@ -5804,6 +5804,25 @@ func newStandalonePlatform() (*mockPlatform, *mockCapturingPRService, *mockIssue
 	return mock, prSvc, issueSvc, wf
 }
 
+type standaloneRefreshPRService struct {
+	*mockCapturingPRService
+	initial    *platform.PullRequest
+	refreshed  *platform.PullRequest
+	refreshErr error
+	getCalls   int
+}
+
+func (m *standaloneRefreshPRService) Get(context.Context, int) (*platform.PullRequest, error) {
+	m.getCalls++
+	if m.getCalls == 1 {
+		return m.initial, nil
+	}
+	if m.refreshErr != nil {
+		return nil, m.refreshErr
+	}
+	return m.refreshed, nil
+}
+
 func TestReviewStandalone_PostsComment(t *testing.T) {
 	mock, prSvc, issueSvc, wf := newStandalonePlatform()
 
@@ -5840,10 +5859,72 @@ func TestReviewStandalone_PostsComment(t *testing.T) {
 	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
 }
 
+func TestReviewStandalone_ReturnsErrorWhenRefetchedPRFails(t *testing.T) {
+	tests := []struct {
+		name       string
+		refreshed  *platform.PullRequest
+		refreshErr error
+		wantErr    string
+	}{
+		{
+			name:    "nil refreshed PR",
+			wantErr: "platform returned nil PR for #77",
+		},
+		{
+			name:       "refresh error",
+			refreshErr: errors.New("github unavailable"),
+			wantErr:    "refreshing PR #77 after standalone review for current merge state: github unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			prSvc := &standaloneRefreshPRService{
+				mockCapturingPRService: &mockCapturingPRService{
+					mockPRService: &mockPRService{
+						diffResult: "diff --git a/main.go b/main.go\n",
+					},
+				},
+				initial: &platform.PullRequest{
+					Number: 77,
+					Title:  "Standalone",
+					Base:   "main",
+					Head:   "feature",
+				},
+				refreshed:  tt.refreshed,
+				refreshErr: tt.refreshErr,
+			}
+			mock := &mockPlatform{
+				issues:     issueSvc,
+				prs:        prSvc,
+				workflows:  &mockWorkflowService{},
+				repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
+				milestones: &mockMilestoneService{},
+			}
+			ag := &mockReviewAgent{
+				reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"},
+			}
+
+			result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+				Integrator: config.Integrator{Review: true},
+			}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Equal(t, 2, prSvc.getCalls)
+			assert.Empty(t, prSvc.comments)
+			assert.Empty(t, prSvc.reviews)
+		})
+	}
+}
+
 func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
 	tests := []struct {
 		name              string
-		pr                platform.PullRequest
+		initialPR         platform.PullRequest
+		postReviewPR      *platform.PullRequest
 		finding           agent.ReviewFinding
 		wantFiltered      bool
 		wantReviewEvent   platform.ReviewEvent
@@ -5851,7 +5932,7 @@ func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
 	}{
 		{
 			name: "clean filters unanchored merge conflict",
-			pr: platform.PullRequest{
+			initialPR: platform.PullRequest{
 				MergeableKnown:   true,
 				Mergeable:        true,
 				MergeStateStatus: "CLEAN",
@@ -5864,7 +5945,7 @@ func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
 		},
 		{
 			name: "dirty preserves unanchored merge conflict",
-			pr: platform.PullRequest{
+			initialPR: platform.PullRequest{
 				MergeableKnown:   true,
 				Mergeable:        false,
 				MergeStateStatus: "DIRTY",
@@ -5874,7 +5955,7 @@ func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
 		},
 		{
 			name: "blocked preserves unanchored merge conflict",
-			pr: platform.PullRequest{
+			initialPR: platform.PullRequest{
 				MergeableKnown:   true,
 				Mergeable:        false,
 				MergeStateStatus: "BLOCKED",
@@ -5884,7 +5965,7 @@ func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
 		},
 		{
 			name: "unknown preserves unanchored merge conflict",
-			pr: platform.PullRequest{
+			initialPR: platform.PullRequest{
 				MergeableKnown:   false,
 				MergeStateStatus: "UNKNOWN",
 			},
@@ -5892,8 +5973,69 @@ func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
 			wantReviewEvent: platform.ReviewRequestChanges,
 		},
 		{
+			name: "post-review dirty preserves unanchored merge conflict despite initial clean",
+			initialPR: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "CLEAN",
+			},
+			postReviewPR: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "DIRTY",
+			},
+			finding:         agent.ReviewFinding{Severity: "HIGH", Description: "Unresolved merge conflict blocks merge"},
+			wantReviewEvent: platform.ReviewRequestChanges,
+		},
+		{
+			name: "post-review blocked preserves unanchored merge conflict despite initial clean",
+			initialPR: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "CLEAN",
+			},
+			postReviewPR: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "BLOCKED",
+			},
+			finding:         agent.ReviewFinding{Severity: "HIGH", Description: "Unresolved merge conflict blocks merge"},
+			wantReviewEvent: platform.ReviewRequestChanges,
+		},
+		{
+			name: "post-review unknown preserves unanchored merge conflict despite initial clean",
+			initialPR: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "CLEAN",
+			},
+			postReviewPR: &platform.PullRequest{
+				MergeableKnown:   false,
+				MergeStateStatus: "UNKNOWN",
+			},
+			finding:         agent.ReviewFinding{Severity: "HIGH", Description: "Unresolved merge conflict blocks merge"},
+			wantReviewEvent: platform.ReviewRequestChanges,
+		},
+		{
+			name: "post-review clean filters unanchored merge conflict despite initial dirty",
+			initialPR: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "DIRTY",
+			},
+			postReviewPR: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "CLEAN",
+			},
+			finding:           agent.ReviewFinding{Severity: "HIGH", Description: "Unresolved merge conflict blocks merge"},
+			wantFiltered:      true,
+			wantReviewEvent:   platform.ReviewApprove,
+			wantStaleMetadata: true,
+		},
+		{
 			name: "clean preserves file-level merge conflict logic",
-			pr: platform.PullRequest{
+			initialPR: platform.PullRequest{
 				MergeableKnown:   true,
 				Mergeable:        true,
 				MergeStateStatus: "CLEAN",
@@ -5906,12 +6048,18 @@ func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mock, prSvc, issueSvc, wf := newStandalonePlatform()
-			pr := tt.pr
-			pr.Number = 77
-			pr.Title = "Standalone"
-			pr.Base = "main"
-			pr.Head = "feature"
-			prSvc.getResult[77] = &pr
+			initialPR := tt.initialPR
+			initialPR.Number = 77
+			initialPR.Title = "Standalone"
+			initialPR.Base = "main"
+			initialPR.Head = "feature"
+			var postReviewPR platform.PullRequest
+			if tt.postReviewPR == nil {
+				postReviewPR = initialPR
+			} else {
+				postReviewPR = *tt.postReviewPR
+			}
+			prSvc.getResults = []*platform.PullRequest{&initialPR, &postReviewPR}
 			ag := &mockReviewAgent{
 				reviewResult: &agent.ReviewResult{
 					Approved: false,
@@ -5925,6 +6073,7 @@ func TestReviewStandalone_ReconcilesStalePRStateFindings(t *testing.T) {
 
 			require.NoError(t, err)
 			require.NotNil(t, result)
+			assert.Equal(t, 2, prSvc.getCalls)
 			require.Len(t, prSvc.comments, 1)
 			require.Len(t, prSvc.reviews, 1)
 			assert.Equal(t, tt.wantReviewEvent, prSvc.reviews[0].event)

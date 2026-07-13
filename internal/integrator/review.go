@@ -1037,6 +1037,15 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 		return &ReviewStandaloneResult{ManualInterventionNeeded: true}, nil
 	}
 	reviewResult := aggregate.Result
+	livePR, err := p.PullRequests().Get(ctx, pr.Number)
+	if err != nil {
+		return nil, fmt.Errorf("refreshing PR #%d after standalone review for current merge state: %w", pr.Number, err)
+	}
+	livePR, err = refreshedPRWithOriginalIdentity(pr, livePR)
+	if err != nil {
+		return nil, fmt.Errorf("refreshing PR #%d after standalone review for current merge state: %w", pr.Number, err)
+	}
+	pr = livePR
 	originalFindingsCount := len(reviewResult.Findings)
 	reconciledFindings, stateFilterStats := reconcileReviewFindingsWithLivePRState(ctx, nil, pr, reviewResult.Findings)
 	reviewResult.Findings = reconciledFindings
