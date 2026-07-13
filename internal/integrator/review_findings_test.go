@@ -139,6 +139,9 @@ func TestReviewFindingExtractionAndSelection(t *testing.T) {
 		want string
 	}{
 		{name: "path prefix strips line", desc: "cmd/herd-service/main.go:123: missing validation", want: "cmd/herd-service/main.go"},
+		{name: "root go mod path", desc: "go.mod: merge conflict marker dependency resolution is wrong", want: "go.mod"},
+		{name: "root package json path", desc: "package.json: resolve merge conflicts script ignores errors", want: "package.json"},
+		{name: "root settings go path", desc: "settings.go: unresolved conflict handler drops errors", want: "settings.go"},
 		{name: "embedded yaml path", desc: "The workflow .github/workflows/review.yml:42 has stale config", want: ".github/workflows/review.yml"},
 		{name: "typescript path prefix", desc: "web/src/mergeResolver.ts: resolve merge conflicts ignores errors", want: "web/src/mergeresolver.ts"},
 		{name: "python embedded path", desc: "The handler in scripts/merge_resolver.py:77 drops errors", want: "scripts/merge_resolver.py"},

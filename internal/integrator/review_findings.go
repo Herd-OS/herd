@@ -15,15 +15,15 @@ type reviewFindingDedupeStats struct {
 }
 
 var (
-	findingPathPrefixRE = regexp.MustCompile(`(?i)^\s*([A-Za-z0-9_.@~+/-]+/[A-Za-z0-9_.@~+-]+\.[A-Za-z0-9][A-Za-z0-9]+)(?::\d+){1,2}:?`)
-	findingPathRE       = regexp.MustCompile(`(?i)(?:^|[\s"'([])([A-Za-z0-9_.@~+/-]+/[A-Za-z0-9_.@~+-]+\.[A-Za-z0-9][A-Za-z0-9]+)(?::\d+){0,2}`)
+	findingPathPrefixRE = regexp.MustCompile(`(?i)^\s*((?:[A-Za-z0-9_.@~+/-]+/)?[A-Za-z0-9_.@~+-]+\.[A-Za-z0-9][A-Za-z0-9]+)(?::\d+){1,2}:?`)
+	findingPathRE       = regexp.MustCompile(`(?i)(?:^|[\s"'([])((?:[A-Za-z0-9_.@~+/-]+/)?[A-Za-z0-9_.@~+-]+\.[A-Za-z0-9][A-Za-z0-9]+)(?::\d+){0,2}`)
 	findingSymbolRE     = regexp.MustCompile(`(?i)\b(?:function|func|method|symbol)\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\b`)
 	findingCallRE       = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\(\)`)
 	findingChunkRE      = regexp.MustCompile(`(?i)\bchunk\s+\d+(?:\s*/\s*\d+)?\b`)
 	findingCycleRE      = regexp.MustCompile(`(?i)\bcycle\s+\d+\b`)
 	findingPunctRE      = regexp.MustCompile(`[^a-z0-9_./ -]+`)
 	findingSpaceRE      = regexp.MustCompile(`\s+`)
-	findingLinePathRE   = regexp.MustCompile(`(?i)([A-Za-z0-9_.@~+/-]+/[A-Za-z0-9_.@~+-]+\.[A-Za-z0-9][A-Za-z0-9]+)(?::\d+){1,2}`)
+	findingLinePathRE   = regexp.MustCompile(`(?i)((?:[A-Za-z0-9_.@~+/-]+/)?[A-Za-z0-9_.@~+-]+\.[A-Za-z0-9][A-Za-z0-9]+)(?::\d+){1,2}`)
 	findingTokenRE      = regexp.MustCompile(`[a-z0-9_./-]+`)
 )
 
