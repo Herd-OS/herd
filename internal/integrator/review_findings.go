@@ -133,16 +133,18 @@ func compactFindingClaim(desc string) string {
 func betterFinding(a, b agent.ReviewFinding) agent.ReviewFinding {
 	aScore := findingCompletenessScore(a)
 	bScore := findingCompletenessScore(b)
+	best := a
 	if bScore > aScore {
-		return b
-	}
-	if aScore > bScore {
-		return a
+		best = b
+	} else if aScore == bScore && findingSeverityRank(b.Severity) > findingSeverityRank(a.Severity) {
+		best = b
 	}
 	if findingSeverityRank(b.Severity) > findingSeverityRank(a.Severity) {
-		return b
+		best.Severity = b.Severity
+	} else {
+		best.Severity = a.Severity
 	}
-	return a
+	return best
 }
 
 func normalizeFindingSeverity(severity string) string {

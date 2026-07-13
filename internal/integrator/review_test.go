@@ -258,8 +258,10 @@ func TestIsCascadeOrMergeConflictFinding(t *testing.T) {
 	}{
 		{name: "cascade label", desc: "herd/cascade-failed is present", want: true},
 		{name: "unresolved merge conflict", desc: "Unresolved merge conflict blocks this PR", want: true},
+		{name: "unresolved merge conflict without pr phrase", desc: "Unresolved merge conflict blocks merge", want: true},
 		{name: "branch conflict", desc: "Branch conflict remains between batch and base", want: true},
 		{name: "file-level merge conflict logic", desc: "internal/merge/resolver.go: resolve merge conflicts ignores errors", want: false},
+		{name: "symbol-level merge conflict logic", desc: "function resolveConflicts ignores errors while resolving merge conflicts", want: false},
 		{name: "conflict in business logic only", desc: "The new option conflicts with documented behavior in settings.go", want: false},
 		{name: "empty", desc: " ", want: false},
 	}
@@ -2249,6 +2251,28 @@ func TestReview_CleanPRFiltersStaleCascadeFindingAndRemovesLabel(t *testing.T) {
 	assert.NotContains(t, comment, "- Raw findings before dedupe: 1")
 	assert.NotContains(t, comment, "- Findings after dedupe: 1")
 	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "unresolved merge conflict on this PR")
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
+func TestReview_CleanPRFiltersUnanchoredPRLevelMergeConflictFinding(t *testing.T) {
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "CLEAN",
+		},
+		finding: agent.ReviewFinding{Severity: "HIGH", Description: "Unresolved merge conflict blocks merge"},
+	})
+
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Empty(t, result.FixIssues)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+	comment := requireCommentContaining(t, prSvc.comments, "Stale PR-state findings ignored")
+	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
+	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "Unresolved merge conflict blocks merge")
 	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
 	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
 }

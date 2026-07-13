@@ -65,6 +65,12 @@ func isCascadeOrMergeConflictFinding(f agent.ReviewFinding) bool {
 		return false
 	}
 
+	if extractFindingPath(f.Description) == "" &&
+		extractFindingSymbol(f.Description) == "" &&
+		hasPRLevelMergeConflictText(text) {
+		return true
+	}
+
 	for _, phrase := range []string{
 		"base branch",
 		"batch branch",
@@ -88,6 +94,17 @@ func isCascadeOrMergeConflictFinding(f agent.ReviewFinding) bool {
 	}
 
 	return false
+}
+
+func hasPRLevelMergeConflictText(text string) bool {
+	hasUnresolvedConflict := strings.Contains(text, "unresolved conflict") ||
+		strings.Contains(text, "unresolved merge conflict") ||
+		strings.Contains(text, "unresolved merge conflicts")
+	hasBranchConflict := strings.Contains(text, "branch conflict") ||
+		strings.Contains(text, "branch-conflict")
+	hasMergeConflict := strings.Contains(text, "merge conflict") ||
+		strings.Contains(text, "merge conflicts")
+	return hasUnresolvedConflict || hasBranchConflict || hasMergeConflict
 }
 
 func shouldIgnoreCascadeFinding(state prMergeState, _ *platform.PullRequest, f agent.ReviewFinding) bool {

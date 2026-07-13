@@ -56,6 +56,19 @@ func TestDedupeReviewFindings(t *testing.T) {
 			wantFingerSame: true,
 		},
 		{
+			name: "same fingerprint keeps complete description and highest severity",
+			findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "internal/integrator/review.go: function runReview missing nil check before using result."},
+				{Severity: "MEDIUM", Description: "Visible diff: internal/integrator/review.go:123: function runReview misses the nil check before using result."},
+			},
+			wantDescs: []string{
+				"Visible diff: internal/integrator/review.go:123: function runReview misses the nil check before using result.",
+			},
+			wantSeverities: []string{"HIGH"},
+			wantDeduped:    1,
+			wantFingerSame: true,
+		},
+		{
 			name: "distinct claims in same file remain separate",
 			findings: []agent.ReviewFinding{
 				{Severity: "HIGH", Description: "internal/integrator/review.go:123: missing nil check before dereferencing result."},
@@ -153,7 +166,9 @@ func TestReviewFindingExtractionAndSelection(t *testing.T) {
 
 	short := agent.ReviewFinding{Severity: "HIGH", Description: "missing nil check"}
 	complete := agent.ReviewFinding{Severity: "LOW", Description: "internal/integrator/review.go:123: function runReview is missing a nil check before dereferencing result"}
-	assert.Equal(t, complete, betterFinding(short, complete))
+	got := betterFinding(short, complete)
+	assert.Equal(t, complete.Description, got.Description)
+	assert.Equal(t, short.Severity, got.Severity)
 
 	low := agent.ReviewFinding{Severity: "LOW", Description: "same text"}
 	high := agent.ReviewFinding{Severity: "HIGH", Description: "same text"}
