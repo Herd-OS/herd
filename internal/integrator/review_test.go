@@ -91,6 +91,19 @@ func TestLivePRMergeState(t *testing.T) {
 			},
 		},
 		{
+			name: "clean status with known unmergeable is not clean",
+			pr: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "CLEAN",
+			},
+			want: prMergeState{
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "CLEAN",
+			},
+		},
+		{
 			name: "dirty status is blocking",
 			pr: &platform.PullRequest{
 				MergeableKnown:   true,
@@ -246,6 +259,7 @@ func TestIsCascadeOrMergeConflictFinding(t *testing.T) {
 		{name: "cascade label", desc: "herd/cascade-failed is present", want: true},
 		{name: "unresolved merge conflict", desc: "Unresolved merge conflict blocks this PR", want: true},
 		{name: "branch conflict", desc: "Branch conflict remains between batch and base", want: true},
+		{name: "file-level merge conflict logic", desc: "internal/merge/resolver.go: resolve merge conflicts ignores errors", want: false},
 		{name: "conflict in business logic only", desc: "The new option conflicts with documented behavior in settings.go", want: false},
 		{name: "empty", desc: " ", want: false},
 	}
@@ -259,7 +273,7 @@ func TestIsCascadeOrMergeConflictFinding(t *testing.T) {
 
 func TestReconcileReviewFindingsWithLivePRState(t *testing.T) {
 	cascadeFinding := agent.ReviewFinding{Severity: "HIGH", Description: "unresolved merge conflict with the base branch"}
-	codeFinding := agent.ReviewFinding{Severity: "HIGH", Description: "auth.go: missing nil check after conflict-free refactor"}
+	codeFinding := agent.ReviewFinding{Severity: "HIGH", Description: "internal/merge/resolver.go: resolve merge conflicts ignores errors"}
 
 	tests := []struct {
 		name              string
@@ -297,6 +311,17 @@ func TestReconcileReviewFindingsWithLivePRState(t *testing.T) {
 			wantIgnoredCount: 1,
 			wantStaleLabel:   true,
 			wantLabelRemoved: true,
+		},
+		{
+			name: "clean status with known unmergeable preserves findings and label",
+			pr: &platform.PullRequest{
+				Number:           50,
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "CLEAN",
+				Labels:           []string{issues.CascadeFailed},
+			},
+			wantDescriptions: []string{cascadeFinding.Description, codeFinding.Description},
 		},
 		{
 			name: "blocked preserves all findings and label",
@@ -2226,6 +2251,49 @@ func TestReview_CleanPRFiltersStaleCascadeFindingAndRemovesLabel(t *testing.T) {
 	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "unresolved merge conflict on this PR")
 	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
 	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
+func TestReview_CleanStatusKnownUnmergeablePreservesCascadeFindingAndLabel(t *testing.T) {
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        false,
+			MergeStateStatus: "CLEAN",
+			Labels:           []string{issues.CascadeFailed},
+		},
+		finding: agent.ReviewFinding{Severity: "HIGH", Description: "herd/cascade-failed indicates an unresolved merge conflict on this PR"},
+	})
+
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Contains(t, issueSvc.createdBody, "unresolved merge conflict on this PR")
+	assert.Empty(t, issueSvc.removedLabels[50])
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "100", wf.dispatched[0]["issue_number"])
+	assert.Contains(t, requireCommentContaining(t, prSvc.comments, "unresolved merge conflict on this PR"), "fix worker dispatched")
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
+func TestReview_CleanPRPreservesFileLevelMergeConflictFinding(t *testing.T) {
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "CLEAN",
+		},
+		finding: agent.ReviewFinding{Severity: "HIGH", Description: "internal/merge/resolver.go: resolve merge conflicts ignores errors"},
+	})
+
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Contains(t, issueSvc.createdBody, "internal/merge/resolver.go: resolve merge conflicts ignores errors")
+	assert.Empty(t, issueSvc.removedLabels[50])
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "100", wf.dispatched[0]["issue_number"])
+	assert.Contains(t, requireCommentContaining(t, prSvc.comments, "internal/merge/resolver.go"), "fix worker dispatched")
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
 }
 
 func TestReview_CleanPRFiltersStaleCascadeFindingWithDedupeMetadata(t *testing.T) {

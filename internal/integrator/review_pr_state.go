@@ -41,34 +41,53 @@ func isCascadeOrMergeConflictFinding(f agent.ReviewFinding) bool {
 		return false
 	}
 
-	phrases := []string{
+	for _, phrase := range []string{
 		issues.CascadeFailed,
 		"cascade failed",
 		"cascade-failed",
 		"conflict-resolution cascade",
 		"conflict resolution cascade",
 		"cascade state",
-		"unresolved merge conflict",
-		"unresolved conflict",
-		"merge conflict",
-		"merge-conflict",
-		"branch conflict",
-		"branch-conflict",
-		"resolve conflicts",
-		"resolve merge conflicts",
-	}
-	for _, phrase := range phrases {
+		"historical cascade",
+		"stale cascade",
+		"previous review says the herd cascade",
+	} {
 		if strings.Contains(text, phrase) {
 			return true
 		}
 	}
 
-	return strings.Contains(text, "conflict") &&
-		(strings.Contains(text, "base branch") ||
-			strings.Contains(text, "batch branch") ||
-			strings.Contains(text, "worker branch") ||
-			strings.Contains(text, "github reports") ||
-			strings.Contains(text, "not mergeable"))
+	hasConflictEvidence := strings.Contains(text, "conflict") ||
+		strings.Contains(text, "mergeable") ||
+		strings.Contains(text, "mergeability") ||
+		strings.Contains(text, "merge state")
+	if !hasConflictEvidence {
+		return false
+	}
+
+	for _, phrase := range []string{
+		"base branch",
+		"batch branch",
+		"worker branch",
+		"branch conflict",
+		"branch-conflict",
+		"github reports",
+		"github mergeability",
+		"not mergeable",
+		"mergeability",
+		"merge state",
+		"this pr",
+		"current pr",
+		"pull request",
+		"batch pr",
+		"pr state",
+	} {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func shouldIgnoreCascadeFinding(state prMergeState, _ *platform.PullRequest, f agent.ReviewFinding) bool {

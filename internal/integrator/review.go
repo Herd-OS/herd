@@ -65,7 +65,7 @@ func livePRMergeState(pr *platform.PullRequest) prMergeState {
 		MergeableKnown:   pr.MergeableKnown,
 		Mergeable:        pr.Mergeable,
 		MergeStateStatus: status,
-		Clean:            (status == "" && pr.MergeableKnown && pr.Mergeable) || status == "CLEAN",
+		Clean:            (status == "" && pr.MergeableKnown && pr.Mergeable) || (status == "CLEAN" && (!pr.MergeableKnown || pr.Mergeable)),
 		Unknown:          (!pr.MergeableKnown && status == "") || status == "UNKNOWN",
 	}
 	switch status {
