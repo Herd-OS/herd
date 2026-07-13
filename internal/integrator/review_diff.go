@@ -26,6 +26,32 @@ func appendDiffCoverageIfLimited(comment string, prepared reviewdiff.PreparedDif
 	return strings.TrimRight(comment, "\n") + "\n\n" + summary
 }
 
+func appendReviewAggregationMetadata(comment string, dedupe reviewFindingDedupeStats, filter reviewStateFilterStats) string {
+	dedupeChanged := dedupe.RawFindings > 0 && dedupe.RawFindings != dedupe.FindingsAfterDedupe
+	staleFiltered := filter.StalePRStateFindingsIgnored > 0
+	cleanupAttempted := filter.CascadeLabelWasStale || filter.CascadeLabelRemoved || filter.CascadeLabelRemoveError != ""
+	if !dedupeChanged && !staleFiltered && !cleanupAttempted {
+		return comment
+	}
+
+	var b strings.Builder
+	b.WriteString(strings.TrimRight(comment, "\n"))
+	b.WriteString("\n\n## Review Aggregation\n")
+	if dedupeChanged || staleFiltered {
+		fmt.Fprintf(&b, "- Raw findings before dedupe: %d\n", dedupe.RawFindings)
+		fmt.Fprintf(&b, "- Findings after dedupe: %d\n", dedupe.FindingsAfterDedupe)
+	}
+	if staleFiltered {
+		fmt.Fprintf(&b, "- Stale PR-state findings ignored: %d\n", filter.StalePRStateFindingsIgnored)
+	}
+	if filter.CascadeLabelRemoveError != "" {
+		fmt.Fprintf(&b, "- Stale cascade label cleanup: failed (%s)\n", filter.CascadeLabelRemoveError)
+	} else if cleanupAttempted {
+		b.WriteString("- Stale cascade label cleanup: removed\n")
+	}
+	return b.String()
+}
+
 func logDiffCoverageIfLimited(prepared reviewdiff.PreparedDiff) {
 	if !shouldAppendPreparedCoverage(prepared) {
 		return

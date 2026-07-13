@@ -2097,7 +2097,13 @@ func TestReview_CleanPRFiltersStaleCascadeFindingAndRemovesLabel(t *testing.T) {
 	assert.Empty(t, issueSvc.createdTitle)
 	assert.Empty(t, wf.dispatched)
 	assert.Contains(t, issueSvc.removedLabels[50], issues.CascadeFailed)
-	assert.Contains(t, requireCommentContaining(t, prSvc.comments, "Stale PR-state findings ignored"), "did not dispatch a fix worker")
+	comment := requireCommentContaining(t, prSvc.comments, "Stale PR-state findings ignored")
+	assert.Contains(t, comment, "did not dispatch a fix worker")
+	assert.Contains(t, comment, "## Review Aggregation")
+	assert.Contains(t, comment, "- Raw findings before dedupe: 1")
+	assert.Contains(t, comment, "- Findings after dedupe: 1")
+	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
+	assert.Contains(t, comment, "- Stale cascade label cleanup: removed")
 	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "unresolved merge conflict on this PR")
 	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
 	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
@@ -2122,9 +2128,73 @@ func TestReview_CleanPRFiltersStaleCascadeFindingWhenLabelCleanupFails(t *testin
 	assert.Empty(t, issueSvc.createdTitle)
 	assert.Empty(t, wf.dispatched)
 	assert.Contains(t, issueSvc.removedLabels[50], issues.CascadeFailed)
-	comment := requireCommentContaining(t, prSvc.comments, "cleanup failed")
+	comment := requireCommentContaining(t, prSvc.comments, "Stale cascade label cleanup")
 	assert.Contains(t, comment, cleanupErr.Error())
-	assert.Contains(t, comment, "Stale finding was still ignored")
+	assert.Contains(t, comment, "## Review Aggregation")
+	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
+	assert.Contains(t, comment, "- Stale cascade label cleanup: failed (github label API failed)")
+	assert.NotContains(t, comment, "Stale finding was still ignored")
+}
+
+func TestReview_PostedCommentIncludesDedupeAggregationMetadata(t *testing.T) {
+	dir, g, headSHA := initChunkedReviewRepo(t, 1)
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	prSvc := newCapturingBatchPRService()
+	mock := newChunkedReviewPlatform(issueSvc, prSvc, headSHA)
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "src/chunk_01.go: missing nil check in LoadConfig"},
+				{Severity: "HIGH", Description: "src/chunk_01.go: missing nil check in LoadConfig"},
+				{Severity: "HIGH", Description: "src/chunk_01.go: missing nil check in LoadConfig"},
+			},
+		},
+	}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{999}, result.FixIssues)
+	comment := requireCommentContaining(t, prSvc.comments, "## Review Aggregation")
+	assert.Contains(t, comment, "- Raw findings before dedupe: 3")
+	assert.Contains(t, comment, "- Findings after dedupe: 1")
+}
+
+func TestReview_PostedCommentOmitsAggregationMetadataForNormalFinding(t *testing.T) {
+	dir, g, headSHA := initChunkedReviewRepo(t, 1)
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	prSvc := newCapturingBatchPRService()
+	mock := newChunkedReviewPlatform(issueSvc, prSvc, headSHA)
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{
+			Approved: false,
+			Findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "src/chunk_01.go: missing nil check in LoadConfig"},
+			},
+		},
+	}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		Workers:    config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{999}, result.FixIssues)
+	comment := requireCommentContaining(t, prSvc.comments, "src/chunk_01.go: missing nil check")
+	assert.NotContains(t, comment, "## Review Aggregation")
 }
 
 func TestReview_NonCleanPRPreservesCascadeFinding(t *testing.T) {

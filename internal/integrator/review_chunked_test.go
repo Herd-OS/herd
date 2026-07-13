@@ -151,7 +151,69 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 		"Acceptance criterion not verified",
 		"Small cleanup",
 	}, result.Comments)
+	assert.Equal(t, reviewFindingDedupeStats{
+		RawFindings:         4,
+		FindingsAfterDedupe: 3,
+		DedupedFindings:     1,
+	}, aggregate.DedupeStats)
 	assert.Contains(t, result.Summary, "Chunked review completed across 2 chunk(s)")
+}
+
+func TestAppendReviewAggregationMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		dedupe      reviewFindingDedupeStats
+		filter      reviewStateFilterStats
+		want        []string
+		doesNotWant []string
+	}{
+		{
+			name:        "normal small review has no aggregation metadata",
+			dedupe:      reviewFindingDedupeStats{RawFindings: 1, FindingsAfterDedupe: 1},
+			doesNotWant: []string{"## Review Aggregation"},
+		},
+		{
+			name:   "dedupe changed finding count",
+			dedupe: reviewFindingDedupeStats{RawFindings: 3, FindingsAfterDedupe: 1, DedupedFindings: 2},
+			want: []string{
+				"## Review Aggregation",
+				"- Raw findings before dedupe: 3",
+				"- Findings after dedupe: 1",
+			},
+		},
+		{
+			name:   "stale filtered finding includes dedupe and stale counts",
+			dedupe: reviewFindingDedupeStats{RawFindings: 1, FindingsAfterDedupe: 1},
+			filter: reviewStateFilterStats{StalePRStateFindingsIgnored: 1, CascadeLabelWasStale: true, CascadeLabelRemoved: true},
+			want: []string{
+				"- Raw findings before dedupe: 1",
+				"- Findings after dedupe: 1",
+				"- Stale PR-state findings ignored: 1",
+				"- Stale cascade label cleanup: removed",
+			},
+		},
+		{
+			name:   "cleanup failure is concise",
+			dedupe: reviewFindingDedupeStats{RawFindings: 1, FindingsAfterDedupe: 1},
+			filter: reviewStateFilterStats{StalePRStateFindingsIgnored: 1, CascadeLabelWasStale: true, CascadeLabelRemoveError: "github failed"},
+			want: []string{
+				"- Stale cascade label cleanup: failed (github failed)",
+			},
+			doesNotWant: []string{"Stale finding was still ignored"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			comment := appendReviewAggregationMetadata("body\n", tt.dedupe, tt.filter)
+			for _, want := range tt.want {
+				assert.Contains(t, comment, want)
+			}
+			for _, notWant := range tt.doesNotWant {
+				assert.NotContains(t, comment, notWant)
+			}
+		})
+	}
 }
 
 func TestRunChunkedReviewWithRetryRepeatedUnparseableReportsNoReviewedChunks(t *testing.T) {

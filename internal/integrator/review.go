@@ -35,6 +35,7 @@ type aggregatedReview struct {
 	ManualIntervention bool
 	AgentError         error
 	ChunkStats         []chunkReviewStats
+	DedupeStats        reviewFindingDedupeStats
 }
 
 type chunkReviewStats struct {
@@ -402,6 +403,12 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	originalFindingsCount := len(reviewResult.Findings)
 	reconciledFindings, stateFilterStats := reconcileReviewFindingsWithLivePRState(postReviewCtx, p.Issues(), pr, reviewResult.Findings)
+	appendReviewMetadata := func(comment string) string {
+		return appendReviewAggregationMetadata(comment, aggregate.DedupeStats, stateFilterStats)
+	}
+	appendReviewMetadataAndCoverage := func(comment string) string {
+		return appendDiffCoverageIfLimited(appendReviewMetadata(comment), preparedDiff)
+	}
 	reviewResult.Findings = reconciledFindings
 	reviewResult.Comments = reviewCommentsFromFindings(reconciledFindings)
 	staleStateOnlyFindings := originalFindingsCount > 0 &&
@@ -414,8 +421,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// Handle approved
 	if reviewResult.Approved {
 		if coverageBlocked {
-			comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
-			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
+			comment := buildCoverageApprovalBlockedBody(plan)
+			comment = appendReviewMetadataAndCoverage(comment)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, findMaxFixCycle(allIssues), len(reviewResult.Findings))
 			if err != nil {
 				return nil, err
@@ -425,7 +432,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			return &ReviewResult{BatchPRNumber: pr.Number, FindingsCount: len(reviewResult.Findings)}, nil
 		}
 		summaryComment := buildBatchSummaryComment(allIssues, reviewResult.Summary)
-		summaryComment = appendDiffCoverageIfLimited(summaryComment, preparedDiff)
+		summaryComment = appendReviewMetadataAndCoverage(summaryComment)
 		summaryComment, err = markReviewResult(summaryComment, reviewResultStatusApproved, findMaxFixCycle(allIssues), 0)
 		if err != nil {
 			return nil, err
@@ -452,8 +459,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		for _, f := range reviewResult.Findings {
 			comment += fmt.Sprintf("- **%s** %s\n", f.Severity, f.Description)
 		}
-		comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
-		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+		comment = appendReviewMetadataAndCoverage(comment)
 		comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, len(reviewResult.Findings))
 		if err != nil {
 			return nil, err
@@ -476,8 +482,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if hasChunkedStats {
 		if stat, ok := offendingChunkSafetyValveStats(aggregate.ChunkStats, safetyValveLimit); ok {
 			comment := buildChunkReviewSafetyValveComment(stat, safetyValveLimit)
-			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
-			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+			comment = appendReviewMetadataAndCoverage(comment)
 			comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, stat.HighFindingCount)
 			if err != nil {
 				return nil, err
@@ -487,8 +492,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		}
 	} else if len(highFindings) > safetyValveLimit {
 		comment := buildReviewSafetyValveComment(len(highFindings), safetyValveLimit)
-		comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
-		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+		comment = appendReviewMetadataAndCoverage(comment)
 		comment, err = markReviewResult(comment, reviewResultStatusMaxCyclesHit, currentCycle, len(highFindings))
 		if err != nil {
 			return nil, err
@@ -514,8 +518,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	// No actionable findings — approve with informational comment and batch summary
 	if len(actionableFindings) == 0 {
 		if coverageBlocked {
-			comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
-			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
+			comment := buildCoverageApprovalBlockedBody(plan)
+			comment = appendReviewMetadataAndCoverage(comment)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
 			if err != nil {
 				return nil, err
@@ -525,16 +529,16 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			return &ReviewResult{BatchPRNumber: pr.Number, FindingsCount: len(reviewResult.Findings)}, nil
 		}
 		if staleStateOnlyFindings {
-			comment := buildStalePRStateFindingsIgnoredComment(stateFilterStats)
-			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+			comment := buildStalePRStateFindingsIgnoredComment()
+			comment = appendReviewMetadataAndCoverage(comment)
 			comment, err = markReviewResult(comment, reviewResultStatusApproved, currentCycle, 0)
 			if err != nil {
 				return nil, err
 			}
 			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		} else if stateFilterStats.CascadeLabelRemoveError != "" {
-			comment := buildStalePRStateFindingsIgnoredComment(stateFilterStats)
-			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+			comment := buildStalePRStateFindingsIgnoredComment()
+			comment = appendReviewMetadataAndCoverage(comment)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
 			if err != nil {
 				return nil, err
@@ -542,7 +546,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
 		}
 		comment := buildReviewCycleComment(0, cfg.Integrator.ReviewMaxFixCycles, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
-		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+		comment = appendReviewMetadataAndCoverage(comment)
 		comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
 		if err != nil {
 			return nil, err
@@ -567,8 +571,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	actionableFindings = dedupFindings(actionableFindings, openFixIssues)
 	if len(actionableFindings) == 0 {
 		if coverageBlocked {
-			comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
-			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
+			comment := buildCoverageApprovalBlockedBody(plan)
+			comment = appendReviewMetadataAndCoverage(comment)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(reviewResult.Findings))
 			if err != nil {
 				return nil, err
@@ -581,7 +585,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		// any previous REQUEST_CHANGES review and post an informational comment.
 		fmt.Println("All actionable findings are duplicates of existing fix issues, approving.")
 		comment := "✅ **HerdOS Agent Review**\n\nAll findings are already covered by existing fix workers. Approving to unblock the PR."
-		comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+		comment = appendReviewMetadataAndCoverage(comment)
 		comment, err = markReviewResult(comment, reviewResultStatusApproved, currentCycle, 0)
 		if err != nil {
 			return nil, err
@@ -600,8 +604,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		if len(blocked) > 0 {
 			_ = p.Issues().AddLabels(postReviewCtx, pr.Number, []string{issues.StableDisagreement})
 			comment := buildStableDisagreementComment(blocked, verdictIdx, workerNoOpVerdicts)
-			comment = appendStalePRStateCleanupFailureNote(comment, stateFilterStats)
-			comment = appendDiffCoverageIfLimited(comment, preparedDiff)
+			comment = appendReviewMetadataAndCoverage(comment)
 			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, currentCycle, len(blocked))
 			if err != nil {
 				return nil, err
@@ -668,8 +671,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	if coverageBlocked {
 		findingsComment = appendCoverageApprovalBlockedSection(findingsComment, plan)
 	}
-	findingsComment = appendStalePRStateCleanupFailureNote(findingsComment, stateFilterStats)
-	findingsComment = appendDiffCoverageIfLimited(findingsComment, preparedDiff)
+	findingsComment = appendReviewMetadataAndCoverage(findingsComment)
 	findingsComment, err = markReviewResult(findingsComment, reviewResultStatusChangesRequested, nextCycle, len(actionableFindings))
 	if err != nil {
 		return nil, err
@@ -750,7 +752,7 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 	if len(plan.Chunks) > 1 {
 		summary = fmt.Sprintf("Chunked review completed across %d chunk(s).", len(plan.Chunks)) + optionalSummarySuffix(summary)
 	}
-	dedupedFindings, _ := dedupeReviewFindings(findings)
+	dedupedFindings, dedupeStats := dedupeReviewFindings(findings)
 	aggregate.Result = &agent.ReviewResult{
 		Approved: approved,
 		Findings: dedupedFindings,
@@ -758,6 +760,7 @@ func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.P
 		Summary:  summary,
 	}
 	aggregate.ChunksReviewed = len(plan.Chunks)
+	aggregate.DedupeStats = dedupeStats
 	return &aggregate, nil
 }
 
@@ -990,13 +993,17 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 		return &ReviewStandaloneResult{ManualInterventionNeeded: true}, nil
 	}
 	reviewResult := aggregate.Result
+	appendReviewMetadataAndCoverage := func(comment string) string {
+		return appendDiffCoverageIfLimited(appendReviewAggregationMetadata(comment, aggregate.DedupeStats, reviewStateFilterStats{}), preparedDiff)
+	}
 
 	highFindings, mediumFindings, lowFindings, criteriaFindings := filterFindingsBySeverity(reviewResult.Findings)
 	if coverageBlocksApproval(plan) {
-		comment := buildCoverageApprovalBlockedComment(preparedDiff, plan)
+		comment := buildCoverageApprovalBlockedBody(plan)
 		if len(reviewResult.Findings) > 0 {
 			comment += "\n\n" + buildReviewCycleComment(0, 0, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
 		}
+		comment = appendReviewMetadataAndCoverage(comment)
 		_ = p.PullRequests().AddComment(ctx, params.PRNumber, comment)
 		_ = p.PullRequests().CreateReview(ctx, params.PRNumber, "Review coverage is partial; not all material files were reviewed.", platform.ReviewRequestChanges)
 		return &ReviewStandaloneResult{FindingsCount: len(reviewResult.Findings)}, nil
@@ -1011,7 +1018,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	}
 
 	findingsComment := buildReviewCycleComment(0, 0, nil, highFindings, mediumFindings, lowFindings, criteriaFindings)
-	findingsComment = appendDiffCoverageIfLimited(findingsComment, preparedDiff)
+	findingsComment = appendReviewMetadataAndCoverage(findingsComment)
 	_ = p.PullRequests().AddComment(ctx, params.PRNumber, findingsComment)
 	_ = p.PullRequests().CreateReview(ctx, params.PRNumber, "Agent review found issues.", platform.ReviewRequestChanges)
 

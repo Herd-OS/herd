@@ -91,16 +91,9 @@ func cleanupStaleCascadeLabel(ctx context.Context, issueSvc platform.IssueServic
 	return stats
 }
 
-func buildStalePRStateFindingsIgnoredComment(stats reviewStateFilterStats) string {
+func buildStalePRStateFindingsIgnoredComment() string {
 	var b strings.Builder
 	b.WriteString("✅ **HerdOS Agent Review**\n\n")
 	b.WriteString("Stale PR-state findings ignored: GitHub currently reports this PR as clean/mergeable, so Herd ignored historical cascade/merge-conflict metadata and did not dispatch a fix worker.")
-	return appendStalePRStateCleanupFailureNote(b.String(), stats)
-}
-
-func appendStalePRStateCleanupFailureNote(comment string, stats reviewStateFilterStats) string {
-	if stats.StalePRStateFindingsIgnored == 0 || stats.CascadeLabelRemoveError == "" {
-		return comment
-	}
-	return strings.TrimRight(comment, "\n") + fmt.Sprintf("\n\nTried to remove stale %s label but cleanup failed: %s. Stale finding was still ignored because live GitHub mergeability is clean.", issues.CascadeFailed, stats.CascadeLabelRemoveError)
+	return b.String()
 }
