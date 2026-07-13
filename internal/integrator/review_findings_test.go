@@ -102,6 +102,17 @@ func TestDedupeReviewFindings(t *testing.T) {
 			wantDeduped:    1,
 			wantFingerSame: true,
 		},
+		{
+			name: "distinct stop word only claims remain separate",
+			findings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "It is this"},
+				{Severity: "HIGH", Description: "This should be"},
+			},
+			wantDescs: []string{
+				"It is this",
+				"This should be",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -179,4 +190,6 @@ func TestReviewFindingExtractionAndSelection(t *testing.T) {
 	high := agent.ReviewFinding{Severity: "HIGH", Description: "same text"}
 	assert.Equal(t, high, betterFinding(low, high))
 	assert.Equal(t, "cfg check cmd/app/main.go missing nil", compactFindingClaim("cmd/app/main.go:12: cfg missing nil check in this chunk"))
+	assert.Equal(t, "", compactFindingClaim("It is this"))
+	assert.Equal(t, "it is this", normalizedFindingDescriptionKey("It is this"))
 }

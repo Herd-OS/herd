@@ -63,10 +63,14 @@ func dedupeReviewFindings(findings []agent.ReviewFinding) (deduped []agent.Revie
 }
 
 func reviewFindingFingerprint(f agent.ReviewFinding) string {
+	claim := compactFindingClaim(f.Description)
+	if claim == "" {
+		claim = normalizedFindingDescriptionKey(f.Description)
+	}
 	return strings.Join([]string{
 		extractFindingPath(f.Description),
 		extractFindingSymbol(f.Description),
-		compactFindingClaim(f.Description),
+		claim,
 	}, "\x00")
 }
 
@@ -128,6 +132,13 @@ func compactFindingClaim(desc string) string {
 	}
 	sort.Strings(compacted)
 	return strings.Join(compacted, " ")
+}
+
+func normalizedFindingDescriptionKey(desc string) string {
+	key := strings.ToLower(desc)
+	key = findingPunctRE.ReplaceAllString(key, " ")
+	key = findingSpaceRE.ReplaceAllString(key, " ")
+	return strings.TrimSpace(key)
 }
 
 func betterFinding(a, b agent.ReviewFinding) agent.ReviewFinding {
