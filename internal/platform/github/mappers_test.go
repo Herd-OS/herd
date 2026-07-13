@@ -169,29 +169,71 @@ func TestMapRunnerIdle(t *testing.T) {
 	assert.Empty(t, runner.Labels)
 }
 
-func TestMapPullRequest_Labels(t *testing.T) {
-	ghPR := &gh.PullRequest{
-		Number:  gh.Ptr(7),
-		Title:   gh.Ptr("Batch PR"),
-		Body:    gh.Ptr("body"),
-		State:   gh.Ptr("open"),
-		HTMLURL: gh.Ptr("https://github.com/org/repo/pull/7"),
-		Head:    &gh.PullRequestBranch{Ref: gh.Ptr("herd/batch/1-x")},
-		Base:    &gh.PullRequestBranch{Ref: gh.Ptr("main")},
-		Labels: []*gh.Label{
-			{Name: gh.Ptr("herd/cascade-failed")},
-			{Name: gh.Ptr("herd/ci-fix-pending")},
+func TestMapPullRequest_LabelsAndMergeability(t *testing.T) {
+	tests := []struct {
+		name             string
+		mergeable        *bool
+		mergeStateStatus *string
+		wantMergeable    bool
+		wantKnown        bool
+		wantStatus       string
+	}{
+		{
+			name:             "mergeable clean",
+			mergeable:        gh.Ptr(true),
+			mergeStateStatus: gh.Ptr(" clean "),
+			wantMergeable:    true,
+			wantKnown:        true,
+			wantStatus:       "CLEAN",
+		},
+		{
+			name:             "not mergeable dirty",
+			mergeable:        gh.Ptr(false),
+			mergeStateStatus: gh.Ptr("dirty"),
+			wantMergeable:    false,
+			wantKnown:        true,
+			wantStatus:       "DIRTY",
+		},
+		{
+			name:          "mergeability unknown",
+			mergeable:     nil,
+			wantMergeable: false,
+			wantKnown:     false,
+			wantStatus:    "",
 		},
 	}
 
-	pr := mapPullRequest(ghPR)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ghPR := &gh.PullRequest{
+				Number:         gh.Ptr(7),
+				Title:          gh.Ptr("Batch PR"),
+				Body:           gh.Ptr("body"),
+				State:          gh.Ptr("open"),
+				HTMLURL:        gh.Ptr("https://github.com/org/repo/pull/7"),
+				Head:           &gh.PullRequestBranch{Ref: gh.Ptr("herd/batch/1-x")},
+				Base:           &gh.PullRequestBranch{Ref: gh.Ptr("main")},
+				Mergeable:      tt.mergeable,
+				MergeableState: tt.mergeStateStatus,
+				Labels: []*gh.Label{
+					{Name: gh.Ptr("herd/cascade-failed")},
+					{Name: gh.Ptr("herd/ci-fix-pending")},
+				},
+			}
 
-	assert.Equal(t, 7, pr.Number)
-	assert.Equal(t, "Batch PR", pr.Title)
-	assert.Equal(t, "open", pr.State)
-	assert.Equal(t, "herd/batch/1-x", pr.Head)
-	assert.Equal(t, "main", pr.Base)
-	assert.Equal(t, []string{"herd/cascade-failed", "herd/ci-fix-pending"}, pr.Labels)
+			pr := mapPullRequest(ghPR)
+
+			assert.Equal(t, 7, pr.Number)
+			assert.Equal(t, "Batch PR", pr.Title)
+			assert.Equal(t, "open", pr.State)
+			assert.Equal(t, "herd/batch/1-x", pr.Head)
+			assert.Equal(t, "main", pr.Base)
+			assert.Equal(t, []string{"herd/cascade-failed", "herd/ci-fix-pending"}, pr.Labels)
+			assert.Equal(t, tt.wantMergeable, pr.Mergeable)
+			assert.Equal(t, tt.wantKnown, pr.MergeableKnown)
+			assert.Equal(t, tt.wantStatus, pr.MergeStateStatus)
+		})
+	}
 }
 
 func TestMapPullRequest_NoLabels(t *testing.T) {

@@ -28,10 +28,10 @@ const (
 	RebasePending = "herd/rebase-pending"
 
 	// CascadeFailed is added to a batch PR when a conflict-resolution cascade
-	// exhausts max_conflict_resolution_attempts. It is removed manually by a
-	// human after they handle the underlying problem, and acts as a circuit
-	// breaker preventing further conflict-resolution issues from being created
-	// for the batch.
+	// exhausts max_conflict_resolution_attempts. It acts as a circuit breaker
+	// preventing further conflict-resolution issues from being created for the
+	// batch, and is removed once live PR metadata reports the PR is clean or a
+	// human handles the underlying problem.
 	CascadeFailed = "herd/cascade-failed"
 
 	// StableDisagreement is added to a batch PR when the integrator detects

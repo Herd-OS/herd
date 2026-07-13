@@ -238,7 +238,9 @@ The review agent runs in a strict output mode. It is instructed not to take any 
 
 Review input is bounded so very large PRs can still be reviewed. In runner and local CLI contexts, HerdOS first tries to build the review diff from the local checkout (`local-git`). If local git diff collection is unavailable, it falls back to GitHub's raw PR diff (`github-raw-diff`), and if GitHub refuses that raw diff because it is too large or unavailable, HerdOS falls back to changed-file metadata and bounded patches from the GitHub files API (`github-files-api`). GitHub raw PR diff size limits therefore do not abort review when local git or files API fallback can provide review input.
 
-Large PRs are split into bounded chunks for headless Integrator reviews and standalone `/herd review` reviews. Each chunk is reviewed by a separate strict-output agent invocation, then HerdOS aggregates findings into one coherent review result.
+Large PRs are split into bounded chunks for headless Integrator reviews and standalone `/herd review` reviews. Each chunk is reviewed by a separate strict-output agent invocation, then HerdOS collapses duplicate findings with deterministic normalization and aggregates the rest into one coherent review result. Deduplication happens before review comments are posted and before batch review fix workers are dispatched. Review comments include raw, deduped, and stale-filter counts only when filtering changed the result.
+
+Prior review comments and non-HerdOS user comments are passed to the agent as historical and contextual review input. Current GitHub PR metadata is included separately and is authoritative for current mergeability, conflict state, head SHA, labels, and CI state.
 
 ```yaml
 integrator:
@@ -272,7 +274,7 @@ When you see that comment, run `/herd review` (optionally with a focus area) on 
 
 Review retries and manual `/herd review` commands are serialized per batch PR by an application-level GitHub-backed review lock. If another review is already running, the duplicate trigger is skipped instead of launching another agent. Manual review still bypasses stable-disagreement suspension, but it respects the active-review lock. Existing active-fix guards still prevent duplicate fix cycles after review findings have already created fix issues.
 
-Approved review results are also idempotent per PR head SHA for automatic triggers. Once a batch PR has a Herd review-result marker with `status: approved` for the current head, later automatic review triggers skip the agent and log a no-op instead of posting another PR comment. Manual `/herd review` is the force override: it asks for a fresh review of the current head even when an approved marker already exists. A new commit changes the head SHA and allows automatic review again; non-approved markers such as `changes_requested` and `max_cycles_hit` do not count as approved-head suppression.
+Approved review results are also idempotent per PR head SHA for automatic triggers. Once a batch PR has a Herd review-result marker with `status: approved` for the current head, later automatic review triggers skip the agent and log a no-op instead of posting another PR comment. Manual `/herd review` is the force override: it asks for a fresh review of the current head even when an approved marker already exists. A new commit changes the head SHA and allows automatic review again; non-approved markers such as `changes_requested` and `max_cycles_hit` do not count as approved-head suppression. Live GitHub PR metadata wins over stale review comments or labels when HerdOS decides whether the current PR is mergeable.
 
 When a batch review starts, HerdOS records the batch PR head SHA, then checks the current PR head again before applying the agent result. If the head changed while the agent was running, HerdOS discards that result, posts a comment on the batch PR, and leaves the updated diff for the next automatic trigger or manual `/herd review`.
 

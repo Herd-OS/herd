@@ -25,6 +25,7 @@ type mockPlatform struct {
 	workflows          *mockWorkflowService
 	repo               *mockRepoService
 	milestones         *mockMilestoneService
+	checks             platform.CheckService
 	authenticatedLogin string
 	authenticatedErr   error
 }
@@ -36,7 +37,7 @@ func (m *mockPlatform) Labels() platform.LabelService             { return nil }
 func (m *mockPlatform) Milestones() platform.MilestoneService     { return m.milestones }
 func (m *mockPlatform) Runners() platform.RunnerService           { return nil }
 func (m *mockPlatform) Repository() platform.RepositoryService    { return m.repo }
-func (m *mockPlatform) Checks() platform.CheckService             { return nil }
+func (m *mockPlatform) Checks() platform.CheckService             { return m.checks }
 func (m *mockPlatform) AuthenticatedLogin(_ context.Context) (string, error) {
 	return m.authenticatedLogin, m.authenticatedErr
 }
@@ -54,6 +55,7 @@ type mockIssueService struct {
 	listCommentsErr        error
 	createResult           *platform.Issue
 	createErr              error
+	removeLabelsErr        error
 	createdTitle           string
 	createdBody            string
 	respectCanceledContext bool
@@ -111,6 +113,9 @@ func (m *mockIssueService) AddLabels(ctx context.Context, number int, labels []s
 }
 func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []string) error {
 	m.removedLabels[number] = append(m.removedLabels[number], labels...)
+	if m.removeLabelsErr != nil {
+		return m.removeLabelsErr
+	}
 	return nil
 }
 func (m *mockIssueService) AddComment(ctx context.Context, number int, body string) error {
@@ -185,6 +190,8 @@ func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ s
 type mockPRService struct {
 	listResult             []*platform.PullRequest
 	getResult              map[int]*platform.PullRequest
+	getResults             []*platform.PullRequest
+	getCalls               int
 	created                *platform.PullRequest
 	merged                 bool
 	mergedNumber           int
@@ -209,8 +216,23 @@ func (m *mockPRService) Create(_ context.Context, title, body, head, base string
 	return m.created, nil
 }
 func (m *mockPRService) Get(_ context.Context, number int) (*platform.PullRequest, error) {
+	if len(m.getResults) > 0 {
+		idx := m.getCalls
+		if idx >= len(m.getResults) {
+			idx = len(m.getResults) - 1
+		}
+		m.getCalls++
+		if pr := m.getResults[idx]; pr != nil {
+			return pr, nil
+		}
+	}
 	if m.getResult != nil {
 		if pr, ok := m.getResult[number]; ok {
+			return pr, nil
+		}
+	}
+	for _, pr := range m.listResult {
+		if pr != nil && pr.Number == number {
 			return pr, nil
 		}
 	}
