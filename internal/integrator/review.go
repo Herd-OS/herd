@@ -65,11 +65,11 @@ func livePRMergeState(pr *platform.PullRequest) prMergeState {
 		MergeableKnown:   pr.MergeableKnown,
 		Mergeable:        pr.Mergeable,
 		MergeStateStatus: status,
-		Clean:            (pr.MergeableKnown && pr.Mergeable) || status == "CLEAN",
+		Clean:            (status == "" && pr.MergeableKnown && pr.Mergeable) || status == "CLEAN",
 		Unknown:          (!pr.MergeableKnown && status == "") || status == "UNKNOWN",
 	}
 	switch status {
-	case "DIRTY", "BLOCKED", "BEHIND", "UNKNOWN":
+	case "DIRTY", "BLOCKED", "BEHIND", "UNKNOWN", "UNSTABLE", "HAS_HOOKS":
 		state.Blocking = true
 	}
 	return state

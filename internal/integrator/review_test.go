@@ -103,11 +103,39 @@ func TestLivePRMergeState(t *testing.T) {
 			},
 		},
 		{
+			name: "dirty status overrides known mergeable",
+			pr: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "DIRTY",
+			},
+			want: prMergeState{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "DIRTY",
+				Blocking:         true,
+			},
+		},
+		{
 			name: "blocked status is blocking",
 			pr: &platform.PullRequest{
 				MergeStateStatus: "BLOCKED",
 			},
 			want: prMergeState{
+				MergeStateStatus: "BLOCKED",
+				Blocking:         true,
+			},
+		},
+		{
+			name: "blocked status overrides known mergeable",
+			pr: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "BLOCKED",
+			},
+			want: prMergeState{
+				MergeableKnown:   true,
+				Mergeable:        true,
 				MergeStateStatus: "BLOCKED",
 				Blocking:         true,
 			},
@@ -120,6 +148,61 @@ func TestLivePRMergeState(t *testing.T) {
 			want: prMergeState{
 				MergeStateStatus: "BEHIND",
 				Blocking:         true,
+			},
+		},
+		{
+			name: "behind status overrides known mergeable",
+			pr: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "BEHIND",
+			},
+			want: prMergeState{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "BEHIND",
+				Blocking:         true,
+			},
+		},
+		{
+			name: "unstable status overrides known mergeable",
+			pr: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "UNSTABLE",
+			},
+			want: prMergeState{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "UNSTABLE",
+				Blocking:         true,
+			},
+		},
+		{
+			name: "has hooks status overrides known mergeable",
+			pr: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "HAS_HOOKS",
+			},
+			want: prMergeState{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "HAS_HOOKS",
+				Blocking:         true,
+			},
+		},
+		{
+			name: "unrecognized status overrides known mergeable",
+			pr: &platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "QUEUED",
+			},
+			want: prMergeState{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "QUEUED",
 			},
 		},
 		{
@@ -219,7 +302,42 @@ func TestReconcileReviewFindingsWithLivePRState(t *testing.T) {
 			name: "blocked preserves all findings and label",
 			pr: &platform.PullRequest{
 				Number:           50,
+				MergeableKnown:   true,
+				Mergeable:        true,
 				MergeStateStatus: "BLOCKED",
+				Labels:           []string{issues.CascadeFailed},
+			},
+			wantDescriptions: []string{cascadeFinding.Description, codeFinding.Description},
+		},
+		{
+			name: "behind preserves all findings and label when mergeable true",
+			pr: &platform.PullRequest{
+				Number:           50,
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "BEHIND",
+				Labels:           []string{issues.CascadeFailed},
+			},
+			wantDescriptions: []string{cascadeFinding.Description, codeFinding.Description},
+		},
+		{
+			name: "unstable preserves all findings and label when mergeable true",
+			pr: &platform.PullRequest{
+				Number:           50,
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "UNSTABLE",
+				Labels:           []string{issues.CascadeFailed},
+			},
+			wantDescriptions: []string{cascadeFinding.Description, codeFinding.Description},
+		},
+		{
+			name: "has hooks preserves all findings and label when mergeable true",
+			pr: &platform.PullRequest{
+				Number:           50,
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "HAS_HOOKS",
 				Labels:           []string{issues.CascadeFailed},
 			},
 			wantDescriptions: []string{cascadeFinding.Description, codeFinding.Description},
@@ -2273,7 +2391,35 @@ func TestReview_NonCleanPRPreservesCascadeFinding(t *testing.T) {
 			name: "blocked",
 			pr: platform.PullRequest{
 				MergeableKnown:   true,
+				Mergeable:        true,
 				MergeStateStatus: "BLOCKED",
+				Labels:           []string{issues.CascadeFailed},
+			},
+		},
+		{
+			name: "behind",
+			pr: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "BEHIND",
+				Labels:           []string{issues.CascadeFailed},
+			},
+		},
+		{
+			name: "unstable",
+			pr: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "UNSTABLE",
+				Labels:           []string{issues.CascadeFailed},
+			},
+		},
+		{
+			name: "has hooks",
+			pr: platform.PullRequest{
+				MergeableKnown:   true,
+				Mergeable:        true,
+				MergeStateStatus: "HAS_HOOKS",
 				Labels:           []string{issues.CascadeFailed},
 			},
 		},
