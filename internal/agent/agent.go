@@ -90,8 +90,9 @@ type ReviewOptions struct {
 	SystemPrompt           string
 	Strictness             string   // "standard", "strict", "lenient" — controls review aggressiveness
 	MinFixSeverity         string   // minimum severity that blocks approval: "high", "medium", "low"
+	CurrentPRMetadata      string   // Fresh PR metadata, authoritative for current PR state
 	PriorReviewComments    []string // Full text of previous HerdOS review comments on this PR
-	UserFeedbackComments   []string // User-authored comments on this PR (authoritative)
+	UserFeedbackComments   []string // User-authored comments on this PR
 	ChunkIndex             int
 	TotalChunks            int
 	ChunkIncludedPathRange string

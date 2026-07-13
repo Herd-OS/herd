@@ -327,6 +327,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	priorReviewComments := collectPriorReviewComments(prComments)
 	userFeedback := collectUserFeedbackComments(prComments)
 	workerNoOpVerdicts := collectWorkerNoOpVerdicts(prComments)
+	ciStatus := currentPRCIStatus(ctx, p, reviewedHeadSHA, pr.Head)
 
 	// Run agent review
 	reviewOpts := agent.ReviewOptions{
@@ -334,6 +335,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		RepoRoot:             params.RepoRoot,
 		Strictness:           cfg.Integrator.ReviewStrictness,
 		MinFixSeverity:       cfg.Integrator.ReviewFixSeverity,
+		CurrentPRMetadata:    buildCurrentPRMetadata(pr, reviewedHeadSHA, pr.Labels, ciStatus),
 		PriorReviewComments:  priorReviewComments,
 		UserFeedbackComments: userFeedback,
 		WorkerNoOpVerdicts:   workerNoOpVerdicts,
@@ -917,9 +919,10 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	logDiffCoverageIfLimited(preparedDiff)
 
 	reviewOpts := agent.ReviewOptions{
-		RepoRoot:       params.RepoRoot,
-		Strictness:     cfg.Integrator.ReviewStrictness,
-		MinFixSeverity: cfg.Integrator.ReviewFixSeverity,
+		RepoRoot:          params.RepoRoot,
+		Strictness:        cfg.Integrator.ReviewStrictness,
+		MinFixSeverity:    cfg.Integrator.ReviewFixSeverity,
+		CurrentPRMetadata: buildCurrentPRMetadata(pr, "", pr.Labels, currentPRCIStatus(ctx, p, "", pr.Head)),
 	}
 
 	ri, readErr := os.ReadFile(filepath.Join(params.RepoRoot, ".herd", "integrator.md"))
@@ -1155,6 +1158,67 @@ func collectWorkerNoOpVerdicts(comments []*platform.Comment) []string {
 		out = append(out, body)
 	}
 	return out
+}
+
+func buildCurrentPRMetadata(pr *platform.PullRequest, headSHA string, labels []string, ciStatus string) string {
+	var lines []string
+	if pr != nil {
+		lines = append(lines,
+			fmt.Sprintf("PR number: #%d", pr.Number),
+			fmt.Sprintf("Head branch: %s", unavailableIfEmpty(pr.Head)),
+			fmt.Sprintf("Base branch: %s", unavailableIfEmpty(pr.Base)),
+		)
+	}
+	lines = append(lines, fmt.Sprintf("Head SHA: %s", unavailableIfEmpty(headSHA)))
+	if pr != nil {
+		lines = append(lines,
+			fmt.Sprintf("Mergeable known: %t", pr.MergeableKnown),
+			fmt.Sprintf("Mergeable: %t", pr.Mergeable),
+			fmt.Sprintf("Merge state status: %s", unavailableIfEmpty(pr.MergeStateStatus)),
+		)
+	}
+	lines = append(lines,
+		fmt.Sprintf("Labels: %s", formatMetadataLabels(labels)),
+		fmt.Sprintf("CI status: %s", unavailableIfEmpty(ciStatus)),
+	)
+	return strings.Join(lines, "\n")
+}
+
+func currentPRCIStatus(ctx context.Context, p platform.Platform, headSHA, headRef string) string {
+	checks := p.Checks()
+	if checks == nil {
+		return "unavailable"
+	}
+	ref := headSHA
+	if ref == "" {
+		ref = headRef
+	}
+	if ref == "" {
+		return "unavailable"
+	}
+	status, err := checks.GetCombinedStatus(ctx, ref)
+	if err != nil {
+		fmt.Printf("Warning: failed to get current PR CI status for %s: %s\n", ref, err)
+		return "unavailable"
+	}
+	if strings.TrimSpace(status) == "" {
+		return "unavailable"
+	}
+	return status
+}
+
+func formatMetadataLabels(labels []string) string {
+	if len(labels) == 0 {
+		return "(none)"
+	}
+	return strings.Join(labels, ", ")
+}
+
+func unavailableIfEmpty(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "unavailable"
+	}
+	return value
 }
 
 func findMaxFixCycle(allIssues []*platform.Issue) int {

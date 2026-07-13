@@ -136,6 +136,9 @@ func TestRenderReviewPrompt_ChunkMetadata(t *testing.T) {
 				"Included path range: internal/a.go through internal/z.go",
 				"Review only the included diffs in this chunk",
 				"Do not assume files from other chunks are present here",
+				"Use live GitHub PR metadata as authoritative for current mergeability and CI state",
+				"Do not report findings based only on historical comments if live metadata contradicts them",
+				"PR-level findings repeated across chunks will be deduped, but avoid repeating them",
 			},
 			wantBeforeDiff: []string{
 				"## Review Chunk",
@@ -492,16 +495,41 @@ func TestRenderReviewPrompt_PriorReviewComments(t *testing.T) {
 
 			if tt.wantSection {
 				assert.Contains(t, prompt, "## Prior Review History")
-				assert.Contains(t, prompt, "Do NOT contradict prior review decisions")
+				assert.Contains(t, prompt, "historical context from previous cycles")
+				assert.Contains(t, prompt, "Do not repeat stale findings from prior reviews unless they are still proven by the current diff/code or current live PR metadata")
+				assert.Contains(t, prompt, "Do not let historical comments override the Current PR Metadata section")
 				for _, comment := range tt.priorReviewComments {
 					assert.Contains(t, prompt, comment)
 				}
 			} else {
 				assert.NotContains(t, prompt, "## Prior Review History")
-				assert.NotContains(t, prompt, "Do NOT contradict prior review decisions")
+				assert.NotContains(t, prompt, "historical context from previous cycles")
 			}
 		})
 	}
+}
+
+func TestRenderReviewPrompt_CurrentPRMetadataPrecedesHistoryAndDiff(t *testing.T) {
+	opts := agent.ReviewOptions{
+		AcceptanceCriteria:   []string{"works"},
+		CurrentPRMetadata:    "PR number: #50\nHead SHA: abc123\nCI status: success",
+		PriorReviewComments:  []string{"historical review body"},
+		UserFeedbackComments: []string{"owner intent body"},
+	}
+	prompt, err := RenderReviewPrompt("diff body", opts)
+	require.NoError(t, err)
+
+	currentIdx := strings.Index(prompt, "## Current PR Metadata")
+	priorIdx := strings.Index(prompt, "## Prior Review History")
+	diffIdx := strings.Index(prompt, "## Diff")
+
+	require.GreaterOrEqual(t, currentIdx, 0, "current metadata section must be present")
+	require.GreaterOrEqual(t, priorIdx, 0, "prior review section must be present")
+	require.GreaterOrEqual(t, diffIdx, 0, "diff section must be present")
+	assert.Less(t, currentIdx, priorIdx, "current metadata must precede prior history")
+	assert.Less(t, currentIdx, diffIdx, "current metadata must precede diff")
+	assert.Contains(t, prompt, "fetched fresh immediately before this review and is authoritative for current PR state")
+	assert.Contains(t, prompt, "CI status: success")
 }
 
 func TestReviewPrompt_ForbidsActions(t *testing.T) {
@@ -579,6 +607,9 @@ func TestReviewPrompt_IncludesWorkerNoOpSection(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Contains(t, prompt, "## Worker No-Op Verdicts")
+			assert.Contains(t, prompt, "historical comments were posted by fix workers in previous cycles")
+			assert.Contains(t, prompt, "authoritative for that prior fix-worker source review")
+			assert.Contains(t, prompt, "do not let no-op verdicts override current live PR metadata")
 			for _, v := range verdicts {
 				assert.Contains(t, prompt, v)
 				wrapped := "---\n" + v + "\n---"
@@ -660,14 +691,15 @@ func TestRenderReviewPrompt_UserFeedbackComments(t *testing.T) {
 
 			if tt.wantSection {
 				assert.Contains(t, prompt, "## User Feedback")
-				assert.Contains(t, prompt, "Treat user feedback as authoritative")
+				assert.Contains(t, prompt, "authoritative for owner intent and false-positive decisions")
+				assert.Contains(t, prompt, "but not for current mergeability, CI, head SHA, or labels when contradicted by Current PR Metadata")
 				assert.Contains(t, prompt, "do NOT re-flag it")
 				for _, comment := range tt.userFeedbackComments {
 					assert.Contains(t, prompt, comment)
 				}
 			} else {
 				assert.NotContains(t, prompt, "## User Feedback")
-				assert.NotContains(t, prompt, "Treat user feedback as authoritative")
+				assert.NotContains(t, prompt, "authoritative for owner intent and false-positive decisions")
 			}
 		})
 	}
