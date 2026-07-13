@@ -96,6 +96,37 @@ func TestApplyAuthenticatedCloneErrorRedactsInstallationToken(t *testing.T) {
 	assert.NotContains(t, err.Error(), base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)))
 }
 
+func TestApplyRejectsEmptyInstallationTokenBeforeGitAuthSetup(t *testing.T) {
+	root := t.TempDir()
+	_, err := Apply(context.Background(), ApplyRequest{
+		Repository:      "acme/widgets",
+		CloneURL:        "https://github.com/acme/widgets.git",
+		InstallationID:  123,
+		TargetBranch:    "main",
+		BaseSHA:         "base",
+		ExpectedHeadSHA: "head",
+		Artifact: ValidatedArtifact{
+			Metadata: PatchMetadata{
+				Repository:      "acme/widgets",
+				JobID:           "job-1",
+				BaseSHA:         "base",
+				ExpectedHeadSHA: "head",
+				Format:          FormatGitDiffBinary,
+			},
+			Data: []byte("diff --git a/file.txt b/file.txt\n"),
+		},
+		Identity:    DefaultIdentity("HerdOS", "herd@example.com"),
+		TokenSource: fixedTokenSource{token: " \t"},
+		TempDir:     root,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty installation token")
+	assert.NoFileExists(t, filepath.Join(root, "git-token"))
+	assert.NoFileExists(t, filepath.Join(root, "git-askpass.sh"))
+	assert.NoDirExists(t, filepath.Join(root, "repo"))
+}
+
 func TestRedactTokenRemovesRawAndExtraHeaderCredentials(t *testing.T) {
 	token := "ghs_secret_installation_token"
 	credential := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))

@@ -48,6 +48,10 @@ func main() {
 	if cfg.ReconcilerEnabled && st != nil {
 		deps.Reconciler = &reconciler.Reconciler{Store: st}
 	}
+	handler, err := service.NewServer(cfg, deps)
+	if err != nil {
+		logger.Fatalf("create server: %v", err)
+	}
 	stopReconciler, started := service.StartReconcilerLoop(ctx, cfg, deps)
 	if started {
 		defer func() {
@@ -55,11 +59,6 @@ func main() {
 				logger.Printf("stop reconciler: %v", err)
 			}
 		}()
-	}
-
-	handler, err := service.NewServer(cfg, deps)
-	if err != nil {
-		logger.Fatalf("create server: %v", err)
 	}
 
 	server := &http.Server{
@@ -76,7 +75,7 @@ func main() {
 
 func openServiceStore(ctx context.Context, cfg service.Config) (*store.PostgresStore, error) {
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
-		if cfg.Env == "production" {
+		if cfg.Env == "production" || cfg.Env == "staging" {
 			return nil, fmt.Errorf("HERD_DATABASE_URL is required")
 		}
 		return nil, nil

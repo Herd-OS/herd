@@ -39,7 +39,7 @@ func TestReadyz(t *testing.T) {
 	}{
 		{
 			name:       "config unhealthy",
-			cfg:        Config{Env: "production"},
+			cfg:        Config{Env: "development", PublicURL: "://bad-url"},
 			store:      healthyStore{},
 			wantStatus: http.StatusServiceUnavailable,
 			wantBody:   "configuration not ready",

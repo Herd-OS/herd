@@ -234,6 +234,25 @@ func TestRegisterHandlerSetupVerifierTransientFailureDoesNotSuggestGhAuthLogin(t
 	assert.Empty(t, st.tokens)
 }
 
+func TestRegisterHandlerSanitizesVerifierErrorBeforePersistingAttempt(t *testing.T) {
+	setupToken := "gho_secret_setup_token"
+	st := newRegisterFakeStore()
+	handler := NewRegisterHandler(RegisterHandlerOptions{
+		Store:         st,
+		SetupVerifier: &fakeSetupVerifier{err: errors.New("request failed with token " + setupToken)},
+		AppVerifier:   &fakeAppVerifier{},
+		AppLogin:      "herd-os",
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, registerRequest(`{"owner":"octo","name":"herd","setup_token":"`+setupToken+`"}`))
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Len(t, st.attempts, 1)
+	assert.NotContains(t, st.attempts[0].Error, setupToken)
+	assert.NotContains(t, rec.Body.String(), setupToken)
+}
+
 func TestSetupVerificationErrorResponseRateLimitsAreRetryable(t *testing.T) {
 	tests := []struct {
 		name string

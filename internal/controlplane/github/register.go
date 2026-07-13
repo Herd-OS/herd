@@ -144,7 +144,8 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	setupRepo, err := h.setupVerifier.VerifySetupRepository(r.Context(), req.SetupToken, req.Owner, req.Name)
 	if err != nil {
-		h.recordAttempt(r.Context(), 0, 0, req.Owner, req.Name, "rejected", err.Error())
+		_, msg := setupVerificationErrorResponse(err)
+		h.recordAttempt(r.Context(), 0, 0, req.Owner, req.Name, "rejected", sanitizeRegistrationError(msg, req.SetupToken))
 		status, msg := setupVerificationErrorResponse(err)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -160,11 +161,12 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.appVerifier.VerifyAppAccess(r.Context(), setupRepo.InstallationID, req.Owner, req.Name); err != nil {
-		h.recordAttempt(r.Context(), setupRepo.ID, setupRepo.InstallationID, req.Owner, req.Name, "rejected", err.Error())
 		if !errors.Is(err, ErrAppInstallationMatch) {
+			h.recordAttempt(r.Context(), setupRepo.ID, setupRepo.InstallationID, req.Owner, req.Name, "rejected", "verify GitHub App installation access: GitHub unavailable")
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "verify GitHub App installation access: GitHub unavailable, retry repository registration"})
 			return
 		}
+		h.recordAttempt(r.Context(), setupRepo.ID, setupRepo.InstallationID, req.Owner, req.Name, "rejected", ErrAppInstallationMatch.Error())
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "Herd GitHub App installation cannot access this repository; update the App installation repository selection and retry `herd init`"})
 		return
 	}
@@ -260,6 +262,33 @@ func (h RegisterHandler) recordAttempt(ctx context.Context, repositoryID int64, 
 		Metadata:       json.RawMessage(`{}`),
 		CreatedAt:      h.now(),
 	})
+}
+
+func sanitizeRegistrationError(msg string, setupToken string) string {
+	msg = strings.TrimSpace(msg)
+	token := strings.TrimSpace(setupToken)
+	if token != "" {
+		msg = strings.ReplaceAll(msg, token, "[REDACTED]")
+	}
+	for _, prefix := range []string{"ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_"} {
+		for {
+			idx := strings.Index(msg, prefix)
+			if idx < 0 {
+				break
+			}
+			end := idx + len(prefix)
+			for end < len(msg) {
+				c := msg[end]
+				if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+					end++
+					continue
+				}
+				break
+			}
+			msg = msg[:idx] + "[REDACTED]" + msg[end:]
+		}
+	}
+	return msg
 }
 
 type githubSetupVerifier struct{}

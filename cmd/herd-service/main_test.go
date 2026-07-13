@@ -23,16 +23,17 @@ func TestOpenServiceStoreMissingDatabaseURL(t *testing.T) {
 			wantErr: "HERD_DATABASE_URL is required",
 		},
 		{
-			name: "development allows health-only startup",
-			cfg: service.Config{
-				Env: "development",
-			},
-		},
-		{
-			name: "non-production trims whitespace database url",
+			name: "staging requires database url",
 			cfg: service.Config{
 				Env:         "staging",
 				DatabaseURL: " \t\n",
+			},
+			wantErr: "HERD_DATABASE_URL is required",
+		},
+		{
+			name: "development allows health-only startup",
+			cfg: service.Config{
+				Env: "development",
 			},
 		},
 	}

@@ -74,6 +74,9 @@ func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 		if err != nil {
 			return ApplyResult{}, fmt.Errorf("get installation token: %w", err)
 		}
+		if strings.TrimSpace(token.Token) == "" {
+			return ApplyResult{}, fmt.Errorf("empty installation token")
+		}
 		tokenValue = token.Token
 		authEnv, cleanup, err := gitAuthEnv(root, req.CloneURL, token.Token)
 		if err != nil {

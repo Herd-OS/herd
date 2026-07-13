@@ -120,12 +120,14 @@ func TestAppGitHubClientFindReviewForCommitPaginates(t *testing.T) {
 				CommitID: gh.Ptr("head"),
 				Body:     gh.Ptr("body"),
 				State:    gh.Ptr("COMMENTED"),
+				User:     &gh.User{Login: gh.Ptr("herd-os[bot]")},
 			}})
 		default:
 			assert.Failf(t, "unexpected page", "page=%q", r.URL.Query().Get("page"))
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+	client.AppLogin = "herd-os"
 
 	found, err := client.FindReviewForCommit(context.Background(), 99, "octo", "widgets", 42, " body\n", platform.ReviewCommentEvent, "head")
 
@@ -161,6 +163,23 @@ func TestAppGitHubClientFindReviewForCommitRequiresAppActor(t *testing.T) {
 			assert.Equal(t, tt.want, found)
 		})
 	}
+}
+
+func TestAppGitHubClientFindReviewForCommitRequiresConfiguredAppLogin(t *testing.T) {
+	client := newReviewTestGitHub(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode([]gh.PullRequestReview{{
+			CommitID: gh.Ptr("head"),
+			Body:     gh.Ptr("body"),
+			State:    gh.Ptr("APPROVED"),
+			User:     &gh.User{Login: gh.Ptr("someone-else")},
+		}})
+	}))
+
+	found, err := client.FindReviewForCommit(context.Background(), 99, "octo", "widgets", 42, "body", platform.ReviewApprove, "head")
+
+	require.Error(t, err)
+	assert.False(t, found)
+	assert.Contains(t, err.Error(), "App login")
 }
 
 func TestAppGitHubClientAddPullRequestComment(t *testing.T) {

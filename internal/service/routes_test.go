@@ -154,6 +154,34 @@ func TestProductionServerFailsWhenDefaultAppRoutesCannotBeConstructed(t *testing
 	assert.Contains(t, err.Error(), "GitHub App auth is not configured")
 }
 
+func TestProductionServerValidatesConfigBeforeRoutes(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{name: "missing webhook secret", cfg: func() Config {
+			cfg := validProductionConfig()
+			cfg.WebhookSecret = ""
+			return cfg
+		}(), want: "HERD_WEBHOOK_SECRET"},
+		{name: "missing database URL", cfg: func() Config {
+			cfg := validProductionConfig()
+			cfg.DatabaseURL = ""
+			return cfg
+		}(), want: "HERD_DATABASE_URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, err := NewServer(tt.cfg, productionTestDependencies(store.NewMemoryStore()))
+
+			require.Error(t, err)
+			assert.Nil(t, handler)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 func TestStartReconcilerLoopStartsAndStopsWithContext(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()

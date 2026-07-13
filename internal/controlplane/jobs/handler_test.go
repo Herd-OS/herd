@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -478,6 +479,49 @@ func TestHandlerAppliesValidPatchArtifactAndRecordsCommitSHA(t *testing.T) {
 	require.Len(t, st.mutationCompletions, 1)
 	assert.Equal(t, "completed", st.mutationCompletions[0].status)
 	assert.Contains(t, string(st.mutationCompletions[0].response), strings.Repeat("a", 40))
+}
+
+func TestHandlerDuplicateSuccessDoesNotFetchExpiredPatchArtifact(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		RepositoryID:   7,
+		InstallationID: 9,
+		HeadSHA:        "head",
+		BaseSHA:        "base",
+		WorkerBranch:   "herd/worker/837",
+	}
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+	artifactStore := &flakyArtifactStore{store: artifactMap(t, metadata, patch)}
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactStore,
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+		AppLogin:       "herd-os[bot]",
+		AppEmail:       "herd@example.com",
+	})
+	payload := validWorkerPayload("job-1", "head")
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	require.Equal(t, http.StatusAccepted, first.Code)
+
+	artifactStore.errs = []error{errors.New("artifact expired")}
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Contains(t, second.Body.String(), `"created":false`)
+	assert.Len(t, applier.requests, 1)
+	assert.Len(t, st.results, 1)
+	assert.Len(t, artifactStore.errs, 1, "duplicate should return before artifact fetch")
 }
 
 func TestHandlerAppliesBundledWorkerBranchArtifactAndRecordsCommitSHA(t *testing.T) {

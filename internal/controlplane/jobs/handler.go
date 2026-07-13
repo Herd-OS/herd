@@ -183,37 +183,6 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	patchArtifact, applyMetadata, applyErr := h.validateWorkerPatch(r.Context(), result)
-	if applyErr != nil {
-		if workerPatchConfigurationError(applyErr) {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": applyErr.Error()})
-			return
-		}
-		if transientPatchValidationError(applyErr) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
-			return
-		}
-		metadata, metadataErr := resultMetadata(payload, claims, applyMetadata)
-		if metadataErr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
-			return
-		}
-		_, err = h.store.RecordJobResult(r.Context(), store.JobResult{
-			JobID:          envelope.JobID,
-			IdempotencyKey: ResultIdempotencyKey(result, payload),
-			Status:         StatusFailure,
-			ResultRef:      ResultPayloadHash(payload),
-			Metadata:       metadata,
-			CreatedAt:      h.now(),
-		})
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record rejected job result"})
-			return
-		}
-		writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
-		return
-	}
-
 	idempotencyKey := ResultIdempotencyKey(result, payload)
 	callbackKey := "job_result:" + idempotencyKey
 	shouldProcess, err := h.acquireResultCallback(r.Context(), callbackKey, envelope.JobID, idempotencyKey)
@@ -229,6 +198,43 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"kind":            envelope.Kind,
 			"idempotency_key": idempotencyKey,
 		})
+		return
+	}
+
+	patchArtifact, applyMetadata, applyErr := h.validateWorkerPatch(r.Context(), result)
+	if applyErr != nil {
+		if workerPatchConfigurationError(applyErr) {
+			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": applyErr.Error()})
+			return
+		}
+		if transientPatchValidationError(applyErr) {
+			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
+			writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
+			return
+		}
+		metadata, metadataErr := resultMetadata(payload, claims, applyMetadata)
+		if metadataErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build job result metadata"})
+			return
+		}
+		_, err = h.store.RecordJobResult(r.Context(), store.JobResult{
+			JobID:          envelope.JobID,
+			IdempotencyKey: idempotencyKey,
+			Status:         StatusFailure,
+			ResultRef:      ResultPayloadHash(payload),
+			Metadata:       metadata,
+			CreatedAt:      h.now(),
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record rejected job result"})
+			return
+		}
+		if err := h.store.CompleteIdempotencyKey(r.Context(), callbackKey, idempotencyKey); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete rejected job result idempotency"})
+			return
+		}
+		writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
 		return
 	}
 	if applyErr := h.processWorkerPatch(r.Context(), result, job, patchArtifact, applyMetadata); applyErr != nil {

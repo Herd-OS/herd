@@ -37,6 +37,11 @@ func NewServer(cfg Config, deps Dependencies) (http.Handler, error) {
 	if deps.Logger == nil {
 		deps.Logger = log.New(os.Stderr, "herd-service: ", log.LstdFlags)
 	}
+	if validateConfigAtStartup(cfg) {
+		if err := cfg.Validate(); err != nil {
+			return nil, fmt.Errorf("service config: %w", err)
+		}
+	}
 	if err := validateProductionDependencies(cfg, deps); err != nil {
 		return nil, err
 	}
@@ -48,6 +53,14 @@ func NewServer(cfg Config, deps Dependencies) (http.Handler, error) {
 	}
 
 	return mux, nil
+}
+
+func validateConfigAtStartup(cfg Config) bool {
+	env := strings.TrimSpace(cfg.Env)
+	if env == "" {
+		return false
+	}
+	return env != "development" && env != "test"
 }
 
 func validateProductionDependencies(cfg Config, deps Dependencies) error {

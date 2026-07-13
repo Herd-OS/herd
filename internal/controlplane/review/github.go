@@ -103,6 +103,9 @@ func (c AppGitHubClient) CreateReviewForCommit(ctx context.Context, installation
 }
 
 func (c AppGitHubClient) FindReviewForCommit(ctx context.Context, installationID int64, owner, repo string, number int, body string, event platform.ReviewEvent, commitID string) (bool, error) {
+	if strings.TrimSpace(c.AppLogin) == "" {
+		return false, fmt.Errorf("herd GitHub App login is required for review repair")
+	}
 	client, err := c.installationClient(ctx, installationID)
 	if err != nil {
 		return false, err
@@ -132,7 +135,7 @@ func (c AppGitHubClient) FindReviewForCommit(ctx context.Context, installationID
 func (c AppGitHubClient) matchesAppActor(login string) bool {
 	want := strings.TrimSpace(c.AppLogin)
 	if want == "" {
-		return true
+		return false
 	}
 	if strings.EqualFold(login, want) {
 		return true
