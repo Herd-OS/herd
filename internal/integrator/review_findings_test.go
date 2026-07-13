@@ -140,6 +140,8 @@ func TestReviewFindingExtractionAndSelection(t *testing.T) {
 	}{
 		{name: "path prefix strips line", desc: "cmd/herd-service/main.go:123: missing validation", want: "cmd/herd-service/main.go"},
 		{name: "embedded yaml path", desc: "The workflow .github/workflows/review.yml:42 has stale config", want: ".github/workflows/review.yml"},
+		{name: "typescript path prefix", desc: "web/src/mergeResolver.ts: resolve merge conflicts ignores errors", want: "web/src/mergeresolver.ts"},
+		{name: "python embedded path", desc: "The handler in scripts/merge_resolver.py:77 drops errors", want: "scripts/merge_resolver.py"},
 		{name: "no path", desc: "PR-level merge conflict remains unresolved", want: ""},
 	}
 	for _, tt := range pathTests {

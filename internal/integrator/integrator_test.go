@@ -190,6 +190,8 @@ func (m *mockIssueService) CreateCommentReaction(_ context.Context, _ int64, _ s
 type mockPRService struct {
 	listResult             []*platform.PullRequest
 	getResult              map[int]*platform.PullRequest
+	getResults             []*platform.PullRequest
+	getCalls               int
 	created                *platform.PullRequest
 	merged                 bool
 	mergedNumber           int
@@ -214,8 +216,23 @@ func (m *mockPRService) Create(_ context.Context, title, body, head, base string
 	return m.created, nil
 }
 func (m *mockPRService) Get(_ context.Context, number int) (*platform.PullRequest, error) {
+	if len(m.getResults) > 0 {
+		idx := m.getCalls
+		if idx >= len(m.getResults) {
+			idx = len(m.getResults) - 1
+		}
+		m.getCalls++
+		if pr := m.getResults[idx]; pr != nil {
+			return pr, nil
+		}
+	}
 	if m.getResult != nil {
 		if pr, ok := m.getResult[number]; ok {
+			return pr, nil
+		}
+	}
+	for _, pr := range m.listResult {
+		if pr != nil && pr.Number == number {
 			return pr, nil
 		}
 	}

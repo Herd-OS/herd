@@ -264,6 +264,8 @@ func TestIsCascadeOrMergeConflictFinding(t *testing.T) {
 		{name: "symbol-level cascade label behavior", desc: "function CascadeFailed cleanup is inconsistent with label behavior", want: false},
 		{name: "file-level current pr merge state", desc: "internal/merge/resolver.go: GitHub reports this PR has an unresolved merge conflict", want: true},
 		{name: "file-level merge conflict logic", desc: "internal/merge/resolver.go: resolve merge conflicts ignores errors", want: false},
+		{name: "typescript file-level merge conflict logic", desc: "web/src/mergeResolver.ts: resolve merge conflicts ignores errors", want: false},
+		{name: "python file-level merge conflict logic", desc: "scripts/merge_resolver.py: unresolved conflict handler drops errors", want: false},
 		{name: "symbol-level merge conflict logic", desc: "function resolveConflicts ignores errors while resolving merge conflicts", want: false},
 		{name: "conflict in business logic only", desc: "The new option conflicts with documented behavior in settings.go", want: false},
 		{name: "empty", desc: " ", want: false},
@@ -2302,6 +2304,66 @@ func TestReview_CleanStatusKnownUnmergeablePreservesCascadeFindingAndLabel(t *te
 	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
 }
 
+func TestReview_RefetchedBlockedPRPreservesCascadeFindingAndLabel(t *testing.T) {
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "CLEAN",
+			Labels:           []string{issues.CascadeFailed},
+		},
+		livePR: &platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "BLOCKED",
+			Labels:           []string{issues.CascadeFailed},
+		},
+		finding: agent.ReviewFinding{Severity: "HIGH", Description: "herd/cascade-failed indicates an unresolved merge conflict on this PR"},
+	})
+
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Contains(t, issueSvc.createdBody, "unresolved merge conflict on this PR")
+	assert.Empty(t, issueSvc.removedLabels[50])
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "100", wf.dispatched[0]["issue_number"])
+	assert.Contains(t, requireCommentContaining(t, prSvc.comments, "unresolved merge conflict on this PR"), "fix worker dispatched")
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "Stale PR-state findings ignored")
+}
+
+func TestReview_RefetchedCleanPRFiltersCascadeFindingAndRemovesLabel(t *testing.T) {
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "BLOCKED",
+			Labels:           []string{issues.CascadeFailed},
+		},
+		livePR: &platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "CLEAN",
+			Labels:           []string{issues.CascadeFailed},
+		},
+		finding: agent.ReviewFinding{Severity: "HIGH", Description: "herd/cascade-failed indicates an unresolved merge conflict on this PR"},
+	})
+
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Empty(t, result.FixIssues)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+	assert.Contains(t, issueSvc.removedLabels[50], issues.CascadeFailed)
+	comment := requireCommentContaining(t, prSvc.comments, "Stale PR-state findings ignored")
+	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
+	assert.Contains(t, comment, "- Stale cascade label cleanup: removed")
+	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "unresolved merge conflict on this PR")
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
+	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
 func TestReview_CleanPRPreservesFileLevelMergeConflictFinding(t *testing.T) {
 	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
 		pr: platform.PullRequest{
@@ -2321,6 +2383,39 @@ func TestReview_CleanPRPreservesFileLevelMergeConflictFinding(t *testing.T) {
 	assert.Equal(t, "100", wf.dispatched[0]["issue_number"])
 	assert.Contains(t, requireCommentContaining(t, prSvc.comments, "internal/merge/resolver.go"), "fix worker dispatched")
 	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
+func TestReview_CleanPRPreservesNonAllowlistedFileLevelMergeConflictFindings(t *testing.T) {
+	tests := []struct {
+		name    string
+		finding string
+	}{
+		{name: "typescript", finding: "web/src/mergeResolver.ts: resolve merge conflicts ignores errors"},
+		{name: "python", finding: "scripts/merge_resolver.py: unresolved conflict handler drops errors"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+				pr: platform.PullRequest{
+					MergeableKnown:   true,
+					Mergeable:        true,
+					MergeStateStatus: "CLEAN",
+				},
+				finding: agent.ReviewFinding{Severity: "HIGH", Description: tt.finding},
+			})
+
+			require.NotNil(t, result)
+			assert.False(t, result.Approved)
+			assert.Equal(t, []int{100}, result.FixIssues)
+			assert.Contains(t, issueSvc.createdBody, tt.finding)
+			assert.Empty(t, issueSvc.removedLabels[50])
+			require.Len(t, wf.dispatched, 1)
+			assert.Equal(t, "100", wf.dispatched[0]["issue_number"])
+			assert.Contains(t, requireCommentContaining(t, prSvc.comments, tt.finding), "fix worker dispatched")
+			assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+		})
+	}
 }
 
 func TestReview_CleanPRPreservesFileLevelCascadeLabelFinding(t *testing.T) {
@@ -2598,6 +2693,7 @@ func TestReview_NonCleanPRPreservesCascadeFinding(t *testing.T) {
 
 type staleCascadeReviewCase struct {
 	pr              platform.PullRequest
+	livePR          *platform.PullRequest
 	finding         agent.ReviewFinding
 	findings        []agent.ReviewFinding
 	removeLabelsErr error
@@ -2623,9 +2719,19 @@ func runStaleCascadeReview(t *testing.T, tc staleCascadeReviewCase) (*ReviewResu
 	pr.Title = "[herd] Batch"
 	pr.Head = "herd/batch/1-batch"
 	pr.Base = "main"
+	livePR := &pr
+	if tc.livePR != nil {
+		live := *tc.livePR
+		live.Number = pr.Number
+		live.Title = pr.Title
+		live.Head = pr.Head
+		live.Base = pr.Base
+		livePR = &live
+	}
 	prSvc := &mockCapturingPRService{
 		mockPRService: &mockPRService{
 			listResult: []*platform.PullRequest{&pr},
+			getResult:  map[int]*platform.PullRequest{50: livePR},
 		},
 	}
 	wf := &mockWorkflowService{

@@ -391,6 +391,11 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		fmt.Printf("Discarded stale review result for PR #%d because head SHA changed while review was running: reviewed_head_sha=%s current_head_sha=%s\n", pr.Number, reviewedHeadSHA, currentHeadSHA)
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
+	livePR, err := p.PullRequests().Get(postReviewCtx, pr.Number)
+	if err != nil {
+		return nil, fmt.Errorf("refreshing PR #%d after review for current merge state: %w", pr.Number, err)
+	}
+	pr = livePR
 	markReviewResult := func(comment, status string, cycle, findingsCount int) (string, error) {
 		marker := newReviewResultMarker(pr.Number, ms.Number, currentHeadSHA, status, cycle, findingsCount, time.Now())
 		markedComment, markerErr := appendReviewResultMarker(comment, marker)
