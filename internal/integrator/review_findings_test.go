@@ -13,6 +13,7 @@ func TestDedupeReviewFindings(t *testing.T) {
 		name           string
 		findings       []agent.ReviewFinding
 		wantDescs      []string
+		wantSeverities []string
 		wantDeduped    int
 		wantFingerSame bool
 	}{
@@ -38,6 +39,19 @@ func TestDedupeReviewFindings(t *testing.T) {
 			wantDescs: []string{
 				"cmd/herd-service/main.go:123: function runServer misses the nil check before using cfg.",
 			},
+			wantDeduped:    1,
+			wantFingerSame: true,
+		},
+		{
+			name: "same file path symbol and claim collapse across severity and keep higher severity",
+			findings: []agent.ReviewFinding{
+				{Severity: "MEDIUM", Description: "internal/integrator/review.go:123: function runReview misses the nil check before using result."},
+				{Severity: "HIGH", Description: "internal/integrator/review.go:456: function runReview misses the nil check before using result."},
+			},
+			wantDescs: []string{
+				"internal/integrator/review.go:456: function runReview misses the nil check before using result.",
+			},
+			wantSeverities: []string{"HIGH"},
 			wantDeduped:    1,
 			wantFingerSame: true,
 		},
@@ -87,6 +101,13 @@ func TestDedupeReviewFindings(t *testing.T) {
 				descs = append(descs, finding.Description)
 			}
 			assert.Equal(t, tt.wantDescs, descs)
+			if tt.wantSeverities != nil {
+				severities := make([]string, 0, len(got))
+				for _, finding := range got {
+					severities = append(severities, finding.Severity)
+				}
+				assert.Equal(t, tt.wantSeverities, severities)
+			}
 			assert.Equal(t, len(tt.findings), stats.RawFindings)
 			assert.Equal(t, len(tt.wantDescs), stats.FindingsAfterDedupe)
 			assert.Equal(t, tt.wantDeduped, stats.DedupedFindings)

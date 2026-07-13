@@ -37,7 +37,7 @@ func appendReviewAggregationMetadata(comment string, dedupe reviewFindingDedupeS
 	var b strings.Builder
 	b.WriteString(strings.TrimRight(comment, "\n"))
 	b.WriteString("\n\n## Review Aggregation\n")
-	if dedupeChanged || staleFiltered {
+	if dedupeChanged {
 		fmt.Fprintf(&b, "- Raw findings before dedupe: %d\n", dedupe.RawFindings)
 		fmt.Fprintf(&b, "- Findings after dedupe: %d\n", dedupe.FindingsAfterDedupe)
 	}

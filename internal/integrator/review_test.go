@@ -2219,13 +2219,40 @@ func TestReview_CleanPRFiltersStaleCascadeFindingAndRemovesLabel(t *testing.T) {
 	comment := requireCommentContaining(t, prSvc.comments, "Stale PR-state findings ignored")
 	assert.Contains(t, comment, "did not dispatch a fix worker")
 	assert.Contains(t, comment, "## Review Aggregation")
-	assert.Contains(t, comment, "- Raw findings before dedupe: 1")
-	assert.Contains(t, comment, "- Findings after dedupe: 1")
 	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
 	assert.Contains(t, comment, "- Stale cascade label cleanup: removed")
+	assert.NotContains(t, comment, "- Raw findings before dedupe: 1")
+	assert.NotContains(t, comment, "- Findings after dedupe: 1")
 	assert.NotContains(t, strings.Join(prSvc.comments, "\n"), "unresolved merge conflict on this PR")
 	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewApprove)
 	assert.NotContains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
+func TestReview_CleanPRFiltersStaleCascadeFindingWithDedupeMetadata(t *testing.T) {
+	result, issueSvc, prSvc, wf := runStaleCascadeReview(t, staleCascadeReviewCase{
+		pr: platform.PullRequest{
+			MergeableKnown:   true,
+			Mergeable:        true,
+			MergeStateStatus: "CLEAN",
+			Labels:           []string{issues.CascadeFailed},
+		},
+		findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "herd/cascade-failed indicates an unresolved merge conflict on this PR"},
+			{Severity: "HIGH", Description: "Previous review says the herd cascade failed due to merge conflicts in chunk 2/3."},
+		},
+	})
+
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Empty(t, result.FixIssues)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
+	comment := requireCommentContaining(t, prSvc.comments, "Stale PR-state findings ignored")
+	assert.Contains(t, comment, "## Review Aggregation")
+	assert.Contains(t, comment, "- Raw findings before dedupe: 2")
+	assert.Contains(t, comment, "- Findings after dedupe: 1")
+	assert.Contains(t, comment, "- Stale PR-state findings ignored: 1")
+	assert.Contains(t, comment, "- Stale cascade label cleanup: removed")
 }
 
 func TestReview_CleanPRFiltersStaleCascadeFindingWhenLabelCleanupFails(t *testing.T) {
@@ -2455,6 +2482,7 @@ func TestReview_NonCleanPRPreservesCascadeFinding(t *testing.T) {
 type staleCascadeReviewCase struct {
 	pr              platform.PullRequest
 	finding         agent.ReviewFinding
+	findings        []agent.ReviewFinding
 	removeLabelsErr error
 }
 
@@ -2495,12 +2523,20 @@ func runStaleCascadeReview(t *testing.T, tc staleCascadeReviewCase) (*ReviewResu
 		repo:       &mockRepoService{defaultBranch: "main", branchExists: map[string]bool{"herd/batch/1-batch": true}},
 		milestones: &mockMilestoneService{},
 	}
+	findings := tc.findings
+	if findings == nil {
+		findings = []agent.ReviewFinding{tc.finding}
+	}
+	comments := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		comments = append(comments, finding.Description)
+	}
 	ag := &mockReviewAgent{
 		reviewResult: &agent.ReviewResult{
 			Approved: false,
 			Summary:  "found stale cascade state",
-			Findings: []agent.ReviewFinding{tc.finding},
-			Comments: []string{tc.finding.Description},
+			Findings: findings,
+			Comments: comments,
 		},
 	}
 

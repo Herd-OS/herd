@@ -64,7 +64,6 @@ func dedupeReviewFindings(findings []agent.ReviewFinding) (deduped []agent.Revie
 
 func reviewFindingFingerprint(f agent.ReviewFinding) string {
 	return strings.Join([]string{
-		normalizeFindingSeverity(f.Severity),
 		extractFindingPath(f.Description),
 		extractFindingSymbol(f.Description),
 		compactFindingClaim(f.Description),

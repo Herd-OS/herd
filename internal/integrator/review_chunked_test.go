@@ -325,11 +325,24 @@ func TestAppendReviewAggregationMetadata(t *testing.T) {
 			},
 		},
 		{
-			name:   "stale filtered finding includes dedupe and stale counts",
+			name:   "stale filtered finding omits unchanged dedupe counts",
 			dedupe: reviewFindingDedupeStats{RawFindings: 1, FindingsAfterDedupe: 1},
 			filter: reviewStateFilterStats{StalePRStateFindingsIgnored: 1, CascadeLabelWasStale: true, CascadeLabelRemoved: true},
 			want: []string{
+				"- Stale PR-state findings ignored: 1",
+				"- Stale cascade label cleanup: removed",
+			},
+			doesNotWant: []string{
 				"- Raw findings before dedupe: 1",
+				"- Findings after dedupe: 1",
+			},
+		},
+		{
+			name:   "stale filtered finding includes changed dedupe and stale counts",
+			dedupe: reviewFindingDedupeStats{RawFindings: 3, FindingsAfterDedupe: 1, DedupedFindings: 2},
+			filter: reviewStateFilterStats{StalePRStateFindingsIgnored: 1, CascadeLabelWasStale: true, CascadeLabelRemoved: true},
+			want: []string{
+				"- Raw findings before dedupe: 3",
 				"- Findings after dedupe: 1",
 				"- Stale PR-state findings ignored: 1",
 				"- Stale cascade label cleanup: removed",
