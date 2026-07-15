@@ -424,64 +424,84 @@ func TestFindDuplicateStrategyFixIssue(t *testing.T) {
 			wantOK:     true,
 		},
 		{
-			name: "closed issue with active label still matches",
+			name: "open in-progress matching strategy issue",
 			issues: []*platform.Issue{
-				reviewStrategyIssue(102, "closed", []string{issues.ReviewNonConverging, issues.StatusInProgress}, matchingBody),
+				reviewStrategyIssue(102, "open", []string{issues.ReviewNonConverging, issues.StatusInProgress}, matchingBody),
 			},
 			wantNumber: 102,
 			wantOK:     true,
 		},
 		{
+			name: "open unlabeled matching strategy issue",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(103, "open", []string{issues.ReviewNonConverging}, matchingBody),
+			},
+			wantNumber: 103,
+			wantOK:     true,
+		},
+		{
+			name: "closed ready issue ignored",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(104, "closed", []string{issues.ReviewNonConverging, issues.StatusReady}, matchingBody),
+			},
+		},
+		{
+			name: "closed in-progress issue ignored",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(105, "closed", []string{issues.ReviewNonConverging, issues.StatusInProgress}, matchingBody),
+			},
+		},
+		{
 			name: "closed done issue ignored",
 			issues: []*platform.Issue{
-				reviewStrategyIssue(103, "closed", []string{issues.ReviewNonConverging, issues.StatusDone}, matchingBody),
+				reviewStrategyIssue(106, "closed", []string{issues.ReviewNonConverging, issues.StatusDone}, matchingBody),
 			},
 		},
 		{
 			name: "closed cancelled issue ignored",
 			issues: []*platform.Issue{
-				reviewStrategyIssue(104, "closed", []string{issues.ReviewNonConverging, issues.StatusCancelled}, matchingBody),
+				reviewStrategyIssue(107, "closed", []string{issues.ReviewNonConverging, issues.StatusCancelled}, matchingBody),
 			},
 		},
 		{
 			name: "wrong label ignored",
 			issues: []*platform.Issue{
-				reviewStrategyIssue(105, "open", []string{issues.StatusReady}, matchingBody),
+				reviewStrategyIssue(108, "open", []string{issues.StatusReady}, matchingBody),
 			},
 		},
 		{
 			name: "wrong title ignored",
 			issues: []*platform.Issue{
-				{Number: 106, State: "open", Title: "Review fixes (cycle 6)", Labels: []string{issues.ReviewNonConverging, issues.StatusReady}, Body: matchingBody},
+				{Number: 109, State: "open", Title: "Review fixes (cycle 6)", Labels: []string{issues.ReviewNonConverging, issues.StatusReady}, Body: matchingBody},
 			},
 		},
 		{
 			name: "wrong batch pr ignored",
 			issues: []*platform.Issue{
-				reviewStrategyIssue(107, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, appendReviewNonConvergenceFingerprint(reviewStrategyIssueBody(850), "fp-match")),
+				reviewStrategyIssue(110, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, appendReviewNonConvergenceFingerprint(reviewStrategyIssueBody(850), "fp-match")),
 			},
 		},
 		{
 			name: "wrong fingerprint ignored",
 			issues: []*platform.Issue{
-				reviewStrategyIssue(108, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, appendReviewNonConvergenceFingerprint(reviewStrategyIssueBody(849), "fp-other")),
+				reviewStrategyIssue(111, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, appendReviewNonConvergenceFingerprint(reviewStrategyIssueBody(849), "fp-other")),
 			},
 		},
 		{
 			name: "fallback body contains fingerprint when marker parse fails",
 			issues: []*platform.Issue{
-				reviewStrategyIssue(109, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, reviewStrategyIssueBody(849)+"\n"+reviewNonConvergenceFingerprintMarkerPrefix+"broken fp-match"),
+				reviewStrategyIssue(112, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, reviewStrategyIssueBody(849)+"\n"+reviewNonConvergenceFingerprintMarkerPrefix+"broken fp-match"),
 			},
-			wantNumber: 109,
+			wantNumber: 112,
 			wantOK:     true,
 		},
 		{
 			name: "returns first matching active issue",
 			issues: []*platform.Issue{
-				reviewStrategyIssue(110, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, matchingBody),
-				reviewStrategyIssue(111, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, matchingBody),
+				reviewStrategyIssue(113, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, matchingBody),
+				reviewStrategyIssue(114, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, matchingBody),
 			},
-			wantNumber: 110,
+			wantNumber: 113,
 			wantOK:     true,
 		},
 	}

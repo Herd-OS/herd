@@ -838,6 +838,9 @@ func parseReviewFingerprintBatchPR(body string) int {
 }
 
 func isActiveReviewStrategyIssue(issue *platform.Issue) bool {
+	if issue.State != "" && issue.State != "open" {
+		return false
+	}
 	status := issues.StatusLabel(issue.Labels)
 	if status == issues.StatusReady || status == issues.StatusInProgress {
 		return true
@@ -845,7 +848,7 @@ func isActiveReviewStrategyIssue(issue *platform.Issue) bool {
 	if status == issues.StatusDone || status == issues.StatusCancelled {
 		return false
 	}
-	return issue.State == "" || issue.State == "open"
+	return status == ""
 }
 
 func buildReviewClusterSummary(cluster reviewConvergenceCluster) string {
