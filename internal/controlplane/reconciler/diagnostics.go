@@ -56,3 +56,22 @@ func diagnosticMetadata(d Diagnostic) json.RawMessage {
 	}
 	return raw
 }
+
+func mergeDiagnosticMetadata(existing json.RawMessage, d Diagnostic) json.RawMessage {
+	var body map[string]any
+	if len(existing) == 0 || json.Unmarshal(existing, &body) != nil {
+		body = map[string]any{}
+	}
+	var diagnostic map[string]any
+	if err := json.Unmarshal(diagnosticMetadata(d), &diagnostic); err != nil {
+		return diagnosticMetadata(d)
+	}
+	for key, value := range diagnostic {
+		body[key] = value
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return diagnosticMetadata(d)
+	}
+	return raw
+}

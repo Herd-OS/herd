@@ -82,7 +82,7 @@ func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
 	assert.Contains(t, eventResp.Body.String(), "invalid workflow event payload")
 }
 
-func TestProductionCommandDispatcherRejectsSyntheticDefaults(t *testing.T) {
+func TestProductionCommandDispatcherRequiresRealAppContextWithoutSyntheticDefaults(t *testing.T) {
 	err := productionCommandDispatcher{}.DispatchCommand(context.Background(), commands.DispatchCommand{
 		RepositoryID:   7,
 		InstallationID: 9,
@@ -94,7 +94,8 @@ func TestProductionCommandDispatcherRejectsSyntheticDefaults(t *testing.T) {
 	})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "durable batch/ref/head context")
+	assert.Contains(t, err.Error(), "GitHub App token source")
+	assert.NotContains(t, err.Error(), "durable batch/ref/head context")
 	assert.NotContains(t, err.Error(), "batch 1")
 }
 

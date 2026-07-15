@@ -125,12 +125,21 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		return Result{}, fmt.Errorf("command GitHub client is not configured")
 	}
 
-	metadata, err := json.Marshal(map[string]any{
+	metadataBody := map[string]any{
 		"args":               cmd.Args,
 		"raw":                cmd.Raw,
 		"author_association": event.AuthorAssociation,
 		"action":             event.Action,
-	})
+	}
+	dispatchable := shouldDispatch(cmd.Kind)
+	if dispatchable && strings.TrimSpace(event.PullRequestURL) == "" {
+		dispatchable = false
+	}
+	if dispatchable {
+		metadataBody["issue_number"] = event.IssueNumber
+		metadataBody["pr_number"] = event.IssueNumber
+	}
+	metadata, err := json.Marshal(metadataBody)
 	if err != nil {
 		return Result{}, fmt.Errorf("marshal command metadata: %w", err)
 	}
@@ -140,10 +149,6 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		Actor:       event.SenderLogin,
 		Status:      StatusAcknowledged,
 		Metadata:    metadata,
-	}
-	dispatchable := shouldDispatch(cmd.Kind)
-	if dispatchable && strings.TrimSpace(event.PullRequestURL) == "" {
-		dispatchable = false
 	}
 	repo, dispatchPending, idempotencyKey, commandMetadata, err := h.recordAndAck(ctx, event, string(cmd.Kind), acknowledgement(cmd), record, dispatchable)
 	if err != nil {
@@ -219,15 +224,21 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 	if !ok || !isAuthorized(event.AuthorAssociation) {
 		return nil
 	}
-	if shouldDispatch(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
+	dispatchable := shouldDispatch(cmd.Kind)
+	if dispatchable && strings.TrimSpace(event.PullRequestURL) == "" {
 		return nil
 	}
-	metadata, err := json.Marshal(map[string]any{
+	metadataBody := map[string]any{
 		"args":               cmd.Args,
 		"raw":                cmd.Raw,
 		"author_association": event.AuthorAssociation,
 		"action":             event.Action,
-	})
+	}
+	if dispatchable {
+		metadataBody["issue_number"] = event.IssueNumber
+		metadataBody["pr_number"] = event.IssueNumber
+	}
+	metadata, err := json.Marshal(metadataBody)
 	if err != nil {
 		return fmt.Errorf("marshal command metadata: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +103,10 @@ func runInitWithOptions(opts initOptions) error {
 	if err != nil {
 		return fmt.Errorf("could not detect repository: %w — make sure a GitHub remote is configured", err)
 	}
-	opts.ControlPlaneURL = effectiveControlPlaneURL(opts.ControlPlaneURL)
+	opts.ControlPlaneURL, err = validatedEffectiveControlPlaneURL(opts.ControlPlaneURL)
+	if err != nil {
+		return err
+	}
 	opts.AppLogin = effectiveAppLogin(opts.AppLogin)
 
 	registration, err := registerRepositoryForInit(context.Background(), owner, repo, opts)
@@ -172,7 +176,11 @@ func runInitWithOptions(opts initOptions) error {
 	}
 
 	// 6. Create runner files
-	if err := createRunnerFilesWithBootstrap(dir, owner, repo, registration.RunnerBootstrapToken, effectiveResponseControlPlaneURL(opts.ControlPlaneURL, registration.ControlPlaneURL)); err != nil {
+	responseControlPlaneURL, err := validatedEffectiveResponseControlPlaneURL(opts.ControlPlaneURL, registration.ControlPlaneURL)
+	if err != nil {
+		return err
+	}
+	if err := createRunnerFilesWithBootstrap(dir, owner, repo, registration.RunnerBootstrapToken, responseControlPlaneURL); err != nil {
 		return err
 	}
 
@@ -253,6 +261,23 @@ func effectiveControlPlaneURL(value string) string {
 	return value
 }
 
+func validatedEffectiveControlPlaneURL(value string) (string, error) {
+	effective := effectiveControlPlaneURL(value)
+	if strings.ContainsFunc(effective, func(r rune) bool {
+		return r <= ' ' || r == 0x7f
+	}) {
+		return "", fmt.Errorf("control-plane URL must not contain whitespace or control characters")
+	}
+	parsed, err := url.Parse(effective)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("control-plane URL must be an absolute http or https URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("control-plane URL must use http or https")
+	}
+	return strings.TrimRight(effective, "/"), nil
+}
+
 func effectiveAppLogin(value string) string {
 	value = strings.TrimPrefix(strings.TrimSpace(value), "@")
 	if value == "" {
@@ -270,6 +295,14 @@ func effectiveResponseControlPlaneURL(requested string, returned string) string 
 		return effectiveControlPlaneURL(returned)
 	}
 	return effectiveControlPlaneURL(requested)
+}
+
+func validatedEffectiveResponseControlPlaneURL(requested string, returned string) (string, error) {
+	effective, err := validatedEffectiveControlPlaneURL(effectiveResponseControlPlaneURL(requested, returned))
+	if err != nil {
+		return "", err
+	}
+	return effective, nil
 }
 
 func registerRepositoryForInit(ctx context.Context, owner, repo string, opts initOptions) (cpclient.RegisterRepositoryResponse, error) {
@@ -688,6 +721,11 @@ func createRunnerFiles(dir, owner, repo string) error {
 }
 
 func createRunnerFilesWithBootstrap(dir, owner, repo string, bootstrapToken string, controlPlaneURL string) error {
+	validControlPlaneURL, err := validatedEffectiveControlPlaneURL(controlPlaneURL)
+	if err != nil {
+		return err
+	}
+	controlPlaneURL = validControlPlaneURL
 	// Runner infrastructure files are herd-managed — always overwrite to keep
 	// them in sync with the installed herd version.
 

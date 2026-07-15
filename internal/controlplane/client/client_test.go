@@ -153,6 +153,25 @@ func TestRegisterRepositoryErrors(t *testing.T) {
 	}
 }
 
+func TestRegisterRepositoryErrorRedactsSetupToken(t *testing.T) {
+	setupToken := "gho_setup_secret_1234567890"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"registration failed for setup_token=` + setupToken + ` and github_pat_extra_secret"}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, srv.Client())
+	require.NoError(t, err)
+
+	_, err = c.RegisterRepository(context.Background(), RegisterRepositoryRequest{Owner: "o", Name: "r", SetupToken: setupToken})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "registration failed")
+	assert.NotContains(t, err.Error(), setupToken)
+	assert.NotContains(t, err.Error(), "github_pat_extra_secret")
+	assert.Contains(t, err.Error(), "[REDACTED]")
+}
+
 func TestNewRejectsInvalidURL(t *testing.T) {
 	tests := []string{"", "://bad", "ftp://example.com"}
 	for _, in := range tests {

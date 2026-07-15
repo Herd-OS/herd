@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -99,6 +100,7 @@ func (c *Client) RegisterRepository(ctx context.Context, req RegisterRepositoryR
 		if msg == "" {
 			msg = resp.Status
 		}
+		msg = sanitizeRegistrationError(msg, req.SetupToken)
 		return RegisterRepositoryResponse{}, StatusError{StatusCode: resp.StatusCode, Message: msg}
 	}
 
@@ -110,6 +112,16 @@ func (c *Client) RegisterRepository(ctx context.Context, req RegisterRepositoryR
 		return RegisterRepositoryResponse{}, fmt.Errorf("control-plane registration response is missing repository_id, installation_id, or runner_bootstrap_token")
 	}
 	return out, nil
+}
+
+var githubTokenPattern = regexp.MustCompile(`\b(?:gh[opsru]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]+)\b`)
+
+func sanitizeRegistrationError(msg, setupToken string) string {
+	msg = githubTokenPattern.ReplaceAllString(msg, "[REDACTED]")
+	if token := strings.TrimSpace(setupToken); token != "" {
+		msg = strings.ReplaceAll(msg, token, "[REDACTED]")
+	}
+	return msg
 }
 
 func (c *Client) SubmitJobResultWithRetry(ctx context.Context, jobID string, payload []byte, bearerToken string, opts RetryOptions) error {

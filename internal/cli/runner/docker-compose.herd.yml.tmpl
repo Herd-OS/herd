@@ -19,7 +19,7 @@ services:
       - REPO_URL=https://github.com/{{.Owner}}/{{.Repo}}
       - HERD_RUNNER_BOOTSTRAP_TOKEN=${HERD_RUNNER_BOOTSTRAP_TOKEN}
 {{- if .ControlPlaneURL }}
-      - HERD_CONTROL_PLANE_URL={{.ControlPlaneURL}}
+      - "HERD_CONTROL_PLANE_URL={{.ControlPlaneURL}}"
 {{- end }}
       - RUNNER_LABELS=herd-worker
       # Optional UID/GID remap — see .env.herd.example. Defaults to 1001/1001

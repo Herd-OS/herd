@@ -176,6 +176,12 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		}); err != nil {
 			return dispatched, err
 		}
+		batchHeadSHA, err := s.Platform.Repository().GetBranchSHA(ctx, req.BatchBranch)
+		if err != nil {
+			_ = s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress})
+			_ = s.Platform.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+			return dispatched, fmt.Errorf("resolve batch branch %s head before dispatching issue #%d: %w", req.BatchBranch, issueNumber, err)
+		}
 		result, err := s.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
 			RepoID:          s.Repo.ID,
 			Owner:           s.Repo.Owner,
@@ -187,6 +193,9 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			BatchNumber:     req.BatchNumber,
 			IssueNumber:     issueNumber,
 			BatchBranch:     req.BatchBranch,
+			BaseSHA:         batchHeadSHA,
+			HeadSHA:         batchHeadSHA,
+			ExpectedHeadSHA: batchHeadSHA,
 			RunnerLabel:     cfg.Workers.RunnerLabel,
 			TimeoutMinutes:  cfg.Workers.TimeoutMinutes,
 			ControlPlaneURL: cfg.EffectiveControlPlaneURL(),

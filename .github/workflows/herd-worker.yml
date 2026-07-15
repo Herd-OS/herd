@@ -129,7 +129,7 @@ jobs:
           HERD_REPOSITORY: ${{ inputs.repository }}
           HERD_BATCH_NUMBER: ${{ inputs.batch_number }}
           HERD_ISSUE_NUMBER: ${{ inputs.issue_number }}
-          HERD_BATCH_BRANCH: ${{ inputs.batch_branch }}
+          HERD_BATCH_BRANCH: ${{ inputs.batch_branch || github.event.repository.default_branch }}
           HERD_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
           HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           HERD_JOB_STATUS: ${{ job.status }}

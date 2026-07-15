@@ -21,6 +21,7 @@ func TestWorkflowInputs(t *testing.T) {
 				BatchNumber:     12,
 				IssueNumber:     34,
 				BatchBranch:     "herd/batch/12",
+				BaseSHA:         "abc123",
 				HeadSHA:         "abc123",
 				ExpectedHeadSHA: "abc123",
 				RunnerLabel:     "herd-worker",

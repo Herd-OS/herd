@@ -20,6 +20,7 @@ func TestDispatchReadyWorkers_UsesServiceDispatcher(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
 	fake.prs.items[99] = &platform.PullRequest{Number: 99}
+	fake.repo.branches["herd/batch/7-demo"] = "batch-head"
 	disp := &fakeDispatcher{}
 	svc := newTestService(fake, newFakeStore(), disp)
 	allIssues := []*platform.Issue{
@@ -44,6 +45,9 @@ func TestDispatchReadyWorkers_UsesServiceDispatcher(t *testing.T) {
 	assert.Equal(t, cpdispatch.JobKindWorker, disp.requests[0].Kind)
 	assert.Equal(t, int64(123), disp.requests[0].RepoID)
 	assert.Equal(t, "herd-worker.yml", disp.requests[0].WorkflowFile)
+	assert.Equal(t, "batch-head", disp.requests[0].BaseSHA)
+	assert.Equal(t, "batch-head", disp.requests[0].HeadSHA)
+	assert.Equal(t, "batch-head", disp.requests[0].ExpectedHeadSHA)
 	assert.Contains(t, fake.issues.removed[1], issues.StatusReady)
 	assert.Contains(t, fake.issues.added[1], issues.StatusInProgress)
 }

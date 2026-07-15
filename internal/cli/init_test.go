@@ -656,7 +656,7 @@ func TestCreateRunnerFilesWithBootstrapWritesEnv(t *testing.T) {
 			compose, err := os.ReadFile(filepath.Join(dir, "docker-compose.herd.yml"))
 			require.NoError(t, err)
 			if tt.wantComposeURL {
-				assert.Contains(t, string(compose), "HERD_CONTROL_PLANE_URL=https://herd.example.com")
+				assert.Contains(t, string(compose), `"HERD_CONTROL_PLANE_URL=https://herd.example.com"`)
 			} else {
 				assert.NotContains(t, string(compose), "HERD_CONTROL_PLANE_URL")
 			}
@@ -669,6 +669,26 @@ func TestCreateRunnerFilesWithBootstrapWritesEnv(t *testing.T) {
 			example, err := os.ReadFile(filepath.Join(dir, ".env.herd.example"))
 			require.NoError(t, err)
 			assert.NotContains(t, string(example), "hrb_bootstrap")
+		})
+	}
+}
+
+func TestCreateRunnerFilesWithBootstrapRejectsInvalidControlPlaneURL(t *testing.T) {
+	tests := []string{
+		"https://herd.example.com\nHERD_RUNNER_BOOTSTRAP_TOKEN=leak",
+		"herd.example.com",
+		"ftp://herd.example.com",
+	}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			dir := t.TempDir()
+
+			err := createRunnerFilesWithBootstrap(dir, "octo", "herd", "hrb_bootstrap", value)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "control-plane URL")
+			_, statErr := os.Stat(filepath.Join(dir, ".env"))
+			assert.True(t, os.IsNotExist(statErr))
 		})
 	}
 }

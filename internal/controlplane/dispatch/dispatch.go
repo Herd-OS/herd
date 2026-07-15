@@ -540,6 +540,17 @@ func validateRequest(req DispatchRequest) error {
 	if headRequired(req.Kind) && req.HeadSHA == "" {
 		return fmt.Errorf("head SHA is required for %s dispatch", req.Kind)
 	}
+	if req.Kind == JobKindWorker {
+		if strings.TrimSpace(req.BaseSHA) == "" {
+			return fmt.Errorf("base SHA is required for %s dispatch", req.Kind)
+		}
+		if strings.TrimSpace(req.HeadSHA) == "" {
+			return fmt.Errorf("head SHA is required for %s dispatch", req.Kind)
+		}
+		if strings.TrimSpace(req.ExpectedHeadSHA) == "" {
+			return fmt.Errorf("expected head SHA is required for %s dispatch", req.Kind)
+		}
+	}
 	if req.ExpectedHeadSHA != "" && req.HeadSHA != "" && req.ExpectedHeadSHA != req.HeadSHA {
 		return fmt.Errorf("stale dispatch head SHA: expected %s, got %s", req.ExpectedHeadSHA, req.HeadSHA)
 	}

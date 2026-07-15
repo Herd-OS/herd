@@ -304,6 +304,33 @@ func TestDispatcherValidationRejectsMissingAndStaleHeadSHA(t *testing.T) {
 			}(),
 			want: "PR number is required",
 		},
+		{
+			name: "worker missing base",
+			req: func() DispatchRequest {
+				r := validRequest()
+				r.BaseSHA = ""
+				return r
+			}(),
+			want: "base SHA is required",
+		},
+		{
+			name: "worker missing head",
+			req: func() DispatchRequest {
+				r := validRequest()
+				r.HeadSHA = ""
+				return r
+			}(),
+			want: "head SHA is required",
+		},
+		{
+			name: "worker missing expected head",
+			req: func() DispatchRequest {
+				r := validRequest()
+				r.ExpectedHeadSHA = ""
+				return r
+			}(),
+			want: "expected head SHA is required",
+		},
 	}
 
 	for _, tt := range tests {
@@ -430,6 +457,7 @@ func validRequest() DispatchRequest {
 		BatchNumber:     12,
 		IssueNumber:     55,
 		BatchBranch:     "herd/batch/12",
+		BaseSHA:         "abc123",
 		HeadSHA:         "abc123",
 		ExpectedHeadSHA: "abc123",
 		RunnerLabel:     "herd-worker",

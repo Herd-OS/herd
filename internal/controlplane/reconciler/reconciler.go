@@ -180,7 +180,7 @@ func (r *Reconciler) runReviews(ctx context.Context, cfg Config, now time.Time, 
 		if pr.State != "open" || pr.HeadSHA != item.State.HeadSHA {
 			d := r.add(report, "review", reviewID(item.State), ClassificationStaleAbandoned, "abandon", "review state no longer matches an open PR head")
 			item.State.Status = "abandoned"
-			item.State.Metadata = diagnosticMetadata(d)
+			item.State.Metadata = mergeDiagnosticMetadata(item.State.Metadata, d)
 			item.State.UpdatedAt = now
 			if err := r.Store.SetReviewState(ctx, item.State); err != nil {
 				*errs = append(*errs, fmt.Errorf("abandon stale review %s: %w", reviewID(item.State), err))
@@ -207,7 +207,7 @@ func (r *Reconciler) runReviews(ctx context.Context, cfg Config, now time.Time, 
 			*errs = append(*errs, fmt.Errorf("repair Herd Review status %s: %w", reviewID(item.State), err))
 			continue
 		}
-		item.State.Metadata = diagnosticMetadata(d)
+		item.State.Metadata = mergeDiagnosticMetadata(item.State.Metadata, d)
 		item.State.UpdatedAt = now
 		if err := r.Store.SetReviewState(ctx, item.State); err != nil {
 			*errs = append(*errs, fmt.Errorf("record repaired review %s: %w", reviewID(item.State), err))

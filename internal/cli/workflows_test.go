@@ -699,7 +699,9 @@ func TestWorkerWorkflowUsesCapturedCheckoutBaseForArtifactsAndResult(t *testing.
 			reportIndex = i
 			require.NotNil(t, step.Env)
 			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_BASE_SHA"])
+			assert.Equal(t, "${{ inputs.batch_branch || github.event.repository.default_branch }}", step.Env["HERD_BATCH_BRANCH"])
 			assert.Contains(t, step.Run, "--arg base_sha \"$HERD_BASE_SHA\"")
+			assert.Contains(t, step.Run, "--arg target_branch \"$HERD_BATCH_BRANCH\"")
 		}
 	}
 
