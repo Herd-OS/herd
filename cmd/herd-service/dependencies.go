@@ -194,7 +194,7 @@ func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd co
 	if d.Dispatcher.Store == nil || d.Dispatcher.GitHub == nil {
 		return fmt.Errorf("production command dispatch requires durable dispatcher store and GitHub client")
 	}
-	target, err := d.resolveCommandTarget(ctx, cmd)
+	target, err := d.resolveCommandTarget(ctx, cmd, kind)
 	if err != nil {
 		return err
 	}
@@ -233,7 +233,7 @@ type commandTarget struct {
 	Ref         string
 }
 
-func (d productionCommandDispatcher) resolveCommandTarget(ctx context.Context, cmd commands.DispatchCommand) (commandTarget, error) {
+func (d productionCommandDispatcher) resolveCommandTarget(ctx context.Context, cmd commands.DispatchCommand, kind cpdispatch.JobKind) (commandTarget, error) {
 	if cmd.RepositoryID == 0 || cmd.InstallationID == 0 || strings.TrimSpace(cmd.Owner) == "" || strings.TrimSpace(cmd.Repo) == "" {
 		return commandTarget{}, fmt.Errorf("production command dispatch requires durable repository context")
 	}
@@ -248,42 +248,46 @@ func (d productionCommandDispatcher) resolveCommandTarget(ctx context.Context, c
 	if err != nil {
 		return commandTarget{}, fmt.Errorf("lookup PR #%d for command dispatch: %w", cmd.PRNumber, err)
 	}
-	batchNumber := 0
-	if pr.Milestone != nil {
-		batchNumber = pr.Milestone.GetNumber()
-	}
-	if batchNumber <= 0 {
-		return commandTarget{}, fmt.Errorf("production command dispatch requires PR #%d to have durable batch milestone", cmd.PRNumber)
+	return commandTargetFromPullRequest(cmd, kind, pr)
+}
+
+func commandTargetFromPullRequest(cmd commands.DispatchCommand, kind cpdispatch.JobKind, pr *gh.PullRequest) (commandTarget, error) {
+	if pr == nil {
+		return commandTarget{}, fmt.Errorf("production command dispatch requires PR #%d", cmd.PRNumber)
 	}
 	head := pr.GetHead()
-	base := pr.GetBase()
 	headSHA := head.GetSHA()
 	if strings.TrimSpace(headSHA) == "" {
 		return commandTarget{}, fmt.Errorf("production command dispatch requires PR #%d head SHA", cmd.PRNumber)
-	}
-	baseSHA := base.GetSHA()
-	if strings.TrimSpace(baseSHA) == "" {
-		return commandTarget{}, fmt.Errorf("production command dispatch requires PR #%d base SHA", cmd.PRNumber)
 	}
 	batchBranch := head.GetRef()
 	if strings.TrimSpace(batchBranch) == "" {
 		return commandTarget{}, fmt.Errorf("production command dispatch requires PR #%d head branch", cmd.PRNumber)
 	}
-	ref := base.GetRef()
-	if strings.TrimSpace(ref) == "" {
-		ref = batchBranch
+	batchNumber := 0
+	if pr.Milestone != nil {
+		batchNumber = pr.Milestone.GetNumber()
+	}
+	if batchNumber <= 0 {
+		if kind != cpdispatch.JobKindReview {
+			return commandTarget{}, fmt.Errorf("production command dispatch requires PR #%d to have durable batch milestone", cmd.PRNumber)
+		}
+		batchNumber = cmd.PRNumber
 	}
 	issueNumber := cmd.IssueNumber
 	if issueNumber <= 0 {
 		issueNumber = cmd.PRNumber
 	}
+	// The worker workflow checks out batch_branch and records that checkout SHA
+	// as HERD_BASE_SHA in callbacks/artifact metadata. For command-dispatched
+	// patch-producing jobs, the durable job base must match that checkout.
 	return commandTarget{
 		BatchNumber: batchNumber,
 		IssueNumber: issueNumber,
 		BatchBranch: batchBranch,
-		BaseSHA:     baseSHA,
+		BaseSHA:     headSHA,
 		HeadSHA:     headSHA,
-		Ref:         ref,
+		Ref:         batchBranch,
 	}, nil
 }
 
@@ -347,12 +351,7 @@ func commandJobKind(kind commands.CommandKind) (cpdispatch.JobKind, error) {
 }
 
 func commandWorkflowFile(kind cpdispatch.JobKind) string {
-	switch kind {
-	case cpdispatch.JobKindReview:
-		return "herd-review.yml"
-	default:
-		return "herd-worker.yml"
-	}
+	return "herd-worker.yml"
 }
 
 func productionLike(cfg service.Config) bool {

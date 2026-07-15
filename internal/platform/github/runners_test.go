@@ -71,7 +71,7 @@ func TestRunnerServiceGet(t *testing.T) {
 }
 
 func TestCreateRunnerRegistrationToken(t *testing.T) {
-	expiresAt := time.Date(2026, 7, 11, 13, 0, 0, 0, time.UTC)
+	expiresAt := time.Date(2099, 7, 11, 13, 0, 0, 0, time.UTC)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /repos/test-org/test-repo/actions/runners/registration-token", func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "POST", r.Method)
@@ -87,6 +87,23 @@ func TestCreateRunnerRegistrationToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "runner-registration-token", token.Token)
 	assert.Equal(t, expiresAt, token.ExpiresAt)
+}
+
+func TestCreateRunnerRegistrationTokenExpiredExpiry(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /repos/test-org/test-repo/actions/runners/registration-token", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"token":      "runner-registration-token",
+			"expires_at": time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		})
+	})
+	client, _ := newTestClient(t, mux)
+
+	token, err := CreateRunnerRegistrationToken(context.Background(), client.gh, "test-org", "test-repo")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expires_at is not in the future")
+	assert.Zero(t, token)
 }
 
 func TestCreateRunnerRegistrationTokenFailure(t *testing.T) {

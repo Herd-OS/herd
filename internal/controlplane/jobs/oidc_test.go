@@ -118,6 +118,45 @@ func TestBearerToken(t *testing.T) {
 	require.ErrorIs(t, err, ErrMissingBearerToken)
 }
 
+func TestExpectedIdentityFromJobUsesRepositoryFallback(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata json.RawMessage
+		wantRepo string
+		wantRef  string
+	}{
+		{
+			name:     "empty metadata",
+			metadata: nil,
+			wantRepo: "acme/widgets",
+		},
+		{
+			name:     "malformed metadata",
+			metadata: json.RawMessage(`{`),
+			wantRepo: "acme/widgets",
+		},
+		{
+			name:     "metadata overlays repository when present",
+			metadata: json.RawMessage(`{"repository":"acme/other","ref":"herd/worker/1"}`),
+			wantRepo: "acme/other",
+			wantRef:  "refs/heads/herd/worker/1",
+		},
+		{
+			name:     "owner and repo overlay repository when present",
+			metadata: json.RawMessage(`{"owner":"acme","repo":"other"}`),
+			wantRepo: "acme/other",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExpectedIdentityFromJob(store.Job{JobID: "job-1", Metadata: tt.metadata}, "acme/widgets")
+
+			assert.Equal(t, tt.wantRepo, got.Repository)
+			assert.Equal(t, tt.wantRef, got.Ref)
+		})
+	}
+}
+
 func TestJWKSValidatorValidateWithLocalKey(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)

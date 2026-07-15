@@ -275,6 +275,12 @@ func validatedEffectiveControlPlaneURL(value string) (string, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", fmt.Errorf("control-plane URL must use http or https")
 	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("control-plane URL must not contain userinfo")
+	}
+	if strings.Contains(effective, `"`) {
+		return "", fmt.Errorf("control-plane URL must not contain double quotes")
+	}
 	return strings.TrimRight(effective, "/"), nil
 }
 
@@ -331,6 +337,9 @@ func registerRepositoryForInit(ctx context.Context, owner, repo string, opts ini
 	}
 	if strings.TrimSpace(resp.RunnerBootstrapToken) == "" {
 		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: response is missing runner bootstrap token; retry `herd init` later or contact the control-plane operator")
+	}
+	if err := validateRunnerBootstrapToken(resp.RunnerBootstrapToken); err != nil {
+		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: invalid runner bootstrap token in response: %w", err)
 	}
 	return resp, nil
 }
@@ -901,6 +910,9 @@ func renderDockerComposeWithControlPlane(owner, repo string, controlPlaneURL str
 
 func writeRunnerEnv(dir string, bootstrapToken string, controlPlaneURL string) error {
 	if strings.TrimSpace(bootstrapToken) != "" {
+		if err := validateRunnerBootstrapToken(bootstrapToken); err != nil {
+			return err
+		}
 		if err := ensureGitignore(dir, ".env"); err != nil {
 			return fmt.Errorf("updating .gitignore for .env: %w", err)
 		}
@@ -949,6 +961,27 @@ func writeRunnerEnv(dir string, bootstrapToken string, controlPlaneURL string) e
 		out.WriteString("HERD_RUNNER_BOOTSTRAP_TOKEN=" + values["HERD_RUNNER_BOOTSTRAP_TOKEN"] + "\n")
 	}
 	return os.WriteFile(path, []byte(out.String()), 0600)
+}
+
+func validateRunnerBootstrapToken(token string) error {
+	if token == "" {
+		return fmt.Errorf("runner bootstrap token is required")
+	}
+	if strings.TrimSpace(token) != token {
+		return fmt.Errorf("runner bootstrap token must not contain leading or trailing whitespace")
+	}
+	if !strings.HasPrefix(token, "hrb_") {
+		return fmt.Errorf("runner bootstrap token has unexpected format")
+	}
+	if strings.ContainsFunc(token, func(r rune) bool {
+		return r <= ' ' || r == 0x7f
+	}) {
+		return fmt.Errorf("runner bootstrap token must be a single-line env-safe value")
+	}
+	if strings.Contains(token, "=") {
+		return fmt.Errorf("runner bootstrap token must not contain env syntax")
+	}
+	return nil
 }
 
 func parseEnvLines(content string) map[string]string {

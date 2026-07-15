@@ -205,6 +205,56 @@ func TestRegisterRepositoryForInitRedactsRegistrarSetupToken(t *testing.T) {
 	assert.Contains(t, err.Error(), "retry `herd init` later")
 }
 
+func TestRegisterRepositoryForInitRejectsUnsafeRunnerBootstrapToken(t *testing.T) {
+	withFakeInitRegistration(t, "gho_human", cpclient.RegisterRepositoryResponse{
+		RunnerBootstrapToken: "hrb_valid\nOTHER=value",
+	}, nil)
+
+	_, err := registerRepositoryForInit(context.Background(), "octo", "herd", initOptions{ControlPlaneURL: config.DefaultControlPlaneURL, AppLogin: "herd-os"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid runner bootstrap token")
+	assert.Contains(t, err.Error(), "single-line")
+}
+
+func TestWriteRunnerEnvRejectsUnsafeRunnerBootstrapTokenBeforeWriting(t *testing.T) {
+	dir := t.TempDir()
+
+	err := writeRunnerEnv(dir, "hrb_valid\nOTHER=value", "")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "single-line")
+	_, statErr := os.Stat(filepath.Join(dir, ".env"))
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestValidatedEffectiveControlPlaneURLRejectsUnsafeValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{
+			name:    "userinfo",
+			value:   "https://user:pass@example.com",
+			wantErr: "userinfo",
+		},
+		{
+			name:    "double quote",
+			value:   `https://example.com/path"x`,
+			wantErr: "double quotes",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := validatedEffectiveControlPlaneURL(tt.value)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestInstallWorkflows(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, installWorkflows(dir, config.Default()))
