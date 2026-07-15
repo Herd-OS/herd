@@ -14,10 +14,21 @@ import (
 )
 
 type githubActionsWorkflow struct {
+	On   githubActionsTriggers       `yaml:"on"`
 	Jobs map[string]githubActionsJob `yaml:"jobs"`
 }
 
+type githubActionsTriggers struct {
+	WorkflowRun githubActionsWorkflowRun `yaml:"workflow_run"`
+}
+
+type githubActionsWorkflowRun struct {
+	Workflows []string `yaml:"workflows"`
+	Types     []string `yaml:"types"`
+}
+
 type githubActionsJob struct {
+	If          string                    `yaml:"if"`
 	Concurrency *githubActionsConcurrency `yaml:"concurrency"`
 	Steps       []githubActionsStep       `yaml:"steps"`
 }
@@ -153,6 +164,52 @@ func TestIntegratorWorkflow_RendersConfiguredCIWorkflows(t *testing.T) {
 	require.NotEqual(t, -1, checkCIIndex)
 	require.NotEqual(t, -1, reviewIndex)
 	assert.Less(t, checkCIIndex, reviewIndex)
+}
+
+func TestIntegratorWorkflow_DefaultWorkerCompletionRunsReviewInIntegrateJob(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+
+	assert.Equal(t, []string{"HerdOS Worker"}, workflow.On.WorkflowRun.Workflows)
+	assert.Equal(t, []string{"completed"}, workflow.On.WorkflowRun.Types)
+	assert.NotContains(t, workflow.Jobs, "check-ci-workflow-completion",
+		"default workflow should not add a separate CI workflow_run review trigger")
+
+	integrate, ok := workflow.Jobs["integrate"]
+	require.True(t, ok, "integrate job should render")
+	assert.Contains(t, integrate.If, "github.event_name == 'workflow_run'")
+	assert.Contains(t, integrate.If, "github.event.workflow_run.conclusion != 'skipped'")
+
+	var runScript string
+	for _, step := range integrate.Steps {
+		if strings.Contains(step.Run, "herd integrator consolidate --run-id") {
+			runScript = step.Run
+			break
+		}
+	}
+	require.NotEmpty(t, runScript, "integrate job should run worker completion commands")
+
+	expectedCommands := []string{
+		`herd integrator consolidate --run-id "$RUN_ID"`,
+		`herd integrator advance --run-id "$RUN_ID"`,
+		`herd integrator review --run-id "$RUN_ID"`,
+		`herd integrator check-ci --run-id "$RUN_ID"`,
+	}
+	previousIndex := -1
+	for _, command := range expectedCommands {
+		index := strings.Index(runScript, command)
+		require.NotEqual(t, -1, index, "integrate run script should contain %q", command)
+		assert.Greater(t, index, previousIndex, "%q should appear after the previous command", command)
+		previousIndex = index
+	}
+	assert.NotContains(t, runScript, "herd integrator review --batch")
+	assert.NotContains(t, runScript, "herd integrator review --pr")
 }
 
 func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T) {
