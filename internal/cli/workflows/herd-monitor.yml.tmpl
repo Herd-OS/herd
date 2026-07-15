@@ -49,9 +49,6 @@ jobs:
     if: vars.HERD_ENABLED == 'true'
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Request hosted monitor patrol
         env:
           HERD_RUNNER: "true"

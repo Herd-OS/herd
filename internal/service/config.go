@@ -129,7 +129,7 @@ func envOrDefault(name string, fallback string) string {
 }
 
 func validatePublicURL(value string) error {
-	parsed, err := url.ParseRequestURI(value)
+	parsed, err := url.Parse(value)
 	if err != nil {
 		return fmt.Errorf("%s must be a valid absolute http or https URL", envPublicURL)
 	}
@@ -141,6 +141,12 @@ func validatePublicURL(value string) error {
 	}
 	if parsed.User != nil {
 		return fmt.Errorf("%s must not include userinfo", envPublicURL)
+	}
+	if parsed.RawQuery != "" {
+		return fmt.Errorf("%s must not include a query string", envPublicURL)
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("%s must not include a fragment", envPublicURL)
 	}
 	return nil
 }

@@ -46,7 +46,7 @@ jobs:
   review:
     if: vars.HERD_ENABLED == 'true'
     runs-on: [self-hosted, '${{`{{`}} inputs.runner_label {{`}}`}}']
-    timeout-minutes: ${{`{{`}} fromJSON(inputs.timeout_minutes) + 5 {{`}}`}}
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v4

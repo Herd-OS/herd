@@ -69,11 +69,6 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Request hosted integration
         env:
           HERD_RUNNER: "true"
@@ -116,12 +111,6 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{`{{`}} github.event.workflow_run.head_branch {{`}}`}}
-          fetch-depth: 0
-
       - name: Request hosted CI reconciliation
         env:
           HERD_RUNNER: "true"
@@ -169,12 +158,6 @@ jobs:
       cancel-in-progress: true
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{`{{`}} github.event.check_run.check_suite.head_branch {{`}}`}}
-          fetch-depth: 0
-
       - name: Request hosted CI reconciliation
         env:
           HERD_RUNNER: "true"
@@ -220,11 +203,6 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Request hosted issue-close reconciliation
         env:
           HERD_RUNNER: "true"
@@ -266,12 +244,6 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{`{{`}} github.event.pull_request.head.ref {{`}}`}}
-          fetch-depth: 0
-
       - name: Request hosted review reconciliation
         env:
           HERD_RUNNER: "true"
@@ -312,9 +284,6 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Request hosted cleanup
         env:
           HERD_RUNNER: "true"

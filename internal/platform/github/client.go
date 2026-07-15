@@ -50,6 +50,9 @@ func New(owner, repo string) (*Client, error) {
 }
 
 func resolveToken() (string, error) {
+	if os.Getenv("HERD_RUNNER") == "true" && os.Getenv("HERD_LOCAL_GITHUB_AUTH") != "true" {
+		return "", fmt.Errorf("GitHub client local auth is disabled when HERD_RUNNER=true; use the Herd control plane GitHub App path or set HERD_LOCAL_GITHUB_AUTH=true for local development")
+	}
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		return token, nil
 	}

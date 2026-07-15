@@ -3,8 +3,6 @@ services:
     image: golang:1.26
     working_dir: /workspace
     command: go run ./cmd/herd-service
-    env_file:
-      - .env
     environment:
       HERD_ENV: development
       HERD_DATABASE_URL: postgres://herd:herd@postgres:5432/herd?sslmode=disable

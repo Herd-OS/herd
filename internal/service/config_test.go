@@ -193,6 +193,22 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: []string{envPublicURL, "userinfo"},
 		},
 		{
+			name: "public url must not include query string",
+			cfg: Config{
+				Env:       "development",
+				PublicURL: "https://service.example.com?x=1",
+			},
+			wantErr: []string{envPublicURL, "query"},
+		},
+		{
+			name: "public url must not include fragment",
+			cfg: Config{
+				Env:       "development",
+				PublicURL: "https://service.example.com/#frag",
+			},
+			wantErr: []string{envPublicURL, "fragment"},
+		},
+		{
 			name: "invalid reconciler interval",
 			cfg: Config{
 				Env:                "development",

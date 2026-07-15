@@ -316,7 +316,8 @@ func TestReviewWorkflow_DefaultMatchesCommittedWorkflowAndPostsReviewCallback(t 
 	s := string(rendered)
 	assert.Contains(t, s, `timeout "${HERD_REVIEW_TIMEOUT_MINUTES}m" herd review-worker --pr "${{ inputs.pr_number }}" --result-file /tmp/herd-review-command-result.json`)
 	assert.NotContains(t, s, "herd integrator review")
-	assert.Contains(t, s, `timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) + 5 }}`)
+	assert.Contains(t, s, `timeout-minutes: 35`)
+	assert.NotContains(t, s, `fromJSON(inputs.timeout_minutes) + 5`)
 	assert.Contains(t, s, `required: true`)
 	assert.Contains(t, s, `ref: ${{ inputs.batch_branch }}`)
 	assert.Contains(t, s, "Verify checkout head")
@@ -374,6 +375,7 @@ func TestCallbackWorkflows_WorkflowEventPostsUseBoundedOIDCRetry(t *testing.T) {
 			require.NoError(t, yaml.Unmarshal(rendered, &workflow))
 			steps := workflowEventCallbackSteps(workflow)
 			require.Len(t, steps, tt.wantCallbackSteps)
+			assertNoCheckoutSteps(t, workflow)
 
 			for _, step := range steps {
 				t.Run(step.Name, func(t *testing.T) {
@@ -406,6 +408,16 @@ func TestCallbackWorkflows_WorkflowEventPostsUseBoundedOIDCRetry(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func assertNoCheckoutSteps(t *testing.T, workflow githubActionsWorkflow) {
+	t.Helper()
+
+	for jobName, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			assert.NotEqualf(t, "actions/checkout@v4", step.Uses, "workflow-event callback job %s must not require checkout before posting", jobName)
+		}
 	}
 }
 
