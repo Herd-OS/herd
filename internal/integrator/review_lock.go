@@ -68,10 +68,7 @@ func acquireReviewLock(ctx context.Context, _ platform.IssueService, repoSvc pla
 		if !stateOK || state.PRNumber != prNumber {
 			return nil, false, nil
 		}
-		if state.Status == "locked" && state.ExpiresAt != nil && state.ExpiresAt.After(now) {
-			return nil, false, nil
-		}
-		if state.Status == "locked" && state.ExpiresAt == nil {
+		if reviewLockBlocksCurrentHead(state, lockFromSHA, now) {
 			return nil, false, nil
 		}
 
@@ -97,6 +94,22 @@ func acquireReviewLock(ctx context.Context, _ platform.IssueService, repoSvc pla
 		return &reviewLockHandle{branch: lockBranch, state: lockedState}, true, nil
 	}
 	return nil, false, nil
+}
+
+func reviewLockBlocksCurrentHead(state reviewLockState, currentHeadSHA string, now time.Time) bool {
+	if state.Status != "locked" {
+		return false
+	}
+	if state.ExpiresAt != nil && !state.ExpiresAt.After(now) {
+		return false
+	}
+	if state.ExpiresAt == nil {
+		return true
+	}
+	if state.BatchBranchSHA == "" {
+		return true
+	}
+	return state.BatchBranchSHA == currentHeadSHA
 }
 
 func releaseReviewLock(ctx context.Context, _ platform.IssueService, repoSvc platform.RepositoryService, h *reviewLockHandle) error {

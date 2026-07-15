@@ -673,6 +673,37 @@ func TestParseLegacyReviewLockCommitMessage(t *testing.T) {
 	}
 }
 
+func TestReviewLockBlocksCurrentHead(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	expiredAt := now.Add(-time.Minute)
+	active := lockedReviewLockState(50, 1, 100, "current-sha", "lock", now)
+	activeOldHead := lockedReviewLockState(50, 1, 100, "old-sha", "lock", now)
+	activeLegacy := lockedReviewLockState(50, 1, 100, "", "lock", now)
+	activeWithoutExpiry := lockedReviewLockState(50, 1, 100, "old-sha", "lock", now)
+	activeWithoutExpiry.ExpiresAt = nil
+	expired := lockedReviewLockState(50, 1, 100, "current-sha", "lock", now)
+	expired.ExpiresAt = &expiredAt
+
+	tests := []struct {
+		name  string
+		state reviewLockState
+		want  bool
+	}{
+		{name: "same head active lock blocks", state: active, want: true},
+		{name: "old head active lock does not block", state: activeOldHead, want: false},
+		{name: "active legacy lock without batch branch sha blocks", state: activeLegacy, want: true},
+		{name: "active lock without expiry blocks", state: activeWithoutExpiry, want: true},
+		{name: "expired lock does not block", state: expired, want: false},
+		{name: "unlocked state does not block", state: reviewLockState{Status: "unlocked"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, reviewLockBlocksCurrentHead(tt.state, "current-sha", now))
+		})
+	}
+}
+
 func TestAcquireReviewLock_FastForwardConflictBlocksDuplicate(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	lockBranch := reviewLockBranch(50)
@@ -708,6 +739,26 @@ func TestAcquireReviewLock_FastForwardConflictBlocksDuplicate(t *testing.T) {
 	assert.True(t, repoSvc.branchExists[lockBranch])
 }
 
+func TestAcquireReviewLock_ActiveSameHeadLockStillBlocks(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	active := lockedReviewLockState(50, 1, 100, "current-sha", "active-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "active-sha"},
+		commitMessages: map[string]string{
+			"active-sha": mustReviewLockCommitMessage(t, active),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 101, "current-sha", now)
+
+	require.NoError(t, err)
+	assert.False(t, acquired)
+	assert.Nil(t, handle)
+	assert.Equal(t, "active-sha", repoSvc.branchSHAs[lockBranch])
+}
+
 func TestAcquireReviewLock_ExpiredLockIsReclaimedByAppendingCommit(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	lockBranch := reviewLockBranch(50)
@@ -740,9 +791,93 @@ func TestAcquireReviewLock_ExpiredLockIsReclaimedByAppendingCommit(t *testing.T)
 	require.True(t, ok)
 	assert.Equal(t, "locked", state.Status)
 	assert.NotEqual(t, "expired", state.LockID)
+	assert.Equal(t, "new-sha", state.BatchBranchSHA)
 }
 
-func TestAcquireReviewLock_ConcurrentStaleReclaimLoserObservesWinner(t *testing.T) {
+func TestAcquireReviewLock_ActiveOldHeadLockIsReclaimedByAppendingCommit(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 100, "old-sha", "old-head-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 101, "current-sha", now)
+
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, handle)
+	newHead := repoSvc.branchSHAs[lockBranch]
+	assert.Equal(t, "old-lock-sha", repoSvc.commitParents[newHead])
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[newHead])
+	require.True(t, ok)
+	assert.Equal(t, "locked", state.Status)
+	assert.NotEqual(t, "old-head-lock", state.LockID)
+	assert.Equal(t, "current-sha", state.BatchBranchSHA)
+}
+
+func TestAcquireReviewLock_CancelledRunOldHeadLockDoesNotBlockCurrentHead(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	cancelledRunLock := lockedReviewLockState(50, 1, 100, "old-sha", "cancelled-run-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "cancelled-lock-sha"},
+		commitMessages: map[string]string{
+			"cancelled-lock-sha": mustReviewLockCommitMessage(t, cancelledRunLock),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 101, "current-sha", now)
+
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, handle)
+	newHead := repoSvc.branchSHAs[lockBranch]
+	assert.Equal(t, "cancelled-lock-sha", repoSvc.commitParents[newHead])
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[newHead])
+	require.True(t, ok)
+	assert.Equal(t, "current-sha", state.BatchBranchSHA)
+}
+
+func TestAcquireReviewLock_ConcurrentOldHeadReclaimLoserObservesWinner(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 100, "old-sha", "old-head-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+	repoSvc.onUpdateBranch = func(name, _ string) {
+		if name != lockBranch || repoSvc.branchSHAs[lockBranch] != "old-lock-sha" {
+			return
+		}
+		winnerState := lockedReviewLockState(50, 1, 999, "current-sha", "winner-lock", now)
+		winnerSHA, createErr := repoSvc.CreateCommit(context.Background(), "old-lock-sha", mustReviewLockCommitMessage(t, winnerState))
+		require.NoError(t, createErr)
+		repoSvc.branchSHAs[lockBranch] = winnerSHA
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 101, "current-sha", now)
+
+	require.NoError(t, err)
+	require.False(t, acquired)
+	require.Nil(t, handle)
+	headState, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "winner-lock", headState.LockID)
+	assert.Equal(t, "current-sha", headState.BatchBranchSHA)
+	assert.GreaterOrEqual(t, repoSvc.markerCommitSeq, 2, "loser created a candidate before retrying after conflict")
+}
+
+func TestAcquireReviewLock_ConcurrentExpiredReclaimLoserObservesWinner(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	lockBranch := reviewLockBranch(50)
 	expiredAt := now.Add(-time.Minute)
@@ -981,7 +1116,7 @@ func TestReview_ManualActiveLockSkipCommentsWithDiagnostics(t *testing.T) {
 	issueSvc := newMockIssueService()
 	now := time.Now().UTC()
 	lockBranch := reviewLockBranch(50)
-	active := lockedReviewLockState(50, 1, 99, "sha-recorded", "active-lock", now)
+	active := lockedReviewLockState(50, 1, 99, "sha-current", "active-lock", now)
 	active.Owner = "review-owner"
 	repoSvc := &mockRepoService{
 		defaultBranch: "main",
@@ -1018,7 +1153,7 @@ func TestReview_ManualActiveLockSkipCommentsWithDiagnostics(t *testing.T) {
 	assert.Contains(t, comment, "review-owner")
 	assert.Contains(t, comment, formatReviewLockTime(active.AcquiredAt))
 	assert.Contains(t, comment, formatReviewLockTime(active.ExpiresAt))
-	assert.Contains(t, comment, "sha-recorded")
+	assert.Contains(t, comment, "sha-current")
 	assert.Contains(t, comment, "sha-current")
 }
 
@@ -1037,7 +1172,7 @@ func TestReview_AutomaticActiveLockSkipOnlyLogsOrAtLeastDoesNotComment(t *testin
 			issueSvc := newMockIssueService()
 			now := time.Now().UTC()
 			lockBranch := reviewLockBranch(50)
-			active := lockedReviewLockState(50, 1, 99, "abc123", "active-lock", now)
+			active := lockedReviewLockState(50, 1, 99, "current-sha", "active-lock", now)
 			repoSvc := &mockRepoService{
 				defaultBranch: "main",
 				branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
