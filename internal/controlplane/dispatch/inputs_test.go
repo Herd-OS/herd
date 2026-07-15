@@ -66,7 +66,6 @@ func TestWorkflowInputs(t *testing.T) {
 				"base_sha":          "def456",
 				"head_sha":          "def456",
 				"expected_head_sha": "def456",
-				"control_plane_url": "https://cp.example.com",
 				"reason":            "requested",
 			},
 		},

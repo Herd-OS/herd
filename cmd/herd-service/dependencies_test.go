@@ -107,18 +107,18 @@ func TestCommandWorkflowFileIsManagedWorkflow(t *testing.T) {
 	tests := []struct {
 		name string
 		kind cpdispatch.JobKind
+		want string
 	}{
-		{name: "review", kind: cpdispatch.JobKindReview},
-		{name: "review fix", kind: cpdispatch.JobKindReviewFix},
-		{name: "ci fix", kind: cpdispatch.JobKindCIFix},
+		{name: "review", kind: cpdispatch.JobKindReview, want: "herd-review.yml"},
+		{name: "review fix", kind: cpdispatch.JobKindReviewFix, want: "herd-worker.yml"},
+		{name: "ci fix", kind: cpdispatch.JobKindCIFix, want: "herd-worker.yml"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			workflowFile := commandWorkflowFile(tt.kind)
 
-			assert.Equal(t, "herd-worker.yml", workflowFile)
+			assert.Equal(t, tt.want, workflowFile)
 			assert.Contains(t, managed, workflowFile)
-			assert.NotContains(t, managed, "herd-review.yml")
 		})
 	}
 }
@@ -126,26 +126,22 @@ func TestCommandWorkflowFileIsManagedWorkflow(t *testing.T) {
 func TestCommandTargetFromPullRequest(t *testing.T) {
 	tests := []struct {
 		name      string
-		kind      cpdispatch.JobKind
 		milestone *gh.Milestone
 		wantBatch int
 		wantErr   string
 	}{
 		{
 			name:      "review without batch milestone uses PR number context",
-			kind:      cpdispatch.JobKindReview,
 			wantBatch: 42,
 		},
 		{
 			name:      "review with batch milestone uses milestone",
-			kind:      cpdispatch.JobKindReview,
 			milestone: &gh.Milestone{Number: gh.Ptr(849)},
 			wantBatch: 849,
 		},
 		{
-			name:    "fix still requires batch milestone",
-			kind:    cpdispatch.JobKindReviewFix,
-			wantErr: "durable batch milestone",
+			name:      "fix without batch milestone uses standalone PR context",
+			wantBatch: 42,
 		},
 	}
 	for _, tt := range tests {
@@ -153,7 +149,7 @@ func TestCommandTargetFromPullRequest(t *testing.T) {
 			target, err := commandTargetFromPullRequest(commands.DispatchCommand{
 				IssueNumber: 0,
 				PRNumber:    42,
-			}, tt.kind, &gh.PullRequest{
+			}, &gh.PullRequest{
 				Head: &gh.PullRequestBranch{
 					Ref: gh.Ptr("feature-branch"),
 					SHA: gh.Ptr("head-sha"),
@@ -212,12 +208,13 @@ type fixedOIDCValidator struct{}
 
 func (fixedOIDCValidator) Validate(context.Context, string) (jobs.OIDCClaims, error) {
 	return jobs.OIDCClaims{
-		Issuer:     jobs.GitHubActionsIssuer,
-		Audience:   []string{"herd-control-plane"},
-		Repository: "octo/herd",
-		Ref:        "refs/heads/main",
-		Workflow:   ".github/workflows/herd-integrator.yml",
-		ExpiresAt:  time.Now().Add(time.Hour),
+		Issuer:      jobs.GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "octo/herd",
+		Ref:         "refs/heads/main",
+		Workflow:    ".github/workflows/herd-integrator.yml",
+		WorkflowRef: "octo/herd/.github/workflows/herd-integrator.yml@refs/heads/main",
+		ExpiresAt:   time.Now().Add(time.Hour),
 	}, nil
 }
 

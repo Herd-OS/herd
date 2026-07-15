@@ -363,14 +363,11 @@ func containsString(values []string, want string) bool {
 func workflowMatches(claims OIDCClaims, expected string) bool {
 	expected = strings.TrimSpace(expected)
 	expectedFile := strings.TrimPrefix(expected, ".github/workflows/")
-	if claims.Workflow == expected || claims.Workflow == expectedFile {
-		return true
-	}
-	if claims.WorkflowRef == expected {
-		return true
-	}
 	refFile, ok := workflowFileFromRef(claims.WorkflowRef)
-	return ok && (refFile == expected || refFile == expectedFile)
+	if !ok {
+		return false
+	}
+	return refFile == expected || refFile == expectedFile
 }
 
 func workflowFileFromRef(workflowRef string) (string, bool) {

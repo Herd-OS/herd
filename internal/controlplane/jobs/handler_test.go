@@ -1481,13 +1481,14 @@ func (errOIDCValidator) Validate(context.Context, string) (OIDCClaims, error) {
 
 func validClaims(now time.Time) OIDCClaims {
 	return OIDCClaims{
-		Issuer:     GitHubActionsIssuer,
-		Audience:   []string{"herd-control-plane"},
-		Repository: "acme/widgets",
-		Ref:        "refs/heads/herd/worker/837",
-		Workflow:   "worker.yml",
-		RunID:      "12345",
-		ExpiresAt:  now.Add(time.Hour),
+		Issuer:      GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "acme/widgets",
+		Ref:         "refs/heads/herd/worker/837",
+		Workflow:    "worker.yml",
+		WorkflowRef: "acme/widgets/.github/workflows/worker.yml@refs/heads/herd/worker/837",
+		RunID:       "12345",
+		ExpiresAt:   now.Add(time.Hour),
 	}
 }
 

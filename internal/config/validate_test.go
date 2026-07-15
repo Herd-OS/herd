@@ -47,6 +47,7 @@ func TestValidate_ControlPlaneURL(t *testing.T) {
 		{"empty uses hosted default", "", false, ""},
 		{"http valid", "http://localhost:8080", false, ""},
 		{"https valid", "https://cp.example.com", false, ""},
+		{"userinfo invalid", "https://user:pass@cp.example.com", true, "control_plane_url must not include userinfo"},
 		{"relative invalid", "/api", true, "control_plane_url must use http or https"},
 		{"unsupported scheme invalid", "ftp://cp.example.com", true, "control_plane_url must use http or https"},
 	}

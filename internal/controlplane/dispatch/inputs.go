@@ -43,9 +43,6 @@ func WorkflowInputs(req DispatchRequest, jobID string) (map[string]string, error
 	if req.TimeoutMinutes > 0 {
 		inputs["timeout_minutes"] = strconv.Itoa(req.TimeoutMinutes)
 	}
-	if req.ControlPlaneURL != "" {
-		inputs["control_plane_url"] = req.ControlPlaneURL
-	}
 	if req.Reason != "" {
 		inputs["reason"] = req.Reason
 	}

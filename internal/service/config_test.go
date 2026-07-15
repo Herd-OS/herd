@@ -185,6 +185,14 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: []string{envPublicURL, "host"},
 		},
 		{
+			name: "public url must not include userinfo",
+			cfg: Config{
+				Env:       "development",
+				PublicURL: "https://user:pass@service.example.com",
+			},
+			wantErr: []string{envPublicURL, "userinfo"},
+		},
+		{
 			name: "invalid reconciler interval",
 			cfg: Config{
 				Env:                "development",

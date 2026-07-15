@@ -213,6 +213,9 @@ func validateHTTPURL(field, value string) error {
 	if parsed.Host == "" {
 		return fmt.Errorf("%s must include a host", field)
 	}
+	if parsed.User != nil {
+		return fmt.Errorf("%s must not include userinfo", field)
+	}
 	return nil
 }
 

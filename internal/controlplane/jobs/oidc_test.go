@@ -21,13 +21,14 @@ import (
 func TestValidateOIDCClaims(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	base := OIDCClaims{
-		Issuer:     GitHubActionsIssuer,
-		Audience:   []string{"herd-control-plane"},
-		Repository: "acme/widgets",
-		Ref:        "refs/heads/herd/worker/837",
-		Workflow:   "worker.yml",
-		RunID:      "12345",
-		ExpiresAt:  now.Add(time.Hour),
+		Issuer:      GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "acme/widgets",
+		Ref:         "refs/heads/herd/worker/837",
+		Workflow:    "worker.yml",
+		WorkflowRef: "acme/widgets/.github/workflows/worker.yml@refs/heads/herd/worker/837",
+		RunID:       "12345",
+		ExpiresAt:   now.Add(time.Hour),
 	}
 	expected := ExpectedOIDCIdentity{
 		Repository: "acme/widgets",
@@ -67,6 +68,7 @@ func TestValidateOIDCClaims(t *testing.T) {
 			name: "wrong workflow",
 			mutate: func(claims *OIDCClaims) {
 				claims.Workflow = "review.yml"
+				claims.WorkflowRef = "acme/widgets/.github/workflows/review.yml@refs/heads/herd/worker/837"
 			},
 			wantErr: "workflow",
 		},
@@ -298,6 +300,31 @@ func TestValidateOIDCClaimsAcceptsExpectedWorkflowFullPath(t *testing.T) {
 	err := ValidateOIDCClaims(claims, expected, OIDCOptions{Audience: "herd-control-plane", Now: func() time.Time { return now }})
 
 	require.NoError(t, err)
+}
+
+func TestValidateOIDCClaimsRejectsWorkflowNameWithWrongWorkflowRef(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	claims := OIDCClaims{
+		Issuer:      GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "acme/widgets",
+		Ref:         "refs/heads/main",
+		Workflow:    "herd-worker.yml",
+		WorkflowRef: "acme/widgets/.github/workflows/evil.yml@refs/heads/main",
+		RunID:       "123",
+		ExpiresAt:   now.Add(time.Hour),
+	}
+	expected := ExpectedOIDCIdentity{
+		Repository: "acme/widgets",
+		Ref:        "refs/heads/main",
+		Workflow:   ".github/workflows/herd-worker.yml",
+		RunID:      "123",
+	}
+
+	err := ValidateOIDCClaims(claims, expected, OIDCOptions{Audience: "herd-control-plane", Now: func() time.Time { return now }})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid OIDC workflow")
 }
 
 func TestValidateOIDCClaimsRejectsWrongIdentityFields(t *testing.T) {

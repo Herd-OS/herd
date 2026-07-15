@@ -424,6 +424,7 @@ func TestHandlerRestrictsOIDCWorkflowByEventKind(t *testing.T) {
 			st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
 			claims := validEventClaims(now)
 			claims.Workflow = tt.workflow
+			claims.WorkflowRef = "octo/herd/" + tt.workflow + "@refs/heads/main"
 			handler := NewHandler(HandlerOptions{
 				Store:     st,
 				Validator: fixedValidator(claims),
@@ -635,13 +636,14 @@ func (v fixedValidator) Validate(context.Context, string) (jobs.OIDCClaims, erro
 
 func validEventClaims(now time.Time) jobs.OIDCClaims {
 	return jobs.OIDCClaims{
-		Issuer:     jobs.GitHubActionsIssuer,
-		Audience:   []string{"herd-control-plane"},
-		Repository: "octo/herd",
-		Ref:        "refs/heads/main",
-		Workflow:   ".github/workflows/herd-integrator.yml",
-		RunID:      "123",
-		ExpiresAt:  now.Add(time.Hour),
+		Issuer:      jobs.GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "octo/herd",
+		Ref:         "refs/heads/main",
+		Workflow:    ".github/workflows/herd-integrator.yml",
+		WorkflowRef: "octo/herd/.github/workflows/herd-integrator.yml@refs/heads/main",
+		RunID:       "123",
+		ExpiresAt:   now.Add(time.Hour),
 	}
 }
 

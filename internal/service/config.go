@@ -139,5 +139,8 @@ func validatePublicURL(value string) error {
 	if parsed.Host == "" {
 		return fmt.Errorf("%s must include a host", envPublicURL)
 	}
+	if parsed.User != nil {
+		return fmt.Errorf("%s must not include userinfo", envPublicURL)
+	}
 	return nil
 }

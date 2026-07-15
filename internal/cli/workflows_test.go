@@ -107,6 +107,7 @@ func TestWorkersExtraEnv_EmptyOmitted(t *testing.T) {
 		"HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}\n\n          ISSUE_NUMBER:",
 		"empty ExtraEnv produced a stray blank line in env block")
 	assert.NotContains(t, string(rendered), "HERD_CONTROL_PLANE_URL: ${{ inputs.control_plane_url")
+	assert.NotContains(t, string(rendered), "control_plane_url:")
 }
 
 func TestWorkersExtraEnv_NilSlice(t *testing.T) {
@@ -267,6 +268,7 @@ func TestCallbackWorkflows_RenderControlPlaneURL(t *testing.T) {
 		{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true},
 		{SrcName: "herd-monitor.yml.tmpl", DestName: "herd-monitor.yml", Template: true},
 		{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true},
+		{SrcName: "herd-review.yml.tmpl", DestName: "herd-review.yml", Template: true},
 	}
 
 	for _, tt := range tests {
@@ -298,6 +300,27 @@ func TestCallbackWorkflows_RenderControlPlaneURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReviewWorkflow_DefaultMatchesCommittedWorkflowAndPostsReviewCallback(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-review.yml.tmpl", DestName: "herd-review.yml", Template: true}
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	onDisk, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "herd-review.yml"))
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(rendered, onDisk),
+		"rendered review template with default config must match committed workflow.\nrendered:\n%s\non-disk:\n%s", rendered, onDisk)
+
+	s := string(rendered)
+	assert.Contains(t, s, "herd integrator review --pr")
+	assert.Contains(t, s, `kind: "review_completed"`)
+	assert.Contains(t, s, "$HERD_CONTROL_PLANE_URL/api/v1/jobs/$HERD_JOB_ID/results")
+	assert.NotContains(t, s, "control_plane_url:")
+	assert.NotContains(t, s, "HERD_GITHUB_TOKEN")
+	assert.NotContains(t, s, "GITHUB_TOKEN")
+	assert.NotContains(t, s, "GH_TOKEN")
 }
 
 func TestCallbackWorkflows_WorkflowEventPostsUseBoundedOIDCRetry(t *testing.T) {
@@ -886,7 +909,7 @@ func TestGeneratedWorkflowsDoNotUseLegacyPATOrCommentDispatch(t *testing.T) {
 
 func TestWorkflowFiles_ContainsExpectedNames(t *testing.T) {
 	files := workflowFiles()
-	require.Len(t, files, 4)
+	require.Len(t, files, 5)
 
 	bySrc := map[string]workflowFile{}
 	for _, wf := range files {
@@ -897,6 +920,11 @@ func TestWorkflowFiles_ContainsExpectedNames(t *testing.T) {
 	require.True(t, ok, "worker template must be registered")
 	assert.True(t, worker.Template, "worker workflow must be marked as template")
 	assert.Equal(t, "herd-worker.yml", worker.DestName)
+
+	review, ok := bySrc["herd-review.yml.tmpl"]
+	require.True(t, ok, "review template must be registered")
+	assert.True(t, review.Template, "review workflow must be marked as template")
+	assert.Equal(t, "herd-review.yml", review.DestName)
 
 	publish, ok := bySrc["herd-publish-runner.yml.tmpl"]
 	require.True(t, ok, "publish-runner template must be registered")
