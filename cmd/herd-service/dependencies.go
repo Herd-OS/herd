@@ -44,7 +44,7 @@ type productionStore interface {
 	commands.Store
 }
 
-func buildServiceDependencies(cfg service.Config, st *store.PostgresStore, logger *log.Logger) (service.Dependencies, error) {
+func buildServiceDependencies(cfg service.Config, st productionStore, logger *log.Logger) (service.Dependencies, error) {
 	return buildServiceDependenciesWithOptions(cfg, st, logger, productionDependencyOptions{})
 }
 
@@ -85,19 +85,21 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		Dispatcher: workflowDispatcher,
 	}
 	if opts.CommandDispatcher == nil {
-		dispatcher := productionCommandDispatcher{
-			Dispatcher:      workflowDispatcher,
-			ControlPlaneURL: cfg.PublicURL,
-			DefaultRunner:   "",
-			TimeoutMinutes:  0,
-		}
-		opts.CommandDispatcher = dispatcher
+		return service.Dependencies{}, fmt.Errorf("production command dispatcher is not configured; durable command dispatch context must be implemented before enabling issue-comment dispatch")
 	}
 	if opts.WorkflowEventProcessor == nil {
-		return service.Dependencies{}, fmt.Errorf("production workflow event processor is not configured")
+		opts.WorkflowEventProcessor = productionWorkflowEventProcessor{
+			Reconciler: &reconciler.Reconciler{
+				Store: st,
+				Commands: productionCommandRequeuer{
+					Dispatcher: opts.CommandDispatcher,
+				},
+				Logger: logger,
+			},
+		}
 	}
 	if opts.ArtifactStore == nil {
-		return service.Dependencies{}, fmt.Errorf("production artifact store is not configured")
+		opts.ArtifactStore = artifacts.GitHubActionsStore{TokenSource: tokenSource}
 	}
 
 	registerRoute, err := cpgithub.NewDefaultRegisterHandler(st, appCfg, appLogin, cfg.PublicURL)
@@ -141,6 +143,29 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 	return deps, nil
 }
 
+type productionWorkflowEventProcessor struct {
+	Reconciler *reconciler.Reconciler
+}
+
+func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Context, _ store.Repository, _ workflowevents.Event) error {
+	if p.Reconciler == nil {
+		return fmt.Errorf("production workflow event reconciler is not configured")
+	}
+	_, err := p.Reconciler.RunOnce(ctx)
+	return err
+}
+
+type productionCommandRequeuer struct {
+	Dispatcher commands.CommandDispatcher
+}
+
+func (r productionCommandRequeuer) RequeueCommand(ctx context.Context, item store.ReconcileCommand) error {
+	if r.Dispatcher == nil {
+		return fmt.Errorf("production command dispatcher is not configured")
+	}
+	return fmt.Errorf("production command requeue requires durable command event context for %s; repair required", item.IdempotencyKey)
+}
+
 type productionCommandDispatcher struct {
 	Dispatcher      cpdispatch.Dispatcher
 	ControlPlaneURL string
@@ -148,7 +173,7 @@ type productionCommandDispatcher struct {
 	TimeoutMinutes  int
 }
 
-func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd commands.DispatchCommand) error {
+func (d productionCommandDispatcher) DispatchCommand(_ context.Context, cmd commands.DispatchCommand) error {
 	kind, err := commandJobKind(cmd.Command.Kind)
 	if err != nil {
 		return err

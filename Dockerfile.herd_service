@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" \
     -o /out/herd-service ./cmd/herd-service
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM alpine:3.22
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.source="https://github.com/herd-os/herd" \
@@ -27,9 +27,13 @@ LABEL org.opencontainers.image.source="https://github.com/herd-os/herd" \
 
 WORKDIR /app
 
-COPY --from=build --chown=nonroot:nonroot /out/herd-service /app/herd-service
+RUN apk add --no-cache ca-certificates git openssh-client && \
+    addgroup -S herd && \
+    adduser -S -G herd -h /app herd
 
-USER nonroot:nonroot
+COPY --from=build --chown=herd:herd /out/herd-service /app/herd-service
+
+USER herd:herd
 EXPOSE 8080
 
 ENTRYPOINT ["/app/herd-service"]

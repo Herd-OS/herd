@@ -201,7 +201,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	patchArtifact, applyMetadata, applyErr := h.validateWorkerPatch(r.Context(), result)
+	patchArtifact, applyMetadata, applyErr := h.validateWorkerPatch(r.Context(), result, job)
 	if applyErr != nil {
 		if workerPatchConfigurationError(applyErr) {
 			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
@@ -407,16 +407,33 @@ func validateResultAgainstJob(result Result, job store.Job) error {
 	if job.HeadSHA != "" && head != "" && job.HeadSHA != head {
 		return fmt.Errorf("stale head SHA: expected %s, got %s", job.HeadSHA, head)
 	}
-	if review, ok := result.(ReviewCompletedResult); ok && job.PRNumber != 0 && review.PRNumber != job.PRNumber {
-		return fmt.Errorf("result pr_number does not match job: expected %d, got %d", job.PRNumber, review.PRNumber)
+	if review, ok := result.(ReviewCompletedResult); ok {
+		if job.PRNumber == 0 {
+			return fmt.Errorf("job PR number is missing")
+		}
+		if review.PRNumber != job.PRNumber {
+			return fmt.Errorf("result pr_number does not match job: expected %d, got %d", job.PRNumber, review.PRNumber)
+		}
 	}
 	if worker, ok := result.(WorkerCompletedResult); ok {
 		if job.BaseSHA != "" && worker.BaseSHA != "" && job.BaseSHA != worker.BaseSHA {
 			return fmt.Errorf("stale base SHA: expected %s, got %s", job.BaseSHA, worker.BaseSHA)
 		}
 		if worker.Status == StatusSuccess {
+			if strings.TrimSpace(job.BaseSHA) == "" {
+				return fmt.Errorf("job base SHA is missing")
+			}
+			if strings.TrimSpace(job.HeadSHA) == "" {
+				return fmt.Errorf("job head SHA is missing")
+			}
 			if strings.TrimSpace(job.WorkerBranch) == "" {
 				return fmt.Errorf("job worker branch is missing")
+			}
+			if worker.BaseSHA != job.BaseSHA {
+				return fmt.Errorf("stale base SHA: expected %s, got %s", job.BaseSHA, worker.BaseSHA)
+			}
+			if worker.ExpectedHeadSHA != job.HeadSHA {
+				return fmt.Errorf("stale expected head SHA: expected %s, got %s", job.HeadSHA, worker.ExpectedHeadSHA)
 			}
 			if strings.TrimSpace(worker.TargetBranch) != job.WorkerBranch {
 				return fmt.Errorf("result target_branch does not match job worker branch")
@@ -426,7 +443,7 @@ func validateResultAgainstJob(result Result, job store.Job) error {
 	return nil
 }
 
-func (h Handler) validateWorkerPatch(ctx context.Context, result Result) (*artifacts.ValidatedArtifact, map[string]any, error) {
+func (h Handler) validateWorkerPatch(ctx context.Context, result Result, job store.Job) (*artifacts.ValidatedArtifact, map[string]any, error) {
 	worker, ok := result.(WorkerCompletedResult)
 	if !ok || worker.Status != StatusSuccess {
 		return nil, nil, nil
@@ -440,10 +457,17 @@ func (h Handler) validateWorkerPatch(ctx context.Context, result Result) (*artif
 	if h.appTokenSource == nil {
 		return nil, nil, fmt.Errorf("worker patch GitHub App token source is not configured")
 	}
+	if _, ok := h.store.(MutationRecorder); !ok {
+		return nil, nil, fmt.Errorf("worker patch mutation recorder is not configured")
+	}
+	if _, ok := h.store.(MutationReader); !ok {
+		return nil, nil, fmt.Errorf("worker patch mutation reader is not configured")
+	}
 	metadata := map[string]any{
 		"patch_artifact": worker.PatchArtifact,
 	}
-	artifact, err := artifacts.Validate(ctx, h.artifactStore, artifacts.ValidationRequest{
+	artifactCtx := artifacts.ContextWithArtifactRepository(ctx, worker.Repository, job.InstallationID)
+	artifact, err := artifacts.Validate(artifactCtx, h.artifactStore, artifacts.ValidationRequest{
 		Repository:       worker.Repository,
 		JobID:            worker.JobID,
 		BaseSHA:          worker.BaseSHA,

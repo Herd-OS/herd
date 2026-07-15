@@ -225,6 +225,71 @@ func TestValidateResultAgainstJobRejectsStaleHeadSHA(t *testing.T) {
 	assert.Contains(t, err.Error(), "stale head SHA")
 }
 
+func TestValidateResultAgainstJobRequiresDurableReviewPRNumber(t *testing.T) {
+	result := ReviewCompletedResult{
+		Version:     1,
+		Kind:        KindReviewCompleted,
+		Repository:  "acme/widgets",
+		JobID:       "job-1",
+		BatchNumber: 106,
+		PRNumber:    12,
+		HeadSHA:     "head",
+		Status:      StatusApproved,
+		Summary:     "looks good",
+	}
+
+	tests := []struct {
+		name string
+		job  store.Job
+		want string
+	}{
+		{name: "missing", job: store.Job{JobID: "job-1", HeadSHA: "head"}, want: "job PR number is missing"},
+		{name: "mismatch", job: store.Job{JobID: "job-1", PRNumber: 13, HeadSHA: "head"}, want: "result pr_number does not match job"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateResultAgainstJob(result, tt.job)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestValidateResultAgainstJobRequiresDurableWorkerSuccessSHAs(t *testing.T) {
+	result := WorkerCompletedResult{
+		Version:         1,
+		Kind:            KindWorkerCompleted,
+		Repository:      "acme/widgets",
+		JobID:           "job-1",
+		BatchNumber:     106,
+		TargetBranch:    "herd/worker/1",
+		BaseSHA:         "base",
+		ExpectedHeadSHA: "head",
+		Status:          StatusSuccess,
+		PatchArtifact:   "worker-branch",
+	}
+
+	tests := []struct {
+		name string
+		job  store.Job
+		want string
+	}{
+		{name: "missing base", job: store.Job{JobID: "job-1", HeadSHA: "head", WorkerBranch: "herd/worker/1"}, want: "job base SHA is missing"},
+		{name: "missing head", job: store.Job{JobID: "job-1", BaseSHA: "base", WorkerBranch: "herd/worker/1"}, want: "job head SHA is missing"},
+		{name: "stale base", job: store.Job{JobID: "job-1", BaseSHA: "other", HeadSHA: "head", WorkerBranch: "herd/worker/1"}, want: "stale base SHA"},
+		{name: "stale expected head", job: store.Job{JobID: "job-1", BaseSHA: "base", HeadSHA: "other", WorkerBranch: "herd/worker/1"}, want: "stale head SHA"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateResultAgainstJob(result, tt.job)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 func TestResultIdempotencyKeyUsesStableResultIdentity(t *testing.T) {
 	payload := []byte(`{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":1,"pr_number":2,"head_sha":"head","status":"approved","summary":"ok"}`)
 	result, err := ParseResultPayload(payload)

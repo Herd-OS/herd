@@ -190,6 +190,21 @@ func TestRegisterRepositoryForInitFailures(t *testing.T) {
 	}
 }
 
+func TestRegisterRepositoryForInitRedactsRegistrarSetupToken(t *testing.T) {
+	setupToken := "gho_exact_secret"
+	reg := withFakeInitRegistration(t, setupToken, cpclient.RegisterRepositoryResponse{}, fmt.Errorf("proxy logged setup_token=%s github_pat_extra_secret", setupToken))
+
+	_, err := registerRepositoryForInit(context.Background(), "octo", "herd", initOptions{ControlPlaneURL: config.DefaultControlPlaneURL, AppLogin: "herd-os"})
+
+	require.Error(t, err)
+	assert.Len(t, reg.reqs, 1)
+	assert.Equal(t, setupToken, reg.reqs[0].SetupToken)
+	assert.NotContains(t, err.Error(), setupToken)
+	assert.NotContains(t, err.Error(), "github_pat_extra_secret")
+	assert.Contains(t, err.Error(), "[REDACTED]")
+	assert.Contains(t, err.Error(), "retry `herd init` later")
+}
+
 func TestInstallWorkflows(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, installWorkflows(dir, config.Default()))

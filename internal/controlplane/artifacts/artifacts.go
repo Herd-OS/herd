@@ -40,6 +40,28 @@ type Store interface {
 	OpenArtifact(ctx context.Context, name string) (io.ReadCloser, error)
 }
 
+type artifactContextKey struct{}
+
+type ArtifactContext struct {
+	Repository     string
+	InstallationID int64
+}
+
+func ContextWithArtifactRepository(ctx context.Context, repository string, installationID int64) context.Context {
+	return context.WithValue(ctx, artifactContextKey{}, ArtifactContext{
+		Repository:     repository,
+		InstallationID: installationID,
+	})
+}
+
+func ArtifactRepositoryFromContext(ctx context.Context) ArtifactContext {
+	if ctx == nil {
+		return ArtifactContext{}
+	}
+	value, _ := ctx.Value(artifactContextKey{}).(ArtifactContext)
+	return value
+}
+
 type ValidationRequest struct {
 	Repository       string
 	JobID            string

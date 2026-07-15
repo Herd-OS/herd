@@ -340,7 +340,7 @@ func TestHandlerRejectsStaleHeadSHA(t *testing.T) {
 func TestHandlerRejectsResultRepositoryDifferentFromJobRepository(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", WorkerBranch: "herd/worker/837", Metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345"}`)}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837", Metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345"}`)}
 	claims := validClaims(now)
 	claims.Repository = "evil/fork"
 	handler := NewHandler(HandlerOptions{
@@ -688,7 +688,7 @@ func TestHandlerAcceptsEmptyPatchArtifactWithoutApplying(t *testing.T) {
 
 func TestHandlerRejectsMissingBearerToken(t *testing.T) {
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", WorkerBranch: "herd/worker/837"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{Store: st, Validator: fixedOIDCValidator(validClaims(time.Now().Add(time.Hour)))})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job-1/results", strings.NewReader(validWorkerPayload("job-1", "head")))
@@ -702,7 +702,7 @@ func TestHandlerRejectsMissingBearerToken(t *testing.T) {
 
 func TestHandlerRejectsOIDCValidatorFailure(t *testing.T) {
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", WorkerBranch: "herd/worker/837"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
 	handler := NewHandler(HandlerOptions{Store: st, Validator: errOIDCValidator{}})
 
 	rec := httptest.NewRecorder()
@@ -929,10 +929,37 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureWithoutMutationReaderDoesNo
 	second := httptest.NewRecorder()
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
-	require.Equal(t, http.StatusConflict, first.Code)
-	require.Equal(t, http.StatusConflict, second.Code)
-	assert.Contains(t, second.Body.String(), "unknown outcome")
-	assert.Len(t, applier.requests, 1)
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusInternalServerError, second.Code)
+	assert.Contains(t, second.Body.String(), "mutation reader is not configured")
+	assert.Empty(t, applier.requests)
+	assert.Empty(t, inner.results)
+}
+
+func TestHandlerRejectsWorkerSuccessWithoutMutationTrackingBeforeArtifactFetch(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
+	inner := newResultStore()
+	inner.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	artifactStore := &flakyArtifactStore{store: artifactMap(t, metadata, patch), errs: []error{fmt.Errorf("artifact should not be fetched")}}
+	handler := NewHandler(HandlerOptions{
+		Store:          noMutationResultStore{inner: inner},
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactStore,
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", validWorkerPayload("job-1", "head")))
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "mutation recorder is not configured")
+	assert.Len(t, artifactStore.errs, 1, "the queued artifact error should remain unused when artifacts are not fetched")
+	assert.Empty(t, applier.requests)
 	assert.Empty(t, inner.results)
 }
 
@@ -1048,6 +1075,34 @@ func (s mutationRecorderOnlyResultStore) RecordGitHubMutationAttempt(ctx context
 
 func (s mutationRecorderOnlyResultStore) CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
 	return s.inner.CompleteGitHubMutationAttempt(ctx, idempotencyKey, status, response, errorMessage, completedAt)
+}
+
+type noMutationResultStore struct {
+	inner *resultStore
+}
+
+func (s noMutationResultStore) GetJob(ctx context.Context, jobID string) (store.Job, error) {
+	return s.inner.GetJob(ctx, jobID)
+}
+
+func (s noMutationResultStore) RecordJobResult(ctx context.Context, r store.JobResult) (bool, error) {
+	return s.inner.RecordJobResult(ctx, r)
+}
+
+func (s noMutationResultStore) AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (bool, error) {
+	return s.inner.AcquireIdempotencyKey(ctx, key)
+}
+
+func (s noMutationResultStore) GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error) {
+	return s.inner.GetIdempotencyKey(ctx, key)
+}
+
+func (s noMutationResultStore) CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error {
+	return s.inner.CompleteIdempotencyKey(ctx, key, resultRef)
+}
+
+func (s noMutationResultStore) FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error {
+	return s.inner.FailIdempotencyKey(ctx, key, errorMessage)
 }
 
 func TestHandlerRetriesReviewResultAfterProcessorFailure(t *testing.T) {

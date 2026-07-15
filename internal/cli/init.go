@@ -290,15 +290,49 @@ func registerRepositoryForInit(ctx context.Context, owner, repo string, opts ini
 		AppLogin:   opts.AppLogin,
 	})
 	if err != nil {
+		safeErr := redactSetupTokenError(err, setupToken)
 		if registrationFailureLooksLikeAppAccess(err) {
-			return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. Ensure the Herd GitHub App is installed for %s/%s and retry `herd init`", err, owner, repo)
+			return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. Ensure the Herd GitHub App is installed for %s/%s and retry `herd init`", safeErr, owner, repo)
 		}
-		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. The Herd control plane is unavailable or rate limited; retry `herd init` later", err)
+		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. The Herd control plane is unavailable or rate limited; retry `herd init` later", safeErr)
 	}
 	if strings.TrimSpace(resp.RunnerBootstrapToken) == "" {
 		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: response is missing runner bootstrap token; retry `herd init` later or contact the control-plane operator")
 	}
 	return resp, nil
+}
+
+func redactSetupTokenError(err error, setupToken string) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(err.Error())
+	token := strings.TrimSpace(setupToken)
+	if token != "" {
+		msg = strings.ReplaceAll(msg, token, "[REDACTED]")
+	}
+	for _, prefix := range []string{"ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_"} {
+		for {
+			idx := strings.Index(msg, prefix)
+			if idx < 0 {
+				break
+			}
+			end := idx + len(prefix)
+			for end < len(msg) {
+				c := msg[end]
+				if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+					end++
+					continue
+				}
+				break
+			}
+			msg = msg[:idx] + "[REDACTED]" + msg[end:]
+		}
+	}
+	if msg == "" {
+		msg = "registration request failed"
+	}
+	return errors.New(msg)
 }
 
 func registrationFailureLooksLikeAppAccess(err error) bool {

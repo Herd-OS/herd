@@ -241,6 +241,23 @@ func TestValidateRejectsOversizedArtifacts(t *testing.T) {
 	}
 }
 
+func TestArtifactRepositoryContextRoundTrip(t *testing.T) {
+	ctx := ContextWithArtifactRepository(context.Background(), "acme/widgets", 99)
+
+	got := ArtifactRepositoryFromContext(ctx)
+
+	assert.Equal(t, "acme/widgets", got.Repository)
+	assert.Equal(t, int64(99), got.InstallationID)
+	assert.Empty(t, ArtifactRepositoryFromContext(context.Background()))
+}
+
+func TestGitHubActionsStoreRequiresTokenSource(t *testing.T) {
+	_, err := GitHubActionsStore{}.OpenArtifact(ContextWithArtifactRepository(context.Background(), "acme/widgets", 99), "worker-branch")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token source")
+}
+
 type memoryArtifactStore map[string][]byte
 
 func (s memoryArtifactStore) OpenArtifact(_ context.Context, name string) (io.ReadCloser, error) {

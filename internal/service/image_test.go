@@ -19,12 +19,15 @@ func TestServiceDockerfileRuntimeImage(t *testing.T) {
 	assert.Contains(t, dockerfile, "FROM --platform=$BUILDPLATFORM golang:1.26.1-alpine AS build")
 	assert.Contains(t, dockerfile, "go build -trimpath")
 	assert.Contains(t, dockerfile, "./cmd/herd-service")
-	assert.Contains(t, dockerfile, "FROM gcr.io/distroless/static-debian12:nonroot")
-	assert.Contains(t, dockerfile, "COPY --from=build --chown=nonroot:nonroot /out/herd-service /app/herd-service")
-	assert.Contains(t, dockerfile, "USER nonroot:nonroot")
+	assert.Contains(t, dockerfile, "FROM alpine:3.22")
+	assert.Contains(t, dockerfile, "apk add --no-cache ca-certificates git openssh-client")
+	assert.Contains(t, dockerfile, "COPY --from=build --chown=herd:herd /out/herd-service /app/herd-service")
+	assert.Contains(t, dockerfile, "USER herd:herd")
 	assert.Contains(t, dockerfile, "EXPOSE 8080")
 
-	runtimeStage := dockerfile[strings.LastIndex(dockerfile, "FROM gcr.io/distroless/static-debian12:nonroot"):]
+	runtimeStart := strings.LastIndex(dockerfile, "FROM alpine:3.22")
+	require.NotEqual(t, -1, runtimeStart)
+	runtimeStage := dockerfile[runtimeStart:]
 	assert.NotContains(t, runtimeStage, "COPY .")
 	assert.NotContains(t, runtimeStage, "HERD_GITHUB_APP_PRIVATE_KEY")
 	assert.NotContains(t, runtimeStage, "HERD_WEBHOOK_SECRET")

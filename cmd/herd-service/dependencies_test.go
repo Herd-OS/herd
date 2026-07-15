@@ -24,28 +24,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildServiceDependenciesProductionRejectsUnsafeDefaults(t *testing.T) {
+func TestBuildServiceDependenciesProductionRejectsMissingCommandDispatcher(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 
-	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{})
+	deps, err := buildServiceDependencies(cfg, st, log.New(io.Discard, "", 0))
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "workflow event processor")
+	assert.Contains(t, err.Error(), "production command dispatcher")
 	assert.Empty(t, deps)
 }
 
-func TestBuildServiceDependenciesProductionRejectsMissingArtifactStore(t *testing.T) {
+func TestBuildServiceDependenciesProductionUsesDefaultWorkflowProcessorAndArtifactStore(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 
 	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{
-		WorkflowEventProcessor: fixedWorkflowProcessor{},
+		CommandDispatcher: fixedCommandDispatcher{},
 	})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "artifact store")
-	assert.Empty(t, deps)
+	require.NoError(t, err)
+	require.NotNil(t, deps.WorkflowEventProcessor)
+	require.NotNil(t, deps.JobResultsRoute)
+	require.NotNil(t, deps.WorkflowEventsRoute)
+	require.NotNil(t, deps.RunnerRegistrationTokenRoute)
+	require.NotNil(t, deps.RegisterRepositoryRoute)
 }
 
 func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
@@ -53,6 +56,7 @@ func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
 	st := store.NewMemoryStore()
 	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{
 		OIDCValidator:          fixedOIDCValidator{},
+		CommandDispatcher:      fixedCommandDispatcher{},
 		WorkflowEventProcessor: fixedWorkflowProcessor{},
 		ArtifactStore:          emptyArtifactStore{},
 	})
@@ -142,5 +146,11 @@ var _ artifacts.Store = emptyArtifactStore{}
 type fixedWorkflowProcessor struct{}
 
 func (fixedWorkflowProcessor) ProcessWorkflowEvent(context.Context, store.Repository, workflowevents.Event) error {
+	return nil
+}
+
+type fixedCommandDispatcher struct{}
+
+func (fixedCommandDispatcher) DispatchCommand(context.Context, commands.DispatchCommand) error {
 	return nil
 }
