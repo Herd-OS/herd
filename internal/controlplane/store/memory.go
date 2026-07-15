@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 )
 
 // MemoryStore is an in-process Store for orchestration tests that do not need
@@ -405,7 +407,7 @@ func (s *MemoryStore) ListStartedGitHubMutationAttempts(_ context.Context, creat
 		if limit > 0 && len(out) >= limit {
 			break
 		}
-		if attempt.Status != "started" {
+		if !mutations.IsPostCallUnknown(attempt.Status) {
 			continue
 		}
 		if !attempt.CreatedAt.IsZero() && !attempt.CreatedAt.Before(createdBefore) {

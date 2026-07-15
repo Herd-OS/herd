@@ -9,6 +9,7 @@ import (
 	"time"
 
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
 )
@@ -178,6 +179,7 @@ func (s ReviewService) DispatchReview(ctx context.Context, repo Repository, req 
 	})
 	if err != nil {
 		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
+		_ = s.Status.SetHerdReviewStatus(ctx, repo, req.PRNumber, req.HeadSHA, ReviewStatusFailure, "Herd Review workflow dispatch failed", "")
 		return ReviewDispatchResult{}, fmt.Errorf("dispatch review workflow: %w", err)
 	}
 	if !dispatched.Created {
@@ -270,19 +272,25 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 			return repairErr
 		}
 		if record.Status == "started" {
-			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
+			if attempt, attemptErr := s.Mutations.GetGitHubMutationAttempt(ctx, key); attemptErr == nil && mutationspkg.IsPreCallRetryable(attempt.Status) {
+				// Safe redelivery: the review submission GitHub call had not started.
+			} else if attemptErr != nil && !errors.Is(attemptErr, store.ErrNotFound) {
+				return fmt.Errorf("get review submission mutation attempt: %w", attemptErr)
+			} else {
+				return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
+			}
 		}
 		if record.Status == "failed" {
 			if attempt, attemptErr := s.Mutations.GetGitHubMutationAttempt(ctx, key); attemptErr != nil && !errors.Is(attemptErr, store.ErrNotFound) {
 				return fmt.Errorf("get failed review submission mutation attempt: %w", attemptErr)
-			} else if attemptErr == nil && attempt.Status != "completed" {
+			} else if attemptErr == nil && !mutationspkg.IsPreCallRetryable(attempt.Status) && !mutationspkg.IsCompleted(attempt.Status) {
 				return fmt.Errorf("%w: %s has unknown outcome after failed mutation attempt", ErrReviewSubmissionInProgress, key)
 			} else if errors.Is(attemptErr, store.ErrNotFound) {
 				if err := s.Mutations.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
 					IdempotencyKey: key,
 					RepositoryID:   repo.ID,
 					MutationType:   "review_submission",
-					Status:         "started",
+					Status:         mutationspkg.PhaseIntentRecorded,
 					Request:        request,
 					CreatedAt:      s.now(),
 				}); err != nil {
@@ -297,7 +305,7 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		IdempotencyKey: key,
 		RepositoryID:   repo.ID,
 		MutationType:   "review_submission",
-		Status:         "started",
+		Status:         mutationspkg.PhaseIntentRecorded,
 		Request:        request,
 		CreatedAt:      s.now(),
 	}); err != nil {
@@ -307,13 +315,18 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		}
 		return fmt.Errorf("record review submission mutation attempt: %w", err)
 	}
+	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCallStarted, nil, "", s.now()); err != nil {
+		_ = s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseFailedPreCall, nil, err.Error(), s.now())
+		_ = s.Mutations.FailIdempotencyKey(ctx, key, err.Error())
+		return fmt.Errorf("mark review submission mutation call started: %w", err)
+	}
 	if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA); err != nil {
-		_ = s.Mutations.CompleteGitHubMutationAttempt(ctx, key, "failed", nil, err.Error(), s.now())
+		_ = s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseRepairRequired, nil, err.Error(), s.now())
 		_ = s.Mutations.FailIdempotencyKey(ctx, key, err.Error())
 		return err
 	}
 	response, _ := json.Marshal(map[string]any{"submitted": true, "event": event, "head_sha": result.HeadSHA})
-	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, "completed", response, "", s.now()); err != nil {
+	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCompleted, response, "", s.now()); err != nil {
 		return fmt.Errorf("complete review submission mutation attempt: %w", err)
 	}
 	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
@@ -330,7 +343,7 @@ func (s ReviewService) repairCompletedReviewSubmission(ctx context.Context, key 
 	if err != nil {
 		return false, fmt.Errorf("get review submission mutation attempt: %w", err)
 	}
-	if attempt.Status != "completed" {
+	if !mutationspkg.IsCompleted(attempt.Status) {
 		return false, nil
 	}
 	response := attempt.Response
@@ -351,7 +364,7 @@ func (s ReviewService) repairStartedReviewSubmission(ctx context.Context, key st
 	if err != nil {
 		return false, fmt.Errorf("get review submission mutation attempt: %w", err)
 	}
-	if attempt.Status != "started" {
+	if !mutationspkg.IsPostCallUnknown(attempt.Status) {
 		return false, nil
 	}
 	lookup, ok := s.GitHub.(ReviewLookupClient)
@@ -366,7 +379,7 @@ func (s ReviewService) repairStartedReviewSubmission(ctx context.Context, key st
 		return false, nil
 	}
 	response, _ := json.Marshal(map[string]any{"submitted": true, "event": event, "head_sha": result.HeadSHA, "repaired": true})
-	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, "completed", response, "", s.now()); err != nil {
+	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCompleted, response, "", s.now()); err != nil {
 		return true, fmt.Errorf("repair review submission mutation attempt: %w", err)
 	}
 	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {

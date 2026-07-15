@@ -14,6 +14,7 @@ import (
 	gh "github.com/google/go-github/v68/github"
 	"github.com/google/uuid"
 	"github.com/herd-os/herd/internal/appauth"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 )
 
@@ -28,9 +29,9 @@ const (
 	JobKindCIFix              JobKind = "ci-fix"
 	JobKindConflictResolution JobKind = "conflict-resolution"
 
-	mutationStatusPreDispatch = "pre_dispatch"
-	mutationStatusDispatching = "dispatching"
-	mutationStatusUnknown     = "unknown"
+	mutationStatusPreDispatch = mutations.PhaseIntentRecorded
+	mutationStatusDispatching = mutations.PhaseCallStarted
+	mutationStatusUnknown     = mutations.PhaseRepairRequired
 )
 
 type DispatchRequest struct {
@@ -224,7 +225,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 	_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, "dispatch_accepted:"+string(resultJSON))
 	if err := d.Store.CompleteIdempotencyKey(ctx, idempotencyKey, string(resultJSON)); err != nil {
 		mutationErr := d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-			Status:      "completed",
+			Status:      mutations.PhaseCompleted,
 			Response:    json.RawMessage(resultJSON),
 			CompletedAt: time.Now().UTC(),
 		})
@@ -234,7 +235,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		return DispatchResult{}, fmt.Errorf("complete dispatch idempotency key: %w", err)
 	}
 	if err := d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-		Status:      "completed",
+		Status:      mutations.PhaseCompleted,
 		Response:    json.RawMessage(resultJSON),
 		CompletedAt: time.Now().UTC(),
 	}); err != nil {
@@ -287,7 +288,7 @@ func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchReque
 				return fmt.Errorf("get existing workflow dispatch mutation attempt: %w", readErr)
 			}
 			switch attempt.Status {
-			case "failed":
+			case mutations.PhaseFailedPreCall:
 				if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutationStatusPreDispatch, nil, "", now); err != nil {
 					return fmt.Errorf("reopen workflow dispatch mutation attempt: %w", err)
 				}
@@ -296,7 +297,7 @@ func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchReque
 				return nil
 			case mutationStatusDispatching, mutationStatusUnknown:
 				return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
-			case "completed":
+			case mutations.PhaseCompleted:
 				return nil
 			default:
 				return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
@@ -413,7 +414,7 @@ func (d Dispatcher) preDispatchMutation(ctx context.Context, idempotencyKey stri
 	if err != nil {
 		return false, fmt.Errorf("get workflow dispatch mutation attempt: %w", err)
 	}
-	return attempt.Status == mutationStatusPreDispatch, nil
+	return mutations.IsPreCallRetryable(attempt.Status), nil
 }
 
 func (d Dispatcher) repairCompletedMutationAttempt(ctx context.Context, idempotencyKey string, resultJSON json.RawMessage) error {
@@ -428,11 +429,11 @@ func (d Dispatcher) repairCompletedMutationAttempt(ctx context.Context, idempote
 	if err != nil {
 		return err
 	}
-	if attempt.Status == "completed" {
+	if mutations.IsCompleted(attempt.Status) {
 		return nil
 	}
 	return d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-		Status:      "completed",
+		Status:      mutations.PhaseCompleted,
 		Response:    resultJSON,
 		CompletedAt: time.Now().UTC(),
 	})
@@ -450,13 +451,13 @@ func (d Dispatcher) completedDispatchMutation(ctx context.Context, idempotencyKe
 	if err != nil {
 		return false, DispatchResult{}, fmt.Errorf("get workflow dispatch mutation attempt: %w", err)
 	}
-	if attempt.Status == mutationStatusPreDispatch {
+	if mutations.IsPreCallRetryable(attempt.Status) {
 		return false, DispatchResult{}, nil
 	}
-	if attempt.Status == "started" {
-		return false, DispatchResult{}, fmt.Errorf("workflow dispatch %q outcome is unknown after GitHub accepted dispatch; repair required", idempotencyKey)
+	if mutations.IsPostCallUnknown(attempt.Status) {
+		return false, DispatchResult{}, fmt.Errorf("workflow dispatch %q is already in progress; outcome is unknown after GitHub accepted dispatch; repair required", idempotencyKey)
 	}
-	if attempt.Status != "completed" {
+	if !mutations.IsCompleted(attempt.Status) {
 		return false, DispatchResult{}, nil
 	}
 	var result DispatchResult

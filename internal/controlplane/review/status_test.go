@@ -160,7 +160,7 @@ func TestSetHerdReviewStatusRetryAfterCompleteIdempotencyFailureRepairsFromMutat
 
 func TestSetHerdReviewStatusReturnsMutationCompletionFailure(t *testing.T) {
 	ctx := context.Background()
-	st := &fakeStatusStore{mutationCompleteErrs: []error{errors.New("database down")}}
+	st := &fakeStatusStore{mutationCompleteErrs: []error{nil, errors.New("database down")}}
 	gh := &fakeStatusGitHub{}
 	svc := StatusService{Store: st, GitHub: gh}
 
@@ -171,12 +171,12 @@ func TestSetHerdReviewStatusReturnsMutationCompletionFailure(t *testing.T) {
 	assert.Len(t, gh.statuses, 1)
 	assert.Empty(t, st.states)
 	require.Len(t, st.mutationAttempts, 1)
-	assert.Equal(t, "started", st.mutationAttempts[0].Status)
+	assert.Equal(t, "call_started", st.mutationAttempts[0].Status)
 }
 
 func TestSetHerdReviewStatusRetryAfterMutationCompletionFailureRepairsStartedAttempt(t *testing.T) {
 	ctx := context.Background()
-	st := &fakeStatusStore{mutationCompleteErrs: []error{errors.New("database down"), nil}}
+	st := &fakeStatusStore{mutationCompleteErrs: []error{nil, errors.New("database down"), nil}}
 	gh := &fakeStatusGitHub{}
 	svc := StatusService{Store: st, GitHub: gh}
 
@@ -203,12 +203,12 @@ func TestSetHerdReviewStatusRetryAfterGitHubFailureReusesFailedMutationAttempt(t
 
 	require.Error(t, firstErr)
 	assert.Contains(t, firstErr.Error(), "github down")
-	require.NoError(t, secondErr)
-	assert.Len(t, gh.statuses, 1)
+	require.Error(t, secondErr)
+	assert.Contains(t, secondErr.Error(), "repair required")
+	assert.Empty(t, gh.statuses)
 	require.Len(t, st.mutationAttempts, 1)
-	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
-	require.Len(t, st.states, 1)
-	assert.Equal(t, "success", st.states[0].Status)
+	assert.Equal(t, "repair_required", st.mutationAttempts[0].Status)
+	assert.Empty(t, st.states)
 }
 
 func TestSetHerdReviewStatusRetriesAfterGitHubFailureAndFailIdempotencyFailure(t *testing.T) {
@@ -222,13 +222,12 @@ func TestSetHerdReviewStatusRetriesAfterGitHubFailureAndFailIdempotencyFailure(t
 
 	require.Error(t, firstErr)
 	assert.Contains(t, firstErr.Error(), "github down")
-	require.NoError(t, secondErr)
-	require.Len(t, gh.statuses, 1)
-	assert.Equal(t, HerdReviewContext, gh.statuses[0].status.Context)
+	require.Error(t, secondErr)
+	assert.Contains(t, secondErr.Error(), "already in progress")
+	assert.Empty(t, gh.statuses)
 	require.Len(t, st.mutationAttempts, 1)
-	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
-	require.Len(t, st.states, 1)
-	assert.Equal(t, "success", st.states[0].Status)
+	assert.Equal(t, "repair_required", st.mutationAttempts[0].Status)
+	assert.Empty(t, st.states)
 }
 
 func TestSetHerdReviewStatusRetriesAfterMutationAttemptRecordFailure(t *testing.T) {

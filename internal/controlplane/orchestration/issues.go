@@ -50,11 +50,6 @@ func (s Service) createTaskIssue(ctx context.Context, req TaskIssueRequest, body
 		if err != nil {
 			return "", err
 		}
-		for _, comment := range issues.SplitOverflowComments(overflow) {
-			if err := s.Platform.Issues().AddComment(ctx, created.Number, comment); err != nil {
-				return "", err
-			}
-		}
 		return fmt.Sprintf("issue:%d", created.Number), nil
 	})
 	if err != nil {
@@ -63,6 +58,9 @@ func (s Service) createTaskIssue(ctx context.Context, req TaskIssueRequest, body
 	issueNumber, ok := parseIssueResult(resultRef)
 	if !ok {
 		return nil, fmt.Errorf("invalid issue result ref %q", resultRef)
+	}
+	if err := s.ensureOverflowComments(ctx, issueNumber, "create", overflow); err != nil {
+		return nil, err
 	}
 	return s.Platform.Issues().Get(ctx, issueNumber)
 }
@@ -80,16 +78,6 @@ func (s Service) updateTaskIssue(ctx context.Context, req TaskIssueRequest, body
 		if err != nil {
 			return "", err
 		}
-		if len(req.Labels) > 0 {
-			if err := s.Platform.Issues().AddLabels(ctx, req.IssueNumber, req.Labels); err != nil {
-				return "", err
-			}
-		}
-		for _, comment := range issues.SplitOverflowComments(overflow) {
-			if err := s.Platform.Issues().AddComment(ctx, req.IssueNumber, comment); err != nil {
-				return "", err
-			}
-		}
 		return fmt.Sprintf("issue:%d", updated.Number), nil
 	})
 	if err != nil {
@@ -99,7 +87,30 @@ func (s Service) updateTaskIssue(ctx context.Context, req TaskIssueRequest, body
 	if !ok {
 		return nil, fmt.Errorf("invalid issue result ref %q", resultRef)
 	}
+	if len(req.Labels) > 0 {
+		if err := s.mutate(ctx, idempotencyKey("task-issue-labels", "repo", s.Repo.ID, "issue", issueNumber, taskIssueLabelsFingerprint(req.Labels)), "issue_label_add", func() (string, error) {
+			return "", s.Platform.Issues().AddLabels(ctx, issueNumber, req.Labels)
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.ensureOverflowComments(ctx, issueNumber, "update", overflow); err != nil {
+		return nil, err
+	}
 	return s.Platform.Issues().Get(ctx, issueNumber)
+}
+
+func (s Service) ensureOverflowComments(ctx context.Context, issueNumber int, phase string, overflow string) error {
+	for idx, comment := range issues.SplitOverflowComments(overflow) {
+		comment := comment
+		key := idempotencyKey("task-issue-overflow-comment", "repo", s.Repo.ID, "issue", issueNumber, phase, idx, taskIssueTextFingerprint(comment))
+		if err := s.mutate(ctx, key, "issue_comment_create", func() (string, error) {
+			return "", s.Platform.Issues().AddComment(ctx, issueNumber, comment)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func taskIssueFingerprint(req TaskIssueRequest, body, overflow string) string {
@@ -131,6 +142,17 @@ func normalizedTaskIssueLabels(labels []string) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+func taskIssueLabelsFingerprint(labels []string) string {
+	payload, _ := json.Marshal(normalizedTaskIssueLabels(labels))
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func taskIssueTextFingerprint(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 func parseIssueResult(ref string) (int, bool) {

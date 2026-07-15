@@ -145,10 +145,10 @@ func TestHandlerRetriesWorkflowEventAfterProcessorFailure(t *testing.T) {
 	handler.ServeHTTP(third, eventRequest(validEventPayload()))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	require.Equal(t, http.StatusAccepted, third.Code)
-	assert.Contains(t, third.Body.String(), `"created":false`)
-	assert.Len(t, processor.calls, 2)
+	require.Equal(t, http.StatusConflict, second.Code)
+	require.Equal(t, http.StatusConflict, third.Code)
+	assert.Contains(t, second.Body.String(), "unknown")
+	assert.Len(t, processor.calls, 1)
 }
 
 func TestHandlerCompletionFailureRedeliveryDoesNotProcessAgain(t *testing.T) {
@@ -201,7 +201,7 @@ func TestHandlerProcessedMarkerFailureRedeliveryDoesNotProcessAgain(t *testing.T
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.commands, 1)
-	assert.Equal(t, "processed", st.commands[0].Status)
+	assert.Equal(t, "processed_pending", st.commands[0].Status)
 }
 
 func TestHandlerProcessedMarkerAndCompletionFailureRedeliveryDoesNotProcessAgain(t *testing.T) {
@@ -228,7 +228,7 @@ func TestHandlerProcessedMarkerAndCompletionFailureRedeliveryDoesNotProcessAgain
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.commands, 1)
-	assert.Equal(t, "processed", st.commands[0].Status)
+	assert.Equal(t, "processed_pending", st.commands[0].Status)
 	for _, record := range st.idem {
 		assert.Equal(t, "completed", record.Status)
 	}
@@ -254,13 +254,10 @@ func TestHandlerProcessedAndPendingMarkerFailuresCompleteForRepair(t *testing.T)
 	handler.ServeHTTP(second, eventRequest(validEventPayload()))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
+	require.Equal(t, http.StatusConflict, second.Code)
 	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.commands, 1)
-	assert.Equal(t, "processed", st.commands[0].Status)
-	for _, record := range st.idem {
-		assert.Equal(t, "completed", record.Status)
-	}
+	assert.Equal(t, "processing", st.commands[0].Status)
 }
 
 func TestHandlerProcessingMarkerRedeliveryBlocksDuplicateProcessing(t *testing.T) {
@@ -326,13 +323,10 @@ func TestHandlerProcessorFailureWithResetFailureRetriesOnRedelivery(t *testing.T
 	handler.ServeHTTP(second, eventRequest(validEventPayload()))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	assert.Len(t, processor.calls, 2)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.commands, 1)
-	assert.Equal(t, "processed", st.commands[0].Status)
-	for _, record := range st.idem {
-		assert.Equal(t, "completed", record.Status)
-	}
+	assert.Equal(t, "processing", st.commands[0].Status)
 }
 
 func TestHandlerDistinctWorkflowRunEventsDoNotCollide(t *testing.T) {

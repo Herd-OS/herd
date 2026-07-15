@@ -296,10 +296,10 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailure(t *testing.T) {
 	second := serveRegistrationRequest(t, handler, req)
 
 	require.Equal(t, http.StatusBadGateway, first.Code)
-	require.Equal(t, http.StatusOK, second.Code)
-	assert.JSONEq(t, `{"token":"github-runner-token","expires_at":"2026-07-11T13:00:00Z"}`, second.Body.String())
-	assert.Equal(t, 2, minter.calls)
-	require.NotNil(t, st.tokens[token.ID].UsedAt)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "outcome is unknown")
+	assert.Equal(t, 1, minter.calls)
+	assert.Nil(t, st.tokens[token.ID].UsedAt)
 }
 
 func TestRegistrationTokenHandlerRetriesAfterMinterFailureWhenFailIdempotencyFails(t *testing.T) {
@@ -316,10 +316,10 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailureWhenFailIdempotencyFai
 	first := serveRegistrationRequest(t, handler, req)
 	second := serveRegistrationRequest(t, handler, req)
 
-	require.Equal(t, http.StatusBadGateway, first.Code)
+	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusConflict, second.Code)
 	assert.Contains(t, second.Body.String(), "already in progress")
-	assert.Equal(t, 1, minter.calls)
+	assert.Equal(t, 0, minter.calls)
 	assert.Nil(t, st.tokens[token.ID].UsedAt)
 }
 

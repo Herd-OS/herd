@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/appauth"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	ghplatform "github.com/herd-os/herd/internal/platform/github"
 )
@@ -18,7 +19,7 @@ const (
 	maxPayloadBytes          = 1 << 20
 	idempotencyScope         = "runner-registration-token"
 	idempotencyTTL           = time.Hour
-	idempotencyStatusStarted = "started"
+	idempotencyStatusStarted = mutationspkg.PhaseIntentRecorded
 	idempotencyStatusDone    = "completed"
 	failedResultPrefix       = "registration_token:"
 )
@@ -115,15 +116,19 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, result)
 		return
 	}
+	if err := h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseCallStarted); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark runner registration token mint started"})
+		return
+	}
 
 	result, err := h.minter.CreateRegistrationToken(r.Context(), repo.InstallationID, repo.Owner, repo.Name)
 	if err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, err.Error())
+		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseRepairRequired+":"+err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create GitHub runner registration token"})
 		return
 	}
 	if strings.TrimSpace(result.Token) == "" || result.ExpiresAt.IsZero() {
-		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, "empty registration token response")
+		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseRepairRequired+":empty registration token response")
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create GitHub runner registration token: empty response"})
 		return
 	}
@@ -245,6 +250,10 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 		if resultJSON, ok := strings.CutPrefix(record.ResultRef, failedResultPrefix); ok {
 			result, ok := h.replayRegistrationResult(w, ctx, resultJSON, token)
 			return result, ok, ok
+		}
+		if strings.HasPrefix(record.ResultRef, mutationspkg.PhaseCallStarted) || strings.HasPrefix(record.ResultRef, mutationspkg.PhaseRepairRequired) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
+			return RegistrationTokenResponse{}, false, false
 		}
 		return RegistrationTokenResponse{}, false, true
 	}

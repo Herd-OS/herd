@@ -492,7 +492,7 @@ func (s *PostgresStore) ListStartedGitHubMutationAttempts(ctx context.Context, c
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, idempotency_key, COALESCE(repository_id, 0), mutation_type, status, request, response, error, created_at, completed_at
 		FROM github_mutation_attempts
-		WHERE status = 'started' AND created_at < $1
+		WHERE status IN ('call_started', 'repair_required', 'started') AND created_at < $1
 		ORDER BY created_at ASC
 		LIMIT $2`, createdBefore, limit)
 	if err != nil {

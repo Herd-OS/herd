@@ -11,6 +11,7 @@ import (
 
 	"github.com/herd-os/herd/internal/config"
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/issues"
@@ -18,9 +19,13 @@ import (
 )
 
 const (
-	mutationStatusStarted   = "started"
-	mutationStatusCompleted = "completed"
-	mutationStatusFailed    = "failed"
+	mutationStatusIntentRecorded = mutations.PhaseIntentRecorded
+	mutationStatusCallStarted    = mutations.PhaseCallStarted
+	mutationStatusCompleted      = mutations.PhaseCompleted
+	mutationStatusFailedPreCall  = mutations.PhaseFailedPreCall
+	mutationStatusRepairRequired = mutations.PhaseRepairRequired
+	mutationStatusStarted        = mutationStatusIntentRecorded
+	mutationStatusFailed         = mutationStatusRepairRequired
 )
 
 // Store is the durable state required by service-owned orchestration.
@@ -285,7 +290,7 @@ func (s Service) withIdempotency(ctx context.Context, key string, mutationType s
 	created, err := s.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       key,
 		Scope:     mutationType,
-		Status:    mutationStatusStarted,
+		Status:    mutationStatusIntentRecorded,
 		CreatedAt: s.now(),
 	})
 	if err != nil {
@@ -309,12 +314,17 @@ func (s Service) withIdempotency(ctx context.Context, key string, mutationType s
 			return resultRef, err
 		}
 		status := strings.TrimSpace(record.Status)
-		if status == mutationStatusFailed {
-			if _, err := s.Store.GetGitHubMutationAttempt(ctx, key); errors.Is(err, store.ErrNotFound) {
+		if status == "failed" || status == mutationStatusFailedPreCall {
+			if attempt, err := s.Store.GetGitHubMutationAttempt(ctx, key); errors.Is(err, store.ErrNotFound) {
 				return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
 			} else if err != nil {
 				return "", fmt.Errorf("get mutation attempt: %w", err)
+			} else if mutations.IsPreCallRetryable(attempt.Status) {
+				return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
 			}
+		}
+		if mutations.IsPreCallRetryable(status) {
+			return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
 		}
 		if status == "" {
 			status = "unknown"
@@ -329,15 +339,32 @@ func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutati
 		IdempotencyKey: key,
 		RepositoryID:   s.Repo.ID,
 		MutationType:   mutationType,
-		Status:         mutationStatusStarted,
+		Status:         mutationStatusIntentRecorded,
 		CreatedAt:      s.now(),
 	}); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			attempt, readErr := s.Store.GetGitHubMutationAttempt(ctx, key)
+			if readErr != nil {
+				_ = s.Store.FailIdempotencyKey(ctx, key, readErr.Error())
+				return "", fmt.Errorf("get existing mutation attempt: %w", readErr)
+			}
+			if !mutations.IsPreCallRetryable(attempt.Status) {
+				_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
+				return "", fmt.Errorf("mutation attempt %q is %s; repair required before retry", key, attempt.Status)
+			}
+		} else {
+			_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
+			return "", fmt.Errorf("record mutation attempt: %w", err)
+		}
+	}
+	if err := s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusCallStarted, nil, "", s.now()); err != nil {
+		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailedPreCall, nil, err.Error(), s.now())
 		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
-		return "", fmt.Errorf("record mutation attempt: %w", err)
+		return "", fmt.Errorf("mark mutation call started: %w", err)
 	}
 	resultRef, err := fn()
 	if err != nil {
-		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailed, nil, err.Error(), s.now())
+		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusRepairRequired, nil, err.Error(), s.now())
 		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
 		return "", err
 	}
@@ -362,7 +389,7 @@ func (s Service) repairCompletedMutationAttempt(ctx context.Context, key string,
 	if err != nil {
 		return fmt.Errorf("get mutation attempt: %w", err)
 	}
-	if attempt.Status == mutationStatusCompleted {
+	if mutations.IsCompleted(attempt.Status) {
 		return nil
 	}
 	response, _ := json.Marshal(map[string]string{"result_ref": resultRef})
@@ -380,7 +407,7 @@ func (s Service) repairIdempotencyFromCompletedMutation(ctx context.Context, key
 	if err != nil {
 		return "", false, fmt.Errorf("get mutation attempt: %w", err)
 	}
-	if attempt.Status != mutationStatusCompleted {
+	if !mutations.IsCompleted(attempt.Status) {
 		return "", false, nil
 	}
 	resultRef := mutationResultRef(attempt.Response)

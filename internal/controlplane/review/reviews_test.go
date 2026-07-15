@@ -109,11 +109,14 @@ func TestSubmitReviewResultRetryAfterStatusFailureDoesNotDuplicateReview(t *test
 	secondErr := svc.SubmitReviewResult(context.Background(), testRepo(true), result)
 
 	require.Error(t, firstErr)
-	require.NoError(t, secondErr)
+	require.Error(t, secondErr)
+	assert.Contains(t, secondErr.Error(), "repair required")
 	assert.Len(t, gh.reviews, 1)
-	require.Len(t, statusGH.statuses, 1)
+	assert.Empty(t, statusGH.statuses)
 	for _, record := range mutations.idem {
-		assert.Equal(t, "completed", record.Status)
+		if record.Scope == "review_submission" {
+			assert.Equal(t, "completed", record.Status)
+		}
 	}
 }
 
@@ -167,7 +170,7 @@ func TestSubmitPRReviewOnceFailedRecordWithoutMutationRecordsAttemptBeforeReview
 func TestSubmitPRReviewOnceFailedUnknownOutcomeDoesNotCreateDuplicateReview(t *testing.T) {
 	gh := &fakeReviewGitHub{}
 	mutations := newFakeReviewMutationStore()
-	mutations.completeMutationErrs = []error{errors.New("database down")}
+	mutations.completeMutationErrs = []error{nil, errors.New("database down")}
 	svc := ReviewService{GitHub: gh, Mutations: mutations}
 	repo := testRepo(true)
 	result := reviewResult(ResultStatusApproved, "head")
@@ -182,7 +185,7 @@ func TestSubmitPRReviewOnceFailedUnknownOutcomeDoesNotCreateDuplicateReview(t *t
 
 	secondErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
 
-	require.ErrorIs(t, secondErr, ErrReviewSubmissionInProgress)
+	require.NoError(t, secondErr)
 	assert.Len(t, gh.reviews, 1)
 }
 

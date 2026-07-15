@@ -539,9 +539,10 @@ func TestHandlerAppliesValidPatchArtifactAndRecordsCommitSHA(t *testing.T) {
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusSuccess, st.results[0].Status)
 	assert.Contains(t, string(st.results[0].Metadata), artifacts.FormatGitDiffBinary)
-	require.Len(t, st.mutationCompletions, 1)
-	assert.Equal(t, "completed", st.mutationCompletions[0].status)
-	assert.Contains(t, string(st.mutationCompletions[0].response), strings.Repeat("a", 40))
+	require.Len(t, st.mutationCompletions, 2)
+	assert.Equal(t, "call_started", st.mutationCompletions[0].status)
+	assert.Equal(t, "completed", st.mutationCompletions[1].status)
+	assert.Contains(t, string(st.mutationCompletions[1].response), strings.Repeat("a", 40))
 }
 
 func TestHandlerDuplicateSuccessDoesNotFetchExpiredPatchArtifact(t *testing.T) {
@@ -622,8 +623,10 @@ func TestHandlerAppliesBundledWorkerBranchArtifactAndRecordsCommitSHA(t *testing
 	assert.Equal(t, "herd-worker.patch", applier.requests[0].Artifact.Metadata.ArtifactName)
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusSuccess, st.results[0].Status)
-	require.Len(t, st.mutationCompletions, 1)
-	assert.Contains(t, string(st.mutationCompletions[0].response), strings.Repeat("b", 40))
+	require.Len(t, st.mutationCompletions, 2)
+	assert.Equal(t, "call_started", st.mutationCompletions[0].status)
+	assert.Equal(t, "completed", st.mutationCompletions[1].status)
+	assert.Contains(t, string(st.mutationCompletions[1].response), strings.Repeat("b", 40))
 }
 
 func TestHandlerIgnoresPatchArtifactOnFailureResult(t *testing.T) {
@@ -802,12 +805,12 @@ func TestHandlerRetriesWorkerPatchAfterApplyFailure(t *testing.T) {
 	handler.ServeHTTP(third, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusConflict, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	require.Equal(t, http.StatusAccepted, third.Code)
-	assert.Contains(t, second.Body.String(), `"created":true`)
-	assert.Contains(t, third.Body.String(), `"created":false`)
-	assert.Len(t, applier.requests, 2)
-	assert.Len(t, st.results, 1)
+	require.Equal(t, http.StatusConflict, second.Code)
+	require.Equal(t, http.StatusConflict, third.Code)
+	assert.Contains(t, second.Body.String(), "unknown outcome")
+	assert.Contains(t, third.Body.String(), "unknown outcome")
+	assert.Len(t, applier.requests, 1)
+	assert.Empty(t, st.results)
 }
 
 func TestHandlerRetryAfterPatchMutationAttemptRecordFailureRecordsBeforeApply(t *testing.T) {

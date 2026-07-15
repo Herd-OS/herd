@@ -15,6 +15,7 @@ import (
 	"github.com/herd-os/herd/internal/appauth"
 	"github.com/herd-os/herd/internal/controlplane"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
 )
@@ -514,7 +515,7 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 	}
 	response := json.RawMessage(`{"empty":true}`)
 	if len(artifact.Data) == 0 {
-		if err := h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil); err != nil {
+		if err := h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseCompleted, response, nil); err != nil {
 			_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 			return err
 		}
@@ -522,6 +523,10 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 			return err
 		}
 		return nil
+	}
+	if err := h.markPatchMutationCallStarted(ctx, idempotencyKey); err != nil {
+		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
+		return err
 	}
 	applyResult, err := h.patchApplier.Apply(ctx, artifacts.ApplyRequest{
 		Repository:      worker.Repository,
@@ -538,7 +543,7 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		Now:             h.now,
 	})
 	if err != nil {
-		_ = h.completePatchMutation(ctx, idempotencyKey, "failed", nil, err)
+		_ = h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseRepairRequired, nil, err)
 		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 		return err
 	}
@@ -549,7 +554,7 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 	if err != nil {
 		return fmt.Errorf("marshal patch apply result: %w", err)
 	}
-	if err := h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil); err != nil {
+	if err := h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseCompleted, response, nil); err != nil {
 		if idemErr := h.completePatchApply(ctx, idempotencyKey, response); idemErr != nil {
 			return fmt.Errorf("%w; complete patch apply idempotency after mutation completion failure: %v", err, idemErr)
 		}
@@ -627,7 +632,7 @@ func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, w
 	if err != nil {
 		return false, nil, fmt.Errorf("get patch mutation attempt: %w", err)
 	}
-	if attempt.Status == "started" {
+	if mutationspkg.IsPostCallUnknown(attempt.Status) {
 		return false, nil, fmt.Errorf("patch apply %q has unknown outcome after started mutation attempt", idempotencyKey)
 	}
 	return true, nil, nil
@@ -646,15 +651,15 @@ func (h Handler) repairCompletedPatchApply(ctx context.Context, idempotencyKey s
 		return false, nil, fmt.Errorf("get patch mutation attempt: %w", err)
 	}
 	response := attempt.Response
-	if attempt.Status == "started" {
+	if mutationspkg.IsPostCallUnknown(attempt.Status) {
 		if len(fallbackResponse) == 0 {
 			return false, nil, nil
 		}
 		response = fallbackResponse
-		if err := h.completePatchMutation(ctx, idempotencyKey, "completed", response, nil); err != nil {
+		if err := h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseCompleted, response, nil); err != nil {
 			return false, nil, err
 		}
-	} else if attempt.Status != "completed" {
+	} else if !mutationspkg.IsCompleted(attempt.Status) {
 		return false, nil, nil
 	}
 	if len(response) == 0 {
@@ -690,7 +695,7 @@ func (h Handler) recordPatchMutationAttempt(ctx context.Context, idempotencyKey 
 			IdempotencyKey: idempotencyKey,
 			RepositoryID:   repositoryID,
 			MutationType:   "patch_apply",
-			Status:         "started",
+			Status:         mutationspkg.PhaseIntentRecorded,
 			Request:        request,
 			CreatedAt:      h.now(),
 		}); err != nil {
@@ -699,6 +704,18 @@ func (h Handler) recordPatchMutationAttempt(ctx context.Context, idempotencyKey 
 			}
 			return fmt.Errorf("record patch mutation attempt: %w", err)
 		}
+	}
+	return nil
+}
+
+func (h Handler) markPatchMutationCallStarted(ctx context.Context, idempotencyKey string) error {
+	recorder, ok := h.store.(MutationRecorder)
+	if !ok {
+		return fmt.Errorf("patch mutation recorder is not configured")
+	}
+	if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutationspkg.PhaseCallStarted, nil, "", h.now()); err != nil {
+		_ = recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall, nil, err.Error(), h.now())
+		return fmt.Errorf("mark patch mutation call started: %w", err)
 	}
 	return nil
 }

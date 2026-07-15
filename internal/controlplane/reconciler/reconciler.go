@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
@@ -244,6 +245,10 @@ func (r *Reconciler) runMutationAttempts(ctx context.Context, cfg Config, now ti
 		}
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			*errs = append(*errs, fmt.Errorf("get stuck mutation idempotency key %s: %w", attempt.IdempotencyKey, err))
+			continue
+		}
+		if mutations.IsPreCallRetryable(attempt.Status) {
+			r.add(report, "mutation_attempt", attempt.IdempotencyKey, ClassificationSafeToRetry, "retry", "mutation was recorded before the GitHub call started")
 			continue
 		}
 		r.add(report, "mutation_attempt", attempt.IdempotencyKey, ClassificationStillNeeded, "inspect_required", "mutation outcome is unknown; current GitHub state must be inspected before retry")

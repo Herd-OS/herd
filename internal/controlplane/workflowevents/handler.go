@@ -16,6 +16,7 @@ import (
 
 	"github.com/herd-os/herd/internal/controlplane"
 	"github.com/herd-os/herd/internal/controlplane/jobs"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 )
 
@@ -167,10 +168,21 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !shouldProcess {
 		commandKey := workflowEventCommandKey(event, payload, claims)
 		commentID := workflowEventCommentID(event, payload, claims)
-		if record, recordErr := h.store.GetCommandRecord(r.Context(), repo.ID, commentID, commandKey); recordErr == nil && record.Status != "processed" {
-			if err := h.markWorkflowEventProcessed(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
+		if record, recordErr := h.store.GetCommandRecord(r.Context(), repo.ID, commentID, commandKey); recordErr == nil {
+			if record.Status == "processing" || record.Status == "repair_required" {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
 				return
+			}
+			if record.Status == "processed" || record.Status == "processed_pending" {
+				if err := h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete workflow event idempotency"})
+					return
+				}
+			} else if record.Status != "processed" {
+				if err := h.markWorkflowEventProcessed(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
+					return
+				}
 			}
 		}
 		writeJSON(w, http.StatusAccepted, map[string]any{
@@ -222,10 +234,15 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing"})
 		return
 	}
+	if err := h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseCallStarted); err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), processKey, err.Error())
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing started"})
+		return
+	}
 	if h.processor != nil {
 		if err := h.processor.ProcessWorkflowEvent(r.Context(), repo, event); err != nil {
-			_ = h.store.UpdateCommandStatus(r.Context(), repo.ID, commentID, commandKey, "acknowledged", metadata)
-			_ = h.store.FailIdempotencyKey(r.Context(), processKey, err.Error())
+			_ = h.markWorkflowEventRepairRequired(r.Context(), repo.ID, commentID, commandKey, metadata)
+			_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseRepairRequired+":"+err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process workflow event"})
 			return
 		}
@@ -263,7 +280,7 @@ func (h Handler) acquireWorkflowEvent(ctx context.Context, key string, metadata 
 	created, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       key,
 		Scope:     "workflow_event",
-		Status:    "started",
+		Status:    mutationspkg.PhaseIntentRecorded,
 		Metadata:  metadata,
 		CreatedAt: h.now(),
 	})
@@ -277,7 +294,16 @@ func (h Handler) acquireWorkflowEvent(ctx context.Context, key string, metadata 
 	if err != nil {
 		return false, err
 	}
-	return record.Status != "completed", nil
+	switch record.Status {
+	case "completed":
+		return false, nil
+	case mutationspkg.PhaseIntentRecorded, mutationspkg.PhaseFailedPreCall:
+		return true, nil
+	case "failed":
+		return strings.HasPrefix(record.ResultRef, mutationspkg.PhaseFailedPreCall), nil
+	default:
+		return false, nil
+	}
 }
 
 func (h Handler) workflowEventProcessedOrRepairable(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
@@ -291,7 +317,13 @@ func (h Handler) workflowEventProcessingUnknown(ctx context.Context, repoID int6
 		return false
 	}
 	idem, err := h.store.GetIdempotencyKey(ctx, processKey)
-	return err != nil || idem.Status != "failed"
+	if err != nil {
+		return true
+	}
+	if idem.Status == "failed" {
+		return strings.HasPrefix(idem.ResultRef, mutationspkg.PhaseCallStarted) || strings.HasPrefix(idem.ResultRef, mutationspkg.PhaseRepairRequired)
+	}
+	return idem.Status != mutationspkg.PhaseIntentRecorded && idem.Status != mutationspkg.PhaseFailedPreCall
 }
 
 func (h Handler) markWorkflowEventProcessing(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
@@ -304,6 +336,10 @@ func (h Handler) markWorkflowEventProcessed(ctx context.Context, repoID int64, c
 
 func (h Handler) markWorkflowEventProcessedPending(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
 	return h.store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "processed_pending", metadata)
+}
+
+func (h Handler) markWorkflowEventRepairRequired(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
+	return h.store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "repair_required", metadata)
 }
 
 func Parse(payload []byte) (Event, error) {
