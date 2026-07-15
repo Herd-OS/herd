@@ -123,11 +123,11 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 
 	result, err := h.minter.CreateRegistrationToken(r.Context(), repo.InstallationID, repo.Owner, repo.Name)
 	if err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseRepairRequired+":"+err.Error())
+		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create GitHub runner registration token"})
 		return
 	}
-	if strings.TrimSpace(result.Token) == "" || result.ExpiresAt.IsZero() {
+	if strings.TrimSpace(result.Token) == "" || result.ExpiresAt.IsZero() || !h.now().Before(result.ExpiresAt) {
 		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseRepairRequired+":empty registration token response")
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create GitHub runner registration token: empty response"})
 		return
@@ -251,6 +251,9 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 			result, ok := h.replayRegistrationResult(w, ctx, resultJSON, token)
 			return result, ok, ok
 		}
+		if strings.HasPrefix(record.ResultRef, mutationspkg.PhaseFailedPreCall) {
+			return RegistrationTokenResponse{}, false, true
+		}
 		if strings.HasPrefix(record.ResultRef, mutationspkg.PhaseCallStarted) || strings.HasPrefix(record.ResultRef, mutationspkg.PhaseRepairRequired) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
 			return RegistrationTokenResponse{}, false, false
@@ -258,8 +261,7 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 		return RegistrationTokenResponse{}, false, true
 	}
 	if record.Status == idempotencyStatusStarted && strings.TrimSpace(record.ResultRef) == "" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request is already in progress; retry with the same nonce after completion or reconciliation"})
-		return RegistrationTokenResponse{}, false, false
+		return RegistrationTokenResponse{}, false, true
 	}
 	if record.Status != idempotencyStatusDone {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
@@ -275,13 +277,21 @@ func (h RegistrationTokenHandler) replayRegistrationResult(w http.ResponseWriter
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "decode runner registration idempotency result"})
 		return RegistrationTokenResponse{}, false
 	}
+	if strings.TrimSpace(result.Token) == "" {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "decode runner registration idempotency result"})
+		return RegistrationTokenResponse{}, false
+	}
+	if result.ExpiresAt.IsZero() {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "decode runner registration idempotency result"})
+		return RegistrationTokenResponse{}, false
+	}
 	if token.UsedAt == nil {
 		if err := h.store.MarkRunnerBootstrapTokenUsed(ctx, token.ID, h.now()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record runner bootstrap token use"})
 			return RegistrationTokenResponse{}, false
 		}
 	}
-	if result.ExpiresAt.IsZero() || !h.now().Before(result.ExpiresAt) {
+	if !h.now().Before(result.ExpiresAt) {
 		writeJSON(w, http.StatusGone, map[string]string{"error": "stored runner registration token has expired; retry with a new nonce"})
 		return RegistrationTokenResponse{}, false
 	}

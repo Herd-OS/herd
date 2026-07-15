@@ -107,6 +107,46 @@ func TestEntrypoint_ControlPlaneRunnerRegistration(t *testing.T) {
 	}
 }
 
+func TestEntrypoint_NormalizeControlPlaneURL(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on this host")
+	}
+	path := filepath.Join("..", "..", "images", "base", "entrypoint.herd.sh")
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{name: "hosted default", want: "https://api.herd-os.com"},
+		{name: "self hosted override", value: " https://control.example.com/base/ ", want: "https://control.example.com/base"},
+		{name: "userinfo rejected", value: "https://user:pass@example.com", wantErr: true},
+		{name: "query rejected", value: "https://example.com?token=secret", wantErr: true},
+		{name: "fragment rejected", value: "https://example.com#frag", wantErr: true},
+		{name: "invalid URL rejected", value: "example.com", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command("bash", "-c", `source <(sed -n '/^normalize_control_plane_url()/,/^}/p' "$1"); normalize_control_plane_url`, "bash", path)
+			if tt.value != "" {
+				cmd.Env = append(os.Environ(), "HERD_CONTROL_PLANE_URL="+tt.value)
+			} else {
+				cmd.Env = os.Environ()
+			}
+			out, err := cmd.CombinedOutput()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, string(out), "HERD_CONTROL_PLANE_URL must be an absolute http or https URL")
+				assert.NotContains(t, string(out), "secret")
+				return
+			}
+			require.NoError(t, err, "output: %s", out)
+			assert.Equal(t, tt.want, strings.TrimSpace(string(out)))
+		})
+	}
+}
+
 func TestEntrypoint_RunnerRegistrationDoesNotUseGitHubToken(t *testing.T) {
 	script := readEntrypoint(t)
 	getTokenIdx := strings.Index(script, "get_token()")

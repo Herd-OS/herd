@@ -87,6 +87,9 @@ jobs:
           HERD_BASE_SHA: ${{ steps.checkout-base.outputs.sha }}
         run: |
           mkdir -p /tmp/herd-worker-artifact
+          export GIT_INDEX_FILE="$(mktemp)"
+          trap 'rm -f "$GIT_INDEX_FILE"' EXIT
+          git read-tree "$HERD_BASE_SHA"
           git add -A
           git diff --binary --cached "$HERD_BASE_SHA" > /tmp/herd-worker-artifact/herd-worker.patch
           PATCH_SHA256="$(sha256sum /tmp/herd-worker-artifact/herd-worker.patch | awk '{print $1}')"

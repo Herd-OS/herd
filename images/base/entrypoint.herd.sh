@@ -45,8 +45,8 @@ normalize_control_plane_url() {
   url="${url%"${url##*[![:space:]]}"}"
   url="${url#"${url%%[![:space:]]*}"}"
   url="${url%/}"
-  if [[ ! "$url" =~ ^https?://[^/[:space:]]+(/.*)?$ ]]; then
-    echo "HERD_CONTROL_PLANE_URL must be an absolute http or https URL: ${url}" >&2
+  if [[ ! "$url" =~ ^https?://[^/@?#[:space:]]+(:[0-9]+)?(/[^?#[:space:]]*)?$ ]]; then
+    echo "HERD_CONTROL_PLANE_URL must be an absolute http or https URL without userinfo, query, or fragment" >&2
     exit 1
   fi
   printf '%s\n' "$url"

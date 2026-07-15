@@ -55,6 +55,21 @@ jobs:
           ref: ${{`{{`}} inputs.batch_branch || github.event.repository.default_branch {{`}}`}}
           fetch-depth: 0
 
+      - name: Verify checkout head
+        env:
+          HERD_EXPECTED_HEAD_SHA: ${{`{{`}} inputs.expected_head_sha {{`}}`}}
+        run: |
+          actual_head="$(git rev-parse HEAD)"
+          if [ "$actual_head" != "$HERD_EXPECTED_HEAD_SHA" ]; then
+            jq -n \
+              --arg status "failed" \
+              --arg summary "Herd Review checkout was stale: expected ${HERD_EXPECTED_HEAD_SHA}, checked out ${actual_head}." \
+              '{status: $status, summary: $summary}' \
+              > /tmp/herd-review-command-result.json
+            echo "Herd Review checkout SHA mismatch: expected ${HERD_EXPECTED_HEAD_SHA}, checked out ${actual_head}." >&2
+            exit 1
+          fi
+
       - name: Run review
         env:
           HERD_RUNNER: "true"
@@ -67,7 +82,7 @@ jobs:
           HERD_CONFIG_CONTROL_PLANE_URL: {{ yamlScalar .ControlPlaneURL }}
 {{- end }}
         run: |
-          herd integrator review --pr "${{`{{`}} inputs.pr_number {{`}}`}}"
+          herd integrator review --pr "${{`{{`}} inputs.pr_number {{`}}`}}" --result-file /tmp/herd-review-command-result.json
 
       - name: Report review result
         if: always()
@@ -80,11 +95,26 @@ jobs:
           HERD_CONTROL_PLANE_URL: {{if .ControlPlaneURL}}{{yamlScalar .ControlPlaneURL}}{{else}}${{`{{`}} vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' {{`}}`}}{{end}}
           HERD_JOB_STATUS: ${{`{{`}} job.status {{`}}`}}
         run: |
-          STATUS="approved"
-          SUMMARY="Herd Review completed successfully."
-          if [ "$HERD_JOB_STATUS" != "success" ]; then
+          STATUS="$(jq -er '.status // empty' /tmp/herd-review-command-result.json 2>/dev/null || true)"
+          SUMMARY="$(jq -er '.summary // empty' /tmp/herd-review-command-result.json 2>/dev/null || true)"
+          case "$STATUS" in
+            approved|changes_requested|failed|timeout|unparseable)
+              ;;
+            "")
+              STATUS="failed"
+              SUMMARY="Herd Review workflow did not produce a structured result."
+              ;;
+            *)
+              SUMMARY="Herd Review produced an unparseable status: ${STATUS}."
+              STATUS="unparseable"
+              ;;
+          esac
+          if [ -z "$SUMMARY" ]; then
+            SUMMARY="Herd Review completed with status ${STATUS}."
+          fi
+          if [ "$HERD_JOB_STATUS" != "success" ] && [ "$STATUS" = "approved" ]; then
             STATUS="failed"
-            SUMMARY="Herd Review workflow failed before producing an approval."
+            SUMMARY="Herd Review workflow failed after producing an approval result."
           fi
           jq -n \
             --arg repository "$HERD_REPOSITORY" \

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/appauth"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -296,10 +297,10 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailure(t *testing.T) {
 	second := serveRegistrationRequest(t, handler, req)
 
 	require.Equal(t, http.StatusBadGateway, first.Code)
-	require.Equal(t, http.StatusConflict, second.Code)
-	assert.Contains(t, second.Body.String(), "outcome is unknown")
-	assert.Equal(t, 1, minter.calls)
-	assert.Nil(t, st.tokens[token.ID].UsedAt)
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.Contains(t, second.Body.String(), "github-runner-token")
+	assert.Equal(t, 2, minter.calls)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
 }
 
 func TestRegistrationTokenHandlerRetriesAfterMinterFailureWhenFailIdempotencyFails(t *testing.T) {
@@ -308,7 +309,6 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailureWhenFailIdempotencyFai
 	st.failErrs = []error{errors.New("database down")}
 	minter := &fakeMinter{
 		responses: []RegistrationTokenResponse{{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}},
-		errors:    []error{errors.New("github failed"), nil},
 	}
 	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
 	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-fail-idem"}
@@ -317,10 +317,28 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailureWhenFailIdempotencyFai
 	second := serveRegistrationRequest(t, handler, req)
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusConflict, second.Code)
-	assert.Contains(t, second.Body.String(), "already in progress")
-	assert.Equal(t, 0, minter.calls)
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.Contains(t, second.Body.String(), "github-runner-token")
+	assert.Equal(t, 1, minter.calls)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+}
+
+func TestRegistrationTokenHandlerRejectsExpiredMinterResponse(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(-time.Minute)}}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-expired-response"}
+
+	rec := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Equal(t, 1, minter.calls)
 	assert.Nil(t, st.tokens[token.ID].UsedAt)
+	for _, record := range st.idempotency {
+		assert.Equal(t, "failed", record.Status)
+		assert.Contains(t, record.ResultRef, mutationspkg.PhaseRepairRequired)
+	}
 }
 
 func TestRegistrationTokenHandlerRetriesAfterMarkUsedFailure(t *testing.T) {
