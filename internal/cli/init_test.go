@@ -158,6 +158,7 @@ func TestRegisterRepositoryForInitFailures(t *testing.T) {
 		{"service unavailable", nil, errors.New("503 Service Unavailable"), "control plane"},
 		{"app not installed", nil, errors.New("Herd GitHub App is not installed"), "GitHub App is installed"},
 		{"unauthorized repo", nil, errors.New("admin access"), "admin access"},
+		{"missing bootstrap token", nil, nil, "missing runner bootstrap token"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -167,7 +168,11 @@ func TestRegisterRepositoryForInitFailures(t *testing.T) {
 				return fakeInitAuthorizer{token: "gho_human", err: tt.authErr}
 			}
 			newRepositoryRegistrar = func(string) (repositoryRegistrar, error) {
-				return &fakeInitRegistrar{err: tt.regErr}, nil
+				response := cpclient.RegisterRepositoryResponse{RunnerBootstrapToken: "hrb_bootstrap"}
+				if tt.name == "missing bootstrap token" {
+					response.RunnerBootstrapToken = ""
+				}
+				return &fakeInitRegistrar{resp: response, err: tt.regErr}, nil
 			}
 			t.Cleanup(func() {
 				newSetupAuthorizer = oldAuth

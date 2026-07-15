@@ -295,6 +295,9 @@ func registerRepositoryForInit(ctx context.Context, owner, repo string, opts ini
 		}
 		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. The Herd control plane is unavailable or rate limited; retry `herd init` later", err)
 	}
+	if strings.TrimSpace(resp.RunnerBootstrapToken) == "" {
+		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: response is missing runner bootstrap token; retry `herd init` later or contact the control-plane operator")
+	}
 	return resp, nil
 }
 

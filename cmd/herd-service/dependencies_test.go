@@ -15,32 +15,46 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
+	"github.com/herd-os/herd/internal/controlplane/commands"
 	"github.com/herd-os/herd/internal/controlplane/jobs"
 	"github.com/herd-os/herd/internal/controlplane/store"
+	"github.com/herd-os/herd/internal/controlplane/workflowevents"
 	"github.com/herd-os/herd/internal/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildServiceDependenciesProductionBuildsDefaultProcessors(t *testing.T) {
+func TestBuildServiceDependenciesProductionRejectsUnsafeDefaults(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 
 	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{})
 
-	require.NoError(t, err)
-	require.NotNil(t, deps.IssueCommentCommandHandler)
-	require.NotNil(t, deps.JobResultsRoute)
-	require.NotNil(t, deps.WorkflowEventsRoute)
-	require.NotNil(t, deps.RunnerRegistrationTokenRoute)
-	require.NotNil(t, deps.RegisterRepositoryRoute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workflow event processor")
+	assert.Empty(t, deps)
+}
+
+func TestBuildServiceDependenciesProductionRejectsMissingArtifactStore(t *testing.T) {
+	cfg := validProductionServiceConfig(t)
+	st := store.NewMemoryStore()
+
+	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{
+		WorkflowEventProcessor: fixedWorkflowProcessor{},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "artifact store")
+	assert.Empty(t, deps)
 }
 
 func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{
-		OIDCValidator: fixedOIDCValidator{},
+		OIDCValidator:          fixedOIDCValidator{},
+		WorkflowEventProcessor: fixedWorkflowProcessor{},
+		ArtifactStore:          emptyArtifactStore{},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, deps.IssueCommentCommandHandler)
@@ -65,6 +79,22 @@ func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
 	handler.ServeHTTP(eventResp, eventReq)
 	assert.Equal(t, http.StatusBadRequest, eventResp.Code)
 	assert.Contains(t, eventResp.Body.String(), "invalid workflow event payload")
+}
+
+func TestProductionCommandDispatcherRejectsSyntheticDefaults(t *testing.T) {
+	err := productionCommandDispatcher{}.DispatchCommand(context.Background(), commands.DispatchCommand{
+		RepositoryID:   7,
+		InstallationID: 9,
+		Owner:          "octo",
+		Repo:           "repo",
+		IssueNumber:    849,
+		PRNumber:       849,
+		Command:        commands.ParsedCommand{Kind: commands.CommandReview},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "durable batch/ref/head context")
+	assert.NotContains(t, err.Error(), "batch 1")
 }
 
 func validProductionServiceConfig(t *testing.T) service.Config {
@@ -108,3 +138,9 @@ func (fixedOIDCValidator) Validate(context.Context, string) (jobs.OIDCClaims, er
 }
 
 var _ artifacts.Store = emptyArtifactStore{}
+
+type fixedWorkflowProcessor struct{}
+
+func (fixedWorkflowProcessor) ProcessWorkflowEvent(context.Context, store.Repository, workflowevents.Event) error {
+	return nil
+}

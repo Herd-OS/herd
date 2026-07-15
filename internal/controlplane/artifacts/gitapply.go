@@ -164,6 +164,9 @@ func validateApplyRequest(req ApplyRequest) error {
 	if strings.TrimSpace(req.ExpectedHeadSHA) == "" {
 		return fmt.Errorf("expected head SHA is required")
 	}
+	if req.BaseSHA != req.ExpectedHeadSHA {
+		return fmt.Errorf("patch base SHA must match expected head SHA")
+	}
 	if req.Artifact.Metadata.Format != FormatGitDiffBinary {
 		return fmt.Errorf("unsupported patch artifact format %q", req.Artifact.Metadata.Format)
 	}

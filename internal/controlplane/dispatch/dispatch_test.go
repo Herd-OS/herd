@@ -78,7 +78,7 @@ func TestDispatcherDuplicateStartedWithoutCompletedMutationDoesNotRedispatch(t *
 	assert.Equal(t, "started", st.idempotencyKeys[key].Status)
 }
 
-func TestDispatcherDuplicatePreDispatchMutationRetries(t *testing.T) {
+func TestDispatcherDuplicateFreshPreDispatchMutationDoesNotRetry(t *testing.T) {
 	st := newFakeStore()
 	req := validRequest()
 	key := IdempotencyKey(req)
@@ -98,11 +98,11 @@ func TestDispatcherDuplicatePreDispatchMutationRetries(t *testing.T) {
 	gh := &fakeWorkflowClient{}
 	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 
-	require.NoError(t, err)
-	assert.True(t, result.Created)
-	assert.Equal(t, "job-existing", result.JobID)
-	assert.Len(t, gh.calls, 1)
-	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already in progress")
+	assert.Empty(t, result.JobID)
+	assert.Empty(t, gh.calls)
+	assert.Equal(t, mutationStatusPreDispatch, st.mutationAttempts[0].Status)
 }
 
 func TestDispatcherDuplicateFailedStartedRecordCanRetry(t *testing.T) {
@@ -182,7 +182,7 @@ func TestDispatcherRetryAfterCompleteMutationFailureDoesNotRedispatch(t *testing
 	gh := &fakeWorkflowClient{}
 	req := validRequest()
 	key := IdempotencyKey(req)
-	st.completeMutationErrs[key] = []error{errors.New("database down"), nil}
+	st.completeMutationErrs[key] = []error{nil, errors.New("database down"), nil}
 
 	first, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 	require.Error(t, err)
@@ -205,7 +205,7 @@ func TestDispatcherRetryAfterAcceptedDispatchPersistenceFailuresDoesNotRedispatc
 	req := validRequest()
 	key := IdempotencyKey(req)
 	st.completeIdemErrs[key] = []error{errors.New("idempotency down")}
-	st.completeMutationErrs[key] = []error{errors.New("mutation down")}
+	st.completeMutationErrs[key] = []error{nil, errors.New("mutation down"), nil}
 
 	_, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 	require.Error(t, err)
@@ -310,14 +310,14 @@ func TestDispatcherRecordsGitHubDispatchError(t *testing.T) {
 	assert.Contains(t, err.Error(), "dispatch workflow")
 	require.Len(t, st.jobs, 1)
 	require.Len(t, st.mutationAttempts, 1)
-	assert.Equal(t, "failed", st.mutationAttempts[0].Status)
+	assert.Equal(t, mutationStatusUnknown, st.mutationAttempts[0].Status)
 	assert.Contains(t, st.mutationAttempts[0].Error, "github down")
 	for _, key := range st.idempotencyKeys {
 		assert.Equal(t, "failed", key.Status)
 	}
 }
 
-func TestDispatcherRetriesAfterWorkflowDispatchFailure(t *testing.T) {
+func TestDispatcherDoesNotRetryAfterUnknownWorkflowDispatchFailure(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeWorkflowClient{errors: []error{errors.New("github down"), nil}}
 	req := validRequest()
@@ -326,13 +326,13 @@ func TestDispatcherRetriesAfterWorkflowDispatchFailure(t *testing.T) {
 	require.Error(t, err)
 	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 
-	require.NoError(t, err)
-	assert.True(t, result.Created)
-	assert.Len(t, gh.calls, 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already in progress")
+	assert.False(t, result.Created)
+	assert.Empty(t, gh.calls)
 	assert.Len(t, st.jobs, 1)
 	record := st.idempotencyKeys[IdempotencyKey(req)]
-	assert.Equal(t, "completed", record.Status)
-	assert.Contains(t, record.ResultRef, result.JobID)
+	assert.Equal(t, "failed", record.Status)
 }
 
 func TestDispatcherRetriesAfterCreateJobFailure(t *testing.T) {

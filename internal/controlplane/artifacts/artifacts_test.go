@@ -180,6 +180,67 @@ func TestValidateBundledPatchArtifact(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOversizedArtifacts(t *testing.T) {
+	tests := []struct {
+		name          string
+		files         memoryArtifactStore
+		metadataName  string
+		wantErrorPart string
+	}{
+		{
+			name: "metadata",
+			files: memoryArtifactStore{
+				"metadata.json": bytes.Repeat([]byte(" "), maxMetadataBytes+1),
+			},
+			metadataName:  "metadata.json",
+			wantErrorPart: "maximum size",
+		},
+		{
+			name: "patch",
+			files: func() memoryArtifactStore {
+				patch := bytes.Repeat([]byte("x"), maxPatchBytes+1)
+				metadata := BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+				return memoryArtifactStore{
+					"metadata.json": mustJSON(t, metadata),
+					"patch.diff":    patch,
+				}
+			}(),
+			metadataName:  "metadata.json",
+			wantErrorPart: "maximum size",
+		},
+		{
+			name: "zipped patch entry",
+			files: func() memoryArtifactStore {
+				patch := bytes.Repeat([]byte("x"), maxPatchBytes+1)
+				metadata := BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+				return memoryArtifactStore{
+					"worker-branch": zipArtifact(t, map[string][]byte{
+						bundledMetadataFile: mustJSON(t, metadata),
+						"patch.diff":        patch,
+					}),
+				}
+			}(),
+			metadataName:  "worker-branch",
+			wantErrorPart: "maximum size",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Validate(context.Background(), tt.files, ValidationRequest{
+				Repository:       "acme/widgets",
+				JobID:            "job-1",
+				BaseSHA:          "base",
+				ExpectedHeadSHA:  "head",
+				MetadataArtifact: tt.metadataName,
+			})
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrorPart)
+		})
+	}
+}
+
 type memoryArtifactStore map[string][]byte
 
 func (s memoryArtifactStore) OpenArtifact(_ context.Context, name string) (io.ReadCloser, error) {

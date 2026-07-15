@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"strings"
 
@@ -89,18 +88,16 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		dispatcher := productionCommandDispatcher{
 			Dispatcher:      workflowDispatcher,
 			ControlPlaneURL: cfg.PublicURL,
-			DefaultWorkflow: "herd-worker.yml",
-			DefaultRef:      "main",
 			DefaultRunner:   "",
 			TimeoutMinutes:  0,
 		}
 		opts.CommandDispatcher = dispatcher
 	}
 	if opts.WorkflowEventProcessor == nil {
-		opts.WorkflowEventProcessor = productionWorkflowEventProcessor{}
+		return service.Dependencies{}, fmt.Errorf("production workflow event processor is not configured")
 	}
 	if opts.ArtifactStore == nil {
-		opts.ArtifactStore = productionArtifactStore{tokenSource: tokenSource, store: st}
+		return service.Dependencies{}, fmt.Errorf("production artifact store is not configured")
 	}
 
 	registerRoute, err := cpgithub.NewDefaultRegisterHandler(st, appCfg, appLogin, cfg.PublicURL)
@@ -147,8 +144,6 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 type productionCommandDispatcher struct {
 	Dispatcher      cpdispatch.Dispatcher
 	ControlPlaneURL string
-	DefaultWorkflow string
-	DefaultRef      string
 	DefaultRunner   string
 	TimeoutMinutes  int
 }
@@ -158,23 +153,7 @@ func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd co
 	if err != nil {
 		return err
 	}
-	_, err = d.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
-		RepoID:          cmd.RepositoryID,
-		Owner:           cmd.Owner,
-		Repo:            cmd.Repo,
-		InstallationID:  cmd.InstallationID,
-		Kind:            kind,
-		WorkflowFile:    firstNonEmptyString(d.DefaultWorkflow, "herd-worker.yml"),
-		Ref:             firstNonEmptyString(d.DefaultRef, "main"),
-		BatchNumber:     1,
-		IssueNumber:     cmd.IssueNumber,
-		PRNumber:        cmd.PRNumber,
-		RunnerLabel:     d.DefaultRunner,
-		TimeoutMinutes:  d.TimeoutMinutes,
-		ControlPlaneURL: d.ControlPlaneURL,
-		Reason:          "issue_comment_command",
-	})
-	return err
+	return fmt.Errorf("production command dispatch requires durable batch/ref/head context for %s; refusing synthetic defaults", kind)
 }
 
 func commandJobKind(kind commands.CommandKind) (cpdispatch.JobKind, error) {
@@ -188,35 +167,6 @@ func commandJobKind(kind commands.CommandKind) (cpdispatch.JobKind, error) {
 	default:
 		return "", fmt.Errorf("command %q is not dispatchable", kind)
 	}
-}
-
-type productionWorkflowEventProcessor struct{}
-
-func (productionWorkflowEventProcessor) ProcessWorkflowEvent(context.Context, store.Repository, workflowevents.Event) error {
-	return nil
-}
-
-type productionArtifactStore struct {
-	tokenSource appauth.TokenSource
-	store       interface {
-		GetRepository(ctx context.Context, owner string, name string) (store.Repository, error)
-	}
-}
-
-func (s productionArtifactStore) OpenArtifact(context.Context, string) (io.ReadCloser, error) {
-	if s.tokenSource == nil || s.store == nil {
-		return nil, fmt.Errorf("production artifact store is not configured")
-	}
-	return nil, fmt.Errorf("production artifact fetching is not implemented")
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func productionLike(cfg service.Config) bool {

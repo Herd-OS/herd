@@ -19,6 +19,10 @@ const (
 	FormatGitDiffBinary = "git-diff-binary"
 
 	bundledMetadataFile = "herd-worker-metadata.json"
+
+	maxMetadataBytes = 1 << 20
+	maxPatchBytes    = 64 << 20
+	maxBundleBytes   = 128 << 20
 )
 
 type PatchMetadata struct {
@@ -56,12 +60,15 @@ func Validate(ctx context.Context, store Store, req ValidationRequest) (Validate
 	if strings.TrimSpace(req.MetadataArtifact) == "" {
 		return ValidatedArtifact{}, fmt.Errorf("patch artifact is required")
 	}
-	metadataBytes, err := readArtifact(ctx, store, req.MetadataArtifact)
+	metadataBytes, err := readArtifact(ctx, store, req.MetadataArtifact, maxBundleBytes)
 	if err != nil {
 		return ValidatedArtifact{}, fmt.Errorf("metadata artifact %q unavailable: %w", req.MetadataArtifact, err)
 	}
 	if artifact, ok, bundleErr := validateBundle(metadataBytes, req); ok || bundleErr != nil {
 		return artifact, bundleErr
+	}
+	if len(metadataBytes) > maxMetadataBytes {
+		return ValidatedArtifact{}, fmt.Errorf("patch metadata exceeds maximum size")
 	}
 	var metadata PatchMetadata
 	decoder := json.NewDecoder(bytes.NewReader(metadataBytes))
@@ -72,7 +79,7 @@ func Validate(ctx context.Context, store Store, req ValidationRequest) (Validate
 	if err := validateMetadata(metadata, req); err != nil {
 		return ValidatedArtifact{}, err
 	}
-	data, err := readArtifact(ctx, store, metadata.ArtifactName)
+	data, err := readArtifact(ctx, store, metadata.ArtifactName, maxPatchBytes)
 	if err != nil {
 		return ValidatedArtifact{}, fmt.Errorf("patch artifact %q unavailable: %w", metadata.ArtifactName, err)
 	}
@@ -88,15 +95,24 @@ func validateBundle(data []byte, req ValidationRequest) (ValidatedArtifact, bool
 		return ValidatedArtifact{}, false, nil
 	}
 	files := map[string][]byte{}
+	total := 0
 	for _, file := range reader.File {
 		if file.FileInfo().IsDir() {
 			continue
 		}
-		body, err := readZipFile(file)
+		limit := maxPatchBytes
+		name := strings.TrimPrefix(filepath.ToSlash(file.Name), "./")
+		if name == bundledMetadataFile || filepath.Base(name) == bundledMetadataFile {
+			limit = maxMetadataBytes
+		}
+		body, err := readZipFile(file, limit)
 		if err != nil {
 			return ValidatedArtifact{}, true, err
 		}
-		name := strings.TrimPrefix(filepath.ToSlash(file.Name), "./")
+		total += len(body)
+		if total > maxBundleBytes {
+			return ValidatedArtifact{}, true, fmt.Errorf("patch artifact bundle exceeds maximum size")
+		}
 		files[name] = body
 		files[filepath.Base(name)] = body
 	}
@@ -127,7 +143,10 @@ func validateBundle(data []byte, req ValidationRequest) (ValidatedArtifact, bool
 	return ValidatedArtifact{Metadata: metadata, Data: patch}, true, nil
 }
 
-func readZipFile(file *zip.File) ([]byte, error) {
+func readZipFile(file *zip.File, limit int) ([]byte, error) {
+	if file.UncompressedSize64 > uint64(limit) { //nolint:gosec // limit is a positive internal artifact size cap.
+		return nil, fmt.Errorf("zip entry %q exceeds maximum size", file.Name)
+	}
 	rc, err := file.Open()
 	if err != nil {
 		return nil, err
@@ -135,7 +154,7 @@ func readZipFile(file *zip.File) ([]byte, error) {
 	defer func() {
 		_ = rc.Close()
 	}()
-	return io.ReadAll(rc)
+	return readAllLimited(rc, limit)
 }
 
 func BuildMetadata(repository, jobID, baseSHA, expectedHeadSHA, artifactName string, data []byte) PatchMetadata {
@@ -187,7 +206,7 @@ func validateMetadata(metadata PatchMetadata, req ValidationRequest) error {
 	return nil
 }
 
-func readArtifact(ctx context.Context, store Store, name string) ([]byte, error) {
+func readArtifact(ctx context.Context, store Store, name string, limit int) ([]byte, error) {
 	rc, err := store.OpenArtifact(ctx, name)
 	if err != nil {
 		return nil, err
@@ -195,5 +214,17 @@ func readArtifact(ctx context.Context, store Store, name string) ([]byte, error)
 	defer func() {
 		_ = rc.Close()
 	}()
-	return io.ReadAll(rc)
+	return readAllLimited(rc, limit)
+}
+
+func readAllLimited(r io.Reader, limit int) ([]byte, error) {
+	limited := io.LimitReader(r, int64(limit)+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > limit {
+		return nil, fmt.Errorf("artifact exceeds maximum size")
+	}
+	return data, nil
 }

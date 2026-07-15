@@ -194,6 +194,69 @@ func TestHandlerDuplicateReviewCallbackUsesStableIdentityAcrossJSONFormatting(t 
 	assert.Len(t, st.results, 1)
 }
 
+func TestHandlerStartedCallbackDoesNotProcessAgain(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	payload := validReviewPayload()
+	resultKey := ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload))
+	st.idem["job_result:"+resultKey] = store.IdempotencyKey{
+		Key:       "job_result:" + resultKey,
+		Scope:     "job_result_callback",
+		Status:    "started",
+		ResultRef: resultKey,
+		Metadata:  json.RawMessage(`{"job_id":"job-1"}`),
+		CreatedAt: now,
+	}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"created":false`)
+	assert.Empty(t, processor.calls)
+	assert.Empty(t, st.results)
+}
+
+func TestHandlerFailedCallbackRetriesProcessing(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	payload := validReviewPayload()
+	resultKey := ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload))
+	st.idem["job_result:"+resultKey] = store.IdempotencyKey{
+		Key:       "job_result:" + resultKey,
+		Scope:     "job_result_callback",
+		Status:    "failed",
+		ResultRef: "previous failure",
+		Metadata:  json.RawMessage(`{"job_id":"job-1"}`),
+		CreatedAt: now,
+	}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Len(t, processor.calls, 1)
+	assert.Len(t, st.results, 1)
+}
+
 func TestHandlerRejectsReviewCompletedPRNumberMismatch(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()

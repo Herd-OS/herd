@@ -29,6 +29,8 @@ const (
 	JobKindConflictResolution JobKind = "conflict-resolution"
 
 	mutationStatusPreDispatch = "pre_dispatch"
+	mutationStatusDispatching = "dispatching"
+	mutationStatusUnknown     = "unknown"
 )
 
 type DispatchRequest struct {
@@ -189,15 +191,19 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 		return DispatchResult{}, err
 	}
+	if err := d.markMutationDispatching(ctx, idempotencyKey); err != nil {
+		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
+		return DispatchResult{}, err
+	}
 
 	if err := d.GitHub.DispatchWorkflow(ctx, req.InstallationID, req.Owner, req.Repo, req.WorkflowFile, req.Ref, inputs); err != nil {
 		d.recordMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-			Status:      "failed",
+			Status:      mutationStatusUnknown,
 			Error:       err.Error(),
 			CompletedAt: time.Now().UTC(),
 		})
 		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
-		return DispatchResult{}, fmt.Errorf("dispatch workflow: %w", err)
+		return DispatchResult{}, fmt.Errorf("dispatch workflow outcome is unknown after GitHub call: %w", err)
 	}
 
 	result := DispatchResult{
@@ -229,6 +235,17 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		return DispatchResult{}, err
 	}
 	return result, nil
+}
+
+func (d Dispatcher) markMutationDispatching(ctx context.Context, idempotencyKey string) error {
+	recorder, ok := d.Store.(MutationRecorder)
+	if !ok {
+		return nil
+	}
+	if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutationStatusDispatching, nil, "", time.Now().UTC()); err != nil {
+		return fmt.Errorf("mark workflow dispatch mutation in-flight: %w", err)
+	}
+	return nil
 }
 
 func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchRequest, idempotencyKey string, inputs map[string]string, now time.Time) error {
@@ -269,8 +286,8 @@ func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchReque
 					return fmt.Errorf("reopen workflow dispatch mutation attempt: %w", err)
 				}
 				return nil
-			case mutationStatusPreDispatch:
-				return nil
+			case mutationStatusPreDispatch, mutationStatusDispatching, mutationStatusUnknown:
+				return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
 			case "completed":
 				return nil
 			default:
@@ -360,23 +377,7 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		result.Created = false
 		return result, nil
 	}
-	if d.preDispatchMutation(ctx, idempotencyKey) {
-		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
-		if inputErr != nil {
-			return DispatchResult{}, inputErr
-		}
-		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
-	}
 	return DispatchResult{}, fmt.Errorf("workflow dispatch %q is already in progress", idempotencyKey)
-}
-
-func (d Dispatcher) preDispatchMutation(ctx context.Context, idempotencyKey string) bool {
-	reader, ok := d.Store.(MutationReader)
-	if !ok {
-		return false
-	}
-	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
-	return err == nil && attempt.Status == mutationStatusPreDispatch
 }
 
 func (d Dispatcher) repairCompletedMutationAttempt(ctx context.Context, idempotencyKey string, resultJSON json.RawMessage) error {

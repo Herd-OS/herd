@@ -227,10 +227,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:      h.now(),
 		})
 		if err != nil {
+			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record rejected job result"})
 			return
 		}
 		if err := h.store.CompleteIdempotencyKey(r.Context(), callbackKey, idempotencyKey); err != nil {
+			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete rejected job result idempotency"})
 			return
 		}
@@ -261,10 +263,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      h.now(),
 	})
 	if err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record job result"})
 		return
 	}
 	if err := h.store.CompleteIdempotencyKey(r.Context(), callbackKey, idempotencyKey); err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete job result idempotency"})
 		return
 	}
@@ -296,7 +300,14 @@ func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, 
 	if err != nil {
 		return false, err
 	}
-	return record.Status != "completed", nil
+	switch record.Status {
+	case "completed", "started":
+		return false, nil
+	case "failed":
+		return true, nil
+	default:
+		return false, fmt.Errorf("job result callback %q has unknown status %q", callbackKey, record.Status)
+	}
 }
 
 func (h Handler) processReviewResult(ctx context.Context, result Result, job store.Job) error {

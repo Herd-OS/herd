@@ -247,6 +247,9 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 		}
 		return RegistrationTokenResponse{}, false, true
 	}
+	if record.Status == idempotencyStatusStarted && strings.TrimSpace(record.ResultRef) == "" {
+		return RegistrationTokenResponse{}, false, true
+	}
 	if record.Status != idempotencyStatusDone {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
 		return RegistrationTokenResponse{}, false, false
@@ -261,15 +264,15 @@ func (h RegistrationTokenHandler) replayRegistrationResult(w http.ResponseWriter
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "decode runner registration idempotency result"})
 		return RegistrationTokenResponse{}, false
 	}
-	if result.ExpiresAt.IsZero() || !h.now().Before(result.ExpiresAt) {
-		writeJSON(w, http.StatusGone, map[string]string{"error": "stored runner registration token has expired; retry with a new nonce"})
-		return RegistrationTokenResponse{}, false
-	}
 	if token.UsedAt == nil {
 		if err := h.store.MarkRunnerBootstrapTokenUsed(ctx, token.ID, h.now()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record runner bootstrap token use"})
 			return RegistrationTokenResponse{}, false
 		}
+	}
+	if result.ExpiresAt.IsZero() || !h.now().Before(result.ExpiresAt) {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "stored runner registration token has expired; retry with a new nonce"})
+		return RegistrationTokenResponse{}, false
 	}
 	return result, true
 }

@@ -251,7 +251,8 @@ func TestRegistrationTokenHandlerDuplicateNonceRejectsExpiredStoredToken(t *test
 	assert.Contains(t, rec.Body.String(), "expired")
 	assert.NotContains(t, rec.Body.String(), "expired-token")
 	assert.Equal(t, 0, minter.calls)
-	assert.Nil(t, st.tokens[token.ID].UsedAt)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+	assert.Equal(t, 1, st.markUsedSuccesses)
 }
 
 func TestRegistrationTokenHandlerMinterFailures(t *testing.T) {
@@ -290,6 +291,27 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailure(t *testing.T) {
 	}
 	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
 	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-retry"}
+
+	first := serveRegistrationRequest(t, handler, req)
+	second := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusBadGateway, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.JSONEq(t, `{"token":"github-runner-token","expires_at":"2026-07-11T13:00:00Z"}`, second.Body.String())
+	assert.Equal(t, 2, minter.calls)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+}
+
+func TestRegistrationTokenHandlerRetriesAfterMinterFailureWhenFailIdempotencyFails(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	st.failErrs = []error{errors.New("database down")}
+	minter := &fakeMinter{
+		responses: []RegistrationTokenResponse{{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}},
+		errors:    []error{errors.New("github failed"), nil},
+	}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-fail-idem"}
 
 	first := serveRegistrationRequest(t, handler, req)
 	second := serveRegistrationRequest(t, handler, req)

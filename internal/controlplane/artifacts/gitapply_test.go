@@ -35,6 +35,25 @@ func TestApplyRejectsTargetBranchAdvanced(t *testing.T) {
 	assert.Contains(t, err.Error(), "target branch advanced")
 }
 
+func TestApplyRejectsPatchBaseBehindExpectedHead(t *testing.T) {
+	remote, source, base, head := prepareApplyRepos(t)
+	artifact := diffArtifact(t, source, base, head)
+
+	_, err := Apply(context.Background(), ApplyRequest{
+		Repository:      "acme/widgets",
+		CloneURL:        remote,
+		TargetBranch:    "main",
+		BaseSHA:         base,
+		ExpectedHeadSHA: head,
+		Artifact:        artifact,
+		Identity:        DefaultIdentity("HerdOS", "herd@example.com"),
+		TempDir:         t.TempDir(),
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "patch base SHA must match expected head SHA")
+}
+
 func TestApplyCommitsWithAppIdentityAndTrailers(t *testing.T) {
 	remote, source, base, head := prepareApplyRepos(t)
 	artifact := diffArtifact(t, source, base, head)
@@ -74,13 +93,13 @@ func TestApplyAuthenticatedCloneErrorRedactsInstallationToken(t *testing.T) {
 		InstallationID:  123,
 		TargetBranch:    "main",
 		BaseSHA:         "base",
-		ExpectedHeadSHA: "head",
+		ExpectedHeadSHA: "base",
 		Artifact: ValidatedArtifact{
 			Metadata: PatchMetadata{
 				Repository:      "acme/widgets",
 				JobID:           "job-1",
 				BaseSHA:         "base",
-				ExpectedHeadSHA: "head",
+				ExpectedHeadSHA: "base",
 				Format:          FormatGitDiffBinary,
 			},
 			Data: []byte("diff --git a/file.txt b/file.txt\n"),
@@ -104,13 +123,13 @@ func TestApplyRejectsEmptyInstallationTokenBeforeGitAuthSetup(t *testing.T) {
 		InstallationID:  123,
 		TargetBranch:    "main",
 		BaseSHA:         "base",
-		ExpectedHeadSHA: "head",
+		ExpectedHeadSHA: "base",
 		Artifact: ValidatedArtifact{
 			Metadata: PatchMetadata{
 				Repository:      "acme/widgets",
 				JobID:           "job-1",
 				BaseSHA:         "base",
-				ExpectedHeadSHA: "head",
+				ExpectedHeadSHA: "base",
 				Format:          FormatGitDiffBinary,
 			},
 			Data: []byte("diff --git a/file.txt b/file.txt\n"),
