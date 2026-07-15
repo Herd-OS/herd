@@ -410,6 +410,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 	coverageBlocked := coverageBlocksApproval(plan)
 
+	rawReviewFindings := append([]agent.ReviewFinding(nil), reviewResult.Findings...)
 	finalDedupedFindings, finalDedupeStats := dedupeReviewFindings(reviewResult.Findings)
 	reviewResult.Findings = finalDedupedFindings
 	reviewResult.Comments = reviewCommentsFromFindings(finalDedupedFindings)
@@ -652,7 +653,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			cfg.Integrator.ReviewNonConvergence.Window,
 			trustedReviewResultMarkerHumanLogins(ctx, p)...,
 		)
-		history = appendCurrentReviewHistoryCycleIfMissing(history, nextCycle, currentHeadSHA, reviewResult.Findings, actionableFindings, highFindings, mediumFindings, lowFindings, criteriaFindings)
+		actionableHighFindings, actionableMediumFindings, actionableLowFindings, actionableCriteriaFindings := filterFindingsBySeverity(actionableFindings)
+		history = appendCurrentReviewHistoryCycleIfMissing(history, nextCycle, currentHeadSHA, rawReviewFindings, actionableFindings, actionableHighFindings, actionableMediumFindings, actionableLowFindings, actionableCriteriaFindings)
 		analysis := analyzeReviewConvergence(history, cfg.Integrator.ReviewNonConvergence.MinCompletedCycles)
 		if analysis.Decision == reviewDecisionEscalateToArchitectureFix {
 			if duplicate, ok := findDuplicateStrategyFixIssue(allIssues, pr.Number, analysis.Cluster.Fingerprint); ok {
@@ -686,12 +688,18 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				}
 			}
 
-			_, _ = p.Workflows().Dispatch(postReviewCtx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
+			_, dispatchErr := p.Workflows().Dispatch(postReviewCtx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
 				"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
 				"batch_branch":    batchBranch,
 				"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
 				"runner_label":    cfg.Workers.RunnerLabel,
 			})
+			if dispatchErr != nil {
+				_ = p.Issues().RemoveLabels(postReviewCtx, fixIssue.Number, []string{issues.StatusInProgress})
+				_ = p.Issues().AddLabels(postReviewCtx, fixIssue.Number, []string{issues.StatusFailed})
+				_ = p.Issues().AddComment(postReviewCtx, fixIssue.Number, fmt.Sprintf("Failed to dispatch strategy-level fix worker: %v", dispatchErr))
+				return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: 1}, nil
+			}
 
 			comment := buildReviewNonConvergencePRComment(analysis, fixIssue.Number)
 			comment = appendReviewMetadataAndCoverage(comment)
@@ -807,11 +815,12 @@ func appendCurrentReviewHistoryCycleIfMissing(cycles []reviewHistoryCycle, nextC
 		}
 	}
 	current := reviewHistoryCycle{
-		Cycle:               nextCycle,
-		HeadSHA:             headSHA,
-		FindingsAfterDedupe: len(reviewFindings),
-		PostedFindingsCount: len(actionableFindings),
-		Status:              reviewResultStatusChangesRequested,
+		Cycle:                   nextCycle,
+		HeadSHA:                 headSHA,
+		RawFindingsBeforeDedupe: len(reviewFindings),
+		FindingsAfterDedupe:     len(actionableFindings),
+		PostedFindingsCount:     len(actionableFindings),
+		Status:                  reviewResultStatusChangesRequested,
 		FindingsBySeverity: map[string][]string{
 			"HIGH":     reviewFindingDescriptions(high),
 			"MEDIUM":   reviewFindingDescriptions(medium),

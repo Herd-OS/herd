@@ -7056,6 +7056,33 @@ func TestReview_NonConvergenceContinueCreatesNormalReviewFixIssue(t *testing.T) 
 	}
 }
 
+func TestReview_NonConvergenceUsesDedupedCurrentFindingCount(t *testing.T) {
+	uniqueFindings := reviewNonConvergenceCurrentFindings(7)
+	currentFindings := make([]agent.ReviewFinding, 0, 28)
+	for _, finding := range uniqueFindings {
+		for range 4 {
+			currentFindings = append(currentFindings, finding)
+		}
+	}
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Equal(t, "Review fixes (cycle 39)", fx.createdIssues[0].title)
+	assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Contains(t, fx.prSvc.reviews[0].body, "Found 7 actionable issues")
+	assert.NotContains(t, fx.prSvc.reviews[0].body, "Strategy-level fix worker dispatched")
+}
+
 func TestReview_NonConvergenceDuplicateStrategyIssueDoesNotCreateOrDispatch(t *testing.T) {
 	currentFindings := reviewNonConvergenceCurrentFindings(28)
 	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
@@ -7090,6 +7117,34 @@ func TestReview_NonConvergenceDuplicateStrategyIssueDoesNotCreateOrDispatch(t *t
 	assert.Equal(t, 1, marker.FindingsCount)
 	require.Len(t, fx.prSvc.reviews, 1)
 	assert.Contains(t, fx.prSvc.reviews[0].body, "already in progress")
+}
+
+func TestReview_NonConvergenceStrategyDispatchFailureMarksIssueFailed(t *testing.T) {
+	currentFindings := reviewNonConvergenceCurrentFindings(28)
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	fx.wf.dispatchErr = errors.New("workflow unavailable")
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.AllCreatesFailed)
+	assert.Equal(t, 1, result.FindingsCount)
+	assert.Empty(t, result.FixIssues)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Contains(t, fx.createdIssues[0].title, "Review strategy fix (cycle 39)")
+	assert.Contains(t, fx.createdIssues[0].labels, issues.StatusInProgress)
+	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	assert.Empty(t, fx.wf.dispatched)
+	assert.Contains(t, fx.issueSvc.removedLabels[9601], issues.StatusInProgress)
+	assert.Contains(t, fx.issueSvc.addedLabels[9601], issues.StatusFailed)
+	require.Len(t, fx.issueSvc.comments[9601], 1)
+	assert.Contains(t, fx.issueSvc.comments[9601][0], "Failed to dispatch strategy-level fix worker")
+	assert.Contains(t, fx.issueSvc.comments[9601][0], "workflow unavailable")
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Strategy fix issue"))
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+	assert.Empty(t, fx.prSvc.reviews)
+	assert.NotContains(t, strings.Join(fx.prSvc.comments, "\n"), "/herd fix")
 }
 
 func TestReview_NonConvergenceDisabledUsesNormalReviewFixIssue(t *testing.T) {

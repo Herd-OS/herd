@@ -308,6 +308,7 @@ type mockWorkflowService struct {
 	dispatched             []map[string]string
 	dispatchedWorkflows    []string
 	dispatchedRefs         []string
+	dispatchErr            error
 	onDispatch             func() // optional; called before recording each dispatch
 	lastListRunFilter      platform.RunFilters
 	listRunFilters         []platform.RunFilters
@@ -323,6 +324,9 @@ func (m *mockWorkflowService) Dispatch(ctx context.Context, workflow, ref string
 	}
 	if m.onDispatch != nil {
 		m.onDispatch()
+	}
+	if m.dispatchErr != nil {
+		return nil, m.dispatchErr
 	}
 	m.dispatched = append(m.dispatched, inputs)
 	m.dispatchedWorkflows = append(m.dispatchedWorkflows, workflow)
