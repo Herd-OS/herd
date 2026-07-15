@@ -6892,6 +6892,143 @@ func TestReview_NoStableDisagreementWhenAllNew(t *testing.T) {
 	assert.NotEmpty(t, wf.dispatched, "fix worker must be dispatched")
 }
 
+func TestReview_NonConvergenceEscalatesToStrategyFixIssue(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	assert.Equal(t, 1, result.FindingsCount)
+	require.Len(t, fx.createdIssues, 1)
+	assert.True(t, strings.HasPrefix(fx.createdIssues[0].title, "Review strategy fix"), "must create strategy issue, not normal review fixes")
+	assert.NotContains(t, fx.createdIssues[0].title, "Review fixes")
+	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	assert.Contains(t, fx.createdIssues[0].labels, issues.TypeFix)
+	assert.Contains(t, fx.createdIssues[0].labels, issues.StatusInProgress)
+	assert.Contains(t, fx.createdIssues[0].body, "Solve the shared architecture/design problem")
+	assert.NotContains(t, fx.createdIssues[0].body, "/herd fix")
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "herd-worker.yml", fx.wf.dispatchedWorkflows[0])
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	assert.Equal(t, "herd/batch/111-batch", fx.wf.dispatched[0]["batch_branch"])
+
+	comment := requireCommentContaining(t, fx.prSvc.comments, "Herd review is not converging")
+	assert.Contains(t, comment, "Cycles analyzed: 34, 35, 36, 37, 38, 39")
+	assert.Contains(t, comment, "Finding count trend: 14, 20, 21, 24, 28, 28")
+	assert.Contains(t, comment, "Fix issues considered: #951, #952, #953, #954, #955")
+	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/dispatch")
+	assert.Contains(t, comment, "Dominant root-cause terms:")
+	assert.Contains(t, comment, "idempotency")
+	assert.Contains(t, comment, "Escalation reason:")
+	assert.Contains(t, comment, "Strategy fix issue: #9601")
+	assert.NotContains(t, strings.Join(fx.prSvc.comments, "\n"), "/herd fix")
+	marker, ok := parseReviewResultMarker(comment)
+	require.True(t, ok)
+	assert.Equal(t, reviewResultStatusChangesRequested, marker.Status)
+	assert.Equal(t, 39, marker.Cycle)
+	assert.Equal(t, 1, marker.FindingsCount)
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, fx.prSvc.reviews[0].event)
+	assert.Contains(t, fx.prSvc.reviews[0].body, "Strategy-level fix worker dispatched")
+	assert.Contains(t, fx.prSvc.reviews[0].body, "#9601")
+}
+
+func TestReview_NonConvergenceContinueCreatesNormalReviewFixIssue(t *testing.T) {
+	tests := []struct {
+		name            string
+		historyCounts   []int
+		minCompleted    int
+		currentFindings []agent.ReviewFinding
+	}{
+		{
+			name:            "decreasing trend",
+			historyCounts:   []int{28, 24, 21, 20, 14},
+			minCompleted:    3,
+			currentFindings: reviewNonConvergenceCurrentFindings(9),
+		},
+		{
+			name:            "insufficient completed cycles",
+			historyCounts:   []int{14, 20},
+			minCompleted:    3,
+			currentFindings: reviewNonConvergenceCurrentFindings(28),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newReviewNonConvergenceIntegrationFixture(t, tt.currentFindings)
+			fx.cfg.Integrator.ReviewNonConvergence.MinCompletedCycles = tt.minCompleted
+			fx.setHistory(t, tt.historyCounts)
+
+			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, []int{9601}, result.FixIssues)
+			require.Len(t, fx.createdIssues, 1)
+			assert.Equal(t, fmt.Sprintf("Review fixes (cycle %d)", 34+len(tt.historyCounts)), fx.createdIssues[0].title)
+			assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+			require.Len(t, fx.wf.dispatched, 1)
+			assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+			assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+		})
+	}
+}
+
+func TestReview_NonConvergenceDuplicateStrategyIssueDoesNotCreateOrDispatch(t *testing.T) {
+	currentFindings := reviewNonConvergenceCurrentFindings(28)
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	analysis := fx.analysisForCurrent(t, currentFindings)
+	duplicateBody := appendReviewNonConvergenceFingerprint(issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: 849},
+		Task:        "Existing strategy fix.",
+	}), analysis.Cluster.Fingerprint)
+	fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
+		Number: 9700,
+		State:  "open",
+		Title:  buildStrategyFixIssueTitle(39, analysis.Cluster),
+		Labels: []string{issues.ReviewNonConverging},
+		Body:   duplicateBody,
+	})
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9700}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	assert.Equal(t, 1, result.FindingsCount)
+	assert.Empty(t, fx.createdIssues)
+	assert.Empty(t, fx.wf.dispatched)
+	comment := requireCommentContaining(t, fx.prSvc.comments, "already being addressed by strategy issue #9700")
+	assert.Contains(t, comment, "Strategy fix issue: #9700")
+	assert.NotContains(t, strings.Join(fx.prSvc.comments, "\n"), "/herd fix")
+	marker, ok := parseReviewResultMarker(comment)
+	require.True(t, ok)
+	assert.Equal(t, reviewResultStatusChangesRequested, marker.Status)
+	assert.Equal(t, 1, marker.FindingsCount)
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Contains(t, fx.prSvc.reviews[0].body, "already in progress")
+}
+
+func TestReview_NonConvergenceDisabledUsesNormalReviewFixIssue(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+	fx.cfg.Integrator.ReviewNonConvergence.Enabled = false
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Equal(t, "Review fixes (cycle 39)", fx.createdIssues[0].title)
+	assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+}
+
 func TestReview_BlockedByStableDisagreementLabel(t *testing.T) {
 	// PR has the StableDisagreement label and params.Manual is false —
 	// Review must early-return without calling the agent.
@@ -7053,4 +7190,136 @@ func TestBuildStableDisagreementComment(t *testing.T) {
 	assert.Contains(t, got, "1. ")
 	assert.Contains(t, got, "2. ")
 	assert.Contains(t, got, "3. ")
+}
+
+type reviewNonConvergenceIntegrationFixture struct {
+	dir           string
+	g             *git.Git
+	cfg           *config.Config
+	mock          *mockPlatform
+	issueSvc      *mockIssueService
+	prSvc         *mockCapturingPRService
+	wf            *mockWorkflowService
+	ag            *mockReviewAgent
+	headSHA       string
+	createdIssues []createdReviewIssue
+}
+
+type createdReviewIssue struct {
+	title  string
+	body   string
+	labels []string
+}
+
+func newReviewNonConvergenceIntegrationFixture(t *testing.T, currentFindings []agent.ReviewFinding) *reviewNonConvergenceIntegrationFixture {
+	t.Helper()
+	dir, g := initTestRepo(t)
+	runReviewTestGit(t, dir, "checkout", "-b", "herd/batch/111-batch")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "controlplane", "dispatch"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "controlplane", "dispatch", "review.go"), []byte("package dispatch\n\nfunc Review() {}\n"), 0644))
+	runReviewTestGit(t, dir, "add", "internal/controlplane/dispatch/review.go")
+	runReviewTestGit(t, dir, "commit", "-m", "batch review change")
+	headSHA := reviewTestGitOutput(t, dir, "rev-parse", "HEAD")
+
+	issueSvc := newMockIssueService()
+	fx := &reviewNonConvergenceIntegrationFixture{
+		dir:      dir,
+		g:        g,
+		issueSvc: issueSvc,
+		headSHA:  headSHA,
+	}
+	fx.setHistory(t, []int{14, 20, 21, 24, 28})
+
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				849: {Number: 849, Title: "[herd] Batch 111", Head: "herd/batch/111-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			fx.createdIssues = append(fx.createdIssues, createdReviewIssue{
+				title:  title,
+				body:   body,
+				labels: append([]string(nil), labels...),
+			})
+			return &platform.Issue{Number: 9601, Title: title, Body: body, Labels: labels}, nil
+		},
+	}
+	mock := newReviewLockTestPlatform(mockCreate)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/111-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/111-batch": headSHA},
+	}
+	mock.milestones = &mockMilestoneService{getResult: map[int]*platform.Milestone{
+		111: {Number: 111, Title: "Batch"},
+	}}
+	cfg := config.Default()
+	cfg.Integrator.ReviewMaxFixCycles = 100
+	cfg.Integrator.ReviewFixSeverity = "low"
+
+	fx.cfg = cfg
+	fx.mock = mock
+	fx.prSvc = prSvc
+	fx.wf = wf
+	fx.ag = &mockReviewAgent{reviewResult: &agent.ReviewResult{
+		Approved: false,
+		Summary:  "review findings",
+		Findings: currentFindings,
+	}}
+	return fx
+}
+
+func (fx *reviewNonConvergenceIntegrationFixture) setHistory(t *testing.T, counts []int) {
+	t.Helper()
+	fx.issueSvc.listCommentsResult = nil
+	fx.issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	for i, count := range counts {
+		cycle := 34 + i
+		fixIssue := 951 + i
+		finding := fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go: durable mutation lacks idempotency before started workflow retry", cycle)
+		fx.issueSvc.listCommentsResult = append(fx.issueSvc.listCommentsResult, reviewHistoryComment(t, fx.headSHA, cycle, count, finding, fixIssue))
+		fx.issueSvc.listResult = append(fx.issueSvc.listResult, reviewFixIssue(fixIssue, cycle, issues.StatusDone, []string{fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go", cycle)}, "Validation success"))
+	}
+}
+
+func (fx *reviewNonConvergenceIntegrationFixture) analysisForCurrent(t *testing.T, currentFindings []agent.ReviewFinding) reviewConvergenceAnalysis {
+	t.Helper()
+	high, medium, low, criteria := filterFindingsBySeverity(currentFindings)
+	history := collectReviewHistoryFromComments(fx.issueSvc.listCommentsResult, fx.issueSvc.listResult, 849, 111, fx.headSHA, fx.cfg.Integrator.ReviewNonConvergence.Window)
+	history = appendCurrentReviewHistoryCycleIfMissing(history, 39, fx.headSHA, currentFindings, currentFindings, high, medium, low, criteria)
+	return analyzeReviewConvergence(history, fx.cfg.Integrator.ReviewNonConvergence.MinCompletedCycles)
+}
+
+func reviewNonConvergenceCurrentFindings(count int) []agent.ReviewFinding {
+	findings := make([]agent.ReviewFinding, 0, count)
+	for i := 1; i <= count; i++ {
+		severity := "MEDIUM"
+		if i <= 9 {
+			severity = "HIGH"
+		}
+		findings = append(findings, agent.ReviewFinding{
+			Severity:    severity,
+			Description: fmt.Sprintf("internal/controlplane/dispatch/current_%02d.go: durable mutation lacks idempotency before started workflow retry", i),
+		})
+	}
+	return findings
+}
+
+func commentsContaining(comments []string, needle string) []string {
+	var out []string
+	for _, comment := range comments {
+		if strings.Contains(comment, needle) {
+			out = append(out, comment)
+		}
+	}
+	return out
 }
