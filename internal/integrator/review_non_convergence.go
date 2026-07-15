@@ -3,6 +3,7 @@ package integrator
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path"
 	"regexp"
@@ -70,6 +71,8 @@ const reviewNonConvergenceRepeatedSubsystemFindingThreshold = 3
 const reviewNonConvergenceRepeatedSubsystemCycleThreshold = 2
 const reviewNonConvergenceRepeatedRootCauseFindingThreshold = 3
 const reviewNonConvergenceRepeatedRootCauseCycleThreshold = 2
+const reviewNonConvergenceFingerprintMarkerPrefix = "<!-- herd:review-nonconvergence "
+const reviewNonConvergenceFingerprintMarkerSuffix = " -->"
 
 var (
 	reviewCycleRE          = regexp.MustCompile(`(?i)\bcycle\s+(\d+)\b`)
@@ -373,6 +376,136 @@ func reviewNonConvergenceFingerprint(cluster reviewConvergenceCluster) string {
 	return hex.EncodeToString(sum[:])[:12]
 }
 
+func buildStrategyFixIssueTitle(nextCycle int, cluster reviewConvergenceCluster) string {
+	summary := "non-converging review loop"
+	if len(cluster.PackageClusters) > 0 && cluster.PackageClusters[0] != "" {
+		summary = cluster.PackageClusters[0]
+	} else if len(cluster.RootCauseTerms) > 0 && cluster.RootCauseTerms[0] != "" {
+		summary = cluster.RootCauseTerms[0]
+	}
+	return truncateReviewStrategyTitle(fmt.Sprintf("Review strategy fix (cycle %d): %s", nextCycle, summary), 120)
+}
+
+func buildStrategyFixIssueBody(ms *platform.Milestone, pr *platform.PullRequest, nextCycle int, analysis reviewConvergenceAnalysis) string {
+	batchNumber := 0
+	if ms != nil {
+		batchNumber = ms.Number
+	}
+	prNumber := 0
+	if pr != nil {
+		prNumber = pr.Number
+	}
+
+	body := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:  1,
+			Batch:    batchNumber,
+			Type:     "fix",
+			FixCycle: nextCycle,
+			BatchPR:  prNumber,
+			Scope:    append([]string(nil), analysis.Cluster.PackageClusters...),
+		},
+		Task: "Solve the shared architecture/design problem causing the non-converging review loop, then migrate the relevant paths to that strategy. Do not process each endpoint-level finding independently; use the clustered findings as symptoms of the same underlying invariant or state-transition failure.",
+		ImplementationDetails: strings.Join([]string{
+			"Identify a durable mutation/idempotency boundary for GitHub-visible side effects.",
+			"Define or repair the shared state transitions so repeated dispatch, retry, and unknown-state paths converge on one observable outcome.",
+			"Migrate the clustered packages to the shared abstraction or invariant rather than adding per-endpoint patches.",
+			"Add regression tests that cover repeated dispatch, retry, and unknown-state repair paths.",
+		}, "\n\n"),
+		Criteria: []string{
+			"Architecture-level abstraction or invariant is documented in code.",
+			"Clustered packages are migrated to the strategy or explicitly justified if a package is left unchanged.",
+			"Idempotency and repair behavior is covered by regression tests.",
+			"No duplicate endpoint-level loop behavior is introduced.",
+			"Relevant package tests are run and reported.",
+		},
+		Context: buildStrategyFixIssueContext(analysis),
+	})
+	return appendReviewNonConvergenceFingerprint(body, analysis.Cluster.Fingerprint)
+}
+
+func buildReviewNonConvergencePRComment(analysis reviewConvergenceAnalysis, strategyIssueNumber int) string {
+	fixIssues := append([]int{}, analysis.CompletedFixIssues...)
+	fixIssues = append(fixIssues, analysis.InProgressFixIssues...)
+	sort.Ints(fixIssues)
+
+	var b strings.Builder
+	b.WriteString("⚠️ **Herd review is not converging**\n\n")
+	fmt.Fprintf(&b, "- Cycles analyzed: %s\n", formatReviewCycleNumbers(analysis.Cycles))
+	fmt.Fprintf(&b, "- Finding count trend: %s\n", formatIntList(analysis.TrendCounts))
+	fmt.Fprintf(&b, "- Fix issues considered: %s\n", formatIssueNumberList(fixIssues))
+	fmt.Fprintf(&b, "- Dominant package clusters: %s\n", formatStringList(analysis.Cluster.PackageClusters))
+	fmt.Fprintf(&b, "- Dominant root-cause terms: %s\n", formatStringList(analysis.Cluster.RootCauseTerms))
+	fmt.Fprintf(&b, "- Escalation reason: %s\n", fallbackString(analysis.Rationale, "repeated review/fix cycles share the same cluster fingerprint"))
+	fmt.Fprintf(&b, "- Strategy fix issue: #%d\n", strategyIssueNumber)
+	return b.String()
+}
+
+func appendReviewNonConvergenceFingerprint(body string, fingerprint string) string {
+	payload := struct {
+		Version     int    `json:"version"`
+		BatchPR     int    `json:"batch_pr"`
+		Fingerprint string `json:"fingerprint"`
+	}{
+		Version:     1,
+		BatchPR:     parseReviewFingerprintBatchPR(body),
+		Fingerprint: fingerprint,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return strings.TrimRight(body, "\n") + "\n"
+	}
+	return strings.TrimRight(body, "\n") + "\n\n" + reviewNonConvergenceFingerprintMarkerPrefix + string(encoded) + reviewNonConvergenceFingerprintMarkerSuffix + "\n"
+}
+
+func parseReviewNonConvergenceFingerprint(body string) (string, bool) {
+	start := strings.Index(body, reviewNonConvergenceFingerprintMarkerPrefix)
+	if start < 0 {
+		return "", false
+	}
+	payloadStart := start + len(reviewNonConvergenceFingerprintMarkerPrefix)
+	end := strings.Index(body[payloadStart:], reviewNonConvergenceFingerprintMarkerSuffix)
+	if end < 0 {
+		return "", false
+	}
+	payload := body[payloadStart : payloadStart+end]
+	var marker struct {
+		Fingerprint string `json:"fingerprint"`
+	}
+	if err := json.Unmarshal([]byte(payload), &marker); err != nil || marker.Fingerprint == "" {
+		return "", false
+	}
+	return marker.Fingerprint, true
+}
+
+func findDuplicateStrategyFixIssue(allIssues []*platform.Issue, prNumber int, fingerprint string) (*platform.Issue, bool) {
+	if fingerprint == "" {
+		return nil, false
+	}
+	for _, issue := range allIssues {
+		if issue == nil || !isActiveReviewStrategyIssue(issue) {
+			continue
+		}
+		if !issues.HasLabel(issue.Labels, issues.ReviewNonConverging) || !strings.HasPrefix(issue.Title, "Review strategy fix") {
+			continue
+		}
+		parsed, err := issues.ParseBody(issue.Body)
+		if err != nil {
+			continue
+		}
+		if parsed.FrontMatter.Type != "fix" || parsed.FrontMatter.BatchPR != prNumber {
+			continue
+		}
+		if parsedFingerprint, ok := parseReviewNonConvergenceFingerprint(issue.Body); ok && parsedFingerprint == fingerprint {
+			return issue, true
+		}
+		if strings.Contains(issue.Body, fingerprint) {
+			return issue, true
+		}
+	}
+	return nil, false
+}
+
 func extractReviewCycleNumber(body string) int {
 	match := reviewCycleRE.FindStringSubmatch(body)
 	if len(match) != 2 {
@@ -620,6 +753,102 @@ func addReviewClusterCount(index map[string]*reviewClusterCounts, key string, cy
 	}
 	index[key].findings++
 	index[key].cycles[cycle] = struct{}{}
+}
+
+func buildStrategyFixIssueContext(analysis reviewConvergenceAnalysis) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "- Cycles analyzed: %s\n", formatReviewCycleNumbers(analysis.Cycles))
+	fmt.Fprintf(&b, "- Finding count trend: %s\n", formatIntList(analysis.TrendCounts))
+	fmt.Fprintf(&b, "- Completed fix issues: %s\n", formatIssueNumberList(analysis.CompletedFixIssues))
+	fmt.Fprintf(&b, "- In-progress fix issues: %s\n", formatIssueNumberList(analysis.InProgressFixIssues))
+	fmt.Fprintf(&b, "- Dominant package clusters: %s\n", formatStringList(analysis.Cluster.PackageClusters))
+	fmt.Fprintf(&b, "- Dominant root-cause terms: %s\n", formatStringList(analysis.Cluster.RootCauseTerms))
+	fmt.Fprintf(&b, "- Rationale: %s\n", fallbackString(analysis.Rationale, "repeated review/fix cycles share the same cluster fingerprint"))
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatReviewCycleNumbers(cycles []reviewHistoryCycle) string {
+	if len(cycles) == 0 {
+		return "none"
+	}
+	nums := make([]int, 0, len(cycles))
+	for i, cycle := range cycles {
+		if cycle.Cycle > 0 {
+			nums = append(nums, cycle.Cycle)
+		} else {
+			nums = append(nums, i+1)
+		}
+	}
+	return formatIntList(nums)
+}
+
+func formatIntList(nums []int) string {
+	if len(nums) == 0 {
+		return "none"
+	}
+	parts := make([]string, len(nums))
+	for i, n := range nums {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatIssueNumberList(nums []int) string {
+	if len(nums) == 0 {
+		return "none"
+	}
+	parts := make([]string, len(nums))
+	for i, n := range nums {
+		parts[i] = fmt.Sprintf("#%d", n)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatStringList(values []string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	return strings.Join(values, ", ")
+}
+
+func fallbackString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func truncateReviewStrategyTitle(title string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(title)
+	if len(runes) <= limit {
+		return title
+	}
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
+}
+
+func parseReviewFingerprintBatchPR(body string) int {
+	parsed, err := issues.ParseBody(body)
+	if err != nil {
+		return 0
+	}
+	return parsed.FrontMatter.BatchPR
+}
+
+func isActiveReviewStrategyIssue(issue *platform.Issue) bool {
+	status := issues.StatusLabel(issue.Labels)
+	if status == issues.StatusReady || status == issues.StatusInProgress {
+		return true
+	}
+	if status == issues.StatusDone || status == issues.StatusCancelled {
+		return false
+	}
+	return issue.State == "" || issue.State == "open"
 }
 
 func buildReviewClusterSummary(cluster reviewConvergenceCluster) string {

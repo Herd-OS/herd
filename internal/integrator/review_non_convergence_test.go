@@ -261,6 +261,228 @@ func TestAnalyzeReviewConvergence_MinCompletedCyclesAndLatestInProgress(t *testi
 	}
 }
 
+func TestBuildStrategyFixIssueTitle(t *testing.T) {
+	tests := []struct {
+		name    string
+		cycle   int
+		cluster reviewConvergenceCluster
+		want    string
+	}{
+		{
+			name:    "package cluster wins",
+			cycle:   6,
+			cluster: reviewConvergenceCluster{PackageClusters: []string{"internal/controlplane/dispatch"}, RootCauseTerms: []string{"idempotency"}},
+			want:    "Review strategy fix (cycle 6): internal/controlplane/dispatch",
+		},
+		{
+			name:    "root cause fallback",
+			cycle:   7,
+			cluster: reviewConvergenceCluster{RootCauseTerms: []string{"idempotency"}},
+			want:    "Review strategy fix (cycle 7): idempotency",
+		},
+		{
+			name:    "default fallback",
+			cycle:   8,
+			cluster: reviewConvergenceCluster{},
+			want:    "Review strategy fix (cycle 8): non-converging review loop",
+		},
+		{
+			name:    "long title is truncated",
+			cycle:   9,
+			cluster: reviewConvergenceCluster{PackageClusters: []string{strings.Repeat("a", 140)}},
+			want:    "Review strategy fix (cycle 9): " + strings.Repeat("a", 86) + "...",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildStrategyFixIssueTitle(tt.cycle, tt.cluster)
+			assert.Equal(t, tt.want, got)
+			assert.LessOrEqual(t, len([]rune(got)), 120)
+		})
+	}
+}
+
+func TestBuildStrategyFixIssueBody(t *testing.T) {
+	analysis := reviewStrategyAnalysisFixture()
+	body := buildStrategyFixIssueBody(
+		&platform.Milestone{Number: 111, Title: "Batch"},
+		&platform.PullRequest{Number: 849, Title: "[herd] Batch"},
+		6,
+		analysis,
+	)
+
+	parsed, err := issues.ParseBody(body)
+	require.NoError(t, err)
+	assert.Equal(t, 1, parsed.FrontMatter.Version)
+	assert.Equal(t, 111, parsed.FrontMatter.Batch)
+	assert.Equal(t, "fix", parsed.FrontMatter.Type)
+	assert.Equal(t, 6, parsed.FrontMatter.FixCycle)
+	assert.Equal(t, 849, parsed.FrontMatter.BatchPR)
+	assert.Equal(t, []string{"internal/controlplane/commands", "internal/controlplane/dispatch"}, parsed.FrontMatter.Scope)
+
+	assert.Contains(t, parsed.Task, "shared architecture/design problem")
+	assert.Contains(t, parsed.Task, "Do not process each endpoint-level finding independently")
+	assert.Contains(t, parsed.ImplementationDetails, "durable mutation/idempotency boundary")
+	assert.Contains(t, parsed.ImplementationDetails, "shared state transitions")
+	assert.Contains(t, parsed.ImplementationDetails, "repeated dispatch, retry, and unknown-state repair paths")
+	assert.Contains(t, parsed.Criteria, "Architecture-level abstraction or invariant is documented in code.")
+	assert.Contains(t, parsed.Criteria, "Clustered packages are migrated to the strategy or explicitly justified if a package is left unchanged.")
+	assert.Contains(t, parsed.Criteria, "Idempotency and repair behavior is covered by regression tests.")
+	assert.Contains(t, parsed.Criteria, "No duplicate endpoint-level loop behavior is introduced.")
+	assert.Contains(t, parsed.Criteria, "Relevant package tests are run and reported.")
+	assert.Contains(t, parsed.Context, "Cycles analyzed: 3, 4, 5")
+	assert.Contains(t, parsed.Context, "Finding count trend: 14, 20, 20")
+	assert.Contains(t, parsed.Context, "Completed fix issues: #951, #952")
+	assert.Contains(t, parsed.Context, "In-progress fix issues: #953")
+	assert.Contains(t, parsed.Context, "Dominant package clusters: internal/controlplane/commands, internal/controlplane/dispatch")
+	assert.Contains(t, parsed.Context, "Dominant root-cause terms: idempotency, retry")
+	assert.Contains(t, parsed.Context, "Rationale: finding trend is increasing or flat after completed fix cycles")
+
+	fingerprint, ok := parseReviewNonConvergenceFingerprint(body)
+	require.True(t, ok)
+	assert.Equal(t, analysis.Cluster.Fingerprint, fingerprint)
+	assert.Contains(t, body, `"version":1`)
+	assert.Contains(t, body, `"batch_pr":849`)
+	assert.NotContains(t, body, "internal/controlplane/dispatch/worker.go: durable mutation lacks idempotency")
+}
+
+func TestBuildReviewNonConvergencePRComment(t *testing.T) {
+	comment := buildReviewNonConvergencePRComment(reviewStrategyAnalysisFixture(), 954)
+
+	assert.True(t, strings.HasPrefix(comment, "⚠️ **Herd review is not converging**"))
+	assert.Contains(t, comment, "Cycles analyzed: 3, 4, 5")
+	assert.Contains(t, comment, "Finding count trend: 14, 20, 20")
+	assert.Contains(t, comment, "Fix issues considered: #951, #952, #953")
+	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/commands, internal/controlplane/dispatch")
+	assert.Contains(t, comment, "Dominant root-cause terms: idempotency, retry")
+	assert.Contains(t, comment, "Escalation reason: finding trend is increasing or flat after completed fix cycles")
+	assert.Contains(t, comment, "Strategy fix issue: #954")
+	assert.NotContains(t, comment, "/herd fix")
+}
+
+func TestReviewNonConvergenceFingerprintRoundTrip(t *testing.T) {
+	body := appendReviewNonConvergenceFingerprint(reviewStrategyIssueBody(849), "abc123finger")
+	got, ok := parseReviewNonConvergenceFingerprint(body)
+	require.True(t, ok)
+	assert.Equal(t, "abc123finger", got)
+	assert.Contains(t, body, reviewNonConvergenceFingerprintMarkerPrefix)
+	assert.Contains(t, body, reviewNonConvergenceFingerprintMarkerSuffix)
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing marker", body: "plain body"},
+		{name: "malformed json", body: reviewNonConvergenceFingerprintMarkerPrefix + "{broken" + reviewNonConvergenceFingerprintMarkerSuffix},
+		{name: "empty fingerprint", body: reviewNonConvergenceFingerprintMarkerPrefix + `{"version":1,"batch_pr":849,"fingerprint":""}` + reviewNonConvergenceFingerprintMarkerSuffix},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseReviewNonConvergenceFingerprint(tt.body)
+			assert.False(t, ok)
+			assert.Empty(t, got)
+		})
+	}
+}
+
+func TestFindDuplicateStrategyFixIssue(t *testing.T) {
+	matchingBody := appendReviewNonConvergenceFingerprint(reviewStrategyIssueBody(849), "fp-match")
+	tests := []struct {
+		name       string
+		issues     []*platform.Issue
+		wantNumber int
+		wantOK     bool
+	}{
+		{
+			name: "open matching strategy issue",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(101, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, matchingBody),
+			},
+			wantNumber: 101,
+			wantOK:     true,
+		},
+		{
+			name: "closed issue with active label still matches",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(102, "closed", []string{issues.ReviewNonConverging, issues.StatusInProgress}, matchingBody),
+			},
+			wantNumber: 102,
+			wantOK:     true,
+		},
+		{
+			name: "closed done issue ignored",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(103, "closed", []string{issues.ReviewNonConverging, issues.StatusDone}, matchingBody),
+			},
+		},
+		{
+			name: "closed cancelled issue ignored",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(104, "closed", []string{issues.ReviewNonConverging, issues.StatusCancelled}, matchingBody),
+			},
+		},
+		{
+			name: "wrong label ignored",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(105, "open", []string{issues.StatusReady}, matchingBody),
+			},
+		},
+		{
+			name: "wrong title ignored",
+			issues: []*platform.Issue{
+				{Number: 106, State: "open", Title: "Review fixes (cycle 6)", Labels: []string{issues.ReviewNonConverging, issues.StatusReady}, Body: matchingBody},
+			},
+		},
+		{
+			name: "wrong batch pr ignored",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(107, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, appendReviewNonConvergenceFingerprint(reviewStrategyIssueBody(850), "fp-match")),
+			},
+		},
+		{
+			name: "wrong fingerprint ignored",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(108, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, appendReviewNonConvergenceFingerprint(reviewStrategyIssueBody(849), "fp-other")),
+			},
+		},
+		{
+			name: "fallback body contains fingerprint when marker parse fails",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(109, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, reviewStrategyIssueBody(849)+"\n"+reviewNonConvergenceFingerprintMarkerPrefix+"broken fp-match"),
+			},
+			wantNumber: 109,
+			wantOK:     true,
+		},
+		{
+			name: "returns first matching active issue",
+			issues: []*platform.Issue{
+				reviewStrategyIssue(110, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, matchingBody),
+				reviewStrategyIssue(111, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, matchingBody),
+			},
+			wantNumber: 110,
+			wantOK:     true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := findDuplicateStrategyFixIssue(tt.issues, 849, "fp-match")
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				require.NotNil(t, got)
+				assert.Equal(t, tt.wantNumber, got.Number)
+			} else {
+				assert.Nil(t, got)
+			}
+		})
+	}
+
+	got, ok := findDuplicateStrategyFixIssue([]*platform.Issue{
+		reviewStrategyIssue(112, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, matchingBody),
+	}, 849, "")
+	assert.False(t, ok)
+	assert.Nil(t, got)
+}
+
 func reviewHistoryComment(t *testing.T, head string, cycle, count int, finding string, fixIssue int) *platform.Comment {
 	t.Helper()
 	marker, err := buildReviewResultMarker(newReviewResultMarker(849, 111, head, reviewResultStatusChangesRequested, cycle, count, time.Date(2026, 7, 15, 12, cycle, 0, 0, time.UTC)))
@@ -290,5 +512,42 @@ func reviewHistoryCycleWithFinding(cycle, count int, finding string) reviewHisto
 		FindingsAfterDedupe: count,
 		PostedFindingsCount: count,
 		FindingsBySeverity:  map[string][]string{"HIGH": {finding}},
+	}
+}
+
+func reviewStrategyAnalysisFixture() reviewConvergenceAnalysis {
+	return reviewConvergenceAnalysis{
+		Decision:             reviewDecisionEscalateToArchitectureFix,
+		Confidence:           0.86,
+		Rationale:            "finding trend is increasing or flat after completed fix cycles",
+		Cycles:               []reviewHistoryCycle{{Cycle: 3}, {Cycle: 4}, {Cycle: 5}},
+		TrendCounts:          []int{14, 20, 20},
+		CompletedFixIssues:   []int{951, 952},
+		InProgressFixIssues:  []int{953},
+		LatestFindingCount:   20,
+		EarliestFindingCount: 14,
+		Cluster: reviewConvergenceCluster{
+			PackageClusters: []string{"internal/controlplane/commands", "internal/controlplane/dispatch"},
+			RootCauseTerms:  []string{"idempotency", "retry"},
+			Fingerprint:     "fp-match",
+			Summary:         "packages: internal/controlplane/commands, internal/controlplane/dispatch; root causes: idempotency, retry",
+		},
+	}
+}
+
+func reviewStrategyIssueBody(batchPR int) string {
+	return issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: batchPR, FixCycle: 6},
+		Task:        "Fix the strategy.",
+	})
+}
+
+func reviewStrategyIssue(number int, state string, labels []string, body string) *platform.Issue {
+	return &platform.Issue{
+		Number: number,
+		State:  state,
+		Title:  "Review strategy fix (cycle 6): internal/controlplane/dispatch",
+		Labels: labels,
+		Body:   body,
 	}
 }
