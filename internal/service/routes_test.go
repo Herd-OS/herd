@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,37 @@ func TestRoutes(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, rec.Code)
 		})
 	}
+}
+
+func TestWebhookRouteFailsClosedWithEmptySecret(t *testing.T) {
+	handler, err := NewServer(Config{Env: "development", WebhookSecret: ""}, Dependencies{Store: store.NewMemoryStore()})
+	require.NoError(t, err)
+	payload := []byte(`{"zen":"Keep it logically awesome."}`)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", strings.NewReader(string(payload)))
+	req.Header.Set("X-GitHub-Event", "ping")
+	req.Header.Set("X-GitHub-Delivery", "delivery-empty-secret")
+	req.Header.Set("X-Hub-Signature-256", signHostedAppPayload("", payload))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.JSONEq(t, `{"error":"webhook secret is not configured"}`, rec.Body.String())
+}
+
+func TestWebhookRouteAcceptsConfiguredSecret(t *testing.T) {
+	handler, err := NewServer(Config{Env: "development", WebhookSecret: "secret"}, Dependencies{Store: store.NewMemoryStore()})
+	require.NoError(t, err)
+	payload := []byte(`{"zen":"Keep it logically awesome."}`)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", strings.NewReader(string(payload)))
+	req.Header.Set("X-GitHub-Event", "ping")
+	req.Header.Set("X-GitHub-Delivery", "delivery-configured-secret")
+	req.Header.Set("X-Hub-Signature-256", signHostedAppPayload("secret", payload))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code)
 }
 
 func TestStubRoutesReturnJSON(t *testing.T) {

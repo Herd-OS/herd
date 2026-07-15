@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/herd-os/herd/internal/appauth"
 	cpgithub "github.com/herd-os/herd/internal/controlplane/github"
@@ -18,7 +19,18 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) error 
 	if deps.IssueCommentCommandHandler != nil {
 		webhookOptions = append(webhookOptions, cpgithub.WithIssueCommentCommandHandler(deps.IssueCommentCommandHandler))
 	}
-	mux.Handle("POST /webhooks/github", cpgithub.NewHandler(cfg.WebhookSecret, deps.Store, deps.Logger, webhookOptions...))
+	if strings.TrimSpace(cfg.WebhookSecret) == "" {
+		if productionLike {
+			return fmt.Errorf("webhook secret is not configured")
+		}
+		mux.Handle("POST /webhooks/github", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "webhook secret is not configured",
+			})
+		}))
+	} else {
+		mux.Handle("POST /webhooks/github", cpgithub.NewHandler(cfg.WebhookSecret, deps.Store, deps.Logger, webhookOptions...))
+	}
 	registerHandler := deps.RegisterRepositoryRoute
 	if registerHandler == nil && deps.Store != nil {
 		_, ok := deps.Store.(cpgithub.RegistrationStore)
