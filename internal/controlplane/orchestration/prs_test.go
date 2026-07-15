@@ -101,7 +101,18 @@ func TestApplyBranchOperation_IdempotencyAndHeadGuard(t *testing.T) {
 			},
 		},
 		{
-			name: "delete requires expected head",
+			name: "delete rejects missing expected head",
+			setup: func(p *fakePlatform) {
+				p.repo.branches["herd/worker/1-task"] = "actual"
+			},
+			req: BranchOperationRequest{
+				OperationKind: "delete",
+				BranchName:    "herd/worker/1-task",
+			},
+			wantErr: "expected head SHA",
+		},
+		{
+			name: "delete rejects mismatched expected head",
 			setup: func(p *fakePlatform) {
 				p.repo.branches["herd/worker/1-task"] = "actual"
 			},

@@ -101,6 +101,9 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 	if req.OperationKind == "" {
 		return fmt.Errorf("operation kind is required")
 	}
+	if (req.OperationKind == "delete" || req.OperationKind == "update") && req.ExpectedHeadSHA == "" {
+		return fmt.Errorf("expected head SHA is required for branch %s", req.OperationKind)
+	}
 	key := idempotencyKey("branch", "repo", s.Repo.ID, req.BranchName, req.ExpectedHeadSHA, req.OperationKind)
 	return s.mutate(ctx, key, "branch_"+req.OperationKind, func() (string, error) {
 		if req.ExpectedHeadSHA != "" {
