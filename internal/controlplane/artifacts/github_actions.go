@@ -36,21 +36,28 @@ func (s GitHubActionsStore) OpenArtifact(ctx context.Context, name string) (io.R
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub installation client: %w", err)
 	}
-	list, _, err := client.Actions.ListArtifacts(ctx, owner, repo, &gh.ListArtifactsOptions{
+	var artifactID int64
+	opts := &gh.ListArtifactsOptions{
 		Name: gh.Ptr(artifactName),
 		ListOptions: gh.ListOptions{
-			PerPage: 10,
+			PerPage: 100,
 		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list GitHub Actions artifacts: %w", err)
 	}
-	var artifactID int64
-	for _, artifact := range list.Artifacts {
-		if artifact.GetName() == artifactName && !artifact.GetExpired() {
-			artifactID = artifact.GetID()
+	for {
+		list, resp, err := client.Actions.ListArtifacts(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list GitHub Actions artifacts: %w", err)
+		}
+		for _, artifact := range list.Artifacts {
+			if artifact.GetName() == artifactName && !artifact.GetExpired() {
+				artifactID = artifact.GetID()
+				break
+			}
+		}
+		if artifactID != 0 || resp == nil || resp.NextPage == 0 {
 			break
 		}
+		opts.Page = resp.NextPage
 	}
 	if artifactID == 0 {
 		return nil, fmt.Errorf("GitHub Actions artifact %q not found", artifactName)

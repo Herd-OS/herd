@@ -58,6 +58,15 @@ func New(baseURL string, httpClient *http.Client) (*Client, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return nil, fmt.Errorf("control-plane URL must use http or https")
 	}
+	if parsed.User != nil {
+		return nil, fmt.Errorf("control-plane URL must not include userinfo")
+	}
+	if parsed.RawQuery != "" {
+		return nil, fmt.Errorf("control-plane URL must not include a query string")
+	}
+	if parsed.Fragment != "" {
+		return nil, fmt.Errorf("control-plane URL must not include a fragment")
+	}
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}

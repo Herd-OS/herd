@@ -173,7 +173,14 @@ func TestRegisterRepositoryErrorRedactsSetupToken(t *testing.T) {
 }
 
 func TestNewRejectsInvalidURL(t *testing.T) {
-	tests := []string{"", "://bad", "ftp://example.com"}
+	tests := []string{
+		"",
+		"://bad",
+		"ftp://example.com",
+		"https://user:pass@example.com",
+		"https://example.com?token=x",
+		"https://example.com#frag",
+	}
 	for _, in := range tests {
 		t.Run(in, func(t *testing.T) {
 			_, err := New(in, nil)

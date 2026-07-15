@@ -248,6 +248,16 @@ func TestExpectedIdentityFromJob(t *testing.T) {
 				RunID:      "456",
 			},
 		},
+		{
+			name:     "full workflow ref metadata",
+			metadata: json.RawMessage(`{"ref":"main","workflow_ref":"acme/widgets/.github/workflows/herd-worker.yml@refs/heads/main","workflow_run_id":"789"}`),
+			want: ExpectedOIDCIdentity{
+				Repository: "acme/widgets",
+				Ref:        "refs/heads/main",
+				Workflow:   "herd-worker.yml",
+				RunID:      "789",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -257,6 +267,25 @@ func TestExpectedIdentityFromJob(t *testing.T) {
 			assert.Equal(t, tt.want, expected)
 		})
 	}
+}
+
+func TestValidateOIDCClaimsAcceptsExpectedWorkflowFullRefMetadata(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	claims := OIDCClaims{
+		Issuer:      GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "acme/widgets",
+		Ref:         "refs/heads/main",
+		Workflow:    "herd-worker.yml",
+		WorkflowRef: "acme/widgets/.github/workflows/herd-worker.yml@refs/heads/main",
+		RunID:       "123",
+		ExpiresAt:   now.Add(time.Hour),
+	}
+	expected := ExpectedIdentityFromJob(store.Job{Metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"main","workflow_ref":"acme/widgets/.github/workflows/herd-worker.yml@refs/heads/main","workflow_run_id":123}`)}, "")
+
+	err := ValidateOIDCClaims(claims, expected, OIDCOptions{Audience: "herd-control-plane", Now: func() time.Time { return now }})
+
+	require.NoError(t, err)
 }
 
 func TestValidateOIDCClaimsAcceptsNormalizedExpectedBranchRef(t *testing.T) {

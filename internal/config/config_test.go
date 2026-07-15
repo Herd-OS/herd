@@ -336,6 +336,8 @@ func TestValidateErrors(t *testing.T) {
 		{"zero stale", func(c *Config) { c.Monitor.StaleThresholdMinutes = 0 }, "monitor.stale_threshold_minutes must be > 0"},
 		{"zero pr age", func(c *Config) { c.Monitor.MaxPRHAgeHours = 0 }, "monitor.max_pr_age_hours must be > 0"},
 		{"zero redispatch", func(c *Config) { c.Monitor.MaxRedispatchAttempts = 0 }, "monitor.max_redispatch_attempts must be > 0"},
+		{"control plane query", func(c *Config) { c.ControlPlaneURL = "https://cp.example.com?token=x" }, "control_plane_url must not include a query string"},
+		{"control plane fragment", func(c *Config) { c.ControlPlaneURL = "https://cp.example.com#frag" }, "control_plane_url must not include a fragment"},
 	}
 
 	for _, tt := range tests {

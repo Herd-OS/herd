@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -93,15 +92,7 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		}
 	}
 	if opts.WorkflowEventProcessor == nil {
-		opts.WorkflowEventProcessor = productionWorkflowEventProcessor{
-			Reconciler: &reconciler.Reconciler{
-				Store: st,
-				Commands: productionCommandRequeuer{
-					Dispatcher: opts.CommandDispatcher,
-				},
-				Logger: logger,
-			},
-		}
+		return service.Dependencies{}, fmt.Errorf("production workflow event processor is not configured")
 	}
 	if opts.ArtifactStore == nil {
 		opts.ArtifactStore = artifacts.GitHubActionsStore{TokenSource: tokenSource}
@@ -146,33 +137,6 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		Dispatcher: opts.CommandDispatcher,
 	}
 	return deps, nil
-}
-
-type productionWorkflowEventProcessor struct {
-	Reconciler *reconciler.Reconciler
-}
-
-func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Context, _ store.Repository, _ workflowevents.Event) error {
-	if p.Reconciler == nil {
-		return fmt.Errorf("production workflow event reconciler is not configured")
-	}
-	_, err := p.Reconciler.RunOnce(ctx)
-	return err
-}
-
-type productionCommandRequeuer struct {
-	Dispatcher commands.CommandDispatcher
-}
-
-func (r productionCommandRequeuer) RequeueCommand(ctx context.Context, item store.ReconcileCommand) error {
-	if r.Dispatcher == nil {
-		return fmt.Errorf("production command dispatcher is not configured")
-	}
-	cmd, err := dispatchCommandFromReconcile(item)
-	if err != nil {
-		return err
-	}
-	return r.Dispatcher.DispatchCommand(ctx, cmd)
 }
 
 type productionCommandDispatcher struct {
@@ -273,6 +237,9 @@ func commandTargetFromPullRequest(cmd commands.DispatchCommand, pr *gh.PullReque
 	}
 	issueNumber := cmd.IssueNumber
 	if issueNumber <= 0 {
+		if cmd.Command.Kind == commands.CommandFix || cmd.Command.Kind == commands.CommandFixCI {
+			return commandTarget{}, fmt.Errorf("production %s command dispatch requires a durable fix issue number for PR #%d", cmd.Command.Kind, cmd.PRNumber)
+		}
 		issueNumber = cmd.PRNumber
 	}
 	// The worker workflow checks out batch_branch and records that checkout SHA
@@ -286,52 +253,6 @@ func commandTargetFromPullRequest(cmd commands.DispatchCommand, pr *gh.PullReque
 		HeadSHA:     headSHA,
 		Ref:         batchBranch,
 	}, nil
-}
-
-func dispatchCommandFromReconcile(item store.ReconcileCommand) (commands.DispatchCommand, error) {
-	kind := commands.CommandKind(item.Command.CommandKey)
-	if _, err := commandJobKind(kind); err != nil {
-		return commands.DispatchCommand{}, err
-	}
-	var metadata struct {
-		IssueNumber int      `json:"issue_number"`
-		PRNumber    int      `json:"pr_number"`
-		Args        []string `json:"args"`
-		Raw         string   `json:"raw"`
-	}
-	if len(item.Command.Metadata) > 0 {
-		_ = json.Unmarshal(item.Command.Metadata, &metadata)
-	}
-	if metadata.PRNumber <= 0 {
-		return commands.DispatchCommand{}, fmt.Errorf("production command requeue requires durable PR context for %s; repair required", item.IdempotencyKey)
-	}
-	if metadata.IssueNumber <= 0 {
-		metadata.IssueNumber = metadata.PRNumber
-	}
-	return commands.DispatchCommand{
-		RepositoryID:   item.Repository.ID,
-		InstallationID: item.Repository.InstallationID,
-		Owner:          item.Repository.Owner,
-		Repo:           item.Repository.Name,
-		IssueNumber:    metadata.IssueNumber,
-		PRNumber:       metadata.PRNumber,
-		CommentID:      item.Command.CommentID,
-		Actor:          item.Command.Actor,
-		Command: commands.ParsedCommand{
-			Kind: kind,
-			Args: metadata.Args,
-			Raw:  firstNonEmptyString(metadata.Raw, "@herd-os "+string(kind)),
-		},
-	}, nil
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func commandJobKind(kind commands.CommandKind) (cpdispatch.JobKind, error) {

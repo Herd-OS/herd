@@ -203,7 +203,7 @@ func Validate(cfg *Config) *ValidationError {
 }
 
 func validateHTTPURL(field, value string) error {
-	parsed, err := url.ParseRequestURI(value)
+	parsed, err := url.Parse(value)
 	if err != nil {
 		return fmt.Errorf("%s must be a valid absolute http or https URL", field)
 	}
@@ -215,6 +215,12 @@ func validateHTTPURL(field, value string) error {
 	}
 	if parsed.User != nil {
 		return fmt.Errorf("%s must not include userinfo", field)
+	}
+	if parsed.RawQuery != "" {
+		return fmt.Errorf("%s must not include a query string", field)
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("%s must not include a fragment", field)
 	}
 	return nil
 }

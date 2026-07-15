@@ -31,24 +31,23 @@ func TestBuildServiceDependenciesProductionWiresCommandDispatcher(t *testing.T) 
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 
-	deps, err := buildServiceDependencies(cfg, st, log.New(io.Discard, "", 0))
+	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{
+		WorkflowEventProcessor: fixedWorkflowProcessor{},
+	})
 
 	require.NoError(t, err)
 	require.NotNil(t, deps.IssueCommentCommandHandler)
 }
 
-func TestBuildServiceDependenciesProductionUsesDefaultWorkflowProcessorAndArtifactStore(t *testing.T) {
+func TestBuildServiceDependenciesProductionRequiresWorkflowProcessor(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 
 	deps, err := buildServiceDependencies(cfg, st, log.New(io.Discard, "", 0))
 
-	require.NoError(t, err)
-	require.NotNil(t, deps.WorkflowEventProcessor)
-	require.NotNil(t, deps.JobResultsRoute)
-	require.NotNil(t, deps.WorkflowEventsRoute)
-	require.NotNil(t, deps.RunnerRegistrationTokenRoute)
-	require.NotNil(t, deps.RegisterRepositoryRoute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "production workflow event processor is not configured")
+	assert.Empty(t, deps)
 }
 
 func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
@@ -126,29 +125,50 @@ func TestCommandWorkflowFileIsManagedWorkflow(t *testing.T) {
 func TestCommandTargetFromPullRequest(t *testing.T) {
 	tests := []struct {
 		name      string
+		kind      commands.CommandKind
+		issue     int
 		milestone *gh.Milestone
 		wantBatch int
+		wantIssue int
 		wantErr   string
 	}{
 		{
 			name:      "review without batch milestone uses PR number context",
+			kind:      commands.CommandReview,
 			wantBatch: 42,
+			wantIssue: 42,
 		},
 		{
 			name:      "review with batch milestone uses milestone",
+			kind:      commands.CommandReview,
 			milestone: &gh.Milestone{Number: gh.Ptr(849)},
 			wantBatch: 849,
+			wantIssue: 42,
 		},
 		{
-			name:      "fix without batch milestone uses standalone PR context",
+			name:      "fix with tracking issue uses durable issue number",
+			kind:      commands.CommandFix,
+			issue:     101,
 			wantBatch: 42,
+			wantIssue: 101,
+		},
+		{
+			name:    "fix without tracking issue is rejected",
+			kind:    commands.CommandFix,
+			wantErr: "durable fix issue number",
+		},
+		{
+			name:    "fix-ci without tracking issue is rejected",
+			kind:    commands.CommandFixCI,
+			wantErr: "durable fix issue number",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			target, err := commandTargetFromPullRequest(commands.DispatchCommand{
-				IssueNumber: 0,
+				IssueNumber: tt.issue,
 				PRNumber:    42,
+				Command:     commands.ParsedCommand{Kind: tt.kind},
 			}, &gh.PullRequest{
 				Head: &gh.PullRequestBranch{
 					Ref: gh.Ptr("feature-branch"),
@@ -168,7 +188,7 @@ func TestCommandTargetFromPullRequest(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantBatch, target.BatchNumber)
-			assert.Equal(t, 42, target.IssueNumber)
+			assert.Equal(t, tt.wantIssue, target.IssueNumber)
 			assert.Equal(t, "feature-branch", target.Ref)
 			assert.Equal(t, "feature-branch", target.BatchBranch)
 			assert.Equal(t, "head-sha", target.BaseSHA)

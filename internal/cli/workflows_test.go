@@ -314,12 +314,17 @@ func TestReviewWorkflow_DefaultMatchesCommittedWorkflowAndPostsReviewCallback(t 
 		"rendered review template with default config must match committed workflow.\nrendered:\n%s\non-disk:\n%s", rendered, onDisk)
 
 	s := string(rendered)
-	assert.Contains(t, s, `herd integrator review --pr "${{ inputs.pr_number }}" --result-file /tmp/herd-review-command-result.json`)
+	assert.Contains(t, s, `timeout "${HERD_REVIEW_TIMEOUT_MINUTES}m" herd review-worker --pr "${{ inputs.pr_number }}" --result-file /tmp/herd-review-command-result.json`)
+	assert.NotContains(t, s, "herd integrator review")
+	assert.Contains(t, s, `timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) + 5 }}`)
+	assert.Contains(t, s, `required: true`)
+	assert.Contains(t, s, `ref: ${{ inputs.batch_branch }}`)
 	assert.Contains(t, s, "Verify checkout head")
 	assert.Contains(t, s, `actual_head="$(git rev-parse HEAD)"`)
 	assert.Contains(t, s, `checked out ${actual_head}`)
 	assert.Contains(t, s, `kind: "review_completed"`)
 	assert.Contains(t, s, `approved|changes_requested|failed|timeout|unparseable`)
+	assert.Contains(t, s, `Herd Review timed out after ${HERD_REVIEW_TIMEOUT_MINUTES} minute(s).`)
 	assert.Contains(t, s, `Herd Review workflow did not produce a structured result.`)
 	assert.NotContains(t, s, `STATUS="approved"`)
 	assert.Contains(t, s, "$HERD_CONTROL_PLANE_URL/api/v1/jobs/$HERD_JOB_ID/results")
@@ -708,6 +713,7 @@ func TestWorkerWorkflowUsesCapturedCheckoutBaseForArtifactsAndResult(t *testing.
 	require.NotEmpty(t, execute.Steps)
 
 	var checkoutIndex, recordIndex, executeIndex, packageIndex, reportIndex = -1, -1, -1, -1, -1
+	verifyIndex := -1
 	for i, step := range execute.Steps {
 		switch step.Name {
 		case "Checkout":
@@ -716,6 +722,13 @@ func TestWorkerWorkflowUsesCapturedCheckoutBaseForArtifactsAndResult(t *testing.
 			recordIndex = i
 			assert.Contains(t, step.Run, "git rev-parse HEAD")
 			assert.Contains(t, step.Run, "$GITHUB_OUTPUT")
+		case "Verify checkout head":
+			verifyIndex = i
+			require.NotNil(t, step.Env)
+			assert.Equal(t, "${{ inputs.expected_head_sha }}", step.Env["HERD_EXPECTED_HEAD_SHA"])
+			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_ACTUAL_HEAD_SHA"])
+			assert.Contains(t, step.Run, `if [ "$HERD_ACTUAL_HEAD_SHA" != "$HERD_EXPECTED_HEAD_SHA" ]; then`)
+			assert.Contains(t, step.Run, "Herd Worker checkout SHA mismatch")
 		case "Execute task":
 			executeIndex = i
 		case "Package worker patch artifact":
@@ -740,11 +753,13 @@ func TestWorkerWorkflowUsesCapturedCheckoutBaseForArtifactsAndResult(t *testing.
 
 	require.NotEqual(t, -1, checkoutIndex)
 	require.NotEqual(t, -1, recordIndex)
+	require.NotEqual(t, -1, verifyIndex)
 	require.NotEqual(t, -1, executeIndex)
 	require.NotEqual(t, -1, packageIndex)
 	require.NotEqual(t, -1, reportIndex)
 	assert.Less(t, checkoutIndex, recordIndex)
-	assert.Less(t, recordIndex, executeIndex)
+	assert.Less(t, recordIndex, verifyIndex)
+	assert.Less(t, verifyIndex, executeIndex)
 	assert.Less(t, executeIndex, packageIndex)
 	assert.Less(t, packageIndex, reportIndex)
 	assert.NotContains(t, string(rendered), "HERD_BASE_SHA: ${{ github.sha }}")

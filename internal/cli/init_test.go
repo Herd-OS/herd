@@ -244,6 +244,16 @@ func TestValidatedEffectiveControlPlaneURLRejectsUnsafeValues(t *testing.T) {
 			value:   `https://example.com/path"x`,
 			wantErr: "double quotes",
 		},
+		{
+			name:    "query",
+			value:   "https://example.com?token=x",
+			wantErr: "query",
+		},
+		{
+			name:    "fragment",
+			value:   "https://example.com#frag",
+			wantErr: "fragment",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

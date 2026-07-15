@@ -65,6 +65,16 @@ jobs:
         run: |
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Verify checkout head
+        env:
+          HERD_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          HERD_ACTUAL_HEAD_SHA: ${{ steps.checkout-base.outputs.sha }}
+        run: |
+          if [ "$HERD_ACTUAL_HEAD_SHA" != "$HERD_EXPECTED_HEAD_SHA" ]; then
+            echo "Herd Worker checkout SHA mismatch: expected ${HERD_EXPECTED_HEAD_SHA}, checked out ${HERD_ACTUAL_HEAD_SHA}." >&2
+            exit 1
+          fi
+
       - name: Execute task
         env:
           HERD_RUNNER: "true"

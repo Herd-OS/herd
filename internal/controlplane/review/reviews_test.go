@@ -98,6 +98,23 @@ func TestSubmitReviewResultFailureStillSetsStatusAndComment(t *testing.T) {
 	assert.Contains(t, gh.comments[0], "secondary rate limit")
 }
 
+func TestSubmitReviewResultFailureCommentRedactsSensitiveError(t *testing.T) {
+	gh := &fakeReviewGitHub{
+		pr:        &platform.PullRequest{Number: 42, HeadSHA: "head"},
+		reviewErr: errors.New("request failed with token github_pat_1234567890abcdef and ghp_1234567890abcdef"),
+	}
+	statusGH := &fakeStatusGitHub{}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Mutations: newFakeReviewMutationStore()}
+
+	err := svc.SubmitReviewResult(context.Background(), testRepo(true), reviewResult(ResultStatusApproved, "head"))
+
+	require.NoError(t, err)
+	require.Len(t, gh.comments, 1)
+	assert.Contains(t, gh.comments[0], "[REDACTED]")
+	assert.NotContains(t, gh.comments[0], "github_pat_1234567890abcdef")
+	assert.NotContains(t, gh.comments[0], "ghp_1234567890abcdef")
+}
+
 func TestSubmitReviewResultRetryAfterStatusFailureDoesNotDuplicateReview(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{errs: []error{errors.New("status down"), nil}}
@@ -320,6 +337,33 @@ func TestDispatchReviewSetsPendingAndSuppressesDuplicateWithLock(t *testing.T) {
 	assert.Equal(t, "pending", statusGH.statuses[0].status.State)
 }
 
+func TestDispatchReviewDispatchFailureSurfacesFailureStatusError(t *testing.T) {
+	locks := newFakeLockStore()
+	dispatcher := &fakeReviewDispatcher{err: errors.New("dispatch down")}
+	statusGH := &fakeStatusGitHub{err: errors.New("status down")}
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	svc := ReviewService{
+		Status:     StatusService{Store: &fakeStatusStore{}, GitHub: statusGH, Now: func() time.Time { return now }},
+		Locks:      locks,
+		Dispatcher: dispatcher,
+		Now:        func() time.Time { return now },
+	}
+	req := DispatchReviewRequest{
+		BatchNumber: 7,
+		PRNumber:    42,
+		BatchBranch: "herd/batch/7-demo",
+		HeadSHA:     "head",
+		RunnerLabel: "self-hosted",
+	}
+
+	_, err := svc.DispatchReview(context.Background(), testRepo(true), req)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dispatch review workflow failed and record failure status")
+	assert.Empty(t, statusGH.statuses)
+	assert.Empty(t, locks.locks)
+}
+
 func TestSubmitReviewResultChangesRequestedWithFixesKeepsPendingAndDispatchesFixes(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{}
@@ -525,10 +569,14 @@ func lockKey(repoID int64, prNumber int, headSHA string) string {
 
 type fakeReviewDispatcher struct {
 	requests []cpdispatch.DispatchRequest
+	err      error
 }
 
 func (d *fakeReviewDispatcher) Dispatch(_ context.Context, req cpdispatch.DispatchRequest) (cpdispatch.DispatchResult, error) {
 	d.requests = append(d.requests, req)
+	if d.err != nil {
+		return cpdispatch.DispatchResult{}, d.err
+	}
 	return cpdispatch.DispatchResult{JobID: "job-1", URL: "https://github.test/actions", Created: true}, nil
 }
 

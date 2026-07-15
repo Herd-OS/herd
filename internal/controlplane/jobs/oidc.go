@@ -106,7 +106,7 @@ func ExpectedIdentityFromJob(job store.Job, repository string) ExpectedOIDCIdent
 		return expected
 	}
 	expected.Ref = normalizeExpectedRef(firstMetadataString(metadata, "github_ref", "ref"))
-	expected.Workflow = firstMetadataString(metadata, "workflow", "workflow_file", "workflow_ref")
+	expected.Workflow = normalizeExpectedWorkflow(firstMetadataString(metadata, "workflow", "workflow_file", "workflow_ref"))
 	expected.RunID = firstMetadataString(metadata, "run_id", "workflow_run_id", "github_run_id")
 	metadataRepository := firstMetadataString(metadata, "repository")
 	if metadataRepository == "" {
@@ -361,13 +361,21 @@ func containsString(values []string, want string) bool {
 }
 
 func workflowMatches(claims OIDCClaims, expected string) bool {
-	expected = strings.TrimSpace(expected)
+	expected = normalizeExpectedWorkflow(expected)
 	expectedFile := strings.TrimPrefix(expected, ".github/workflows/")
 	refFile, ok := workflowFileFromRef(claims.WorkflowRef)
 	if !ok {
 		return false
 	}
 	return refFile == expected || refFile == expectedFile
+}
+
+func normalizeExpectedWorkflow(workflow string) string {
+	workflow = strings.TrimSpace(workflow)
+	if file, ok := workflowFileFromRef(workflow); ok {
+		return file
+	}
+	return workflow
 }
 
 func workflowFileFromRef(workflowRef string) (string, bool) {

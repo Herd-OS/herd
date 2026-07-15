@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 )
 
 var ErrReviewSubmissionInProgress = errors.New("review submission is already in progress")
+
+var sensitiveErrorTokenPattern = regexp.MustCompile(`\b(?:gh[opsru]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]+|[A-Za-z0-9+/]{20,}={0,2})\b`)
 
 const (
 	ResultStatusApproved         = "approved"
@@ -147,10 +150,6 @@ func (s ReviewService) DispatchReview(ctx context.Context, repo Repository, req 
 	if !locked {
 		return ReviewDispatchResult{Locked: false}, nil
 	}
-	if err := s.MarkReviewPending(ctx, repo, req.PRNumber, req.HeadSHA, "Herd Review is running on a self-hosted worker", ""); err != nil {
-		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
-		return ReviewDispatchResult{}, err
-	}
 	workflowFile := strings.TrimSpace(req.WorkflowFile)
 	if workflowFile == "" {
 		workflowFile = "herd-review.yml"
@@ -179,8 +178,14 @@ func (s ReviewService) DispatchReview(ctx context.Context, repo Repository, req 
 	})
 	if err != nil {
 		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
-		_ = s.Status.SetHerdReviewStatus(ctx, repo, req.PRNumber, req.HeadSHA, ReviewStatusFailure, "Herd Review workflow dispatch failed", "")
+		if statusErr := s.Status.SetHerdReviewStatus(ctx, repo, req.PRNumber, req.HeadSHA, ReviewStatusFailure, "Herd Review workflow dispatch failed", ""); statusErr != nil {
+			return ReviewDispatchResult{}, fmt.Errorf("dispatch review workflow failed and record failure status: %w", statusErr)
+		}
 		return ReviewDispatchResult{}, fmt.Errorf("dispatch review workflow: %w", err)
+	}
+	if err := s.MarkReviewPending(ctx, repo, req.PRNumber, req.HeadSHA, "Herd Review is running on a self-hosted worker", dispatched.URL); err != nil {
+		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
+		return ReviewDispatchResult{}, err
 	}
 	if !dispatched.Created {
 		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
@@ -473,7 +478,18 @@ func reviewSubmissionKey(repo Repository, result ReviewCompletedResult, event pl
 }
 
 func reviewSubmissionFailureComment(err error) string {
-	return "Herd Review could not submit an App-authored pull request review. The Herd Review commit status has been set to failure.\n\nError: " + err.Error()
+	return "Herd Review could not submit an App-authored pull request review. The Herd Review commit status has been set to failure.\n\nError: " + sanitizeReviewSubmissionError(err)
+}
+
+func sanitizeReviewSubmissionError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "unknown error"
+	}
+	return sensitiveErrorTokenPattern.ReplaceAllString(msg, "[REDACTED]")
 }
 
 func targetURL(result ReviewCompletedResult, prURL string) string {

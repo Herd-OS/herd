@@ -278,6 +278,12 @@ func validatedEffectiveControlPlaneURL(value string) (string, error) {
 	if parsed.User != nil {
 		return "", fmt.Errorf("control-plane URL must not contain userinfo")
 	}
+	if parsed.RawQuery != "" {
+		return "", fmt.Errorf("control-plane URL must not contain a query string")
+	}
+	if parsed.Fragment != "" {
+		return "", fmt.Errorf("control-plane URL must not contain a fragment")
+	}
 	if strings.Contains(effective, `"`) {
 		return "", fmt.Errorf("control-plane URL must not contain double quotes")
 	}
