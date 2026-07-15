@@ -16,14 +16,15 @@ const (
 )
 
 type Config struct {
-	Version      int          `yaml:"version"`
-	Platform     Platform     `yaml:"platform"`
-	Agent        Agent        `yaml:"agent"`
-	Workers      Workers      `yaml:"workers"`
-	Integrator   Integrator   `yaml:"integrator"`
-	Monitor      Monitor      `yaml:"monitor"`
-	PullRequests PullRequests `yaml:"pull_requests"`
-	ImagePublish ImagePublish `yaml:"image_publish"`
+	Version         int          `yaml:"version"`
+	ControlPlaneURL string       `yaml:"control_plane_url,omitempty"`
+	Platform        Platform     `yaml:"platform"`
+	Agent           Agent        `yaml:"agent"`
+	Workers         Workers      `yaml:"workers"`
+	Integrator      Integrator   `yaml:"integrator"`
+	Monitor         Monitor      `yaml:"monitor"`
+	PullRequests    PullRequests `yaml:"pull_requests"`
+	ImagePublish    ImagePublish `yaml:"image_publish"`
 }
 
 type Platform struct {
@@ -205,7 +206,17 @@ func Save(dir string, cfg *Config) error {
 	return os.WriteFile(path, data, 0644)
 }
 
+func (c *Config) EffectiveControlPlaneURL() string {
+	if c != nil && c.ControlPlaneURL != "" {
+		return c.ControlPlaneURL
+	}
+	return DefaultControlPlaneURL
+}
+
 func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("HERD_CONTROL_PLANE_URL"); v != "" {
+		cfg.ControlPlaneURL = v
+	}
 	if v := os.Getenv("HERD_MAX_WORKERS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Workers.MaxConcurrent = n

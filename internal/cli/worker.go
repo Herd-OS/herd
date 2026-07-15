@@ -31,10 +31,12 @@ func newWorkerExecCmd() *cobra.Command {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd worker exec is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
-
 			issueNum, err := strconv.Atoi(args[0])
 			if err != nil {
 				return fmt.Errorf("invalid issue number: %s", args[0])
+			}
+			if err := ensureProductionControlPlaneAuth("herd worker exec"); err != nil {
+				return err
 			}
 
 			mode := os.Getenv("HERD_WORKER_MODE")

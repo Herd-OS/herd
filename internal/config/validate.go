@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -27,6 +28,11 @@ func Validate(cfg *Config) *ValidationError {
 
 	if cfg.Version != 1 {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("version must be 1, got %d", cfg.Version))
+	}
+	if strings.TrimSpace(cfg.ControlPlaneURL) != "" {
+		if err := validateHTTPURL("control_plane_url", cfg.ControlPlaneURL); err != nil {
+			ve.Errors = append(ve.Errors, err.Error())
+		}
 	}
 
 	// Platform
@@ -192,6 +198,29 @@ func Validate(cfg *Config) *ValidationError {
 
 	if len(ve.Errors) > 0 {
 		return ve
+	}
+	return nil
+}
+
+func validateHTTPURL(field, value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid absolute http or https URL", field)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("%s must use http or https", field)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("%s must include a host", field)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("%s must not include userinfo", field)
+	}
+	if parsed.RawQuery != "" {
+		return fmt.Errorf("%s must not include a query string", field)
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("%s must not include a fragment", field)
 	}
 	return nil
 }

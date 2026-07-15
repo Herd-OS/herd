@@ -20,6 +20,7 @@ type PullRequest struct {
 	Body             string
 	State            string // "open", "closed", "merged"
 	Head             string // branch name
+	HeadSHA          string
 	Base             string // target branch
 	Labels           []string
 	Mergeable        bool
@@ -148,6 +149,13 @@ type MergeResult struct {
 	SHA     string
 	Merged  bool
 	Message string
+}
+
+type CommitStatus struct {
+	State       string
+	Context     string
+	Description string
+	TargetURL   string
 }
 
 // Filter and update types

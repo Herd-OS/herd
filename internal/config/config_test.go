@@ -12,6 +12,8 @@ import (
 func TestDefault(t *testing.T) {
 	cfg := Default()
 	assert.Equal(t, 1, cfg.Version)
+	assert.Empty(t, cfg.ControlPlaneURL)
+	assert.Equal(t, DefaultControlPlaneURL, cfg.EffectiveControlPlaneURL())
 	assert.Equal(t, "github", cfg.Platform.Provider)
 	assert.Equal(t, "claude", cfg.Agent.Provider)
 	assert.Equal(t, "medium", cfg.Agent.CodexReasoningEffort)
@@ -50,6 +52,7 @@ platform:
   provider: "github"
   owner: "my-org"
   repo: "my-project"
+control_plane_url: "https://cp.example.com"
 agent:
   provider: "claude"
 workers:
@@ -97,6 +100,8 @@ image_publish:
 
 	assert.Equal(t, "my-org", cfg.Platform.Owner)
 	assert.Equal(t, "my-project", cfg.Platform.Repo)
+	assert.Equal(t, "https://cp.example.com", cfg.ControlPlaneURL)
+	assert.Equal(t, "https://cp.example.com", cfg.EffectiveControlPlaneURL())
 	assert.Equal(t, 5, cfg.Workers.MaxConcurrent)
 	assert.Equal(t, "custom-label", cfg.Workers.RunnerLabel)
 	assert.Equal(t, 60, cfg.Workers.TimeoutMinutes)
@@ -331,6 +336,8 @@ func TestValidateErrors(t *testing.T) {
 		{"zero stale", func(c *Config) { c.Monitor.StaleThresholdMinutes = 0 }, "monitor.stale_threshold_minutes must be > 0"},
 		{"zero pr age", func(c *Config) { c.Monitor.MaxPRHAgeHours = 0 }, "monitor.max_pr_age_hours must be > 0"},
 		{"zero redispatch", func(c *Config) { c.Monitor.MaxRedispatchAttempts = 0 }, "monitor.max_redispatch_attempts must be > 0"},
+		{"control plane query", func(c *Config) { c.ControlPlaneURL = "https://cp.example.com?token=x" }, "control_plane_url must not include a query string"},
+		{"control plane fragment", func(c *Config) { c.ControlPlaneURL = "https://cp.example.com#frag" }, "control_plane_url must not include a fragment"},
 	}
 
 	for _, tt := range tests {

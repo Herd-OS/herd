@@ -6,22 +6,65 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
-  actions: write
+  id-token: write
 
 jobs:
   patrol:
     if: vars.HERD_ENABLED == 'true'
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Patrol
+      - name: Request hosted monitor patrol
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-          HERD_ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          herd monitor patrol
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "$EVENT_NAME" \
+            '{
+              version: 1,
+              kind: "monitor_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: "patrol"
+            }' \
+            > /tmp/herd-monitor-event.json
+          attempt=1
+          delay=1
+          while true; do
+            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -er '.value // empty')"; then
+              if [ "$attempt" -ge 4 ]; then
+                echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
+                exit 1
+              fi
+              echo "HerdOS workflow event OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt 30 ]; then
+                delay=30
+              fi
+              continue
+            fi
+            if curl -fsSL -X POST \
+              -H "Authorization: Bearer $OIDC_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data-binary @/tmp/herd-monitor-event.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"; then
+              echo "Submitted HerdOS workflow event after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS workflow event after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS workflow event callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done

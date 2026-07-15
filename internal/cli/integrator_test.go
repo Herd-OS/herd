@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +116,46 @@ func TestReviewResultMessage(t *testing.T) {
 			assert.Equal(t, tt.want, reviewResultMessage(tt.result))
 		})
 	}
+}
+
+func TestHostedReviewResultFromIntegrator(t *testing.T) {
+	tests := []struct {
+		name       string
+		result     *integrator.ReviewResult
+		wantStatus string
+	}{
+		{name: "approved", result: &integrator.ReviewResult{Approved: true}, wantStatus: "approved"},
+		{name: "duplicate approved", result: &integrator.ReviewResult{SkippedDuplicateApprovedHead: true}, wantStatus: "approved"},
+		{name: "changes requested", result: &integrator.ReviewResult{FixIssues: []int{101}}, wantStatus: "changes_requested"},
+		{name: "plain changes requested", result: &integrator.ReviewResult{}, wantStatus: "changes_requested"},
+		{name: "max cycles", result: &integrator.ReviewResult{MaxCyclesHit: true}, wantStatus: "failed"},
+		{name: "unparseable manual intervention", result: &integrator.ReviewResult{ManualInterventionNeeded: true}, wantStatus: "failed"},
+		{name: "nil", result: nil, wantStatus: "failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hostedReviewResultFromIntegrator(tt.result)
+			assert.Equal(t, tt.wantStatus, got.Status)
+			assert.NotEmpty(t, got.Summary)
+		})
+	}
+}
+
+func TestWriteHostedReviewResult(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.json")
+
+	require.NoError(t, writeHostedReviewResult(path, hostedReviewWorkflowResult{
+		Status:  "changes_requested",
+		Summary: "needs work",
+	}))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var got hostedReviewWorkflowResult
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, "changes_requested", got.Status)
+	assert.Equal(t, "needs work", got.Summary)
 }
 
 func TestIntegratorReviewCmd_DuplicateSkipReasonPrintedOnce(t *testing.T) {

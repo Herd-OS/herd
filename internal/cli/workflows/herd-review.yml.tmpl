@@ -1,0 +1,187 @@
+name: HerdOS Review
+run-name: "Herd Review PR #${{`{{`}} inputs.pr_number {{`}}`}}"
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: 'Control-plane job ID'
+        required: true
+        type: string
+      repository:
+        description: 'Repository full name'
+        required: true
+        type: string
+      batch_number:
+        description: 'Batch number or standalone PR number'
+        required: true
+        type: number
+      pr_number:
+        description: 'Pull request number to review'
+        required: true
+        type: number
+      batch_branch:
+        description: 'Resolved branch or ref to check out'
+        required: true
+        type: string
+      expected_head_sha:
+        description: 'Expected PR head SHA for result validation'
+        required: true
+        type: string
+      timeout_minutes:
+        description: 'Max execution time'
+        required: false
+        type: number
+        default: 30
+      runner_label:
+        description: 'Runner label override (default from config)'
+        required: false
+        type: string
+        default: 'herd-worker'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  review:
+    if: vars.HERD_ENABLED == 'true'
+    runs-on: [self-hosted, '${{`{{`}} inputs.runner_label {{`}}`}}']
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{`{{`}} inputs.batch_branch {{`}}`}}
+          fetch-depth: 0
+
+      - name: Verify checkout head
+        env:
+          HERD_EXPECTED_HEAD_SHA: ${{`{{`}} inputs.expected_head_sha {{`}}`}}
+        run: |
+          actual_head="$(git rev-parse HEAD)"
+          if [ "$actual_head" != "$HERD_EXPECTED_HEAD_SHA" ]; then
+            jq -n \
+              --arg status "failed" \
+              --arg summary "Herd Review checkout was stale: expected ${HERD_EXPECTED_HEAD_SHA}, checked out ${actual_head}." \
+              '{status: $status, summary: $summary}' \
+              > /tmp/herd-review-command-result.json
+            echo "Herd Review checkout SHA mismatch: expected ${HERD_EXPECTED_HEAD_SHA}, checked out ${actual_head}." >&2
+            exit 1
+          fi
+
+      - name: Run review
+        env:
+          HERD_RUNNER: "true"
+          HERD_JOB_ID: ${{`{{`}} inputs.job_id {{`}}`}}
+          HERD_REPOSITORY: ${{`{{`}} inputs.repository {{`}}`}}
+          HERD_BATCH_NUMBER: ${{`{{`}} inputs.batch_number {{`}}`}}
+          HERD_EXPECTED_HEAD_SHA: ${{`{{`}} inputs.expected_head_sha {{`}}`}}
+          HERD_CONTROL_PLANE_URL: {{if .ControlPlaneURL}}{{yamlScalar .ControlPlaneURL}}{{else}}${{`{{`}} vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' {{`}}`}}{{end}}
+          HERD_REVIEW_TIMEOUT_MINUTES: ${{`{{`}} inputs.timeout_minutes {{`}}`}}
+{{- if .ControlPlaneURL }}
+          HERD_CONFIG_CONTROL_PLANE_URL: {{ yamlScalar .ControlPlaneURL }}
+{{- end }}
+        run: |
+          set +e
+          timeout "${HERD_REVIEW_TIMEOUT_MINUTES}m" herd review-worker --pr "${{`{{`}} inputs.pr_number {{`}}`}}" --result-file /tmp/herd-review-command-result.json
+          rc=$?
+          set -e
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            jq -n \
+              --arg status "timeout" \
+              --arg summary "Herd Review timed out after ${HERD_REVIEW_TIMEOUT_MINUTES} minute(s)." \
+              '{status: $status, summary: $summary}' \
+              > /tmp/herd-review-command-result.json
+            exit 1
+          fi
+          exit "$rc"
+
+      - name: Report review result
+        if: always()
+        env:
+          HERD_JOB_ID: ${{`{{`}} inputs.job_id {{`}}`}}
+          HERD_REPOSITORY: ${{`{{`}} inputs.repository {{`}}`}}
+          HERD_BATCH_NUMBER: ${{`{{`}} inputs.batch_number {{`}}`}}
+          HERD_PR_NUMBER: ${{`{{`}} inputs.pr_number {{`}}`}}
+          HERD_EXPECTED_HEAD_SHA: ${{`{{`}} inputs.expected_head_sha {{`}}`}}
+          HERD_CONTROL_PLANE_URL: {{if .ControlPlaneURL}}{{yamlScalar .ControlPlaneURL}}{{else}}${{`{{`}} vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' {{`}}`}}{{end}}
+          HERD_JOB_STATUS: ${{`{{`}} job.status {{`}}`}}
+        run: |
+          STATUS="$(jq -er '.status // empty' /tmp/herd-review-command-result.json 2>/dev/null || true)"
+          SUMMARY="$(jq -er '.summary // empty' /tmp/herd-review-command-result.json 2>/dev/null || true)"
+          case "$STATUS" in
+            approved|changes_requested|failed|timeout|unparseable)
+              ;;
+            "")
+              STATUS="failed"
+              SUMMARY="Herd Review workflow did not produce a structured result."
+              ;;
+            *)
+              SUMMARY="Herd Review produced an unparseable status: ${STATUS}."
+              STATUS="unparseable"
+              ;;
+          esac
+          if [ -z "$SUMMARY" ]; then
+            SUMMARY="Herd Review completed with status ${STATUS}."
+          fi
+          if [ "$HERD_JOB_STATUS" != "success" ] && [ "$STATUS" = "approved" ]; then
+            STATUS="failed"
+            SUMMARY="Herd Review workflow failed after producing an approval result."
+          fi
+          jq -n \
+            --arg repository "$HERD_REPOSITORY" \
+            --arg job_id "$HERD_JOB_ID" \
+            --argjson batch_number "$HERD_BATCH_NUMBER" \
+            --argjson pr_number "$HERD_PR_NUMBER" \
+            --arg head_sha "$HERD_EXPECTED_HEAD_SHA" \
+            --arg status "$STATUS" \
+            --arg summary "$SUMMARY" \
+            '{
+              version: 1,
+              kind: "review_completed",
+              repository: $repository,
+              job_id: $job_id,
+              batch_number: $batch_number,
+              pr_number: $pr_number,
+              head_sha: $head_sha,
+              status: $status,
+              summary: $summary
+            }' \
+            > /tmp/herd-review-result.json
+          attempt=1
+          delay=1
+          while true; do
+            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -er '.value // empty')"; then
+              if [ "$attempt" -ge 4 ]; then
+                echo "Failed to fetch HerdOS review result OIDC token after ${attempt} attempt(s)." >&2
+                exit 1
+              fi
+              echo "HerdOS review result OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt 30 ]; then
+                delay=30
+              fi
+              continue
+            fi
+            if curl -fsSL -X POST \
+              -H "Authorization: Bearer $OIDC_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data-binary @/tmp/herd-review-result.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/jobs/$HERD_JOB_ID/results"; then
+              echo "Submitted HerdOS review result after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS review result after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS review result callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done

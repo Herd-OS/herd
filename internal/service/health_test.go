@@ -1,0 +1,150 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/herd-os/herd/internal/controlplane/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestHealthz(t *testing.T) {
+	handler, err := NewServer(Config{}, Dependencies{})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	assert.JSONEq(t, `{"status":"ok"}`, rec.Body.String())
+}
+
+func TestReadyz(t *testing.T) {
+	validConfig := validProductionConfig()
+
+	tests := []struct {
+		name       string
+		cfg        Config
+		store      Store
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "config unhealthy",
+			cfg:        Config{Env: "development", PublicURL: "://bad-url"},
+			store:      healthyStore{},
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "configuration not ready",
+		},
+		{
+			name:       "development storage dependency missing",
+			cfg:        Config{Env: "development"},
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "storage not ready",
+		},
+		{
+			name:       "development health smoke keeps readiness storage backed",
+			cfg:        Config{Env: "development"},
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "storage not ready",
+		},
+		{
+			name: "storage unhealthy",
+			cfg:  validConfig,
+			store: unhealthyStore{
+				err: errors.New("database unavailable"),
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   "database unavailable",
+		},
+		{
+			name:       "ready",
+			cfg:        validConfig,
+			store:      healthyStore{},
+			wantStatus: http.StatusOK,
+			wantBody:   `"status":"ready"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps := Dependencies{Store: tt.store}
+			if tt.cfg.Env == "production" || tt.cfg.Env == "staging" {
+				deps = productionTestDependencies(tt.store)
+			}
+			handler, err := NewServer(tt.cfg, deps)
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+			assert.Contains(t, rec.Body.String(), tt.wantBody)
+		})
+	}
+}
+
+type healthyStore struct{}
+
+func (healthyStore) Health(context.Context) error {
+	return nil
+}
+
+func (healthyStore) RecordWebhookDelivery(context.Context, store.WebhookDelivery) (bool, error) {
+	return true, nil
+}
+
+func (healthyStore) GetWebhookDelivery(context.Context, string) (store.WebhookDelivery, error) {
+	return store.WebhookDelivery{}, store.ErrNotFound
+}
+
+func (healthyStore) UpdateWebhookDeliveryStatus(context.Context, string, string, string, *time.Time) error {
+	return nil
+}
+
+func (healthyStore) UpsertInstallation(context.Context, store.Installation) error {
+	return nil
+}
+
+func (healthyStore) UpsertRepository(_ context.Context, r store.Repository) (store.Repository, error) {
+	return r, nil
+}
+
+type unhealthyStore struct {
+	err error
+}
+
+func (s unhealthyStore) Health(context.Context) error {
+	return s.err
+}
+
+func (s unhealthyStore) RecordWebhookDelivery(context.Context, store.WebhookDelivery) (bool, error) {
+	return true, nil
+}
+
+func (s unhealthyStore) GetWebhookDelivery(context.Context, string) (store.WebhookDelivery, error) {
+	return store.WebhookDelivery{}, store.ErrNotFound
+}
+
+func (s unhealthyStore) UpdateWebhookDeliveryStatus(context.Context, string, string, string, *time.Time) error {
+	return nil
+}
+
+func (s unhealthyStore) UpsertInstallation(context.Context, store.Installation) error {
+	return nil
+}
+
+func (s unhealthyStore) UpsertRepository(_ context.Context, r store.Repository) (store.Repository, error) {
+	return r, nil
+}

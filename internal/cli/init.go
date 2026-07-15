@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,14 +17,42 @@ import (
 
 	"github.com/herd-os/herd/internal/cli/runner"
 	"github.com/herd-os/herd/internal/config"
+	cpclient "github.com/herd-os/herd/internal/controlplane/client"
 	"github.com/herd-os/herd/internal/display"
 	"github.com/herd-os/herd/internal/issues"
 	ghplatform "github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
 )
 
+const defaultAppLogin = "herd-os"
+
+type initOptions struct {
+	SkipLabels      bool
+	SkipWorkflows   bool
+	ControlPlaneURL string
+	AppLogin        string
+}
+
+type repositoryRegistrar interface {
+	RegisterRepository(ctx context.Context, req cpclient.RegisterRepositoryRequest) (cpclient.RegisterRepositoryResponse, error)
+}
+
+type setupAuthorizer interface {
+	SetupToken(ctx context.Context) (string, error)
+}
+
+var (
+	newSetupAuthorizer = func() setupAuthorizer {
+		return newGHAuthorizer(nil)
+	}
+	newRepositoryRegistrar = func(controlPlaneURL string) (repositoryRegistrar, error) {
+		return cpclient.New(controlPlaneURL, nil)
+	}
+)
+
 func newInitCmd() *cobra.Command {
 	var skipLabels, skipWorkflows, checkOnly, dryRun bool
+	var controlPlaneURL, appLogin string
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -32,7 +63,12 @@ func newInitCmd() *cobra.Command {
 			if checkOnly || dryRun {
 				return runInitCheck()
 			}
-			return runInit(skipLabels, skipWorkflows)
+			return runInitWithOptions(initOptions{
+				SkipLabels:      skipLabels,
+				SkipWorkflows:   skipWorkflows,
+				ControlPlaneURL: controlPlaneURL,
+				AppLogin:        appLogin,
+			})
 		},
 		SilenceUsage: true,
 	}
@@ -41,11 +77,17 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&skipWorkflows, "skip-workflows", false, "Don't install workflow files")
 	cmd.Flags().BoolVar(&checkOnly, "check", false, "Compare what `herd init` would write against on-disk files; exit 1 if any drift is detected. Writes nothing.")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Alias for --check")
+	cmd.Flags().StringVar(&controlPlaneURL, "control-plane-url", "", "Herd control-plane URL for self-hosted installs (default: hosted HerdOS API)")
+	cmd.Flags().StringVar(&appLogin, "app-login", "", "GitHub App login override for tests or self-hosted installs")
 
 	return cmd
 }
 
 func runInit(skipLabels, skipWorkflows bool) error {
+	return runInitWithOptions(initOptions{SkipLabels: skipLabels, SkipWorkflows: skipWorkflows})
+}
+
+func runInitWithOptions(opts initOptions) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -61,6 +103,16 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	if err != nil {
 		return fmt.Errorf("could not detect repository: %w — make sure a GitHub remote is configured", err)
 	}
+	opts.ControlPlaneURL, err = validatedEffectiveControlPlaneURL(opts.ControlPlaneURL)
+	if err != nil {
+		return err
+	}
+	opts.AppLogin = effectiveAppLogin(opts.AppLogin)
+
+	registration, err := registerRepositoryForInit(context.Background(), owner, repo, opts)
+	if err != nil {
+		return err
+	}
 
 	// 2. Create config
 	configPath := filepath.Join(dir, config.ConfigFile)
@@ -68,6 +120,9 @@ func runInit(skipLabels, skipWorkflows bool) error {
 		cfg := config.Default()
 		cfg.Platform.Owner = owner
 		cfg.Platform.Repo = repo
+		if isSelfHostedControlPlane(opts.ControlPlaneURL) {
+			cfg.ControlPlaneURL = opts.ControlPlaneURL
+		}
 		if err := config.Save(dir, cfg); err != nil {
 			return fmt.Errorf("creating config: %w", err)
 		}
@@ -81,6 +136,9 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	cfg, err := config.Load(dir)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
+	}
+	if isSelfHostedControlPlane(opts.ControlPlaneURL) {
+		cfg.ControlPlaneURL = opts.ControlPlaneURL
 	}
 
 	// 3. Create .herd/ directory with role instruction files
@@ -100,7 +158,7 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	fmt.Println(display.Success("Created .herd/ directory with role instruction files"))
 
 	// 4. Create labels
-	if !skipLabels {
+	if !opts.SkipLabels {
 		if err := createLabels(owner, repo); err != nil {
 			return err
 		}
@@ -109,7 +167,7 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	}
 
 	// 5. Install workflow files
-	if !skipWorkflows {
+	if !opts.SkipWorkflows {
 		if err := installWorkflows(dir, cfg); err != nil {
 			return err
 		}
@@ -118,7 +176,11 @@ func runInit(skipLabels, skipWorkflows bool) error {
 	}
 
 	// 6. Create runner files
-	if err := createRunnerFiles(dir, owner, repo); err != nil {
+	responseControlPlaneURL, err := validatedEffectiveResponseControlPlaneURL(opts.ControlPlaneURL, registration.ControlPlaneURL)
+	if err != nil {
+		return err
+	}
+	if err := createRunnerFilesWithBootstrap(dir, owner, repo, registration.RunnerBootstrapToken, responseControlPlaneURL); err != nil {
 		return err
 	}
 
@@ -189,6 +251,154 @@ func detectOwnerRepo(dir string) (string, string, error) {
 	}
 
 	return "", "", fmt.Errorf("cannot parse owner/repo from remote: %s", remote)
+}
+
+func effectiveControlPlaneURL(value string) string {
+	value = strings.TrimRight(strings.TrimSpace(value), "/")
+	if value == "" {
+		return config.DefaultControlPlaneURL
+	}
+	return value
+}
+
+func validatedEffectiveControlPlaneURL(value string) (string, error) {
+	effective := effectiveControlPlaneURL(value)
+	if strings.ContainsFunc(effective, func(r rune) bool {
+		return r <= ' ' || r == 0x7f
+	}) {
+		return "", fmt.Errorf("control-plane URL must not contain whitespace or control characters")
+	}
+	parsed, err := url.Parse(effective)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("control-plane URL must be an absolute http or https URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("control-plane URL must use http or https")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("control-plane URL must not contain userinfo")
+	}
+	if parsed.RawQuery != "" {
+		return "", fmt.Errorf("control-plane URL must not contain a query string")
+	}
+	if parsed.Fragment != "" {
+		return "", fmt.Errorf("control-plane URL must not contain a fragment")
+	}
+	if strings.Contains(effective, `"`) {
+		return "", fmt.Errorf("control-plane URL must not contain double quotes")
+	}
+	return strings.TrimRight(effective, "/"), nil
+}
+
+func effectiveAppLogin(value string) string {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "@")
+	if value == "" {
+		return defaultAppLogin
+	}
+	return value
+}
+
+func isSelfHostedControlPlane(value string) bool {
+	return effectiveControlPlaneURL(value) != config.DefaultControlPlaneURL
+}
+
+func effectiveResponseControlPlaneURL(requested string, returned string) string {
+	if strings.TrimSpace(returned) != "" {
+		return effectiveControlPlaneURL(returned)
+	}
+	return effectiveControlPlaneURL(requested)
+}
+
+func validatedEffectiveResponseControlPlaneURL(requested string, returned string) (string, error) {
+	effective, err := validatedEffectiveControlPlaneURL(effectiveResponseControlPlaneURL(requested, returned))
+	if err != nil {
+		return "", err
+	}
+	return effective, nil
+}
+
+func registerRepositoryForInit(ctx context.Context, owner, repo string, opts initOptions) (cpclient.RegisterRepositoryResponse, error) {
+	authorizer := newSetupAuthorizer()
+	setupToken, err := authorizer.SetupToken(ctx)
+	if err != nil {
+		return cpclient.RegisterRepositoryResponse{}, err
+	}
+	registrar, err := newRepositoryRegistrar(opts.ControlPlaneURL)
+	if err != nil {
+		return cpclient.RegisterRepositoryResponse{}, err
+	}
+	resp, err := registrar.RegisterRepository(ctx, cpclient.RegisterRepositoryRequest{
+		Repository: owner + "/" + repo,
+		Owner:      owner,
+		Name:       repo,
+		SetupToken: setupToken,
+		AppLogin:   opts.AppLogin,
+	})
+	if err != nil {
+		safeErr := redactSetupTokenError(err, setupToken)
+		if registrationFailureLooksLikeAppAccess(err) {
+			return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. Ensure the Herd GitHub App is installed for %s/%s and retry `herd init`", safeErr, owner, repo)
+		}
+		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: %w. The Herd control plane is unavailable or rate limited; retry `herd init` later", safeErr)
+	}
+	if strings.TrimSpace(resp.RunnerBootstrapToken) == "" {
+		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: response is missing runner bootstrap token; retry `herd init` later or contact the control-plane operator")
+	}
+	if err := validateRunnerBootstrapToken(resp.RunnerBootstrapToken); err != nil {
+		return cpclient.RegisterRepositoryResponse{}, fmt.Errorf("register repository with Herd control plane: invalid runner bootstrap token in response: %w", err)
+	}
+	return resp, nil
+}
+
+func redactSetupTokenError(err error, setupToken string) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(err.Error())
+	token := strings.TrimSpace(setupToken)
+	if token != "" {
+		msg = strings.ReplaceAll(msg, token, "[REDACTED]")
+	}
+	for _, prefix := range []string{"ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_"} {
+		for {
+			idx := strings.Index(msg, prefix)
+			if idx < 0 {
+				break
+			}
+			end := idx + len(prefix)
+			for end < len(msg) {
+				c := msg[end]
+				if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+					end++
+					continue
+				}
+				break
+			}
+			msg = msg[:idx] + "[REDACTED]" + msg[end:]
+		}
+	}
+	if msg == "" {
+		msg = "registration request failed"
+	}
+	return errors.New(msg)
+}
+
+func registrationFailureLooksLikeAppAccess(err error) bool {
+	var statusErr cpclient.StatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case 401, 403, 404:
+			return true
+		default:
+			return false
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not installed") || strings.Contains(message, "installation") || strings.Contains(message, "admin access")
 }
 
 func ensureGitignore(dir, entry string) error {
@@ -366,7 +576,11 @@ func renderManagedFiles(dir, owner, repo string, cfg *config.Config) ([]managedF
 // exists but fails to merge, returns the base content and the merge error so the
 // caller can decide whether to surface a warning.
 func renderMergedCompose(dir, owner, repo string) ([]byte, bool, error) {
-	rendered, err := renderDockerCompose(owner, repo)
+	return renderMergedComposeWithControlPlane(dir, owner, repo, "")
+}
+
+func renderMergedComposeWithControlPlane(dir, owner, repo string, controlPlaneURL string) ([]byte, bool, error) {
+	rendered, err := renderDockerComposeWithControlPlane(owner, repo, controlPlaneURL)
 	if err != nil {
 		return nil, false, fmt.Errorf("rendering docker-compose.herd.yml: %w", err)
 	}
@@ -444,8 +658,9 @@ func createRoleInstructionFiles(herdDir string) error {
 }
 
 type runnerTemplateData struct {
-	Owner string
-	Repo  string
+	Owner           string
+	Repo            string
+	ControlPlaneURL string
 }
 
 // runnerBaseImage returns the fully-qualified, version-pinned GHCR reference for
@@ -517,6 +732,15 @@ func renderHerdRunnerDockerfile(baseImage string) ([]byte, error) {
 }
 
 func createRunnerFiles(dir, owner, repo string) error {
+	return createRunnerFilesWithBootstrap(dir, owner, repo, "", "")
+}
+
+func createRunnerFilesWithBootstrap(dir, owner, repo string, bootstrapToken string, controlPlaneURL string) error {
+	validControlPlaneURL, err := validatedEffectiveControlPlaneURL(controlPlaneURL)
+	if err != nil {
+		return err
+	}
+	controlPlaneURL = validControlPlaneURL
 	// Runner infrastructure files are herd-managed — always overwrite to keep
 	// them in sync with the installed herd version.
 
@@ -578,7 +802,11 @@ func createRunnerFiles(dir, owner, repo string) error {
 	}
 
 	// docker-compose.herd.yml (templated with owner/repo, merged with override if present)
-	composeContent, mergedOK, mergeErr := renderMergedCompose(dir, owner, repo)
+	composeControlPlaneURL := ""
+	if isSelfHostedControlPlane(controlPlaneURL) {
+		composeControlPlaneURL = effectiveControlPlaneURL(controlPlaneURL)
+	}
+	composeContent, mergedOK, mergeErr := renderMergedComposeWithControlPlane(dir, owner, repo, composeControlPlaneURL)
 	if composeContent == nil {
 		return fmt.Errorf("rendering docker-compose.herd.yml: %w", mergeErr)
 	}
@@ -601,6 +829,13 @@ func createRunnerFiles(dir, owner, repo string) error {
 		return fmt.Errorf("writing .env.herd.example: %w", err)
 	}
 	fmt.Println(display.Success("Installed .env.herd.example"))
+
+	if strings.TrimSpace(bootstrapToken) != "" {
+		if err := writeRunnerEnv(dir, bootstrapToken, composeControlPlaneURL); err != nil {
+			return err
+		}
+		fmt.Println(display.Success("Wrote runner bootstrap token to .env"))
+	}
 
 	return nil
 }
@@ -660,6 +895,10 @@ func extractYAMLHeader(s string) string {
 }
 
 func renderDockerCompose(owner, repo string) (string, error) {
+	return renderDockerComposeWithControlPlane(owner, repo, "")
+}
+
+func renderDockerComposeWithControlPlane(owner, repo string, controlPlaneURL string) (string, error) {
 	data, err := runner.FS.ReadFile("docker-compose.herd.yml.tmpl")
 	if err != nil {
 		return "", fmt.Errorf("reading embedded template: %w", err)
@@ -669,10 +908,113 @@ func renderDockerCompose(owner, repo string) (string, error) {
 		return "", err
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, runnerTemplateData{Owner: owner, Repo: repo}); err != nil {
+	if err := tmpl.Execute(&buf, runnerTemplateData{Owner: owner, Repo: repo, ControlPlaneURL: controlPlaneURL}); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+func writeRunnerEnv(dir string, bootstrapToken string, controlPlaneURL string) error {
+	if strings.TrimSpace(bootstrapToken) != "" {
+		if err := validateRunnerBootstrapToken(bootstrapToken); err != nil {
+			return err
+		}
+		if err := ensureGitignore(dir, ".env"); err != nil {
+			return fmt.Errorf("updating .gitignore for .env: %w", err)
+		}
+	}
+	path := filepath.Join(dir, ".env")
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading .env: %w", err)
+	}
+
+	values := parseEnvLines(string(existing))
+	values["HERD_RUNNER_BOOTSTRAP_TOKEN"] = bootstrapToken
+	if strings.TrimSpace(controlPlaneURL) != "" {
+		values["HERD_CONTROL_PLANE_URL"] = effectiveControlPlaneURL(controlPlaneURL)
+	} else {
+		delete(values, "HERD_CONTROL_PLANE_URL")
+	}
+
+	var out strings.Builder
+	wroteBootstrap := false
+	wroteControlPlane := false
+	for _, line := range strings.Split(string(existing), "\n") {
+		if line == "" {
+			continue
+		}
+		key, ok := envLineKey(line)
+		switch {
+		case ok && key == "HERD_RUNNER_BOOTSTRAP_TOKEN":
+			out.WriteString("HERD_RUNNER_BOOTSTRAP_TOKEN=" + values[key] + "\n")
+			wroteBootstrap = true
+		case ok && key == "HERD_CONTROL_PLANE_URL":
+			if v, keep := values[key]; keep {
+				out.WriteString("HERD_CONTROL_PLANE_URL=" + v + "\n")
+				wroteControlPlane = true
+			}
+		default:
+			out.WriteString(line + "\n")
+		}
+	}
+	if !wroteControlPlane {
+		if v, ok := values["HERD_CONTROL_PLANE_URL"]; ok {
+			out.WriteString("HERD_CONTROL_PLANE_URL=" + v + "\n")
+		}
+	}
+	if !wroteBootstrap {
+		out.WriteString("HERD_RUNNER_BOOTSTRAP_TOKEN=" + values["HERD_RUNNER_BOOTSTRAP_TOKEN"] + "\n")
+	}
+	return os.WriteFile(path, []byte(out.String()), 0600)
+}
+
+func validateRunnerBootstrapToken(token string) error {
+	if token == "" {
+		return fmt.Errorf("runner bootstrap token is required")
+	}
+	if strings.TrimSpace(token) != token {
+		return fmt.Errorf("runner bootstrap token must not contain leading or trailing whitespace")
+	}
+	if !strings.HasPrefix(token, "hrb_") {
+		return fmt.Errorf("runner bootstrap token has unexpected format")
+	}
+	if strings.ContainsFunc(token, func(r rune) bool {
+		return r <= ' ' || r == 0x7f
+	}) {
+		return fmt.Errorf("runner bootstrap token must be a single-line env-safe value")
+	}
+	if strings.Contains(token, "=") {
+		return fmt.Errorf("runner bootstrap token must not contain env syntax")
+	}
+	return nil
+}
+
+func parseEnvLines(content string) map[string]string {
+	values := map[string]string{}
+	for _, line := range strings.Split(content, "\n") {
+		key, ok := envLineKey(line)
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			values[key] = parts[1]
+		}
+	}
+	return values
+}
+
+func envLineKey(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, "=") {
+		return "", false
+	}
+	key := strings.TrimSpace(strings.SplitN(trimmed, "=", 2)[0])
+	if key == "" {
+		return "", false
+	}
+	return key, true
 }
 
 // versionStateFile is the path (relative to repo root) where herd init records
@@ -847,8 +1189,9 @@ func cleanupBranch(dir, branch string) {
 func printNextSteps(owner, repo string) {
 	fmt.Println()
 	fmt.Println("Set up runners:")
-	fmt.Println("  1. cp .env.herd.example .env")
-	fmt.Println("  2. Add your GITHUB_TOKEN to .env")
+	fmt.Println("  1. Review the .env created by herd init; add model/provider credentials there")
+	fmt.Println("     If .env is missing, copy .env.herd.example to .env first")
+	fmt.Println("  2. Confirm HERD_RUNNER_BOOTSTRAP_TOKEN is present in .env; do not overwrite it")
 	fmt.Println("  3. Run: claude setup-token (uses your subscription, no API cost)")
 	fmt.Println("     Add the token as CLAUDE_CODE_OAUTH_TOKEN in .env")
 	fmt.Println("  4. docker compose -f docker-compose.herd.yml up -d")
@@ -857,20 +1200,9 @@ func printNextSteps(owner, repo string) {
 	fmt.Printf("  gh variable set HERD_ENABLED --body true --repo %s/%s\n", owner, repo)
 	fmt.Println("  Workflows are installed but inactive until HERD_ENABLED is set.")
 	fmt.Println()
-	fmt.Printf("For full automation (cross-workflow dispatch):\n")
-	fmt.Printf("  Add a fine-grained PAT as HERD_GITHUB_TOKEN in repo secrets:\n")
-	fmt.Printf("  → https://github.com/%s/%s/settings/secrets/actions\n", owner, repo)
-	fmt.Println("  Required PAT permissions:")
-	fmt.Println("    Actions:         Read and write")
-	fmt.Println("    Administration:  Read and write")
-	fmt.Println("    Commit statuses: Read and write")
-	fmt.Println("    Contents:        Read and write")
-	fmt.Println("    Issues:          Read and write")
-	fmt.Println("    Metadata:        Read-only (automatic)")
-	fmt.Println("    Pull requests:   Read and write")
-	fmt.Println("    Workflows:       Read and write")
-	fmt.Println("  Without this, GITHUB_TOKEN's anti-recursion protection prevents")
-	fmt.Println("  Monitor→Worker and Integrator→Worker dispatch.")
+	fmt.Printf("Production orchestration:\n")
+	fmt.Println("  Herd dispatches jobs through the control plane and GitHub App installation auth.")
+	fmt.Println("  Do not add HERD_GITHUB_TOKEN or human PAT secrets for production workflows.")
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Println("  herd plan          Start a planning session")

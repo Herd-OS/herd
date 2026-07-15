@@ -218,6 +218,22 @@ func TestPullRequestCreateReview(t *testing.T) {
 	}
 }
 
+func TestPullRequestCreateReviewForCommit(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/test-org/test-repo/pulls/1/reviews", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		var req gh.PullRequestReviewRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "APPROVE", req.GetEvent())
+		assert.Equal(t, "head-sha", req.GetCommitID())
+		json.NewEncoder(w).Encode(gh.PullRequestReview{ID: gh.Ptr(int64(1))})
+	})
+
+	client, _ := newTestClient(t, mux)
+	err := client.PullRequests().(*pullRequestService).CreateReviewForCommit(context.Background(), 1, "Review body", platform.ReviewApprove, "head-sha")
+	require.NoError(t, err)
+}
+
 func TestPullRequestUpdateBranch(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/test-org/test-repo/pulls/1/update-branch", func(w http.ResponseWriter, r *http.Request) {
@@ -478,7 +494,7 @@ func TestMapPullRequest(t *testing.T) {
 		Title:     gh.Ptr("Test"),
 		Body:      gh.Ptr("Body"),
 		State:     gh.Ptr("open"),
-		Head:      &gh.PullRequestBranch{Ref: gh.Ptr("feature")},
+		Head:      &gh.PullRequestBranch{Ref: gh.Ptr("feature"), SHA: gh.Ptr("head-sha")},
 		Base:      &gh.PullRequestBranch{Ref: gh.Ptr("main")},
 		Mergeable: gh.Ptr(true),
 		HTMLURL:   gh.Ptr("https://github.com/org/repo/pull/42"),
@@ -490,6 +506,7 @@ func TestMapPullRequest(t *testing.T) {
 	assert.Equal(t, "Body", pr.Body)
 	assert.Equal(t, "open", pr.State)
 	assert.Equal(t, "feature", pr.Head)
+	assert.Equal(t, "head-sha", pr.HeadSHA)
 	assert.Equal(t, "main", pr.Base)
 	assert.True(t, pr.Mergeable)
 	assert.Equal(t, "https://github.com/org/repo/pull/42", pr.URL)

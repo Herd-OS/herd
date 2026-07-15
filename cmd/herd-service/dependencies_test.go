@@ -1,0 +1,253 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	gh "github.com/google/go-github/v68/github"
+	"github.com/herd-os/herd/internal/cli"
+	"github.com/herd-os/herd/internal/controlplane/artifacts"
+	"github.com/herd-os/herd/internal/controlplane/commands"
+	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/jobs"
+	"github.com/herd-os/herd/internal/controlplane/store"
+	"github.com/herd-os/herd/internal/controlplane/workflowevents"
+	"github.com/herd-os/herd/internal/service"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestBuildServiceDependenciesProductionWiresCommandDispatcher(t *testing.T) {
+	cfg := validProductionServiceConfig(t)
+	st := store.NewMemoryStore()
+
+	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{
+		WorkflowEventProcessor: fixedWorkflowProcessor{},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, deps.IssueCommentCommandHandler)
+}
+
+func TestBuildServiceDependenciesProductionRequiresWorkflowProcessor(t *testing.T) {
+	cfg := validProductionServiceConfig(t)
+	st := store.NewMemoryStore()
+
+	deps, err := buildServiceDependencies(cfg, st, log.New(io.Discard, "", 0))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "production workflow event processor is not configured")
+	assert.Empty(t, deps)
+}
+
+func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
+	cfg := validProductionServiceConfig(t)
+	st := store.NewMemoryStore()
+	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{
+		OIDCValidator:          fixedOIDCValidator{},
+		CommandDispatcher:      fixedCommandDispatcher{},
+		WorkflowEventProcessor: fixedWorkflowProcessor{},
+		ArtifactStore:          emptyArtifactStore{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, deps.IssueCommentCommandHandler)
+	require.NotNil(t, deps.JobResultsRoute)
+	require.NotNil(t, deps.WorkflowEventsRoute)
+	require.NotNil(t, deps.RunnerRegistrationTokenRoute)
+	require.NotNil(t, deps.RegisterRepositoryRoute)
+
+	handler, err := service.NewServer(cfg, deps)
+	require.NoError(t, err)
+
+	jobReq := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job-1/results", strings.NewReader(`{`))
+	jobReq.Header.Set("Authorization", "Bearer oidc")
+	jobResp := httptest.NewRecorder()
+	handler.ServeHTTP(jobResp, jobReq)
+	assert.Equal(t, http.StatusBadRequest, jobResp.Code)
+	assert.Contains(t, jobResp.Body.String(), "malformed JSON result payload")
+
+	eventReq := httptest.NewRequest(http.MethodPost, "/api/v1/workflow-events", strings.NewReader(`{`))
+	eventReq.Header.Set("Authorization", "Bearer oidc")
+	eventResp := httptest.NewRecorder()
+	handler.ServeHTTP(eventResp, eventReq)
+	assert.Equal(t, http.StatusBadRequest, eventResp.Code)
+	assert.Contains(t, eventResp.Body.String(), "invalid workflow event payload")
+}
+
+func TestProductionCommandDispatcherRequiresRealAppContextWithoutSyntheticDefaults(t *testing.T) {
+	err := productionCommandDispatcher{}.DispatchCommand(context.Background(), commands.DispatchCommand{
+		RepositoryID:   7,
+		InstallationID: 9,
+		Owner:          "octo",
+		Repo:           "repo",
+		IssueNumber:    849,
+		PRNumber:       849,
+		Command:        commands.ParsedCommand{Kind: commands.CommandReview},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GitHub App token source")
+	assert.NotContains(t, err.Error(), "durable batch/ref/head context")
+	assert.NotContains(t, err.Error(), "batch 1")
+}
+
+func TestCommandWorkflowFileIsManagedWorkflow(t *testing.T) {
+	managed := cli.WorkflowFiles()
+	tests := []struct {
+		name string
+		kind cpdispatch.JobKind
+		want string
+	}{
+		{name: "review", kind: cpdispatch.JobKindReview, want: "herd-review.yml"},
+		{name: "review fix", kind: cpdispatch.JobKindReviewFix, want: "herd-worker.yml"},
+		{name: "ci fix", kind: cpdispatch.JobKindCIFix, want: "herd-worker.yml"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workflowFile := commandWorkflowFile(tt.kind)
+
+			assert.Equal(t, tt.want, workflowFile)
+			assert.Contains(t, managed, workflowFile)
+		})
+	}
+}
+
+func TestCommandTargetFromPullRequest(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      commands.CommandKind
+		issue     int
+		milestone *gh.Milestone
+		wantBatch int
+		wantIssue int
+		wantErr   string
+	}{
+		{
+			name:      "review without batch milestone uses PR number context",
+			kind:      commands.CommandReview,
+			wantBatch: 42,
+			wantIssue: 42,
+		},
+		{
+			name:      "review with batch milestone uses milestone",
+			kind:      commands.CommandReview,
+			milestone: &gh.Milestone{Number: gh.Ptr(849)},
+			wantBatch: 849,
+			wantIssue: 42,
+		},
+		{
+			name:      "fix with tracking issue uses durable issue number",
+			kind:      commands.CommandFix,
+			issue:     101,
+			wantBatch: 42,
+			wantIssue: 101,
+		},
+		{
+			name:    "fix without tracking issue is rejected",
+			kind:    commands.CommandFix,
+			wantErr: "durable fix issue number",
+		},
+		{
+			name:    "fix-ci without tracking issue is rejected",
+			kind:    commands.CommandFixCI,
+			wantErr: "durable fix issue number",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target, err := commandTargetFromPullRequest(commands.DispatchCommand{
+				IssueNumber: tt.issue,
+				PRNumber:    42,
+				Command:     commands.ParsedCommand{Kind: tt.kind},
+			}, &gh.PullRequest{
+				Head: &gh.PullRequestBranch{
+					Ref: gh.Ptr("feature-branch"),
+					SHA: gh.Ptr("head-sha"),
+				},
+				Base: &gh.PullRequestBranch{
+					Ref: gh.Ptr("main"),
+					SHA: gh.Ptr("base-sha"),
+				},
+				Milestone: tt.milestone,
+			})
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantBatch, target.BatchNumber)
+			assert.Equal(t, tt.wantIssue, target.IssueNumber)
+			assert.Equal(t, "feature-branch", target.Ref)
+			assert.Equal(t, "feature-branch", target.BatchBranch)
+			assert.Equal(t, "head-sha", target.BaseSHA)
+			assert.Equal(t, "head-sha", target.HeadSHA)
+		})
+	}
+}
+
+func validProductionServiceConfig(t *testing.T) service.Config {
+	t.Helper()
+	return service.Config{
+		GitHubAppID:         123,
+		GitHubAppPrivateKey: string(testPrivateKeyPEM(t)),
+		WebhookSecret:       "webhook-secret",
+		PublicURL:           "https://control.example.test",
+		DatabaseURL:         "postgres://example",
+		Env:                 "production",
+		AppLogin:            "herd-os",
+		OIDCAudience:        "herd-control-plane",
+	}
+}
+
+func testPrivateKeyPEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+}
+
+type emptyArtifactStore struct{}
+
+func (emptyArtifactStore) OpenArtifact(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+type fixedOIDCValidator struct{}
+
+func (fixedOIDCValidator) Validate(context.Context, string) (jobs.OIDCClaims, error) {
+	return jobs.OIDCClaims{
+		Issuer:      jobs.GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "octo/herd",
+		Ref:         "refs/heads/main",
+		Workflow:    ".github/workflows/herd-integrator.yml",
+		WorkflowRef: "octo/herd/.github/workflows/herd-integrator.yml@refs/heads/main",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}, nil
+}
+
+var _ artifacts.Store = emptyArtifactStore{}
+
+type fixedWorkflowProcessor struct{}
+
+func (fixedWorkflowProcessor) ProcessWorkflowEvent(context.Context, store.Repository, workflowevents.Event) error {
+	return nil
+}
+
+type fixedCommandDispatcher struct{}
+
+func (fixedCommandDispatcher) DispatchCommand(context.Context, commands.DispatchCommand) error {
+	return nil
+}

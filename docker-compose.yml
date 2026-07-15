@@ -1,0 +1,39 @@
+services:
+  service:
+    image: golang:1.26
+    working_dir: /workspace
+    command: go run ./cmd/herd-service
+    environment:
+      HERD_ENV: development
+      HERD_DATABASE_URL: postgres://herd:herd@postgres:5432/herd?sslmode=disable
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: herd
+      POSTGRES_USER: herd
+      POSTGRES_PASSWORD: herd
+    ports:
+      - "5432:5432"
+    volumes:
+      - herd-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U herd -d herd"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  herd-postgres-data:

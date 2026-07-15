@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -43,6 +44,9 @@ func newConsolidateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator consolidate is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator consolidate"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -102,6 +106,9 @@ func newAdvanceCmd() *cobra.Command {
 			}
 			if runID == 0 && batchNum == 0 {
 				return fmt.Errorf("either --run-id or --batch is required")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator advance"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -172,6 +179,7 @@ func newIntegratorReviewCmd() *cobra.Command {
 	var runID int64
 	var prNumber int
 	var batchNum int
+	var resultFile string
 
 	cmd := &cobra.Command{
 		Use:   "review",
@@ -195,6 +203,9 @@ func newIntegratorReviewCmd() *cobra.Command {
 			}
 			if set > 1 {
 				return fmt.Errorf("--run-id, --pr, and --batch are mutually exclusive")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator review"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -234,6 +245,12 @@ func newIntegratorReviewCmd() *cobra.Command {
 				RepoRoot:    cwd,
 			})
 			if err != nil {
+				if resultFile != "" {
+					_ = writeHostedReviewResult(resultFile, hostedReviewWorkflowResult{
+						Status:  "failed",
+						Summary: "Herd Review failed: " + err.Error(),
+					})
+				}
 				if prNumber != 0 {
 					postIntegratorFailure(cmd.Context(), client.Issues(), prNumber, "review", err)
 				} else if runID != 0 {
@@ -247,6 +264,11 @@ func newIntegratorReviewCmd() *cobra.Command {
 				}
 				return err
 			}
+			if resultFile != "" {
+				if err := writeHostedReviewResult(resultFile, hostedReviewResultFromIntegrator(result)); err != nil {
+					return err
+				}
+			}
 
 			printReviewResultMessage(result)
 			return nil
@@ -256,7 +278,53 @@ func newIntegratorReviewCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID")
 	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number")
 	cmd.Flags().IntVar(&batchNum, "batch", 0, "Batch/milestone number")
+	cmd.Flags().StringVar(&resultFile, "result-file", "", "Write hosted review workflow result JSON")
 	return cmd
+}
+
+type hostedReviewWorkflowResult struct {
+	Status  string `json:"status"`
+	Summary string `json:"summary"`
+}
+
+func hostedReviewResultFromIntegrator(result *integrator.ReviewResult) hostedReviewWorkflowResult {
+	if result == nil {
+		return hostedReviewWorkflowResult{Status: "failed", Summary: "Herd Review did not produce a result."}
+	}
+	switch {
+	case result.Approved || result.SkippedDuplicateApprovedHead:
+		summary := reviewResultMessage(result)
+		if summary == "" {
+			summary = "Herd Review approved this head."
+		}
+		return hostedReviewWorkflowResult{Status: "approved", Summary: summary}
+	case result.MaxCyclesHit:
+		return hostedReviewWorkflowResult{Status: "failed", Summary: "Herd Review reached the maximum fix cycle count."}
+	case result.ManualInterventionNeeded, result.StableDisagreement, result.AllCreatesFailed:
+		summary := reviewResultMessage(result)
+		if summary == "" {
+			summary = "Herd Review requires manual intervention."
+		}
+		return hostedReviewWorkflowResult{Status: "failed", Summary: summary}
+	default:
+		summary := reviewResultMessage(result)
+		if summary == "" {
+			summary = "Herd Review requested changes."
+		}
+		return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary}
+	}
+}
+
+func writeHostedReviewResult(path string, result hostedReviewWorkflowResult) error {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling hosted review result: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("writing hosted review result: %w", err)
+	}
+	return nil
 }
 
 func printReviewResultMessage(result *integrator.ReviewResult) {
@@ -300,6 +368,9 @@ func newIntegratorMergeCmd() *cobra.Command {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator merge is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
+			if err := ensureProductionControlPlaneAuth("herd integrator merge"); err != nil {
+				return err
+			}
 
 			cfg, err := config.Load(".")
 			if err != nil {
@@ -341,6 +412,9 @@ func newIntegratorCleanupCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator cleanup is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator cleanup"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -419,6 +493,9 @@ func newHandleCommentCmd() *cobra.Command {
 					fmt.Printf("Ignoring command from %s (association: %s)\n", authorLogin, authorAssociation)
 					return nil
 				}
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator handle-comment"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -507,6 +584,9 @@ func newIntegratorCheckCICmd() *cobra.Command {
 				return fmt.Errorf("herd integrator check-ci is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
 			if err := validateCheckCIFlags(runID, batchNum, ciRunID); err != nil {
+				return err
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator check-ci"); err != nil {
 				return err
 			}
 

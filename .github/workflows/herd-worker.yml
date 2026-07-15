@@ -3,6 +3,18 @@ run-name: "Herd Worker #${{ inputs.issue_number }}"
 on:
   workflow_dispatch:
     inputs:
+      job_id:
+        description: 'Control-plane job ID'
+        required: true
+        type: string
+      repository:
+        description: 'Repository full name'
+        required: true
+        type: string
+      batch_number:
+        description: 'Batch number'
+        required: true
+        type: number
       issue_number:
         description: 'Issue number to work on'
         required: true
@@ -12,6 +24,10 @@ on:
         required: false
         type: string
         default: ''
+      expected_head_sha:
+        description: 'Expected worker head SHA for result validation'
+        required: true
+        type: string
       mode:
         description: 'Execution mode: batch (default) or standalone'
         required: false
@@ -29,9 +45,8 @@ on:
         default: 'herd-worker'
 
 permissions:
-  contents: write
-  issues: write
-  actions: write
+  contents: read
+  id-token: write
 
 jobs:
   execute:
@@ -44,13 +59,150 @@ jobs:
         with:
           ref: ${{ inputs.batch_branch || github.event.repository.default_branch }}
           fetch-depth: 0
-          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Record checkout base
+        id: checkout-base
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify checkout head
+        env:
+          HERD_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          HERD_ACTUAL_HEAD_SHA: ${{ steps.checkout-base.outputs.sha }}
+        run: |
+          if [ "$HERD_ACTUAL_HEAD_SHA" != "$HERD_EXPECTED_HEAD_SHA" ]; then
+            echo "Herd Worker checkout SHA mismatch: expected ${HERD_EXPECTED_HEAD_SHA}, checked out ${HERD_ACTUAL_HEAD_SHA}." >&2
+            exit 1
+          fi
 
       - name: Execute task
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          HERD_JOB_ID: ${{ inputs.job_id }}
+          HERD_REPOSITORY: ${{ inputs.repository }}
+          HERD_BATCH_NUMBER: ${{ inputs.batch_number }}
+          HERD_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           HERD_WORKER_MODE: ${{ inputs.mode }}
         run: |
           herd worker exec "$ISSUE_NUMBER"
+
+      - name: Package worker patch artifact
+        if: success()
+        env:
+          HERD_JOB_ID: ${{ inputs.job_id }}
+          HERD_REPOSITORY: ${{ inputs.repository }}
+          HERD_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          HERD_BASE_SHA: ${{ steps.checkout-base.outputs.sha }}
+        run: |
+          mkdir -p /tmp/herd-worker-artifact
+          export GIT_INDEX_FILE="$(mktemp)"
+          trap 'rm -f "$GIT_INDEX_FILE"' EXIT
+          git read-tree "$HERD_BASE_SHA"
+          git add -A
+          git diff --binary --cached "$HERD_BASE_SHA" > /tmp/herd-worker-artifact/herd-worker.patch
+          PATCH_SHA256="$(sha256sum /tmp/herd-worker-artifact/herd-worker.patch | awk '{print $1}')"
+          jq -n \
+            --arg repository "$HERD_REPOSITORY" \
+            --arg job_id "$HERD_JOB_ID" \
+            --arg base_sha "$HERD_BASE_SHA" \
+            --arg expected_head_sha "$HERD_EXPECTED_HEAD_SHA" \
+            --arg artifact_name "herd-worker.patch" \
+            --arg sha256 "$PATCH_SHA256" \
+            '{
+              version: 1,
+              repository: $repository,
+              job_id: $job_id,
+              base_sha: $base_sha,
+              expected_head_sha: $expected_head_sha,
+              format: "git-diff-binary",
+              artifact_name: $artifact_name,
+              sha256: $sha256
+            }' \
+            > /tmp/herd-worker-artifact/herd-worker-metadata.json
+
+      - name: Upload worker patch artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-branch
+          path: /tmp/herd-worker-artifact
+          if-no-files-found: error
+
+      - name: Report result
+        if: always()
+        env:
+          HERD_JOB_ID: ${{ inputs.job_id }}
+          HERD_REPOSITORY: ${{ inputs.repository }}
+          HERD_BATCH_NUMBER: ${{ inputs.batch_number }}
+          HERD_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          HERD_BATCH_BRANCH: ${{ inputs.batch_branch || github.event.repository.default_branch }}
+          HERD_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
+          HERD_JOB_STATUS: ${{ job.status }}
+          HERD_BASE_SHA: ${{ steps.checkout-base.outputs.sha }}
+        run: |
+          STATUS="success"
+          if [ "$HERD_JOB_STATUS" != "success" ]; then
+            STATUS="failure"
+          fi
+          jq -n \
+            --arg repository "$HERD_REPOSITORY" \
+            --arg job_id "$HERD_JOB_ID" \
+            --argjson batch_number "$HERD_BATCH_NUMBER" \
+            --argjson issue_number "$HERD_ISSUE_NUMBER" \
+            --arg target_branch "$HERD_BATCH_BRANCH" \
+            --arg base_sha "$HERD_BASE_SHA" \
+            --arg expected_head_sha "$HERD_EXPECTED_HEAD_SHA" \
+            --arg status "$STATUS" \
+            '{
+              version: 1,
+              kind: "worker_completed",
+              repository: $repository,
+              job_id: $job_id,
+              batch_number: $batch_number,
+              issue_number: $issue_number,
+              target_branch: $target_branch,
+              base_sha: $base_sha,
+              expected_head_sha: $expected_head_sha,
+              status: $status
+            } + (if $status == "success" then {patch_artifact: "worker-branch"} else {} end)' \
+            > /tmp/herd-job-result.json
+          attempt=1
+          delay=1
+          while true; do
+            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -er '.value // empty')"; then
+              if [ "$attempt" -ge 4 ]; then
+                echo "Failed to fetch HerdOS job result OIDC token after ${attempt} attempt(s)." >&2
+                exit 1
+              fi
+              echo "HerdOS job result OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt 30 ]; then
+                delay=30
+              fi
+              continue
+            fi
+            if curl -fsSL -X POST \
+              -H "Authorization: Bearer $OIDC_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data-binary @/tmp/herd-job-result.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/jobs/$HERD_JOB_ID/results"; then
+              echo "Submitted HerdOS job result after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS job result after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS job result callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done

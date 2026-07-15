@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+
+FROM --platform=$BUILDPLATFORM golang:1.26.1-alpine AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/herd-service ./cmd/herd-service
+COPY internal ./internal
+
+ARG TARGETOS=linux
+ARG TARGETARCH
+ARG VERSION=dev
+
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" \
+    -o /out/herd-service ./cmd/herd-service
+
+FROM alpine:3.22
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/herd-os/herd" \
+      org.opencontainers.image.description="HerdOS hosted control-plane service" \
+      org.opencontainers.image.version=$VERSION
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates git openssh-client && \
+    addgroup -S herd && \
+    adduser -S -G herd -h /app herd
+
+COPY --from=build --chown=herd:herd /out/herd-service /app/herd-service
+
+USER herd:herd
+EXPOSE 8080
+
+ENTRYPOINT ["/app/herd-service"]

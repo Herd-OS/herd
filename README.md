@@ -66,12 +66,16 @@ automatically. The system is self-healing.
 brew install herd-os/tap/herd
 
 cd /path/to/your/repo
+gh auth login
 herd init
 herd plan "Add dark mode support"
 ```
 
-See the [full setup guide](docs/getting-started.md) for runner
-configuration and options.
+Before `herd init`, install the official HerdOS GitHub App (`@herd-os`) on the
+repository and authenticate GitHub CLI with an account that can administer it.
+`gh` is a setup-time dependency for `herd init`; worker/runtime containers do
+not need your `gh` login. See the [full setup guide](docs/getting-started.md)
+for runner configuration and options.
 
 ## Why "Herd"?
 
@@ -89,6 +93,8 @@ Herd tames the chaos.
 | [Getting Started](docs/getting-started.md) | First run walkthrough |
 | [Runner Setup](docs/runners.md) | Self-hosted runner configuration |
 | [Configuration](docs/configuration.md) | `.herdos.yml` reference |
+| [Hosted Control Plane](docs/hosted-control-plane.md) | What HerdOS hosts and what you host |
+| [Service Operations](docs/service.md) | Self-hosted control-plane service |
 | [Design Docs](docs/design/) | Architecture and design decisions |
 
 ## Status
