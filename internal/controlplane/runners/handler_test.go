@@ -317,10 +317,10 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailureWhenFailIdempotencyFai
 	second := serveRegistrationRequest(t, handler, req)
 
 	require.Equal(t, http.StatusBadGateway, first.Code)
-	require.Equal(t, http.StatusOK, second.Code)
-	assert.JSONEq(t, `{"token":"github-runner-token","expires_at":"2026-07-11T13:00:00Z"}`, second.Body.String())
-	assert.Equal(t, 2, minter.calls)
-	require.NotNil(t, st.tokens[token.ID].UsedAt)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "already in progress")
+	assert.Equal(t, 1, minter.calls)
+	assert.Nil(t, st.tokens[token.ID].UsedAt)
 }
 
 func TestRegistrationTokenHandlerRetriesAfterMarkUsedFailure(t *testing.T) {
@@ -391,19 +391,20 @@ func TestRegistrationTokenHandlerCompleteAndFallbackFailureDoesNotMintAgain(t *t
 	require.NotNil(t, st.tokens[token.ID].UsedAt)
 }
 
-func TestRegistrationTokenHandlerSameNonceRejectsChangedRunnerMetadata(t *testing.T) {
+func TestRegistrationTokenHandlerSameNonceHandlesRunnerMetadata(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, _ := newHandlerTestStore(t, now)
 	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}}
 	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
 	firstReq := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"self-hosted", "herd"}, BootstrapToken: plain, RequestNonce: "nonce-1"}
 	tests := []struct {
-		name string
-		req  RegistrationTokenRequest
+		name       string
+		req        RegistrationTokenRequest
+		wantStatus int
 	}{
-		{name: "runner name changed", req: RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-2", RunnerLabels: []string{"self-hosted", "herd"}, BootstrapToken: plain, RequestNonce: "nonce-1"}},
-		{name: "labels reordered", req: RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"herd", "self-hosted"}, BootstrapToken: plain, RequestNonce: "nonce-1"}},
-		{name: "labels changed", req: RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"self-hosted", "other"}, BootstrapToken: plain, RequestNonce: "nonce-1"}},
+		{name: "runner name changed", req: RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-2", RunnerLabels: []string{"self-hosted", "herd"}, BootstrapToken: plain, RequestNonce: "nonce-1"}, wantStatus: http.StatusConflict},
+		{name: "labels reordered", req: RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"herd", "self-hosted"}, BootstrapToken: plain, RequestNonce: "nonce-1"}, wantStatus: http.StatusOK},
+		{name: "labels changed", req: RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"self-hosted", "other"}, BootstrapToken: plain, RequestNonce: "nonce-1"}, wantStatus: http.StatusConflict},
 	}
 
 	first := serveRegistrationRequest(t, handler, firstReq)
@@ -413,8 +414,12 @@ func TestRegistrationTokenHandlerSameNonceRejectsChangedRunnerMetadata(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			rec := serveRegistrationRequest(t, handler, tt.req)
 
-			assert.Equal(t, http.StatusConflict, rec.Code)
-			assert.Contains(t, rec.Body.String(), "different runner metadata")
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			if tt.wantStatus == http.StatusConflict {
+				assert.Contains(t, rec.Body.String(), "different runner metadata")
+			} else {
+				assert.JSONEq(t, first.Body.String(), rec.Body.String())
+			}
 			assert.Equal(t, 1, minter.calls)
 		})
 	}

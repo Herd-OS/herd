@@ -85,7 +85,10 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		Dispatcher: workflowDispatcher,
 	}
 	if opts.CommandDispatcher == nil {
-		return service.Dependencies{}, fmt.Errorf("production command dispatcher is not configured; durable command dispatch context must be implemented before enabling issue-comment dispatch")
+		opts.CommandDispatcher = productionCommandDispatcher{
+			Dispatcher:      workflowDispatcher,
+			ControlPlaneURL: cfg.PublicURL,
+		}
 	}
 	if opts.WorkflowEventProcessor == nil {
 		opts.WorkflowEventProcessor = productionWorkflowEventProcessor{

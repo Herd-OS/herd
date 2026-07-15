@@ -31,7 +31,7 @@ jobs:
       - name: Verify service image user
         run: |
           USER=$(docker image inspect herd-service:smoke --format '{{.Config.User}}')
-          test "$USER" = "nonroot:nonroot"
+          test "$USER" = "herd:herd"
       - name: Smoke test /healthz
         run: make image-service-smoke HERD_SERVICE_IMAGE=herd-service:smoke HERD_SERVICE_SKIP_BUILD=1
 

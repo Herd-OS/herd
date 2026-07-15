@@ -45,6 +45,7 @@ type DispatchRequest struct {
 	IssueNumber     int
 	PRNumber        int
 	BatchBranch     string
+	BaseSHA         string
 	HeadSHA         string
 	ExpectedHeadSHA string
 	RunnerLabel     string
@@ -104,6 +105,9 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 	if d.GitHub == nil {
 		return DispatchResult{}, fmt.Errorf("dispatch GitHub client is required")
 	}
+	if err := d.requireMutationStore(); err != nil {
+		return DispatchResult{}, err
+	}
 
 	idempotencyKey := IdempotencyKey(req)
 	jobID := "job_" + uuid.NewString()
@@ -157,6 +161,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		"issue_number":      req.IssueNumber,
 		"pr_number":         req.PRNumber,
 		"batch_branch":      req.BatchBranch,
+		"base_sha":          dispatchBaseSHA(req),
 		"repository":        req.Owner + "/" + req.Repo,
 		"owner":             req.Owner,
 		"repo":              req.Repo,
@@ -175,6 +180,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 			RepositoryID:   req.RepoID,
 			InstallationID: req.InstallationID,
 			PRNumber:       req.PRNumber,
+			BaseSHA:        dispatchBaseSHA(req),
 			HeadSHA:        req.HeadSHA,
 			Status:         "dispatching",
 			WorkerBranch:   req.BatchBranch,
@@ -240,7 +246,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 func (d Dispatcher) markMutationDispatching(ctx context.Context, idempotencyKey string) error {
 	recorder, ok := d.Store.(MutationRecorder)
 	if !ok {
-		return nil
+		return fmt.Errorf("workflow dispatch mutation recorder is required")
 	}
 	if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutationStatusDispatching, nil, "", time.Now().UTC()); err != nil {
 		return fmt.Errorf("mark workflow dispatch mutation in-flight: %w", err)
@@ -251,7 +257,7 @@ func (d Dispatcher) markMutationDispatching(ctx context.Context, idempotencyKey 
 func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchRequest, idempotencyKey string, inputs map[string]string, now time.Time) error {
 	recorder, ok := d.Store.(MutationRecorder)
 	if !ok {
-		return nil
+		return fmt.Errorf("workflow dispatch mutation recorder is required")
 	}
 	requestJSON, marshalErr := json.Marshal(map[string]any{
 		"owner":         req.Owner,
@@ -286,7 +292,9 @@ func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchReque
 					return fmt.Errorf("reopen workflow dispatch mutation attempt: %w", err)
 				}
 				return nil
-			case mutationStatusPreDispatch, mutationStatusDispatching, mutationStatusUnknown:
+			case mutationStatusPreDispatch:
+				return nil
+			case mutationStatusDispatching, mutationStatusUnknown:
 				return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
 			case "completed":
 				return nil
@@ -368,6 +376,19 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		}
 		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
 	}
+	if record.Status == "started" {
+		preCall, preCallErr := d.preDispatchMutation(ctx, idempotencyKey)
+		if preCallErr != nil {
+			return DispatchResult{}, preCallErr
+		}
+		if preCall {
+			inputs, inputErr := WorkflowInputs(req, metadata.JobID)
+			if inputErr != nil {
+				return DispatchResult{}, inputErr
+			}
+			return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
+		}
+	}
 	if completed, result, recoverErr := d.completedDispatchMutation(ctx, idempotencyKey); recoverErr != nil {
 		return DispatchResult{}, recoverErr
 	} else if completed {
@@ -380,10 +401,25 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 	return DispatchResult{}, fmt.Errorf("workflow dispatch %q is already in progress", idempotencyKey)
 }
 
+func (d Dispatcher) preDispatchMutation(ctx context.Context, idempotencyKey string) (bool, error) {
+	reader, ok := d.Store.(MutationReader)
+	if !ok {
+		return false, fmt.Errorf("workflow dispatch mutation reader is required")
+	}
+	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get workflow dispatch mutation attempt: %w", err)
+	}
+	return attempt.Status == mutationStatusPreDispatch, nil
+}
+
 func (d Dispatcher) repairCompletedMutationAttempt(ctx context.Context, idempotencyKey string, resultJSON json.RawMessage) error {
 	reader, ok := d.Store.(MutationReader)
 	if !ok {
-		return nil
+		return fmt.Errorf("workflow dispatch mutation reader is required")
 	}
 	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
 	if errors.Is(err, store.ErrNotFound) {
@@ -405,7 +441,7 @@ func (d Dispatcher) repairCompletedMutationAttempt(ctx context.Context, idempote
 func (d Dispatcher) completedDispatchMutation(ctx context.Context, idempotencyKey string) (bool, DispatchResult, error) {
 	reader, ok := d.Store.(MutationReader)
 	if !ok {
-		return false, DispatchResult{}, nil
+		return false, DispatchResult{}, fmt.Errorf("workflow dispatch mutation reader is required")
 	}
 	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
 	if errors.Is(err, store.ErrNotFound) {
@@ -444,7 +480,7 @@ func (d Dispatcher) recordMutationResult(ctx context.Context, idempotencyKey str
 func (d Dispatcher) completeMutationResult(ctx context.Context, idempotencyKey string, result GitHubMutationResult) error {
 	recorder, ok := d.Store.(MutationRecorder)
 	if !ok {
-		return nil
+		return fmt.Errorf("workflow dispatch mutation recorder is required")
 	}
 	if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, result.Status, result.Response, result.Error, result.CompletedAt); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -453,6 +489,23 @@ func (d Dispatcher) completeMutationResult(ctx context.Context, idempotencyKey s
 		return fmt.Errorf("complete workflow dispatch mutation attempt: %w", err)
 	}
 	return nil
+}
+
+func (d Dispatcher) requireMutationStore() error {
+	if _, ok := d.Store.(MutationRecorder); !ok {
+		return fmt.Errorf("workflow dispatch mutation recorder is required")
+	}
+	if _, ok := d.Store.(MutationReader); !ok {
+		return fmt.Errorf("workflow dispatch mutation reader is required")
+	}
+	return nil
+}
+
+func dispatchBaseSHA(req DispatchRequest) string {
+	if strings.TrimSpace(req.BaseSHA) != "" {
+		return req.BaseSHA
+	}
+	return req.HeadSHA
 }
 
 func validateRequest(req DispatchRequest) error {

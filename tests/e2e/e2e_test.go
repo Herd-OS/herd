@@ -119,14 +119,15 @@ func TestE2E_DockerComposePostgresSmoke(t *testing.T) {
 	root := findModuleRoot(t)
 	composePath := filepath.Join(root, "docker-compose.yml")
 	require.FileExists(t, composePath)
+	projectName := fmt.Sprintf("herd-e2e-postgres-smoke-%d", os.Getpid())
 	t.Cleanup(func() {
 		downCtx, downCancel := context.WithTimeout(context.Background(), time.Minute)
 		defer downCancel()
-		cmd := exec.CommandContext(downCtx, "docker", "compose", "-f", composePath, "down", "-v")
+		cmd := exec.CommandContext(downCtx, "docker", "compose", "-p", projectName, "-f", composePath, "down", "-v")
 		cmd.Dir = root
 		_ = cmd.Run()
 	})
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d", "--wait", "postgres")
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "-f", composePath, "up", "-d", "--wait", "postgres")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
 		require.NoError(t, err, "Docker Compose/Postgres smoke failed: %s", string(out))

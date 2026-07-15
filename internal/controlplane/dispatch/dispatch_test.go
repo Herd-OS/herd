@@ -30,8 +30,11 @@ func TestDispatcherDispatchCreatesJobAndDispatchesWorkflow(t *testing.T) {
 	assert.Equal(t, "main", gh.calls[0].ref)
 	assert.Equal(t, result.JobID, gh.calls[0].inputs["job_id"])
 	assert.Equal(t, "55", gh.calls[0].inputs["issue_number"])
+	assert.Equal(t, "abc123", gh.calls[0].inputs["base_sha"])
 	require.Len(t, st.jobs, 1)
 	assert.Equal(t, "dispatching", st.jobs[result.JobID].Status)
+	assert.Equal(t, "abc123", st.jobs[result.JobID].BaseSHA)
+	assert.Equal(t, "abc123", st.jobs[result.JobID].HeadSHA)
 	require.Len(t, st.mutationAttempts, 1)
 	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
 	assert.Empty(t, st.mutationAttempts[0].Error)
@@ -78,7 +81,7 @@ func TestDispatcherDuplicateStartedWithoutCompletedMutationDoesNotRedispatch(t *
 	assert.Equal(t, "started", st.idempotencyKeys[key].Status)
 }
 
-func TestDispatcherDuplicateFreshPreDispatchMutationDoesNotRetry(t *testing.T) {
+func TestDispatcherDuplicateFreshPreDispatchMutationRetries(t *testing.T) {
 	st := newFakeStore()
 	req := validRequest()
 	key := IdempotencyKey(req)
@@ -98,11 +101,24 @@ func TestDispatcherDuplicateFreshPreDispatchMutationDoesNotRetry(t *testing.T) {
 	gh := &fakeWorkflowClient{}
 	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 
+	require.NoError(t, err)
+	assert.True(t, result.Created)
+	assert.Equal(t, "job-existing", result.JobID)
+	assert.Len(t, gh.calls, 1)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+}
+
+func TestDispatcherRequiresMutationStore(t *testing.T) {
+	st := newMinimalStore()
+	gh := &fakeWorkflowClient{}
+
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), validRequest())
+
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already in progress")
+	assert.Contains(t, err.Error(), "mutation recorder is required")
 	assert.Empty(t, result.JobID)
 	assert.Empty(t, gh.calls)
-	assert.Equal(t, mutationStatusPreDispatch, st.mutationAttempts[0].Status)
+	assert.Empty(t, st.jobs)
 }
 
 func TestDispatcherDuplicateFailedStartedRecordCanRetry(t *testing.T) {
@@ -552,6 +568,69 @@ func (s *fakeStore) GetGitHubMutationAttempt(_ context.Context, idempotencyKey s
 		}
 	}
 	return store.GitHubMutationAttempt{}, store.ErrNotFound
+}
+
+type minimalStore struct {
+	jobs            map[string]store.Job
+	idempotencyKeys map[string]store.IdempotencyKey
+}
+
+func newMinimalStore() *minimalStore {
+	return &minimalStore{
+		jobs:            map[string]store.Job{},
+		idempotencyKeys: map[string]store.IdempotencyKey{},
+	}
+}
+
+func (s *minimalStore) CreateJob(_ context.Context, j store.Job) error {
+	s.jobs[j.JobID] = j
+	return nil
+}
+
+func (s *minimalStore) GetJob(_ context.Context, jobID string) (store.Job, error) {
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return store.Job{}, store.ErrNotFound
+	}
+	return job, nil
+}
+
+func (s *minimalStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
+	if _, ok := s.idempotencyKeys[key.Key]; ok {
+		return false, nil
+	}
+	s.idempotencyKeys[key.Key] = key
+	return true, nil
+}
+
+func (s *minimalStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return store.IdempotencyKey{}, store.ErrNotFound
+	}
+	return record, nil
+}
+
+func (s *minimalStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	record.Status = "completed"
+	record.ResultRef = resultRef
+	s.idempotencyKeys[key] = record
+	return nil
+}
+
+func (s *minimalStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	s.idempotencyKeys[key] = record
+	return nil
 }
 
 type workflowCall struct {

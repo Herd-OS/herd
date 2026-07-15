@@ -347,6 +347,9 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 				}
 				return repo, false, idempotencyKey, ackMetadata, nil
 			}
+			if dispatchable && h.commandDispatchOutcomeUnknown(ctx, repo.ID, event.CommentID, commandKey) {
+				return store.Repository{}, false, "", nil, fmt.Errorf("command dispatch %q has unknown outcome after started dispatcher call", idempotencyKey)
+			}
 			_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata)
 			if dispatchable {
 				return repo, true, idempotencyKey, ackMetadata, nil

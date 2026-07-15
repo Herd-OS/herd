@@ -27,6 +27,7 @@ func WorkflowInputs(req DispatchRequest, jobID string) (map[string]string, error
 		"job_id":            jobID,
 		"batch_number":      strconv.Itoa(req.BatchNumber),
 		"batch_branch":      req.BatchBranch,
+		"base_sha":          dispatchBaseSHA(req),
 		"head_sha":          req.HeadSHA,
 		"expected_head_sha": req.ExpectedHeadSHA,
 	}

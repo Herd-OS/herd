@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -248,7 +249,8 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 		return RegistrationTokenResponse{}, false, true
 	}
 	if record.Status == idempotencyStatusStarted && strings.TrimSpace(record.ResultRef) == "" {
-		return RegistrationTokenResponse{}, false, true
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request is already in progress; retry with the same nonce after completion or reconciliation"})
+		return RegistrationTokenResponse{}, false, false
 	}
 	if record.Status != idempotencyStatusDone {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
@@ -278,6 +280,7 @@ func (h RegistrationTokenHandler) replayRegistrationResult(w http.ResponseWriter
 }
 
 func runnerRequestMetadata(repoID int64, req RegistrationTokenRequest, token store.RunnerBootstrapToken) ([]byte, error) {
+	labels := normalizeRunnerLabels(req.RunnerLabels)
 	return json.Marshal(struct {
 		RepositoryID     int64    `json:"repository_id"`
 		RunnerName       string   `json:"runner_name"`
@@ -287,10 +290,23 @@ func runnerRequestMetadata(repoID int64, req RegistrationTokenRequest, token sto
 	}{
 		RepositoryID:     repoID,
 		RunnerName:       strings.TrimSpace(req.RunnerName),
-		RunnerLabels:     req.RunnerLabels,
+		RunnerLabels:     labels,
 		BootstrapTokenID: token.ID,
 		RequestNonce:     strings.TrimSpace(req.RequestNonce),
 	})
+}
+
+func normalizeRunnerLabels(labels []string) []string {
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		out = append(out, label)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func sameRegistrationRequest(existing json.RawMessage, current []byte) bool {
@@ -314,15 +330,17 @@ type runnerRegistrationMetadata struct {
 }
 
 func (m runnerRegistrationMetadata) equal(other runnerRegistrationMetadata) bool {
+	left := normalizeRunnerLabels(m.RunnerLabels)
+	right := normalizeRunnerLabels(other.RunnerLabels)
 	if m.RepositoryID != other.RepositoryID ||
 		strings.TrimSpace(m.RunnerName) != strings.TrimSpace(other.RunnerName) ||
 		m.BootstrapTokenID != other.BootstrapTokenID ||
 		strings.TrimSpace(m.RequestNonce) != strings.TrimSpace(other.RequestNonce) ||
-		len(m.RunnerLabels) != len(other.RunnerLabels) {
+		len(left) != len(right) {
 		return false
 	}
-	for i := range m.RunnerLabels {
-		if strings.TrimSpace(m.RunnerLabels[i]) != strings.TrimSpace(other.RunnerLabels[i]) {
+	for i := range left {
+		if left[i] != right[i] {
 			return false
 		}
 	}

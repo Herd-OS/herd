@@ -24,24 +24,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildServiceDependenciesProductionRejectsMissingCommandDispatcher(t *testing.T) {
+func TestBuildServiceDependenciesProductionWiresCommandDispatcher(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 
 	deps, err := buildServiceDependencies(cfg, st, log.New(io.Discard, "", 0))
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "production command dispatcher")
-	assert.Empty(t, deps)
+	require.NoError(t, err)
+	require.NotNil(t, deps.IssueCommentCommandHandler)
 }
 
 func TestBuildServiceDependenciesProductionUsesDefaultWorkflowProcessorAndArtifactStore(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 
-	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{
-		CommandDispatcher: fixedCommandDispatcher{},
-	})
+	deps, err := buildServiceDependencies(cfg, st, log.New(io.Discard, "", 0))
 
 	require.NoError(t, err)
 	require.NotNil(t, deps.WorkflowEventProcessor)

@@ -490,6 +490,31 @@ func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t 
 	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
 }
 
+func TestHandlerDispatchStatusAndFallbackFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
+	st := newFakeStore()
+	st.updateErrs = []error{nil, nil, errors.New("store down")}
+	st.completeErrs = []error{nil, errors.New("idempotency down")}
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os review")
+
+	_, err := h.HandleIssueComment(context.Background(), event)
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mark command dispatched")
+	require.Error(t, retryErr)
+	assert.Contains(t, retryErr.Error(), "unknown outcome")
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+	key := "repo:42:comment:123:command:review"
+	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
+	require.Len(t, st.commandRecords, 1)
+	assert.Equal(t, "dispatching", st.commandRecords[0].Status)
+}
+
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeGitHub{}
