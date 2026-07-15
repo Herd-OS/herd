@@ -57,6 +57,10 @@ integrator:
     max_file_bytes: 40000
     max_files_per_chunk: 80
     max_chunks: 8
+  review_non_convergence:
+    enabled: true
+    window: 5
+    min_completed_cycles: 3
   ci_max_fix_cycles: 0           # max CI-failure fix cycles (0 = unlimited)
 
 monitor:
@@ -281,6 +285,28 @@ When a batch review starts, HerdOS records the batch PR head SHA, then checks th
 If a manual `/herd review` is skipped because another review is active, HerdOS posts diagnostic lock metadata when available: owner, acquired time, expiry time, recorded head SHA, and current head SHA. A recorded head SHA that differs from the current PR head on an unexpired lock is diagnostic only; it does not allow a second concurrent review. Review lock expiry or release controls recovery.
 
 Review-lock metadata is not merge approval. Merge approval uses the batch PR metadata and does not merge, approve, or consult `herd/review-lock/pr-N` branches.
+
+### Review Non-Convergence
+
+HerdOS watches recent review result comments and completed review-fix issues before creating another review-fix issue. By default it looks back across the last 5 review cycles, requires at least 3 completed fix cycles, requires the latest deduped finding count to meet an internal threshold, and requires repeated package/root-cause clusters before escalating. The feature is enabled by default.
+
+When non-convergence is detected, HerdOS creates one strategy-level fix issue instead of another large endpoint-level review-fix issue. This escalation is internal: HerdOS creates the issue and dispatches the worker directly, without asking humans to post `/herd fix`.
+
+```yaml
+integrator:
+  review_non_convergence:
+    enabled: true
+    window: 5
+    min_completed_cycles: 3
+```
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `integrator.review_non_convergence.enabled` | `true` | Enables deterministic review-cycle non-convergence detection and strategy-level fix escalation. |
+| `integrator.review_non_convergence.window` | `5` | Number of recent review cycles considered when analyzing repeated findings. |
+| `integrator.review_non_convergence.min_completed_cycles` | `3` | Minimum completed review-fix cycles required before escalation can occur. |
+
+Other thresholds, including the latest deduped finding-count floor and repeated cluster requirements, are conservative internal constants for now.
 
 ## CI Fix Loop
 
