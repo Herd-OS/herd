@@ -492,10 +492,12 @@ manual-intervention comment.
 
 After all planned chunks finish, HerdOS aggregates findings, deduplicates
 duplicate reports across chunks, and posts one coherent review result marker for
-the PR head SHA. Batch PR review creates one batched fix issue for actionable
-findings instead of one issue per chunk. Standalone `/herd review` uses the same
-chunk aggregation for its findings comment, but it does not create fix issues or
-dispatch workers.
+the PR head SHA. Deduplication happens before both the PR comment and any review
+fix dispatch. Review comments include raw, deduped, or stale-filter counts only
+when filtering changed the result. Batch PR review creates one batched fix issue
+for actionable findings instead of one issue per chunk. Standalone
+`/herd review` uses the same chunk aggregation for its findings comment, but it
+does not create fix issues or dispatch workers.
 
 The review safety valve is evaluated per review pass. For ordinary reviews that
 means the single aggregate result; for chunked reviews, each chunk is its own
@@ -772,8 +774,10 @@ issues in the milestone. On the next exhaustion event it:
 #### Label semantics
 
 The `herd/cascade-failed` label is **set automatically** by the
-integrator and **removed manually** by a human. While the label is
-present on a batch PR, Herd refuses to create any new
+integrator. Humans may remove it manually after resolving the underlying
+problem, and HerdOS also removes a stale label automatically when fresh GitHub
+PR metadata reports the PR clean and mergeable. While the label is present on a
+batch PR, Herd refuses to create any new
 conflict-resolution issues for that batch — every code path that would
 otherwise dispatch a conflict resolver (`handleConflictResolution`,
 `handleRebaseConflictResolution`, `DispatchRebaseConflictWorker`)
@@ -793,7 +797,8 @@ The batch PR comment lists three options in priority order:
    needed, then post `@herd-os integrate` to advance past it.
 
 Once the underlying problem is handled, remove the `herd/cascade-failed`
-label from the batch PR. The next `@herd-os integrate` (or workflow_run
+label from the batch PR, or let the next integrator pass remove it when GitHub
+reports the PR clean and mergeable. The next `@herd-os integrate` (or workflow_run
 trigger) will resume conflict resolution normally.
 
 #### Why we intentionally stop retrying
@@ -1226,7 +1231,7 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 | `@herd-os fix-ci` | Mention | Issue or PR | Check CI status and dispatch a fix worker if CI failed |
 | `@herd-os retry` | Mention | Issue | Re-dispatch the current failed issue's worker |
 | `@herd-os retry <N>` | Mention | Issue or PR | Re-dispatch failed issue #N's worker |
-| `@herd-os review` | Mention | PR | Trigger a chunked agent review of the PR |
+| `@herd-os review` | Mention | PR | Trigger a chunked agent review of the PR and post one deduplicated aggregate result |
 | `@herd-os fix <description>` | Mention | PR | Create a fix issue from the description and dispatch a worker |
 | `@herd-os integrate` | Mention | Issue or PR | Run the full integrator cycle: consolidate -> check CI -> advance -> review |
 | `@herd-os dispatch` | Mention | Issue | Dispatch the current issue (must be ready or blocked) |
@@ -1234,7 +1239,7 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 | `herd review <pr-number>` | CLI | Local terminal | Open an interactive Claude Code session pre-loaded with diff coverage, comments, CI status, and chunk 1/N of the PR diff. The agent acts as a reviewer assistant — you drive the conversation; it can read code and discuss findings, and it drafts `@herd-os fix` comments for any actionable changes (it never edits files locally). It does NOT auto-dispatch workers or create issues. |
 | `herd dashboard` | CLI | Local terminal | Live read-only TUI showing active workers, open batches, and recent failures. Refreshes on a `--refresh-seconds` timer (default 15, clamp 5–300). Keybinds: `q` quit, `r` refresh, ↑/↓ select batch, Enter to open the batch's PR or milestone. Worker rows render as OSC 8 hyperlinks where supported. Single-repo and read-only in v1. |
 
-Note on `herd review <pr-number>` vs `@herd-os review`: the CLI command opens an interactive local agent session for discussing a PR — the session is read-only on the working tree, and the only way it enacts changes is by drafting a `@herd-os fix` comment that you approve and post via `gh pr comment`; herd's batch workers then handle the actual edits. For large PRs, the initial interactive prompt includes the coverage summary plus only chunk 1/N so humans can see the limitation before making full-PR conclusions. The mention command runs an automated chunked agent review on the PR and posts aggregated findings as a comment. Use the CLI when you want a back-and-forth; use the mention command when you want a one-shot pre-screen.
+Note on `herd review <pr-number>` vs `@herd-os review`: the CLI command opens an interactive local agent session for discussing a PR — the session is read-only on the working tree, and the only way it enacts changes is by drafting a `@herd-os fix` comment that you approve and post via `gh pr comment`; herd's batch workers then handle the actual edits. For large PRs, the initial interactive prompt includes the coverage summary plus only chunk 1/N so humans can see the limitation before making full-PR conclusions. The mention command runs an automated chunked agent review on the PR and posts deduplicated aggregated findings as a comment. Use the CLI when you want a back-and-forth; use the mention command when you want a one-shot pre-screen.
 
 The review session is intentionally read-only on the working tree. Local edits during a review would create phantom commits that the integrator does not track and would conflict with any in-flight fix workers in the batch. All changes flow through `@herd-os fix` comments, which are dispatched to workers like any other batch task.
 
@@ -1244,7 +1249,7 @@ When the interactive `herd review <pr-number>` session reaches a concrete action
 
 #### Non-Batch PR Reviews
 
-`@herd-os review` works on any PR, not just batch PRs. When used on a non-batch PR, it runs the same chunked agent review and posts one aggregated severity-classified findings comment, but skips all batch-specific logic: no fix issues are created, no workers are dispatched, and no fix cycles are tracked. This is useful for getting an AI review on regular PRs without the full Herd orchestration.
+`@herd-os review` works on any PR, not just batch PRs. When used on a non-batch PR, it runs the same chunked agent review and posts one deduplicated aggregated severity-classified findings comment, but skips all batch-specific logic: no fix issues are created, no workers are dispatched, and no fix cycles are tracked. This is useful for getting an AI review on regular PRs without the full Herd orchestration.
 
 #### Standalone @herd-os fix
 

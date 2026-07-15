@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/herd-os/herd/internal/controlplane/reconciler"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/service"
 )
@@ -41,12 +40,9 @@ func main() {
 		}()
 	}
 
-	deps := service.Dependencies{
-		Logger: logger,
-		Store:  st,
-	}
-	if cfg.ReconcilerEnabled && st != nil {
-		deps.Reconciler = &reconciler.Reconciler{Store: st}
+	deps, err := buildServiceDependencies(cfg, st, logger)
+	if err != nil {
+		logger.Fatalf("build service dependencies: %v", err)
 	}
 	handler, err := service.NewServer(cfg, deps)
 	if err != nil {

@@ -82,7 +82,7 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 		Description: strings.TrimSpace(description),
 		TargetURL:   strings.TrimSpace(targetURL),
 	}
-	statusKey := statusMutationKey(repo.ID, prNumber, headSHA, state, status.TargetURL)
+	statusKey := statusMutationKey(repo.ID, prNumber, headSHA, state, status.TargetURL, status.Description)
 	idem, ok := s.Store.(StatusIdempotencyStore)
 	if !ok {
 		return fmt.Errorf("review status idempotency store is required")
@@ -307,8 +307,9 @@ func statusIdempotencyKey(repoID int64, prNumber int, headSHA string) string {
 	return fmt.Sprintf("herd_review_status:%d:%d:%s:%s", repoID, prNumber, headSHA, HerdReviewContext)
 }
 
-func statusMutationKey(repoID int64, prNumber int, headSHA string, state ReviewStatusState, targetURL string) string {
-	return fmt.Sprintf("%s:%s:%s", statusIdempotencyKey(repoID, prNumber, headSHA), state, strings.TrimSpace(targetURL))
+func statusMutationKey(repoID int64, prNumber int, headSHA string, state ReviewStatusState, targetURL string, description string) string {
+	normalizedDescription := strings.Join(strings.Fields(description), " ")
+	return fmt.Sprintf("%s:%s:%s:%s", statusIdempotencyKey(repoID, prNumber, headSHA), state, strings.TrimSpace(targetURL), normalizedDescription)
 }
 
 func mustStatusMetadata(repo Repository, prNumber int, headSHA string, state ReviewStatusState, description, targetURL string) json.RawMessage {

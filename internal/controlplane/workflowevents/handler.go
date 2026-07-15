@@ -371,7 +371,11 @@ func workflowEventCommentID(event Event, payload []byte, claims jobs.OIDCClaims)
 }
 
 func workflowEventCommandKey(event Event, payload []byte, claims jobs.OIDCClaims) string {
-	return event.Kind + ":" + event.Action + ":" + workflowEventIdentity(event, payload, claims)
+	repository := strings.TrimSpace(event.Repository)
+	if repository == "" {
+		repository = strings.TrimSpace(claims.Repository)
+	}
+	return event.Kind + ":" + event.Action + ":" + repository + ":" + workflowEventIdentity(event, payload, claims)
 }
 
 func workflowEventIdentity(event Event, payload []byte, claims jobs.OIDCClaims) string {

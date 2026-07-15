@@ -81,6 +81,21 @@ func TestSetHerdReviewStatusAllowsNewHeadPendingAfterSuccess(t *testing.T) {
 	assert.Equal(t, "pending", gh.statuses[1].status.State)
 }
 
+func TestSetHerdReviewStatusDifferentDescriptionCreatesNewVisibleStatus(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{}
+	gh := &fakeStatusGitHub{}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	require.NoError(t, svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusFailure, "review timed out", "https://example.test/run"))
+	require.NoError(t, svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusFailure, "review output was unparseable", "https://example.test/run"))
+	require.NoError(t, svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusFailure, "review output was unparseable", "https://example.test/run"))
+
+	require.Len(t, gh.statuses, 2)
+	assert.Equal(t, "review timed out", gh.statuses[0].status.Description)
+	assert.Equal(t, "review output was unparseable", gh.statuses[1].status.Description)
+}
+
 func TestSetHerdReviewStatusRequiresIdempotencyStore(t *testing.T) {
 	ctx := context.Background()
 	st := &stateOnlyStatusStore{}

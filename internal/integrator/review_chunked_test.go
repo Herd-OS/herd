@@ -10,6 +10,7 @@ import (
 	"github.com/herd-os/herd/internal/agent"
 	agentprompt "github.com/herd-os/herd/internal/agent/prompt"
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/reviewdiff"
 	"github.com/stretchr/testify/assert"
@@ -94,7 +95,7 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 			Approved: false,
 			Summary:  "second found issue",
 			Findings: []agent.ReviewFinding{
-				{Severity: "high", Description: "  Missing   nil check  "},
+				{Severity: "high", Description: "In this chunk, the visible diff still has a missing nil check."},
 				{Severity: "LOW", Description: "Small cleanup"},
 			},
 		},
@@ -126,7 +127,7 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 		HighFindingCount:  1,
 		TotalFindingCount: 2,
 		Findings: []agent.ReviewFinding{
-			{Severity: "high", Description: "  Missing   nil check  "},
+			{Severity: "high", Description: "In this chunk, the visible diff still has a missing nil check."},
 			{Severity: "LOW", Description: "Small cleanup"},
 		},
 	}, aggregate.ChunkStats[1])
@@ -143,9 +144,232 @@ func TestRunChunkedReviewWithRetryAggregatesMetadataAndDedupesAcrossChunks(t *te
 	assert.Equal(t, "b.go", ag.opts[1].ChunkIncludedPathRange)
 	require.Len(t, result.Findings, 3)
 	assert.Equal(t, "HIGH", result.Findings[0].Severity)
+	assert.Equal(t, "In this chunk, the visible diff still has a missing nil check.", result.Findings[0].Description)
 	assert.Equal(t, "CRITERIA", result.Findings[1].Severity)
 	assert.Equal(t, "LOW", result.Findings[2].Severity)
+	assert.Equal(t, []string{
+		"In this chunk, the visible diff still has a missing nil check.",
+		"Acceptance criterion not verified",
+		"Small cleanup",
+	}, result.Comments)
+	assert.Equal(t, reviewFindingDedupeStats{
+		RawFindings:         4,
+		FindingsAfterDedupe: 3,
+		DedupedFindings:     1,
+	}, aggregate.DedupeStats)
 	assert.Contains(t, result.Summary, "Chunked review completed across 2 chunk(s)")
+}
+
+func TestReview_ChunkedPRLevelFindingDedupesBeforeCommentAndFixDispatch(t *testing.T) {
+	results := []*agent.ReviewResult{
+		{Approved: false, Summary: "chunk 1", Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "Repository owner feedback says Herd cascade-failed because of an unresolved merge conflict in this chunk."},
+		}},
+		{Approved: false, Summary: "chunk 2", Findings: []agent.ReviewFinding{
+			{Severity: "high", Description: "Previous review says the herd cascade failed due to merge conflicts in chunk 2/3."},
+		}},
+		{Approved: false, Summary: "chunk 3", Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "Cycle 3 still reports a branch conflict in the conflict resolution cascade."},
+		}},
+	}
+	for _, result := range results {
+		result.Comments = reviewCommentsFromFindings(result.Findings)
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	var createdBody string
+	createdIssues := 0
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			createdIssues++
+			createdBody = body
+			return &platform.Issue{Number: 100, Title: title, Body: body}, nil
+		},
+	}
+	dir, g, headSHA := initChunkedReviewRepo(t, 3)
+	prSvc := newCapturingBatchPRService()
+	prSvc.getResult[50].MergeableKnown = true
+	prSvc.getResult[50].Mergeable = false
+	prSvc.getResult[50].MergeStateStatus = "BLOCKED"
+	prSvc.getResult[50].Labels = []string{issues.CascadeFailed}
+	mock := newChunkedReviewPlatform(mockCreate, prSvc, headSHA)
+	ag := &chunkCaptureAgent{results: results}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{
+			Review:             true,
+			ReviewMaxFixCycles: 10,
+			ReviewDiff:         config.ReviewDiff{MaxFilesPerChunk: 1},
+		},
+		Workers: config.Workers{TimeoutMinutes: 30},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, []int{100}, result.FixIssues)
+	assert.Equal(t, 1, createdIssues)
+	require.Len(t, mock.workflows.dispatched, 1)
+	assert.Equal(t, "100", mock.workflows.dispatched[0]["issue_number"])
+	assert.Empty(t, issueSvc.removedLabels[50])
+
+	comment := requireCommentContaining(t, prSvc.comments, "## Review Aggregation")
+	assert.Contains(t, comment, "- Raw findings before dedupe: 3")
+	assert.Contains(t, comment, "- Findings after dedupe: 1")
+	assert.Equal(t, 1, strings.Count(comment, "- Repository owner feedback says Herd cascade-failed"))
+	assert.NotContains(t, comment, "Previous review says the herd cascade failed")
+	assert.NotContains(t, comment, "Cycle 3 still reports")
+	assert.Contains(t, createdBody, "Repository owner feedback says Herd cascade-failed")
+	assert.NotContains(t, createdBody, "Previous review says the herd cascade failed")
+	assert.NotContains(t, createdBody, "Cycle 3 still reports")
+	assert.Contains(t, reviewEvents(prSvc.reviews), platform.ReviewRequestChanges)
+}
+
+func TestRunChunkedReviewWithRetryDedupesFileLevelDuplicateVariations(t *testing.T) {
+	plan := reviewdiff.ChunkPlan{
+		Chunks: []reviewdiff.ReviewChunk{
+			{Index: 1, Total: 2, Text: "diff-a", IncludedFiles: []reviewdiff.ChangedFile{{Path: "cmd/herd-service/main.go"}}},
+			{Index: 2, Total: 2, Text: "diff-b", IncludedFiles: []reviewdiff.ChangedFile{{Path: "cmd/herd-service/main.go"}}},
+		},
+		Coverage: reviewdiff.CoverageSummary{
+			Source:         "test",
+			TotalFiles:     1,
+			ReviewMode:     reviewdiff.CoverageModeChunked,
+			ChunksPlanned:  2,
+			ChunksReviewed: 2,
+			FilesReviewed:  1,
+			Complete:       true,
+		},
+	}
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{
+		{Approved: false, Summary: "chunk 1", Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "cmd/herd-service/main.go: production dependency wiring is wrong."},
+		}},
+		{Approved: false, Summary: "chunk 2", Findings: []agent.ReviewFinding{
+			{Severity: "high", Description: "Visible diff: cmd/herd-service/main.go production dependency wiring wrong in this chunk."},
+		}},
+	}}
+
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	require.NotNil(t, aggregate.Result)
+	require.Len(t, aggregate.Result.Findings, 1)
+	assert.Equal(t, "Visible diff: cmd/herd-service/main.go production dependency wiring wrong in this chunk.", aggregate.Result.Findings[0].Description)
+	assert.Equal(t, reviewFindingDedupeStats{RawFindings: 2, FindingsAfterDedupe: 1, DedupedFindings: 1}, aggregate.DedupeStats)
+}
+
+func TestRunChunkedReviewWithRetryPreservesDistinctFindingsInSameFile(t *testing.T) {
+	plan := reviewdiff.ChunkPlan{
+		Chunks: []reviewdiff.ReviewChunk{
+			{Index: 1, Total: 2, Text: "diff-a", IncludedFiles: []reviewdiff.ChangedFile{{Path: "cmd/herd-service/main.go"}}},
+			{Index: 2, Total: 2, Text: "diff-b", IncludedFiles: []reviewdiff.ChangedFile{{Path: "cmd/herd-service/main.go"}}},
+		},
+		Coverage: reviewdiff.CoverageSummary{
+			Source:         "test",
+			TotalFiles:     1,
+			ReviewMode:     reviewdiff.CoverageModeChunked,
+			ChunksPlanned:  2,
+			ChunksReviewed: 2,
+			FilesReviewed:  1,
+			Complete:       true,
+		},
+	}
+	ag := &chunkCaptureAgent{results: []*agent.ReviewResult{
+		{Approved: false, Summary: "chunk 1", Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "cmd/herd-service/main.go: function wireProductionDependencies drops the database provider."},
+		}},
+		{Approved: false, Summary: "chunk 2", Findings: []agent.ReviewFinding{
+			{Severity: "HIGH", Description: "cmd/herd-service/main.go: function loadConfig ignores the HERD_CONFIG_PATH override."},
+		}},
+	}}
+
+	aggregate, err := runChunkedReviewWithRetry(context.Background(), ag, &mockPlatform{prs: &mockPRService{}}, plan, agent.ReviewOptions{}, 50)
+
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	require.NotNil(t, aggregate.Result)
+	require.Len(t, aggregate.Result.Findings, 2)
+	assert.Equal(t, reviewFindingDedupeStats{RawFindings: 2, FindingsAfterDedupe: 2}, aggregate.DedupeStats)
+	assert.Equal(t, []string{
+		"cmd/herd-service/main.go: function wireProductionDependencies drops the database provider.",
+		"cmd/herd-service/main.go: function loadConfig ignores the HERD_CONFIG_PATH override.",
+	}, []string{aggregate.Result.Findings[0].Description, aggregate.Result.Findings[1].Description})
+}
+
+func TestAppendReviewAggregationMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		dedupe      reviewFindingDedupeStats
+		filter      reviewStateFilterStats
+		want        []string
+		doesNotWant []string
+	}{
+		{
+			name:        "normal small review has no aggregation metadata",
+			dedupe:      reviewFindingDedupeStats{RawFindings: 1, FindingsAfterDedupe: 1},
+			doesNotWant: []string{"## Review Aggregation"},
+		},
+		{
+			name:   "dedupe changed finding count",
+			dedupe: reviewFindingDedupeStats{RawFindings: 3, FindingsAfterDedupe: 1, DedupedFindings: 2},
+			want: []string{
+				"## Review Aggregation",
+				"- Raw findings before dedupe: 3",
+				"- Findings after dedupe: 1",
+			},
+		},
+		{
+			name:   "stale filtered finding omits unchanged dedupe counts",
+			dedupe: reviewFindingDedupeStats{RawFindings: 1, FindingsAfterDedupe: 1},
+			filter: reviewStateFilterStats{StalePRStateFindingsIgnored: 1, CascadeLabelWasStale: true, CascadeLabelRemoved: true},
+			want: []string{
+				"- Stale PR-state findings ignored: 1",
+				"- Stale cascade label cleanup: removed",
+			},
+			doesNotWant: []string{
+				"- Raw findings before dedupe: 1",
+				"- Findings after dedupe: 1",
+			},
+		},
+		{
+			name:   "stale filtered finding includes changed dedupe and stale counts",
+			dedupe: reviewFindingDedupeStats{RawFindings: 3, FindingsAfterDedupe: 1, DedupedFindings: 2},
+			filter: reviewStateFilterStats{StalePRStateFindingsIgnored: 1, CascadeLabelWasStale: true, CascadeLabelRemoved: true},
+			want: []string{
+				"- Raw findings before dedupe: 3",
+				"- Findings after dedupe: 1",
+				"- Stale PR-state findings ignored: 1",
+				"- Stale cascade label cleanup: removed",
+			},
+		},
+		{
+			name:   "cleanup failure is concise",
+			dedupe: reviewFindingDedupeStats{RawFindings: 1, FindingsAfterDedupe: 1},
+			filter: reviewStateFilterStats{StalePRStateFindingsIgnored: 1, CascadeLabelWasStale: true, CascadeLabelRemoveError: "github failed"},
+			want: []string{
+				"- Stale cascade label cleanup: failed (github failed)",
+			},
+			doesNotWant: []string{"Stale finding was still ignored"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			comment := appendReviewAggregationMetadata("body\n", tt.dedupe, tt.filter)
+			for _, want := range tt.want {
+				assert.Contains(t, comment, want)
+			}
+			for _, notWant := range tt.doesNotWant {
+				assert.NotContains(t, comment, notWant)
+			}
+		})
+	}
 }
 
 func TestRunChunkedReviewWithRetryRepeatedUnparseableReportsNoReviewedChunks(t *testing.T) {

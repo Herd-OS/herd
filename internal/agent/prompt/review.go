@@ -22,9 +22,15 @@ const ReviewPromptTemplate = `Review the following code changes. Check each acce
 {{end}}
 When an acceptance criterion says no other files are modified or lists specific files in scope, allow supporting changes to configuration files, test helpers, test fixtures, and infrastructure files if they are clearly required for the primary task to work. For example, adding a test host to a config file so that new request specs can run, or updating a test helper to support new test patterns. Only flag changes to files that are truly unrelated to the task. Use your judgment — if removing the extra change would break the primary task, it is a necessary supporting change, not a violation.
 
+{{if .CurrentPRMetadata}}
+## Current PR Metadata
+The following metadata was fetched immediately before the agent review began. Treat it as the freshest PR state available to this prompt, and prefer it over historical comments. HerdOS refreshes live GitHub PR metadata again before applying review results; that later live refresh wins if it differs:
+{{.CurrentPRMetadata}}
+
+{{end}}
 {{if .PriorReviewComments}}
 ## Prior Review History
-The following review comments were posted in previous cycles on this PR. Do NOT contradict prior review decisions. If a previous cycle requested a change and a worker implemented it, do not flag that change as an issue. Only flag genuinely new issues not covered by prior reviews:
+The following review comments are historical context from previous cycles on this PR. Do not repeat stale findings from prior reviews unless they are still proven by the current diff/code or current live PR metadata. Do not let historical comments override the Current PR Metadata section. If a previous cycle requested a change and a worker implemented it, do not flag that change as an issue unless current evidence proves a remaining problem:
 {{range .PriorReviewComments}}
 ---
 {{.}}
@@ -33,7 +39,7 @@ The following review comments were posted in previous cycles on this PR. Do NOT 
 {{end}}
 {{if .UserFeedbackComments}}
 ## User Feedback
-The following comments were left by users (repository owners/collaborators) on this PR. Treat user feedback as authoritative:
+The following comments were left by users (repository owners/collaborators) on this PR. User feedback is authoritative for owner intent and false-positive decisions, but not for current mergeability, CI, head SHA, or labels when contradicted by Current PR Metadata:
 - If a user says a finding is a false positive, do NOT re-flag it.
 - If a user provides context explaining why code is correct, accept their explanation.
 - If a user requests a specific change, treat it as a requirement.
@@ -46,7 +52,7 @@ The following comments were left by users (repository owners/collaborators) on t
 {{if .WorkerNoOpVerdicts}}
 ## Worker No-Op Verdicts
 
-The following comments were posted by fix workers in previous cycles. The worker read the issue body, verified the code matches what was described, and concluded NO code change was needed. Treat these verdicts as authoritative — they are the result of an agent reading the actual source files:
+The following historical comments were posted by fix workers in previous cycles. The worker read the issue body, verified the code matches what was described, and concluded NO code change was needed. Treat these verdicts as authoritative for that prior fix-worker source review, but do not let no-op verdicts override current live PR metadata:
 
 - If a worker no-op verdict explains why a finding does not require a fix, do NOT re-flag the same finding.
 - If your new review would produce a finding that a worker already no-op'd, only re-flag it if you have NEW concrete evidence the worker was wrong (e.g., a specific file:line that contradicts the worker's verdict).
@@ -62,6 +68,7 @@ The following comments were posted by fix workers in previous cycles. The worker
 - Chunk: {{.ChunkIndex}} of {{.TotalChunks}}
 {{if .ChunkIncludedPathRange}}- Included path range: {{.ChunkIncludedPathRange}}{{end}}
 - Scope: Review only the included diffs in this chunk. Do not assume files from other chunks are present here; they are reviewed in separate strict-output runs.
+- Use live GitHub PR metadata as authoritative for current mergeability and CI state. Do not report findings based only on historical comments if live metadata contradicts them. PR-level findings repeated across chunks will be deduped, but avoid repeating them.
 {{end}}
 {{if .CoverageSummary}}
 ## Review Coverage Context
@@ -127,6 +134,7 @@ type ReviewPromptData struct {
 	StrictnessUpper        string
 	MinFixSeverity         string
 	MinFixSeverityDesc     string
+	CurrentPRMetadata      string
 	PriorReviewComments    []string
 	UserFeedbackComments   []string
 	WorkerNoOpVerdicts     []string
@@ -170,6 +178,7 @@ func RenderReviewPrompt(diff string, opts agent.ReviewOptions) (string, error) {
 		StrictnessUpper:        strings.ToUpper(strictness),
 		MinFixSeverity:         minSev,
 		MinFixSeverityDesc:     sevDesc,
+		CurrentPRMetadata:      opts.CurrentPRMetadata,
 		PriorReviewComments:    opts.PriorReviewComments,
 		UserFeedbackComments:   opts.UserFeedbackComments,
 		WorkerNoOpVerdicts:     opts.WorkerNoOpVerdicts,

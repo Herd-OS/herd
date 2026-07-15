@@ -221,18 +221,19 @@ func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 		labels = append(labels, l.GetName())
 	}
 	return &platform.PullRequest{
-		Number:         pr.GetNumber(),
-		Title:          pr.GetTitle(),
-		Body:           pr.GetBody(),
-		State:          pr.GetState(),
-		Head:           pr.GetHead().GetRef(),
-		HeadSHA:        pr.GetHead().GetSHA(),
-		Base:           pr.GetBase().GetRef(),
-		Labels:         labels,
-		Mergeable:      pr.GetMergeable(),
-		MergeableKnown: pr.Mergeable != nil,
-		URL:            pr.GetHTMLURL(),
-		CreatedAt:      pr.GetCreatedAt().Time,
+		Number:           pr.GetNumber(),
+		Title:            pr.GetTitle(),
+		Body:             pr.GetBody(),
+		State:            pr.GetState(),
+		Head:             pr.GetHead().GetRef(),
+		HeadSHA:          pr.GetHead().GetSHA(),
+		Base:             pr.GetBase().GetRef(),
+		Labels:           labels,
+		Mergeable:        pr.GetMergeable(),
+		MergeableKnown:   pr.Mergeable != nil,
+		MergeStateStatus: strings.ToUpper(strings.TrimSpace(pr.GetMergeableState())),
+		URL:              pr.GetHTMLURL(),
+		CreatedAt:        pr.GetCreatedAt().Time,
 	}
 }
 
