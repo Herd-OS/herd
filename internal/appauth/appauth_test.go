@@ -92,7 +92,7 @@ func TestGenerateJWTErrors(t *testing.T) {
 }
 
 func TestGitHubTokenSourceInstallationTokenSuccess(t *testing.T) {
-	expiresAt := time.Date(2026, 7, 11, 13, 0, 0, 0, time.UTC)
+	expiresAt := time.Date(2030, 7, 11, 13, 0, 0, 0, time.UTC)
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		assert.Equal(t, http.MethodPost, req.Method)
 		assert.Equal(t, "/api/v3/app/installations/99/access_tokens", req.URL.Path)
@@ -144,7 +144,7 @@ func TestGitHubTokenSourceRefreshesAppJWTAfterExpiry(t *testing.T) {
 		assert.Equal(t, http.MethodPost, req.Method)
 		assert.Equal(t, "/api/v3/app/installations/99/access_tokens", req.URL.Path)
 		authHeaders = append(authHeaders, req.Header.Get("Authorization"))
-		return jsonResponse(http.StatusCreated, `{"token":"installation-token","expires_at":"2026-07-11T13:00:00Z"}`), nil
+		return jsonResponse(http.StatusCreated, `{"token":"installation-token","expires_at":"2030-07-11T13:00:00Z"}`), nil
 	})
 	httpClient := oauth2.NewClient(context.Background(), jwtSource)
 	oauthTransport, ok := httpClient.Transport.(*oauth2.Transport)
@@ -208,8 +208,46 @@ func TestGitHubTokenSourceInstallationTokenError(t *testing.T) {
 	assert.Contains(t, err.Error(), "installation 42")
 }
 
+func TestGitHubTokenSourceInstallationTokenRejectsInvalidExpiry(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name:    "missing expiry",
+			body:    `{"token":"installation-token"}`,
+			wantErr: "missing expiry",
+		},
+		{
+			name:    "expired",
+			body:    `{"token":"installation-token","expires_at":"2000-01-01T00:00:00Z"}`,
+			wantErr: "expired token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return jsonResponse(http.StatusCreated, tt.body), nil
+			})
+			httpClient := &http.Client{Transport: rt}
+			ghClient, err := github.NewClient(httpClient).WithEnterpriseURLs("https://example.test/api/v3/", "https://example.test/api/uploads/")
+			require.NoError(t, err)
+			source, err := NewGitHubTokenSourceWithClient(ghClient)
+			require.NoError(t, err)
+
+			token, err := source.InstallationToken(context.Background(), 42)
+
+			require.Error(t, err)
+			assert.Empty(t, token.Token)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestNewInstallationClient(t *testing.T) {
-	expiresAt := time.Date(2026, 7, 11, 13, 0, 0, 0, time.UTC)
+	expiresAt := time.Date(2030, 7, 11, 13, 0, 0, 0, time.UTC)
 	source := &fakeTokenSource{
 		token: InstallationToken{
 			Token:     "installation-token",
@@ -239,7 +277,7 @@ func TestNewInstallationClient(t *testing.T) {
 }
 
 func TestInstallationOAuthTokenSourceRefreshesExpiredInstallationToken(t *testing.T) {
-	current := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	current := time.Date(2030, 7, 11, 12, 0, 0, 0, time.UTC)
 	source := &fakeTokenSource{tokens: []InstallationToken{
 		{Token: "installation-token-1", ExpiresAt: current.Add(time.Hour)},
 		{Token: "installation-token-2", ExpiresAt: current.Add(2 * time.Hour)},
@@ -281,6 +319,40 @@ func TestNewInstallationClientRejectsEmptyToken(t *testing.T) {
 	assert.Nil(t, client)
 	assert.Nil(t, httpClient)
 	assert.Contains(t, err.Error(), "empty token")
+}
+
+func TestNewInstallationClientRejectsInvalidTokenExpiry(t *testing.T) {
+	tests := []struct {
+		name    string
+		token   InstallationToken
+		wantErr string
+	}{
+		{
+			name:    "missing expiry",
+			token:   InstallationToken{Token: "installation-token"},
+			wantErr: "missing token expiry",
+		},
+		{
+			name:    "expired",
+			token:   InstallationToken{Token: "installation-token", ExpiresAt: time.Date(2026, 7, 11, 11, 0, 0, 0, time.UTC)},
+			wantErr: "expired token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := &fakeTokenSource{token: tt.token}
+			ts := newInstallationOAuthTokenSource(context.Background(), source, 77, func() time.Time {
+				return time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+			})
+
+			token, err := ts.Token()
+
+			require.Error(t, err)
+			assert.Nil(t, token)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
 
 func TestRetryTransportRetriesOnlyReadRequests(t *testing.T) {

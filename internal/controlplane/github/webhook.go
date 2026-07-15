@@ -192,6 +192,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	event, err := ParseEvent(eventName, payload)
 	if err != nil {
+		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "failed", err.Error(), nil)
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "parse webhook payload: unsupported payload shape",
 		})

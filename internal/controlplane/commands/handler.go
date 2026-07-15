@@ -317,7 +317,7 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 				return repo, false, idempotencyKey, commandRecord.Metadata, nil
 			}
 		}
-		if existing.Status != "completed" {
+		if existing.Status == "failed" {
 			ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)
 			if err != nil {
 				return store.Repository{}, false, "", nil, fmt.Errorf("add acknowledgement comment: %w", err)
@@ -335,6 +335,9 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 				return repo, false, idempotencyKey, ackMetadata, nil
 			}
 			return repo, true, idempotencyKey, ackMetadata, nil
+		}
+		if existing.Status != "completed" {
+			return store.Repository{}, false, "", nil, fmt.Errorf("command acknowledgement %q outcome is unknown after started acknowledgement attempt; repair required", idempotencyKey)
 		}
 		if ackID, ok := parseAckResultRef(existing.ResultRef); ok {
 			ackMetadata := commandMetadataWithAck(commandRecord.Metadata, ackID)
@@ -355,6 +358,9 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 
 	record = prepareCommandRecord(repo, event, commandKey, record)
 	if _, err := h.Store.RecordCommand(ctx, record); err != nil {
+		if failures, ok := h.Store.(IdempotencyFailureStore); ok {
+			_ = failures.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
+		}
 		return store.Repository{}, false, "", nil, fmt.Errorf("record command: %w", err)
 	}
 	ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)

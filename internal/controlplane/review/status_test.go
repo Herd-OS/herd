@@ -211,6 +211,26 @@ func TestSetHerdReviewStatusRetryAfterGitHubFailureReusesFailedMutationAttempt(t
 	assert.Equal(t, "success", st.states[0].Status)
 }
 
+func TestSetHerdReviewStatusRetriesAfterGitHubFailureAndFailIdempotencyFailure(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{failErrs: []error{errors.New("database down")}}
+	gh := &fakeStatusGitHub{errs: []error{errors.New("github down"), nil}}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	firstErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+	secondErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "github down")
+	require.NoError(t, secondErr)
+	require.Len(t, gh.statuses, 1)
+	assert.Equal(t, HerdReviewContext, gh.statuses[0].status.Context)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+	require.Len(t, st.states, 1)
+	assert.Equal(t, "success", st.states[0].Status)
+}
+
 func TestSetHerdReviewStatusRetriesAfterMutationAttemptRecordFailure(t *testing.T) {
 	ctx := context.Background()
 	st := &fakeStatusStore{recordMutationErrs: []error{errors.New("database down"), nil}}
@@ -235,6 +255,7 @@ type fakeStatusStore struct {
 	states               []store.ReviewState
 	errs                 []error
 	completeErrs         []error
+	failErrs             []error
 	recordMutationErrs   []error
 	mutationCompleteErrs []error
 	idem                 map[string]store.IdempotencyKey
@@ -396,6 +417,13 @@ func (s *fakeStatusStore) GetGitHubMutationAttempt(_ context.Context, key string
 }
 
 func (s *fakeStatusStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	if len(s.failErrs) > 0 {
+		err := s.failErrs[0]
+		s.failErrs = s.failErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	record, ok := s.idem[key]
 	if !ok {
 		return store.ErrNotFound

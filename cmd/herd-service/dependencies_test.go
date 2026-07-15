@@ -15,34 +15,32 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
-	"github.com/herd-os/herd/internal/controlplane/commands"
 	"github.com/herd-os/herd/internal/controlplane/jobs"
 	"github.com/herd-os/herd/internal/controlplane/store"
-	"github.com/herd-os/herd/internal/controlplane/workflowevents"
 	"github.com/herd-os/herd/internal/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildServiceDependenciesProductionFailsWhenProcessorsMissing(t *testing.T) {
+func TestBuildServiceDependenciesProductionBuildsDefaultProcessors(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 
 	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "production command dispatcher is not configured")
-	assert.Nil(t, deps.Store)
+	require.NoError(t, err)
+	require.NotNil(t, deps.IssueCommentCommandHandler)
+	require.NotNil(t, deps.JobResultsRoute)
+	require.NotNil(t, deps.WorkflowEventsRoute)
+	require.NotNil(t, deps.RunnerRegistrationTokenRoute)
+	require.NotNil(t, deps.RegisterRepositoryRoute)
 }
 
 func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 	deps, err := buildServiceDependenciesWithOptions(cfg, st, log.New(io.Discard, "", 0), productionDependencyOptions{
-		ArtifactStore:          emptyArtifactStore{},
-		CommandDispatcher:      noopCommandDispatcher{},
-		WorkflowEventProcessor: noopWorkflowProcessor{},
-		OIDCValidator:          fixedOIDCValidator{},
+		OIDCValidator: fixedOIDCValidator{},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, deps.IssueCommentCommandHandler)
@@ -94,18 +92,6 @@ type emptyArtifactStore struct{}
 
 func (emptyArtifactStore) OpenArtifact(context.Context, string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
-}
-
-type noopCommandDispatcher struct{}
-
-func (noopCommandDispatcher) DispatchCommand(context.Context, commands.DispatchCommand) error {
-	return nil
-}
-
-type noopWorkflowProcessor struct{}
-
-func (noopWorkflowProcessor) ProcessWorkflowEvent(context.Context, store.Repository, workflowevents.Event) error {
-	return nil
 }
 
 type fixedOIDCValidator struct{}

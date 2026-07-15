@@ -75,7 +75,17 @@ func (s *GitHubTokenSource) InstallationToken(ctx context.Context, installationI
 		return InstallationToken{}, fmt.Errorf("creating GitHub App installation token for installation %d: empty response", installationID)
 	}
 
-	return convertInstallationToken(token), nil
+	converted := convertInstallationToken(token)
+	if converted.Token == "" {
+		return InstallationToken{}, fmt.Errorf("creating GitHub App installation token for installation %d: empty token", installationID)
+	}
+	if converted.ExpiresAt.IsZero() {
+		return InstallationToken{}, fmt.Errorf("creating GitHub App installation token for installation %d: missing expiry", installationID)
+	}
+	if !time.Now().Before(converted.ExpiresAt) {
+		return InstallationToken{}, fmt.Errorf("creating GitHub App installation token for installation %d: expired token", installationID)
+	}
+	return converted, nil
 }
 
 // NewInstallationClient returns a GitHub client authenticated with an installation token.
@@ -138,6 +148,12 @@ func (s *installationOAuthTokenSource) Token() (*oauth2.Token, error) {
 	}
 	if token.Token == "" {
 		return nil, fmt.Errorf("empty token")
+	}
+	if token.ExpiresAt.IsZero() {
+		return nil, fmt.Errorf("missing token expiry")
+	}
+	if !now.Before(token.ExpiresAt) {
+		return nil, fmt.Errorf("expired token")
 	}
 	cached := &oauth2.Token{
 		AccessToken: token.Token,

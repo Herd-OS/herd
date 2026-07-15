@@ -78,6 +78,33 @@ func TestDispatcherDuplicateStartedWithoutCompletedMutationDoesNotRedispatch(t *
 	assert.Equal(t, "started", st.idempotencyKeys[key].Status)
 }
 
+func TestDispatcherDuplicatePreDispatchMutationRetries(t *testing.T) {
+	st := newFakeStore()
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.idempotencyKeys[key] = store.IdempotencyKey{
+		Key:      key,
+		Scope:    "workflow_dispatch",
+		Status:   "started",
+		Metadata: json.RawMessage(`{"job_id":"job-existing"}`),
+	}
+	st.jobs["job-existing"] = store.Job{JobID: "job-existing"}
+	st.mutationAttempts = append(st.mutationAttempts, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		MutationType:   "workflow_dispatch",
+		Status:         mutationStatusPreDispatch,
+	})
+
+	gh := &fakeWorkflowClient{}
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.True(t, result.Created)
+	assert.Equal(t, "job-existing", result.JobID)
+	assert.Len(t, gh.calls, 1)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+}
+
 func TestDispatcherDuplicateFailedStartedRecordCanRetry(t *testing.T) {
 	st := newFakeStore()
 	req := validRequest()
@@ -183,14 +210,14 @@ func TestDispatcherRetryAfterAcceptedDispatchPersistenceFailuresDoesNotRedispatc
 	_, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "complete workflow dispatch mutation attempt after GitHub accepted dispatch")
-	_, retryErr := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	result, retryErr := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 
-	require.Error(t, retryErr)
-	assert.Contains(t, retryErr.Error(), "repair required")
+	require.NoError(t, retryErr)
+	assert.False(t, result.Created)
 	assert.Len(t, gh.calls, 1)
 	require.Len(t, st.mutationAttempts, 1)
-	assert.Equal(t, "started", st.mutationAttempts[0].Status)
-	assert.Equal(t, "started", st.idempotencyKeys[key].Status)
+	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
 }
 
 func TestDispatcherFailedIdempotencyWithCompletedMutationRepairsWithoutRedispatch(t *testing.T) {

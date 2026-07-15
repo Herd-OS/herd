@@ -213,6 +213,23 @@ func TestHandlerRequiresEventHeader(t *testing.T) {
 	assert.JSONEq(t, `{"error":"missing X-GitHub-Event header"}`, rec.Body.String())
 }
 
+func TestHandlerMarksMalformedAcceptedDeliveryFailed(t *testing.T) {
+	payload := []byte(`{"action":"created","installation":{`)
+	st := &fakeStore{}
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Delivery", "delivery-malformed")
+	req.Header.Set("X-GitHub-Event", EventInstallation)
+	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+	rec := httptest.NewRecorder()
+
+	NewHandler("secret", st, log.New(io.Discard, "", 0)).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Len(t, st.deliveries, 1)
+	assert.Equal(t, "failed", st.deliveries[0].Status)
+	assert.NotEmpty(t, st.deliveries[0].Error)
+}
+
 func TestHandlerInstallationRepositoriesAddRemove(t *testing.T) {
 	payload := []byte(`{
 		"action":"removed",

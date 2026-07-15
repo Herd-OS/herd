@@ -168,6 +168,32 @@ func TestRegistrationTokenHandlerDuplicateNonceReplaysResponse(t *testing.T) {
 	assert.Equal(t, 1, minter.calls)
 }
 
+func TestRegistrationTokenHandlerDuplicateNonceReplaysWithNormalizedMetadata(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"self-hosted", "herd"}, BootstrapToken: plain, RequestNonce: "nonce-normalized"}
+	resultJSON, err := json.Marshal(minter.response)
+	require.NoError(t, err)
+	key := registrationIDKey(st.repository.ID, token.ID, req.RequestNonce)
+	st.idempotency[key] = store.IdempotencyKey{
+		Key:       key,
+		Scope:     idempotencyScope,
+		Status:    idempotencyStatusDone,
+		ResultRef: string(resultJSON),
+		Metadata:  json.RawMessage(`{"request_nonce":"nonce-normalized","bootstrap_token_id":1,"runner_labels":["self-hosted","herd"],"runner_name":"runner-1","repository_id":10}`),
+		CreatedAt: now,
+	}
+
+	rec := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"token":"github-runner-token","expires_at":"2026-07-11T13:00:00Z"}`, rec.Body.String())
+	assert.Equal(t, 0, minter.calls)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+}
+
 func TestRegistrationTokenHandlerReplayRepairsMissingTokenUse(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, token := newHandlerTestStore(t, now)
@@ -320,6 +346,29 @@ func TestRegistrationTokenHandlerCompleteFailureDoesNotMintAgain(t *testing.T) {
 	require.NotNil(t, st.tokens[token.ID].UsedAt)
 }
 
+func TestRegistrationTokenHandlerCompleteAndFallbackFailureDoesNotMintAgain(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	st.completeErrs = []error{errors.New("database down"), nil}
+	st.failErrs = []error{nil, errors.New("fallback down")}
+	minter := &fakeMinter{
+		responses: []RegistrationTokenResponse{
+			{Token: "github-runner-token-1", ExpiresAt: now.Add(time.Hour)},
+		},
+	}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-complete-fallback"}
+
+	first := serveRegistrationRequest(t, handler, req)
+	second := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.Contains(t, second.Body.String(), "github-runner-token-1")
+	assert.Equal(t, 1, minter.calls)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+}
+
 func TestRegistrationTokenHandlerSameNonceRejectsChangedRunnerMetadata(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, _ := newHandlerTestStore(t, now)
@@ -386,6 +435,7 @@ type handlerFakeStore struct {
 	tokensByHash      map[string]store.RunnerBootstrapToken
 	idempotency       map[string]store.IdempotencyKey
 	completeErrs      []error
+	failErrs          []error
 	markUsedErrs      []error
 	markUsedSuccesses int
 }
@@ -461,6 +511,13 @@ func (s *handlerFakeStore) CompleteIdempotencyKey(_ context.Context, key string,
 }
 
 func (s *handlerFakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	if len(s.failErrs) > 0 {
+		err := s.failErrs[0]
+		s.failErrs = s.failErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	record, ok := s.idempotency[key]
 	if !ok {
 		return store.ErrNotFound

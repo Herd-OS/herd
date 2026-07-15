@@ -116,27 +116,19 @@ func TestE2E_DockerComposePostgresSmoke(t *testing.T) {
 		t.Skipf("Docker Compose is not available: %s", string(out))
 	}
 
-	dir := t.TempDir()
-	composePath := filepath.Join(dir, "compose.yml")
-	compose := `services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: herd
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d herd"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
-`
-	require.NoError(t, os.WriteFile(composePath, []byte(compose), 0644))
+	root := findModuleRoot(t)
+	composePath := filepath.Join(root, "docker-compose.yml")
+	require.FileExists(t, composePath)
 	t.Cleanup(func() {
 		downCtx, downCancel := context.WithTimeout(context.Background(), time.Minute)
 		defer downCancel()
-		_ = exec.CommandContext(downCtx, "docker", "compose", "-f", composePath, "down", "-v").Run()
+		cmd := exec.CommandContext(downCtx, "docker", "compose", "-f", composePath, "down", "-v")
+		cmd.Dir = root
+		_ = cmd.Run()
 	})
-	if out, err := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d", "--wait", "postgres").CombinedOutput(); err != nil {
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d", "--wait", "postgres")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
 		require.NoError(t, err, "Docker Compose/Postgres smoke failed: %s", string(out))
 	}
 }

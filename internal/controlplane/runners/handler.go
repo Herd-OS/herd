@@ -132,6 +132,7 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	usedAt := h.now()
+	_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, failedResultPrefix+string(resultJSON))
 	if err := h.store.CompleteIdempotencyKey(r.Context(), idempotencyKey, string(resultJSON)); err != nil {
 		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, failedResultPrefix+string(resultJSON))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete runner registration idempotency"})
@@ -290,7 +291,39 @@ func runnerRequestMetadata(repoID int64, req RegistrationTokenRequest, token sto
 }
 
 func sameRegistrationRequest(existing json.RawMessage, current []byte) bool {
-	return strings.TrimSpace(string(existing)) == strings.TrimSpace(string(current))
+	var existingMetadata runnerRegistrationMetadata
+	if err := json.Unmarshal(existing, &existingMetadata); err != nil {
+		return false
+	}
+	var currentMetadata runnerRegistrationMetadata
+	if err := json.Unmarshal(current, &currentMetadata); err != nil {
+		return false
+	}
+	return existingMetadata.equal(currentMetadata)
+}
+
+type runnerRegistrationMetadata struct {
+	RepositoryID     int64    `json:"repository_id"`
+	RunnerName       string   `json:"runner_name"`
+	RunnerLabels     []string `json:"runner_labels"`
+	BootstrapTokenID int64    `json:"bootstrap_token_id"`
+	RequestNonce     string   `json:"request_nonce"`
+}
+
+func (m runnerRegistrationMetadata) equal(other runnerRegistrationMetadata) bool {
+	if m.RepositoryID != other.RepositoryID ||
+		strings.TrimSpace(m.RunnerName) != strings.TrimSpace(other.RunnerName) ||
+		m.BootstrapTokenID != other.BootstrapTokenID ||
+		strings.TrimSpace(m.RequestNonce) != strings.TrimSpace(other.RequestNonce) ||
+		len(m.RunnerLabels) != len(other.RunnerLabels) {
+		return false
+	}
+	for i := range m.RunnerLabels {
+		if strings.TrimSpace(m.RunnerLabels[i]) != strings.TrimSpace(other.RunnerLabels[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func registrationIDKey(repoID int64, tokenID int64, nonce string) string {

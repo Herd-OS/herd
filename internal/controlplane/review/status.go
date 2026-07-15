@@ -115,7 +115,11 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 			if repaired, err := s.repairStartedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, status, state, description, targetURL, now); repaired || err != nil {
 				return err
 			}
-			return fmt.Errorf("herd review status %q is already in progress", statusKey)
+			if reopened, err := s.reopenFailedStatusMutation(ctx, statusKey, now); err != nil {
+				return err
+			} else if !reopened {
+				return fmt.Errorf("herd review status %q is already in progress", statusKey)
+			}
 		}
 	}
 	if err := s.ensureStatusMutationAttempt(ctx, statusKey, repo, prNumber, headSHA, status, now); err != nil {
@@ -136,6 +140,21 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 		return fmt.Errorf("complete Herd Review status idempotency: %w", err)
 	}
 	return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
+}
+
+func (s StatusService) reopenFailedStatusMutation(ctx context.Context, key string, now time.Time) (bool, error) {
+	mutations, ok := s.Store.(StatusMutationStore)
+	if !ok {
+		return false, nil
+	}
+	attempt, err := mutations.GetGitHubMutationAttempt(ctx, key)
+	if err != nil || attempt.Status != "failed" {
+		return false, nil
+	}
+	if err := mutations.CompleteGitHubMutationAttempt(ctx, key, "started", nil, "", now); err != nil {
+		return true, fmt.Errorf("reopen Herd Review status mutation attempt: %w", err)
+	}
+	return true, nil
 }
 
 func (s StatusService) recordStatusMutationAttempt(ctx context.Context, key string, repo Repository, prNumber int, headSHA string, status platform.CommitStatus, now time.Time) error {

@@ -381,6 +381,28 @@ func TestHandlerAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing
 	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
+func TestHandlerAcknowledgementRecordAndFallbackCompletionFailureDoesNotAckAgain(t *testing.T) {
+	st := newFakeStore()
+	st.updateErrs = []error{errors.New("store down")}
+	st.completeErrs = []error{errors.New("idempotency down")}
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os review")
+
+	_, err := h.HandleIssueComment(context.Background(), event)
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "record acknowledgement comment")
+	require.Error(t, retryErr)
+	assert.Contains(t, retryErr.Error(), "repair required")
+	assert.Len(t, gh.comments, 1)
+	assert.Empty(t, dispatcher.dispatched)
+	key := "repo:42:comment:123:command:review"
+	require.Equal(t, "started", st.idempotencyKeys[key].Status)
+}
+
 func TestHandlerAcknowledgementCompletionFailureRedeliveryDoesNotAckAgain(t *testing.T) {
 	st := newFakeStore()
 	st.completeErrs = []error{errors.New("store down"), nil, nil}
@@ -642,6 +664,19 @@ func (s *fakeStore) GetIdempotencyKey(_ context.Context, key string) (store.Idem
 		return store.IdempotencyKey{}, store.ErrNotFound
 	}
 	return record, nil
+}
+
+func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	record.Status = "failed"
+	record.ResultRef = errorMessage
+	record.CompletedAt = &now
+	s.idempotencyKeys[key] = record
+	return nil
 }
 
 func (s *fakeStore) RecordCommand(_ context.Context, c store.CommandRecord) (bool, error) {
