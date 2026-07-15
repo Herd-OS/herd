@@ -39,8 +39,9 @@ type reviewLockState struct {
 }
 
 type reviewLockHandle struct {
-	branch string
-	state  reviewLockState
+	branch         string
+	state          reviewLockState
+	reclaimedStale *reviewLockState
 }
 
 type reviewLockRepository interface {
@@ -71,6 +72,7 @@ func acquireReviewLock(ctx context.Context, _ platform.IssueService, repoSvc pla
 		if reviewLockBlocksCurrentHead(state, lockFromSHA, now) {
 			return nil, false, nil
 		}
+		reclaimedStale := reclaimedStaleReviewLockState(state, prNumber, lockFromSHA)
 
 		lockID, err := newReviewLockToken()
 		if err != nil {
@@ -91,9 +93,17 @@ func acquireReviewLock(ctx context.Context, _ platform.IssueService, repoSvc pla
 			}
 			return nil, false, fmt.Errorf("updating review lock branch %s: %w", lockBranch, err)
 		}
-		return &reviewLockHandle{branch: lockBranch, state: lockedState}, true, nil
+		return &reviewLockHandle{branch: lockBranch, state: lockedState, reclaimedStale: reclaimedStale}, true, nil
 	}
 	return nil, false, nil
+}
+
+func reclaimedStaleReviewLockState(state reviewLockState, prNumber int, currentHeadSHA string) *reviewLockState {
+	if state.Status != "locked" || state.PRNumber != prNumber || state.BatchBranchSHA == "" || state.BatchBranchSHA == currentHeadSHA {
+		return nil
+	}
+	reclaimed := state
+	return &reclaimed
 }
 
 func reviewLockBlocksCurrentHead(state reviewLockState, currentHeadSHA string, now time.Time) bool {

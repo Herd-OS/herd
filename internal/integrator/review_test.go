@@ -811,6 +811,9 @@ func TestAcquireReviewLock_ActiveOldHeadLockIsReclaimedByAppendingCommit(t *test
 	require.NoError(t, err)
 	require.True(t, acquired)
 	require.NotNil(t, handle)
+	require.NotNil(t, handle.reclaimedStale)
+	assert.Equal(t, "old-head-lock", handle.reclaimedStale.LockID)
+	assert.Equal(t, "old-sha", handle.reclaimedStale.BatchBranchSHA)
 	newHead := repoSvc.branchSHAs[lockBranch]
 	assert.Equal(t, "old-lock-sha", repoSvc.commitParents[newHead])
 	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[newHead])
@@ -1155,6 +1158,147 @@ func TestReview_ManualActiveLockSkipCommentsWithDiagnostics(t *testing.T) {
 	assert.Contains(t, comment, formatReviewLockTime(active.ExpiresAt))
 	assert.Contains(t, comment, "sha-current")
 	assert.Contains(t, comment, "sha-current")
+}
+
+func TestReview_ManualStaleOldHeadLockReclaimsAndPostsInfoComment(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 99, "old-sha", "old-head-lock", now)
+	oldHead.Owner = "stale-owner"
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "current-sha", lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+	mock.prs = prSvc
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir, Manual: true})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	require.NotEmpty(t, prSvc.comments)
+	infoComments := commentsContaining(prSvc.comments, "Herd reclaimed a stale review lock")
+	require.Len(t, infoComments, 1)
+	infoComment := infoComments[0]
+	assert.Contains(t, infoComment, "older PR head")
+	assert.Contains(t, infoComment, "continuing review")
+	assert.Contains(t, infoComment, "- Locked head: `old-sha`")
+	assert.Contains(t, infoComment, "- Current head: `current-sha`")
+	assert.NotContains(t, strings.ToLower(infoComment), "wait for the active review")
+	assert.Empty(t, commentsContaining(prSvc.comments, "another review lock is active"))
+}
+
+func TestReview_AutomaticStaleOldHeadLockReclaimsWithoutInfoComment(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 99, "old-sha", "old-head-lock", now)
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "current-sha", lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+	mock.prs = prSvc
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.Empty(t, commentsContaining(prSvc.comments, "Herd reclaimed a stale review lock"))
+	assert.Empty(t, commentsContaining(prSvc.comments, "another review lock is active"))
+}
+
+func TestReview_RunBasedAutomaticStaleOldHeadLockReclaims(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[10] = &platform.Issue{
+		Number:    10,
+		Title:     "Worker task",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	now := time.Now().UTC()
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 99, "old-sha", "old-head-lock", now)
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "current-sha", lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{
+				{Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Inputs: map[string]string{"issue_number": "10"}},
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	dir, g := initTestRepo(t)
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       repoSvc,
+		milestones: &mockMilestoneService{},
+	}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.Equal(t, 1, ag.calls)
+	assert.Empty(t, commentsContaining(prSvc.comments, "Herd reclaimed a stale review lock"))
+	assert.Empty(t, commentsContaining(prSvc.comments, "another review lock is active"))
 }
 
 func TestReview_AutomaticActiveLockSkipOnlyLogsOrAtLeastDoesNotComment(t *testing.T) {
@@ -4030,6 +4174,16 @@ func reviewEvents(reviews []capturedReview) []platform.ReviewEvent {
 		events = append(events, review.event)
 	}
 	return events
+}
+
+func commentsContaining(comments []string, needle string) []string {
+	var matches []string
+	for _, comment := range comments {
+		if strings.Contains(comment, needle) {
+			matches = append(matches, comment)
+		}
+	}
+	return matches
 }
 
 func (m *mockCapturingPRService) AddComment(_ context.Context, _ int, body string) error {
