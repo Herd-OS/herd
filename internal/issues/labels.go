@@ -40,6 +40,10 @@ const (
 	// skipped — the user removes the label (or runs /herd review or
 	// /herd integrate manually) to resume.
 	StableDisagreement = "herd/stable-disagreement"
+
+	// ReviewNonConverging is added to a batch PR when repeated review/fix
+	// cycles are escalated to a strategy-level fix.
+	ReviewNonConverging = "herd/review-nonconverging"
 )
 
 // Type labels
@@ -79,6 +83,7 @@ func AllLabels() []LabelDef {
 		{RetryPending, "D4C5F9", "Monitor-posted retry pending processing"},
 		{RebasePending, "FBCA04", "Rebase conflict resolution in progress for this batch PR"},
 		{StableDisagreement, "E11D48", "Reviewer and fix worker disagree — automatic review paused"},
+		{ReviewNonConverging, "FBCA04", "Review/fix loop is being handled by a strategy-level fix"},
 		{CascadeFailed, "B60205", "Conflict resolution cascade exhausted — manual intervention required"},
 	}
 }

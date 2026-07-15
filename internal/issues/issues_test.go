@@ -9,7 +9,7 @@ import (
 
 func TestAllLabels(t *testing.T) {
 	labels := AllLabels()
-	assert.Len(t, labels, 16)
+	assert.Len(t, labels, 17)
 
 	var cascadeFailed *LabelDef
 	for i := range labels {
@@ -41,6 +41,25 @@ func TestStableDisagreementLabel(t *testing.T) {
 	assert.False(t, IsStatusLabel(StableDisagreement))
 	assert.NotContains(t, AllStatusLabels(), StableDisagreement)
 	assert.NotContains(t, AllTypeLabels(), StableDisagreement)
+}
+
+func TestReviewNonConvergingLabel(t *testing.T) {
+	assert.Equal(t, "herd/review-nonconverging", ReviewNonConverging)
+
+	labels := AllLabels()
+	var matches []LabelDef
+	for _, l := range labels {
+		if l.Name == ReviewNonConverging {
+			matches = append(matches, l)
+		}
+	}
+	require.Len(t, matches, 1, "AllLabels should contain exactly one entry for ReviewNonConverging")
+	assert.Equal(t, "FBCA04", matches[0].Color)
+	assert.Equal(t, "Review/fix loop is being handled by a strategy-level fix", matches[0].Description)
+
+	assert.False(t, IsStatusLabel(ReviewNonConverging))
+	assert.NotContains(t, AllStatusLabels(), ReviewNonConverging)
+	assert.NotContains(t, AllTypeLabels(), ReviewNonConverging)
 }
 
 func TestIsStatusLabel(t *testing.T) {

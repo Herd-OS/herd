@@ -25,6 +25,11 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, true, cfg.Integrator.Review)
 	assert.Equal(t, 0, cfg.Integrator.ReviewMaxFixCycles)
 	assert.Equal(t, "standard", cfg.Integrator.ReviewStrictness)
+	assert.Equal(t, ReviewNonConvergence{
+		Enabled:            true,
+		Window:             5,
+		MinCompletedCycles: 3,
+	}, cfg.Integrator.ReviewNonConvergence)
 	assert.Equal(t, ReviewDiff{
 		MaxChunkBytes:    180000,
 		MaxFileBytes:     40000,
@@ -63,6 +68,10 @@ integrator:
   require_ci: false
   review: true
   review_max_fix_cycles: 2
+  review_non_convergence:
+    enabled: false
+    window: 7
+    min_completed_cycles: 4
   review_diff:
     max_chunk_bytes: 90000
     max_file_bytes: 20000
@@ -103,6 +112,11 @@ image_publish:
 	assert.Equal(t, "rebase", cfg.Integrator.Strategy)
 	assert.Equal(t, "dispatch-resolver", cfg.Integrator.OnConflict)
 	assert.Equal(t, false, cfg.Integrator.RequireCI)
+	assert.Equal(t, ReviewNonConvergence{
+		Enabled:            false,
+		Window:             7,
+		MinCompletedCycles: 4,
+	}, cfg.Integrator.ReviewNonConvergence)
 	assert.Equal(t, ReviewDiff{
 		MaxChunkBytes:    90000,
 		MaxFileBytes:     20000,
@@ -244,6 +258,11 @@ platform:
 		MaxFilesPerChunk: 80,
 		MaxChunks:        8,
 	}, cfg.Integrator.ReviewDiff)
+	assert.Equal(t, ReviewNonConvergence{
+		Enabled:            true,
+		Window:             5,
+		MinCompletedCycles: 3,
+	}, cfg.Integrator.ReviewNonConvergence)
 	assert.Nil(t, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
 	assert.Equal(t, []string{"ubuntu-latest"}, cfg.ImagePublish.RunsOn)

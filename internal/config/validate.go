@@ -140,6 +140,12 @@ func Validate(cfg *Config) *ValidationError {
 	if cfg.Integrator.CIMaxFixCycles < 0 {
 		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.ci_max_fix_cycles must be >= 0 (0 = unlimited), got %d", cfg.Integrator.CIMaxFixCycles))
 	}
+	if cfg.Integrator.ReviewNonConvergence.Window <= 0 {
+		ve.Errors = append(ve.Errors, "integrator.review_non_convergence.window must be > 0")
+	}
+	if cfg.Integrator.ReviewNonConvergence.MinCompletedCycles <= 0 {
+		ve.Errors = append(ve.Errors, "integrator.review_non_convergence.min_completed_cycles must be > 0")
+	}
 	if cfg.Integrator.ReviewDiff.MaxChunkBytes <= 0 {
 		ve.Errors = append(ve.Errors, "integrator.review_diff.max_chunk_bytes must be > 0")
 	}
