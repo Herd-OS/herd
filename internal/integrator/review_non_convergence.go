@@ -138,7 +138,7 @@ func collectReviewHistoryFromComments(comments []*platform.Comment, allIssues []
 	return attachReviewFixIssueHistory(cycles, reviewHistoryIssuesForPR(allIssues, prNumber))
 }
 
-func parseReviewHistoryCycle(comment *platform.Comment, prNumber int, batchNumber int, headSHA string, trustedHumanLogins ...string) (reviewHistoryCycle, bool) {
+func parseReviewHistoryCycle(comment *platform.Comment, prNumber int, batchNumber int, _ string, trustedHumanLogins ...string) (reviewHistoryCycle, bool) {
 	if !isTrustedReviewResultMarkerComment(comment, trustedHumanLogins...) {
 		return reviewHistoryCycle{}, false
 	}
@@ -146,9 +146,6 @@ func parseReviewHistoryCycle(comment *platform.Comment, prNumber int, batchNumbe
 	marker, hasMarker := parseReviewResultMarker(body)
 	if hasMarker {
 		if marker.PRNumber != prNumber || marker.BatchNumber != batchNumber {
-			return reviewHistoryCycle{}, false
-		}
-		if marker.HeadSHA != "" && headSHA != "" && marker.HeadSHA != headSHA {
 			return reviewHistoryCycle{}, false
 		}
 	}

@@ -81,6 +81,29 @@ func TestParseReviewHistoryCycle_OlderCommentWithoutMarkerUsesPartialData(t *tes
 	assert.Len(t, cycle.FindingsBySeverity["LOW"], 1)
 }
 
+func TestParseReviewHistoryCycle_AcceptsOlderMarkerHeadSHA(t *testing.T) {
+	marker, err := buildReviewResultMarker(newReviewResultMarker(849, 111, "older-head", reviewResultStatusChangesRequested, 34, 14, time.Now()))
+	require.NoError(t, err)
+	comment := &platform.Comment{
+		AuthorLogin: "herd[bot]",
+		Body: strings.Join([]string{
+			"🔍 **HerdOS Agent Review** (cycle 34 of 100)",
+			"",
+			"Found 14 issues:",
+			"",
+			"- **HIGH** internal/controlplane/dispatch/history.go: durable mutation lacks idempotency",
+			marker,
+		}, "\n"),
+	}
+
+	cycle, ok := parseReviewHistoryCycle(comment, 849, 111, "latest-head")
+	require.True(t, ok)
+	assert.Equal(t, 34, cycle.Cycle)
+	assert.Equal(t, "older-head", cycle.HeadSHA)
+	assert.Equal(t, 14, cycle.PostedFindingsCount)
+	assert.Contains(t, cycle.FindingsBySeverity["HIGH"], "internal/controlplane/dispatch/history.go: durable mutation lacks idempotency")
+}
+
 func TestParseReviewHistoryCycle_RejectsUntrustedOrMismatchedMarker(t *testing.T) {
 	marker, err := buildReviewResultMarker(newReviewResultMarker(850, 111, "abc123", reviewResultStatusChangesRequested, 1, 1, time.Now()))
 	require.NoError(t, err)
@@ -111,7 +134,6 @@ func TestCollectReviewHistoryFromComments_WindowsAndAttachesFixIssues(t *testing
 		reviewHistoryComment(t, "head", 1, 4, "internal/controlplane/dispatch/a.go: idempotency mutation", 901),
 		reviewHistoryComment(t, "head", 2, 5, "internal/controlplane/dispatch/b.go: idempotency mutation", 902),
 		reviewHistoryComment(t, "old", 3, 6, "internal/controlplane/dispatch/c.go: idempotency mutation", 903),
-		reviewHistoryComment(t, "head", 3, 6, "internal/controlplane/dispatch/c.go: idempotency mutation", 903),
 	}
 	allIssues := []*platform.Issue{
 		reviewFixIssue(901, 1, issues.StatusDone, []string{"internal/controlplane/dispatch/a.go"}, "Validation passed"),

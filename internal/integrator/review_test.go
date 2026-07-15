@@ -6936,6 +6936,40 @@ func TestReview_NonConvergenceEscalatesToStrategyFixIssue(t *testing.T) {
 	assert.Contains(t, fx.prSvc.reviews[0].body, "#9601")
 }
 
+func TestReview_NonConvergenceEscalatesWithOlderHistoricalHeadSHAs(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+	fx.setHistoryWithHeadSHAs(t, []int{14, 20, 21, 24, 28}, []string{
+		"older-head-34",
+		"older-head-35",
+		"older-head-36",
+		"older-head-37",
+		"older-head-38",
+	})
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	assert.Equal(t, 1, result.FindingsCount)
+	require.Len(t, fx.createdIssues, 1)
+	assert.True(t, strings.HasPrefix(fx.createdIssues[0].title, "Review strategy fix"))
+	assert.NotContains(t, fx.createdIssues[0].title, "Review fixes")
+	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+
+	comment := requireCommentContaining(t, fx.prSvc.comments, "Herd review is not converging")
+	assert.Contains(t, comment, "Cycles analyzed: 34, 35, 36, 37, 38, 39")
+	assert.Contains(t, comment, "Finding count trend: 14, 20, 21, 24, 28, 28")
+	marker, ok := parseReviewResultMarker(comment)
+	require.True(t, ok)
+	assert.Equal(t, fx.headSHA, marker.HeadSHA)
+	assert.Equal(t, 39, marker.Cycle)
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Found 28 actionable issues"))
+}
+
 func TestReview_NonConvergenceContinueCreatesNormalReviewFixIssue(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -7278,6 +7312,16 @@ func newReviewNonConvergenceIntegrationFixture(t *testing.T, currentFindings []a
 
 func (fx *reviewNonConvergenceIntegrationFixture) setHistory(t *testing.T, counts []int) {
 	t.Helper()
+	headSHAs := make([]string, len(counts))
+	for i := range counts {
+		headSHAs[i] = fx.headSHA
+	}
+	fx.setHistoryWithHeadSHAs(t, counts, headSHAs)
+}
+
+func (fx *reviewNonConvergenceIntegrationFixture) setHistoryWithHeadSHAs(t *testing.T, counts []int, headSHAs []string) {
+	t.Helper()
+	require.Len(t, headSHAs, len(counts))
 	fx.issueSvc.listCommentsResult = nil
 	fx.issueSvc.listResult = []*platform.Issue{
 		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
@@ -7286,7 +7330,7 @@ func (fx *reviewNonConvergenceIntegrationFixture) setHistory(t *testing.T, count
 		cycle := 34 + i
 		fixIssue := 951 + i
 		finding := fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go: durable mutation lacks idempotency before started workflow retry", cycle)
-		fx.issueSvc.listCommentsResult = append(fx.issueSvc.listCommentsResult, reviewHistoryComment(t, fx.headSHA, cycle, count, finding, fixIssue))
+		fx.issueSvc.listCommentsResult = append(fx.issueSvc.listCommentsResult, reviewHistoryComment(t, headSHAs[i], cycle, count, finding, fixIssue))
 		fx.issueSvc.listResult = append(fx.issueSvc.listResult, reviewFixIssue(fixIssue, cycle, issues.StatusDone, []string{fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go", cycle)}, "Validation success"))
 	}
 }
