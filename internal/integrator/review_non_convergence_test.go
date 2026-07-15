@@ -283,6 +283,91 @@ func TestAnalyzeReviewConvergence_MinCompletedCyclesAndLatestInProgress(t *testi
 	}
 }
 
+func TestAnalyzeReviewConvergence_DefersForLatestFixBearingCycleBeforeCurrentReview(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     string
+		wantIssues []int
+	}{
+		{
+			name:       "ready latest fix before appended current review",
+			status:     issues.StatusReady,
+			wantIssues: []int{954},
+		},
+		{
+			name:       "in-progress latest fix before appended current review",
+			status:     issues.StatusInProgress,
+			wantIssues: []int{954},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			counts := []int{14, 20, 21, 24, 28}
+			cycles := make([]reviewHistoryCycle, 0, len(counts)+1)
+			for i, count := range counts {
+				cycle := reviewHistoryCycleWithFinding(i+1, count, fmt.Sprintf("internal/controlplane/dispatch/file%d.go: durable mutation lacks idempotency before started workflow retry", i))
+				cycle.FixIssues = []reviewHistoryFixIssue{{Number: 950 + i, StatusLabel: issues.StatusDone, WorkerReport: true, ValidationStatus: "success"}}
+				cycles = append(cycles, cycle)
+			}
+			cycles[len(cycles)-1].FixIssues[0] = reviewHistoryFixIssue{Number: 954, StatusLabel: tt.status}
+			cycles = append(cycles, reviewHistoryCycleWithFinding(6, 28, "internal/controlplane/dispatch/current.go: durable mutation lacks idempotency before started workflow retry"))
+
+			analysis := analyzeReviewConvergence(cycles, 3)
+
+			assert.Equal(t, reviewDecisionContinueFixLoop, analysis.Decision)
+			assert.Equal(t, tt.wantIssues, analysis.InProgressFixIssues)
+			assert.Equal(t, []int{950, 951, 952, 953}, analysis.CompletedFixIssues)
+			assert.Contains(t, analysis.Rationale, "synthesis is deferred")
+		})
+	}
+}
+
+func TestLatestFixBearingReviewCycle(t *testing.T) {
+	tests := []struct {
+		name      string
+		cycles    []reviewHistoryCycle
+		wantCycle int
+		wantOK    bool
+	}{
+		{
+			name: "empty cycles",
+		},
+		{
+			name: "no fix-bearing cycles",
+			cycles: []reviewHistoryCycle{
+				{Cycle: 1},
+				{Cycle: 2},
+			},
+		},
+		{
+			name: "latest fix-bearing cycle ignores appended current review",
+			cycles: []reviewHistoryCycle{
+				{Cycle: 3, FixIssues: []reviewHistoryFixIssue{{Number: 103}}},
+				{Cycle: 4},
+			},
+			wantCycle: 3,
+			wantOK:    true,
+		},
+		{
+			name: "highest fix-bearing cycle wins",
+			cycles: []reviewHistoryCycle{
+				{Cycle: 3, FixIssues: []reviewHistoryFixIssue{{Number: 103}}},
+				{Cycle: 4},
+				{Cycle: 5, FixIssues: []reviewHistoryFixIssue{{Number: 105}}},
+			},
+			wantCycle: 5,
+			wantOK:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCycle, gotOK := latestFixBearingReviewCycle(tt.cycles)
+			assert.Equal(t, tt.wantCycle, gotCycle)
+			assert.Equal(t, tt.wantOK, gotOK)
+		})
+	}
+}
+
 func TestBuildStrategyFixIssueTitle(t *testing.T) {
 	tests := []struct {
 		name    string

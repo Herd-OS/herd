@@ -253,6 +253,7 @@ func analyzeReviewConvergence(cycles []reviewHistoryCycle, minCompletedCycles in
 		return analysis
 	}
 
+	latestFixCycle, hasFixCycle := latestFixBearingReviewCycle(cycles)
 	for _, cycle := range cycles {
 		analysis.TrendCounts = append(analysis.TrendCounts, reviewFindingCount(cycle))
 		for _, fix := range cycle.FixIssues {
@@ -260,7 +261,7 @@ func analyzeReviewConvergence(cycles []reviewHistoryCycle, minCompletedCycles in
 			case issues.StatusDone:
 				analysis.CompletedFixIssues = appendUniqueInt(analysis.CompletedFixIssues, fix.Number)
 			case issues.StatusInProgress, issues.StatusReady:
-				if cycle.Cycle == cycles[len(cycles)-1].Cycle {
+				if hasFixCycle && cycle.Cycle == latestFixCycle {
 					analysis.InProgressFixIssues = appendUniqueInt(analysis.InProgressFixIssues, fix.Number)
 				}
 			}
@@ -304,6 +305,19 @@ func analyzeReviewConvergence(cycles []reviewHistoryCycle, minCompletedCycles in
 	}
 	analysis.Rationale = "no repeated subsystem or root-cause cluster met deterministic thresholds"
 	return analysis
+}
+
+func latestFixBearingReviewCycle(cycles []reviewHistoryCycle) (int, bool) {
+	latest := 0
+	for _, cycle := range cycles {
+		if len(cycle.FixIssues) == 0 {
+			continue
+		}
+		if cycle.Cycle > latest {
+			latest = cycle.Cycle
+		}
+	}
+	return latest, latest > 0
 }
 
 func packageClusterFromFinding(description string) string {

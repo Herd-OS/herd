@@ -6970,6 +6970,51 @@ func TestReview_NonConvergenceEscalatesWithOlderHistoricalHeadSHAs(t *testing.T)
 	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Found 28 actionable issues"))
 }
 
+func TestReview_NonConvergenceDefersWhenLatestHistoricalFixIsActive(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{
+			name:   "ready",
+			status: issues.StatusReady,
+		},
+		{
+			name:   "in-progress",
+			status: issues.StatusInProgress,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+			fx.ag.onReview = func() {
+				for _, issue := range fx.issueSvc.listResult {
+					if issue.Number == 955 {
+						issue.Labels = []string{tt.status}
+					}
+				}
+			}
+
+			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, []int{9601}, result.FixIssues)
+			assert.Equal(t, 39, result.FixCycle)
+			require.Len(t, fx.createdIssues, 1)
+			assert.Equal(t, "Review fixes (cycle 39)", fx.createdIssues[0].title)
+			assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+			require.Len(t, fx.wf.dispatched, 1)
+			assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+			assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+			assert.Empty(t, commentsContaining(fx.prSvc.comments, "Strategy fix issue"))
+			require.Len(t, fx.prSvc.reviews, 1)
+			assert.Contains(t, fx.prSvc.reviews[0].body, "Found 28 actionable issues")
+			assert.NotContains(t, fx.prSvc.reviews[0].body, "Strategy-level fix worker dispatched")
+		})
+	}
+}
+
 func TestReview_NonConvergenceContinueCreatesNormalReviewFixIssue(t *testing.T) {
 	tests := []struct {
 		name            string
