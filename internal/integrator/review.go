@@ -410,6 +410,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 	coverageBlocked := coverageBlocksApproval(plan)
 
+	rawReviewFindings := append([]agent.ReviewFinding(nil), reviewResult.Findings...)
 	finalDedupedFindings, finalDedupeStats := dedupeReviewFindings(reviewResult.Findings)
 	reviewResult.Findings = finalDedupedFindings
 	reviewResult.Comments = reviewCommentsFromFindings(finalDedupedFindings)
@@ -640,6 +641,82 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 
 	// Create single batched fix issue with all actionable findings
 	nextCycle := currentCycle + 1
+	defaultBranchForDispatch, _ := p.Repository().GetDefaultBranch(postReviewCtx)
+
+	if cfg.Integrator.ReviewNonConvergence.Enabled {
+		history := collectReviewHistoryFromComments(
+			prComments,
+			allIssues,
+			pr.Number,
+			ms.Number,
+			currentHeadSHA,
+			cfg.Integrator.ReviewNonConvergence.Window,
+			trustedReviewResultMarkerHumanLogins(ctx, p)...,
+		)
+		actionableHighFindings, actionableMediumFindings, actionableLowFindings, actionableCriteriaFindings := filterFindingsBySeverity(actionableFindings)
+		history = appendCurrentReviewHistoryCycleIfMissing(history, nextCycle, currentHeadSHA, rawReviewFindings, actionableFindings, actionableHighFindings, actionableMediumFindings, actionableLowFindings, actionableCriteriaFindings)
+		analysis := analyzeReviewConvergence(history, cfg.Integrator.ReviewNonConvergence.MinCompletedCycles)
+		if analysis.Decision == reviewDecisionEscalateToArchitectureFix {
+			if duplicate, ok := findDuplicateStrategyFixIssue(allIssues, pr.Number, analysis.Cluster.Fingerprint); ok {
+				comment := buildReviewNonConvergencePRComment(analysis, duplicate.Number)
+				comment += fmt.Sprintf("\nNon-convergence is already being addressed by strategy issue #%d.\n", duplicate.Number)
+				comment = appendReviewMetadataAndCoverage(comment)
+				comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, nextCycle, 1)
+				if err != nil {
+					return nil, err
+				}
+				_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+				_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, fmt.Sprintf("Review/fix loop is not converging. Strategy-level fix is already in progress → #%d.", duplicate.Number), platform.ReviewRequestChanges)
+				return &ReviewResult{
+					FixIssues:     []int{duplicate.Number},
+					FixCycle:      nextCycle,
+					BatchPRNumber: pr.Number,
+					FindingsCount: 1,
+				}, nil
+			}
+
+			strategyBody := buildStrategyFixIssueBody(ms, pr, nextCycle, analysis)
+			truncatedBody, overflow := issues.TruncateIssueBody(strategyBody)
+			fixIssue, createErr := p.Issues().Create(postReviewCtx, buildStrategyFixIssueTitle(nextCycle, analysis.Cluster), truncatedBody,
+				[]string{issues.TypeFix, issues.StatusInProgress, issues.ReviewNonConverging}, &ms.Number)
+			if createErr != nil {
+				return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: 1}, nil
+			}
+			for _, comment := range issues.SplitOverflowComments(overflow) {
+				if cerr := p.Issues().AddComment(postReviewCtx, fixIssue.Number, comment); cerr != nil {
+					fmt.Printf("Warning: failed to post overflow comment on fix issue #%d: %v\n", fixIssue.Number, cerr)
+				}
+			}
+
+			_, dispatchErr := p.Workflows().Dispatch(postReviewCtx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
+				"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
+				"batch_branch":    batchBranch,
+				"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+				"runner_label":    cfg.Workers.RunnerLabel,
+			})
+			if dispatchErr != nil {
+				_ = p.Issues().RemoveLabels(postReviewCtx, fixIssue.Number, []string{issues.StatusInProgress})
+				_ = p.Issues().AddLabels(postReviewCtx, fixIssue.Number, []string{issues.StatusFailed})
+				_ = p.Issues().AddComment(postReviewCtx, fixIssue.Number, fmt.Sprintf("Failed to dispatch strategy-level fix worker: %v", dispatchErr))
+				return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: 1}, nil
+			}
+
+			comment := buildReviewNonConvergencePRComment(analysis, fixIssue.Number)
+			comment = appendReviewMetadataAndCoverage(comment)
+			comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, nextCycle, 1)
+			if err != nil {
+				return nil, err
+			}
+			_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+			_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, fmt.Sprintf("Review/fix loop is not converging. Strategy-level fix worker dispatched → #%d.", fixIssue.Number), platform.ReviewRequestChanges)
+			return &ReviewResult{
+				FixIssues:     []int{fixIssue.Number},
+				FixCycle:      nextCycle,
+				BatchPRNumber: pr.Number,
+				FindingsCount: 1,
+			}, nil
+		}
+	}
 
 	var fixTaskBuilder strings.Builder
 	fixTaskBuilder.WriteString("Fix the following issues found during agent review:\n\n")
@@ -660,8 +737,6 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	})
 
 	fixTitle := fmt.Sprintf("Review fixes (cycle %d)", nextCycle)
-
-	defaultBranchForDispatch, _ := p.Repository().GetDefaultBranch(postReviewCtx)
 
 	truncatedBody, overflow := issues.TruncateIssueBody(fixBody)
 	fixIssue, err := p.Issues().Create(postReviewCtx, fixTitle, truncatedBody,
@@ -731,6 +806,37 @@ func refreshedPRWithOriginalIdentity(original, refreshed *platform.PullRequest) 
 		refreshed.Base = original.Base
 	}
 	return refreshed, nil
+}
+
+func appendCurrentReviewHistoryCycleIfMissing(cycles []reviewHistoryCycle, nextCycle int, headSHA string, reviewFindings, actionableFindings []agent.ReviewFinding, high, medium, low, criteria []agent.ReviewFinding) []reviewHistoryCycle {
+	for _, cycle := range cycles {
+		if cycle.Cycle == nextCycle && (cycle.HeadSHA == "" || headSHA == "" || cycle.HeadSHA == headSHA) {
+			return cycles
+		}
+	}
+	current := reviewHistoryCycle{
+		Cycle:                   nextCycle,
+		HeadSHA:                 headSHA,
+		RawFindingsBeforeDedupe: len(reviewFindings),
+		FindingsAfterDedupe:     len(actionableFindings),
+		PostedFindingsCount:     len(actionableFindings),
+		Status:                  reviewResultStatusChangesRequested,
+		FindingsBySeverity: map[string][]string{
+			"HIGH":     reviewFindingDescriptions(high),
+			"MEDIUM":   reviewFindingDescriptions(medium),
+			"LOW":      reviewFindingDescriptions(low),
+			"CRITERIA": reviewFindingDescriptions(criteria),
+		},
+	}
+	return append(cycles, current)
+}
+
+func reviewFindingDescriptions(findings []agent.ReviewFinding) []string {
+	out := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		out = append(out, finding.Description)
+	}
+	return out
 }
 
 func runChunkedReviewWithRetry(ctx context.Context, ag agent.Agent, p platform.Platform, plan reviewdiff.ChunkPlan, baseOpts agent.ReviewOptions, prNumber int) (*aggregatedReview, error) {

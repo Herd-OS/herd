@@ -567,6 +567,27 @@ Fix issues are labeled `herd/type:fix`, have no dependencies (run in parallel),
 and track which review cycle spawned them via a `fix_cycle` field and a
 `batch_pr` reference back to the PR.
 
+#### Review non-convergence
+
+Before creating another review-fix issue, the Integrator parses recent HerdOS
+review result comments and completed review-fix issues for the batch PR. The
+first implementation is deterministic-only: it compares review-cycle trends,
+deduped finding counts, and repeated package/root-cause clusters to decide
+whether the fix loop is still making progress or needs a different strategy.
+
+When the deterministic heuristics detect non-convergence, the Integrator creates
+one strategy-level fix issue instead of another broad endpoint-level review-fix
+issue. The strategy issue carries the recurring finding clusters and a duplicate
+fingerprint. Before creating one, HerdOS checks for an existing strategy fix by
+label, title, and fingerprint so repeated review triggers do not dispatch
+duplicate strategy workers.
+
+Strategy fixes use the existing worker workflow. The Integrator creates the
+issue internally and dispatches the worker directly, so no human `/herd fix`
+comment is required. Future implementations can add optional agent synthesis for
+the strategy text, but this version intentionally keeps the decision and issue
+construction deterministic.
+
 #### Review fix-issue dedup
 
 New review findings are deduplicated only against fix issues whose herd status
