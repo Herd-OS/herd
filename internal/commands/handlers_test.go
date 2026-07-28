@@ -12,6 +12,7 @@ import (
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
+	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -48,6 +49,7 @@ func (m *testPlatform) Checks() platform.CheckService {
 type testIssueService struct {
 	getResult          map[int]*platform.Issue
 	listResult         []*platform.Issue
+	listFilters        []platform.IssueFilters
 	addedLabels        map[int][]string
 	removedLabels      map[int][]string
 	createdIssues      []*platform.Issue
@@ -56,6 +58,7 @@ type testIssueService struct {
 	addLabelsErr       error
 	createErr          error
 	listCommentsResult []*platform.Comment
+	listCommentsCalls  int
 	storedComments     map[int][]*platform.Comment
 	nextCommentID      int64
 }
@@ -87,7 +90,8 @@ func (m *testIssueService) Get(_ context.Context, number int) (*platform.Issue, 
 	}
 	return nil, fmt.Errorf("issue #%d not found", number)
 }
-func (m *testIssueService) List(_ context.Context, _ platform.IssueFilters) ([]*platform.Issue, error) {
+func (m *testIssueService) List(_ context.Context, filters platform.IssueFilters) ([]*platform.Issue, error) {
+	m.listFilters = append(m.listFilters, filters)
 	return m.listResult, nil
 }
 func (m *testIssueService) Update(_ context.Context, _ int, _ platform.IssueUpdate) (*platform.Issue, error) {
@@ -126,6 +130,7 @@ func (m *testIssueService) DeleteComment(_ context.Context, commentID int64) err
 	return nil
 }
 func (m *testIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	m.listCommentsCalls++
 	result := append([]*platform.Comment{}, m.storedComments[number]...)
 	result = append(result, m.listCommentsResult...)
 	return result, nil
@@ -137,15 +142,26 @@ func (m *testIssueService) CreateCommentReaction(_ context.Context, _ int64, _ s
 // --- Mock PRService ---
 
 type testPRService struct {
-	getResult  map[int]*platform.PullRequest
-	listResult []*platform.PullRequest
-	comments   []string
+	getResult    map[int]*platform.PullRequest
+	getSequences map[int][]*platform.PullRequest
+	getCalls     map[int]int
+	listResult   []*platform.PullRequest
+	comments     []string
 }
 
 func (m *testPRService) Create(_ context.Context, _, _, _, _ string) (*platform.PullRequest, error) {
 	return nil, nil
 }
 func (m *testPRService) Get(_ context.Context, number int) (*platform.PullRequest, error) {
+	if m.getCalls == nil {
+		m.getCalls = make(map[int]int)
+	}
+	m.getCalls[number]++
+	if seq := m.getSequences[number]; len(seq) > 0 {
+		pr := seq[0]
+		m.getSequences[number] = seq[1:]
+		return pr, nil
+	}
 	if m.getResult != nil {
 		if pr, ok := m.getResult[number]; ok {
 			return pr, nil
@@ -186,17 +202,21 @@ func (m *testPRService) Close(_ context.Context, _ int) error {
 // --- Mock WorkflowService ---
 
 type testWorkflowService struct {
-	dispatched  []map[string]string
-	dispatchErr error
+	dispatched          []map[string]string
+	dispatchedWorkflows []string
+	dispatchedRefs      []string
+	dispatchErr         error
 }
 
 func (m *testWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
-func (m *testWorkflowService) Dispatch(_ context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
+func (m *testWorkflowService) Dispatch(_ context.Context, workflowFile, ref string, inputs map[string]string) (*platform.Run, error) {
 	if m.dispatchErr != nil {
 		return nil, m.dispatchErr
 	}
+	m.dispatchedWorkflows = append(m.dispatchedWorkflows, workflowFile)
+	m.dispatchedRefs = append(m.dispatchedRefs, ref)
 	m.dispatched = append(m.dispatched, inputs)
 	return &platform.Run{ID: 999}, nil
 }
@@ -1383,6 +1403,360 @@ func TestHandlerContext_IsPR(t *testing.T) {
 	}
 }
 
+// --- Tests for handleResolveConflicts ---
+
+func TestPRReportsConflictAndClean(t *testing.T) {
+	tests := []struct {
+		name         string
+		pr           *platform.PullRequest
+		wantConflict bool
+		wantClean    bool
+	}{
+		{
+			name:         "dirty status conflicts",
+			pr:           &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "DIRTY"},
+			wantConflict: true,
+		},
+		{
+			name:         "conflicting status conflicts",
+			pr:           &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "CONFLICTING"},
+			wantConflict: true,
+		},
+		{
+			name:      "clean status is clean",
+			pr:        &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "CLEAN"},
+			wantClean: true,
+		},
+		{
+			name:      "has hooks status is clean enough",
+			pr:        &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "HAS_HOOKS"},
+			wantClean: true,
+		},
+		{
+			name:      "unstable status is non-conflict",
+			pr:        &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "UNSTABLE"},
+			wantClean: true,
+		},
+		{
+			name:      "behind status is non-conflict",
+			pr:        &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "BEHIND"},
+			wantClean: true,
+		},
+		{
+			name: "blocked status is non-conflict",
+			pr:   &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "BLOCKED"},
+		},
+		{
+			name:      "known true unknown non-clean status is clean",
+			pr:        &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "BLOCKED"},
+			wantClean: true,
+		},
+		{
+			name: "unknown mergeability reports neither",
+			pr:   &platform.PullRequest{MergeableKnown: false, MergeStateStatus: "UNKNOWN"},
+		},
+		{
+			name: "known unmergeable empty status reports neither",
+			pr:   &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: ""},
+		},
+		{
+			name: "nil PR reports neither",
+			pr:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantConflict, prReportsConflict(tt.pr))
+			assert.Equal(t, tt.wantClean, prReportsClean(tt.pr))
+		})
+	}
+}
+
+func TestLatestPRWithKnownMergeability_BoundedAttempts(t *testing.T) {
+	origSleep := resolveConflictsSleep
+	sleepCalls := 0
+	resolveConflictsSleep = func(context.Context, time.Duration) error {
+		sleepCalls++
+		return nil
+	}
+	t.Cleanup(func() { resolveConflictsSleep = origSleep })
+
+	prSvc := &testPRService{
+		getSequences: map[int][]*platform.PullRequest{
+			10: {
+				{Number: 10, MergeableKnown: false, MergeStateStatus: "UNKNOWN"},
+				{Number: 10, MergeableKnown: true, MergeStateStatus: ""},
+			},
+		},
+	}
+
+	pr, known, err := latestPRWithKnownMergeability(context.Background(), prSvc, 10)
+
+	require.NoError(t, err)
+	assert.True(t, known)
+	require.NotNil(t, pr)
+	assert.Empty(t, pr.MergeStateStatus)
+	assert.Equal(t, 2, prSvc.getCalls[10])
+	assert.Equal(t, 1, sleepCalls)
+}
+
+func TestLatestPRWithKnownMergeability_ReturnsKnownPR(t *testing.T) {
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			10: {Number: 10, MergeableKnown: true, Mergeable: true, MergeStateStatus: "CLEAN"},
+		},
+	}
+
+	pr, known, err := latestPRWithKnownMergeability(context.Background(), prSvc, 10)
+
+	require.NoError(t, err)
+	assert.True(t, known)
+	require.NotNil(t, pr)
+	assert.Equal(t, 10, pr.Number)
+	assert.Equal(t, 1, prSvc.getCalls[10])
+}
+
+func TestHandleResolveConflicts_NotPR(t *testing.T) {
+	prSvc := &testPRService{}
+	issueSvc := newTestIssueService()
+	wf := &testWorkflowService{}
+	p := &testPlatform{issues: issueSvc, prs: prSvc, workflows: wf, repo: &testRepoService{}, milestones: &testMilestoneService{}}
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        false,
+	}
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.NoError(t, result.Error)
+	assert.Equal(t, "⚠️ `/herd resolve-conflicts` can only be used on pull requests.", result.Message)
+	assert.Empty(t, prSvc.getCalls)
+	assert.Empty(t, issueSvc.createdIssues)
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestHandleResolveConflicts_NotBatchPR(t *testing.T) {
+	issueSvc := newTestIssueService()
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			10: {Number: 10, Head: "feature/foo"},
+		},
+	}
+	p := &testPlatform{issues: issueSvc, prs: prSvc, workflows: wf, repo: &testRepoService{}, milestones: &testMilestoneService{}}
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        true,
+	}
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.NoError(t, result.Error)
+	assert.Equal(t, "⚠️ `/herd resolve-conflicts` can only be used on Herd batch PRs.", result.Message)
+	assert.Empty(t, issueSvc.createdIssues)
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestHandleResolveConflicts_UnknownMergeabilityRetriesAndNoops(t *testing.T) {
+	origSleep := resolveConflictsSleep
+	sleepCalls := 0
+	resolveConflictsSleep = func(context.Context, time.Duration) error {
+		sleepCalls++
+		return nil
+	}
+	t.Cleanup(func() { resolveConflictsSleep = origSleep })
+
+	unknownPR := &platform.PullRequest{Number: 10, Head: "herd/batch/12-foo", Base: "main", HeadSHA: "head123", BaseSHA: "base123", MergeableKnown: false, MergeStateStatus: "UNKNOWN"}
+	issueSvc := newTestIssueService()
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getSequences: map[int][]*platform.PullRequest{
+			10: {unknownPR, unknownPR, unknownPR, unknownPR, unknownPR},
+		},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{12: {Number: 12, Title: "Foo"}}},
+	}
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        true,
+	}
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "could not determine whether this PR is currently conflicting")
+	assert.Equal(t, resolveConflictsMergeabilityAttempts, prSvc.getCalls[10])
+	assert.Equal(t, resolveConflictsMergeabilityAttempts-1, sleepCalls)
+	assert.Empty(t, issueSvc.createdIssues)
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestHandleResolveConflicts_CleanPRNoops(t *testing.T) {
+	issueSvc := newTestIssueService()
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			10: {Number: 10, Head: "herd/batch/12-foo", Base: "main", MergeableKnown: true, Mergeable: true, MergeStateStatus: "CLEAN"},
+		},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{12: {Number: 12, Title: "Foo"}}},
+	}
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IsPR:        true,
+	}
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.NoError(t, result.Error)
+	assert.Equal(t, "ℹ️ PR is not currently conflicting with base.", result.Message)
+	assert.Empty(t, issueSvc.createdIssues)
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestHandleResolveConflicts_ConflictingBatchPRCreatesIssueAndDispatches(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	issueSvc.listCommentsResult = []*platform.Comment{
+		{AuthorLogin: "herd", Body: "old Herd review finding text that must stay out"},
+	}
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			10: {
+				Number:           10,
+				Head:             "herd/batch/12-foo",
+				Base:             "main",
+				HeadSHA:          "head123",
+				BaseSHA:          "base123",
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "DIRTY",
+			},
+		},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{12: {Number: 12, Title: "Foo Batch"}}},
+	}
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		IssueBody:   "Batch PR body, not the triggering comment.",
+		AuthorLogin: "octocat",
+		IsPR:        true,
+	}
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts", Prompt: "please keep generated files intact"})
+
+	require.NoError(t, result.Error)
+	assert.Equal(t, "🔧 Created conflict-resolution issue #200 and dispatched worker.", result.Message)
+	require.Len(t, issueSvc.createdIssues, 1)
+	created := issueSvc.createdIssues[0]
+	assert.Contains(t, created.Labels, issues.TypeFix)
+	assert.Contains(t, created.Labels, issues.StatusInProgress)
+	assert.Contains(t, created.Body, "conflict_resolution: true")
+	assert.Contains(t, created.Body, "batch_pr: 10")
+	assert.Contains(t, created.Body, "Head SHA: `head123`")
+	assert.Contains(t, created.Body, "Base SHA: `base123`")
+	assert.Contains(t, created.Body, "Triggering author: `octocat`")
+	assert.Contains(t, created.Body, "/herd resolve-conflicts")
+	assert.Contains(t, created.Body, "please keep generated files intact")
+	assert.NotContains(t, created.Body, "Batch PR body, not the triggering comment.")
+	assert.NotContains(t, created.Body, "old Herd review finding text")
+	assert.Equal(t, 0, issueSvc.listCommentsCalls)
+
+	require.Len(t, issueSvc.createdMilestones, 1)
+	require.NotNil(t, issueSvc.createdMilestones[0])
+	assert.Equal(t, 12, *issueSvc.createdMilestones[0])
+
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "200", wf.dispatched[0]["issue_number"])
+	assert.Equal(t, "herd/batch/12-foo", wf.dispatched[0]["batch_branch"])
+}
+
+func TestHandleResolveConflicts_DuplicateActiveResolverNoops(t *testing.T) {
+	ms := &platform.Milestone{Number: 12, Title: "Foo"}
+	existingBody := integrator.BuildConflictResolutionIssueBody(integrator.ConflictResolutionIssueParams{
+		Kind:         integrator.ConflictResolutionKindPRBase,
+		Milestone:    ms,
+		BatchPR:      10,
+		PRHeadBranch: "herd/batch/12-foo",
+		PRHeadSHA:    "head123",
+		BaseBranch:   "main",
+		BaseSHA:      "base123",
+	})
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 401, State: "open", Labels: []string{issues.TypeFix, issues.StatusReady}, Body: existingBody},
+	}
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			10: {
+				Number:           10,
+				Head:             "herd/batch/12-foo",
+				Base:             "main",
+				HeadSHA:          "head123",
+				BaseSHA:          "base123",
+				MergeableKnown:   true,
+				Mergeable:        false,
+				MergeStateStatus: "CONFLICTING",
+			},
+		},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{12: ms}},
+	}
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Config:      baseConfig(),
+		IssueNumber: 10,
+		AuthorLogin: "octocat",
+		IsPR:        true,
+	}
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "#401")
+	assert.Empty(t, issueSvc.createdIssues)
+	assert.Empty(t, wf.dispatched)
+}
+
 // --- Tests for DefaultRegistry ---
 
 func TestDefaultRegistry(t *testing.T) {
@@ -1392,6 +1766,7 @@ func TestDefaultRegistry(t *testing.T) {
 	assert.True(t, reg.Has("retry"))
 	assert.True(t, reg.Has("review"))
 	assert.True(t, reg.Has("fix"))
+	assert.True(t, reg.Has("resolve-conflicts"))
 }
 
 // --- Tests for ExtraInstructions in review ---

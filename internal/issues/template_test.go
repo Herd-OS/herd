@@ -251,6 +251,29 @@ func TestParseBody_RoundTripTargetFields(t *testing.T) {
 	assert.Equal(t, original.FrontMatter.Type, parsed.FrontMatter.Type)
 }
 
+func TestParseBody_RoundTripPRSHAFields(t *testing.T) {
+	original := IssueBody{
+		FrontMatter: FrontMatter{
+			Version:   1,
+			Type:      TypeFix,
+			BatchPR:   849,
+			PRHeadSHA: "head123",
+			PRBaseSHA: "base456",
+		},
+		Task: "Resolve PR conflict",
+	}
+
+	rendered := RenderBody(original)
+	assert.Contains(t, rendered, "pr_head_sha: head123")
+	assert.Contains(t, rendered, "pr_base_sha: base456")
+
+	parsed, err := ParseBody(rendered)
+	require.NoError(t, err)
+
+	assert.Equal(t, original.FrontMatter.PRHeadSHA, parsed.FrontMatter.PRHeadSHA)
+	assert.Equal(t, original.FrontMatter.PRBaseSHA, parsed.FrontMatter.PRBaseSHA)
+}
+
 func TestTypeStandaloneFixLabel(t *testing.T) {
 	assert.Equal(t, "herd/type:standalone-fix", TypeStandaloneFix)
 	assert.Contains(t, AllTypeLabels(), TypeStandaloneFix)

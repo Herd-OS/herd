@@ -729,15 +729,58 @@ which path is taken. The resolver is capped at `max_conflict_resolution_attempts
 (default 2); when that budget is exhausted, the batch enters cascade-failed
 state — see [When cascades fail](#when-cascades-fail).
 
-### Monitor-Detected Batch-vs-Main Conflicts
+### Open Batch PR Conflicts
+
+Once the batch PR is open, its base branch may advance and make the PR
+unmergeable. This is distinct from Integrator consolidation conflicts: automatic
+resolver issues still handle worker branches conflicting while they are merged
+into the batch branch, controlled by `integrator.on_conflict`; open batch PR
+conflict handling resolves the batch PR head against its base branch.
+
+Live GitHub PR metadata is authoritative for current mergeability, conflict
+state, head SHA, and base SHA. HerdOS always checks the single-PR
+`PullRequests().Get()` endpoint before dispatching because the list endpoint
+does not populate the `Mergeable` field.
+
+#### Manual `/herd resolve-conflicts`
+
+Post `/herd resolve-conflicts` on an open batch PR when GitHub reports that it
+conflicts with its base branch. You can add optional context after the command:
+`/herd resolve-conflicts <context>`.
+
+The handler checks live PR mergeability before creating work:
+
+1. If GitHub reports a clean or mergeable state, the command no-ops because the
+   PR is not currently conflicting with its base.
+2. If GitHub reports mergeability as unknown, HerdOS waits briefly and retries.
+   If it is still unknown after the bounded retry, the command no-ops with a
+   retry-later warning.
+3. If GitHub reports an explicit conflict state, such as `DIRTY` or
+   `CONFLICTING`, HerdOS creates and dispatches a focused conflict-resolution
+   issue for the current PR head and base.
+
+Known non-conflict blockers, such as branch protection, required reviews,
+failing checks, or `BLOCKED` states, no-op as "not currently conflicting with
+base" rather than dispatching a resolver.
+
+Duplicate active resolver issues are keyed by batch PR, head SHA, and base SHA,
+so repeated comments do not dispatch duplicate workers for the same conflict
+state. Generated resolver issue bodies include only the triggering comment,
+current PR metadata, optional context, and concise merge/rebase instructions;
+they deliberately avoid the full PR conversation history.
+
+Generic `/herd fix` remains available for normal code fixes and keeps its
+existing behavior: batch fix issues include PR conversation history to give the
+worker review and discussion context.
+
+#### Monitor-Detected Batch-vs-Main Conflicts
 
 Previously, batch branch conflicts with main were only detected at PR creation
 time (during the final rebase). The Monitor now detects these proactively during
 patrol:
 
-1. For each open batch PR with a `herd/batch/` head branch, the Monitor calls
-   the single-PR `PullRequests().Get()` endpoint (the List endpoint does not
-   populate the `Mergeable` field)
+1. For each open batch PR with a `herd/batch/` head branch, the Monitor uses
+   live single-PR metadata
 2. If `Mergeable == false`, the batch PR has conflicts with its base branch
 3. The Monitor checks for the `herd/rebase-pending` label to prevent duplicate
    dispatches (same dedup pattern as `herd/ci-fix-pending` for CI fixes)
@@ -1255,6 +1298,8 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 | Command | Kind | Context | Description |
 |---------|------|---------|-------------|
 | `/herd fix-ci` | Slash | Issue or PR | Check CI status and dispatch a fix worker if CI failed |
+| `/herd resolve-conflicts` | Slash | PR | On a batch PR, check live mergeability and dispatch a focused conflict-resolution worker only when the PR currently conflicts with its base |
+| `/herd resolve-conflicts <context>` | Slash | PR | Same as above, with extra context included in the resolver issue |
 | `/herd retry` | Slash | Issue | Re-dispatch the current failed issue's worker |
 | `/herd retry <N>` | Slash | Issue or PR | Re-dispatch failed issue #N's worker |
 | `/herd review` | Slash | PR | Trigger an agent review of the PR and post one deduplicated aggregate result |
