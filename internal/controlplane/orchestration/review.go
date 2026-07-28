@@ -91,27 +91,10 @@ func (s Service) createReviewFixIssueFromIntent(ctx context.Context, key string,
 		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
 		return 0, false, fmt.Errorf("record review fix issue mutation attempt: %w", err)
 	}
-	start, err := s.Store.TryStartGitHubMutationAttempt(ctx, key, []string{mutationStatusIntentRecorded, mutationStatusFailedPreCall}, s.now())
-	if err != nil {
-		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailedPreCall, nil, err.Error(), s.now())
-		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
-		return 0, false, fmt.Errorf("mark review fix issue mutation call started: %w", err)
-	}
-	if !start.Started {
-		if mutations.IsCompleted(start.Attempt.Status) {
-			resultRef := mutationResultRef(start.Attempt.Response)
-			issueNumber, ok := parseIssueResult(resultRef)
-			if ok {
-				_ = s.Store.CompleteIdempotencyKey(ctx, key, resultRef)
-				return issueNumber, false, nil
-			}
-		}
-		return 0, false, fmt.Errorf("review fix issue mutation %q is %s; repair required before retry", key, start.Attempt.Status)
-	}
 	issue, err := s.EnsureTaskIssue(ctx, req)
 	if err != nil {
-		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusRepairRequired, nil, err.Error(), s.now())
-		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
+		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailedPreCall, nil, err.Error(), s.now())
+		_ = s.Store.FailIdempotencyKey(ctx, key, mutationStatusFailedPreCall+":"+err.Error())
 		return 0, false, err
 	}
 	resultRef := fmt.Sprintf("issue:%d", issue.Number)

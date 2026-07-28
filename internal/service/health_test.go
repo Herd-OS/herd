@@ -113,6 +113,10 @@ func (healthyStore) UpdateWebhookDeliveryStatus(context.Context, string, string,
 	return nil
 }
 
+func (healthyStore) TryStartWebhookDeliveryProcessing(context.Context, string, []string) (store.WebhookDeliveryStartResult, error) {
+	return store.WebhookDeliveryStartResult{Started: true}, nil
+}
+
 func (healthyStore) UpsertInstallation(context.Context, store.Installation) error {
 	return nil
 }
@@ -139,6 +143,10 @@ func (s unhealthyStore) GetWebhookDelivery(context.Context, string) (store.Webho
 
 func (s unhealthyStore) UpdateWebhookDeliveryStatus(context.Context, string, string, string, *time.Time) error {
 	return nil
+}
+
+func (s unhealthyStore) TryStartWebhookDeliveryProcessing(context.Context, string, []string) (store.WebhookDeliveryStartResult, error) {
+	return store.WebhookDeliveryStartResult{Started: true}, nil
 }
 
 func (s unhealthyStore) UpsertInstallation(context.Context, store.Installation) error {

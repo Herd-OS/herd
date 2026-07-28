@@ -771,6 +771,20 @@ func (d productionCommandDispatcher) ensureCommandFixIssue(ctx context.Context, 
 			}
 			return issueNumber, nil
 		}
+		if mutations.IsPreCallRetryable(record.Status) || strings.HasPrefix(record.ResultRef, mutations.PhaseFailedPreCall+":") {
+			if err := d.recordIssueCreateMutationAttempt(ctx, key, cmd.RepositoryID, "command_fix_issue_create", now); err != nil {
+				_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseFailedPreCall+":"+err.Error())
+				return 0, err
+			}
+			started, err := d.tryStartIssueCreateMutation(ctx, key, "command fix issue")
+			if err != nil || !started {
+				if err != nil {
+					return 0, err
+				}
+				return d.waitForCommandFixIssue(ctx, p, cmd, pr, target, key)
+			}
+			return d.createCommandFixIssue(ctx, p, cmd, pr, target, key)
+		}
 		status := strings.TrimSpace(record.Status)
 		if status == "" {
 			status = "unknown"

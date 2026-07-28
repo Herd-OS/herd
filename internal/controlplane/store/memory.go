@@ -104,6 +104,30 @@ func (s *MemoryStore) UpdateWebhookDeliveryStatus(_ context.Context, deliveryID 
 	return nil
 }
 
+func (s *MemoryStore) TryStartWebhookDeliveryProcessing(_ context.Context, deliveryID string, allowedStatuses []string) (WebhookDeliveryStartResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delivery, ok := s.webhookDeliveries[deliveryID]
+	if !ok {
+		return WebhookDeliveryStartResult{}, ErrNotFound
+	}
+	allowed := false
+	for _, status := range allowedStatuses {
+		if delivery.Status == status {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return WebhookDeliveryStartResult{Started: false, Delivery: delivery}, nil
+	}
+	delivery.Status = "processor_started"
+	delivery.Error = ""
+	delivery.ProcessedAt = nil
+	s.webhookDeliveries[deliveryID] = delivery
+	return WebhookDeliveryStartResult{Started: true, Delivery: delivery}, nil
+}
+
 func (s *MemoryStore) UpsertInstallation(_ context.Context, i Installation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

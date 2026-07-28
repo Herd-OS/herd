@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -476,7 +477,7 @@ func TestHandlerAcknowledgementRecordAndFallbackCompletionFailureDoesNotAckAgain
 	assert.Len(t, gh.comments, 1)
 	assert.Empty(t, dispatcher.dispatched)
 	key := "repo:42:comment:123:command:review"
-	require.Equal(t, "started", st.idempotencyKeys[key].Status)
+	require.Equal(t, "call_started", st.idempotencyKeys[key].Status)
 }
 
 func TestHandlerAcknowledgementCompletionFailureRedeliveryDoesNotAckAgain(t *testing.T) {
@@ -547,7 +548,7 @@ func TestHandlerRecordFailureRetryPostsOneAcknowledgement(t *testing.T) {
 
 func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t *testing.T) {
 	st := newFakeStore()
-	st.updateErrs = []error{nil, nil, errors.New("store down")}
+	st.updateErrs = []error{nil, errors.New("store down")}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
@@ -569,7 +570,7 @@ func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t 
 
 func TestHandlerDispatchStatusAndFallbackFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
 	st := newFakeStore()
-	st.updateErrs = []error{nil, nil, errors.New("store down")}
+	st.updateErrs = []error{nil, errors.New("store down")}
 	st.completeErrs = []error{nil, errors.New("idempotency down")}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
@@ -581,15 +582,14 @@ func TestHandlerDispatchStatusAndFallbackFailureRedeliveryDoesNotDispatchAgain(t
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mark command dispatched")
-	require.Error(t, retryErr)
-	assert.Contains(t, retryErr.Error(), "unknown outcome")
+	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
-	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.dispatched, 2)
 	key := "repo:42:comment:123:command:review"
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
-	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
+	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
-	assert.Equal(t, "dispatching", st.commandRecords[0].Status)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
 }
 
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {
@@ -779,6 +779,21 @@ func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessa
 	record.CompletedAt = &now
 	s.idempotencyKeys[key] = record
 	return nil
+}
+
+func (s *fakeStore) TryStartIdempotencyKey(_ context.Context, key string, toStatus string, resultRef string, retryableFailedPrefix string) (store.IdempotencyStartResult, error) {
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return store.IdempotencyStartResult{}, store.ErrNotFound
+	}
+	retryableFailed := record.Status == "failed" && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
+	if record.Status != "intent_recorded" && !retryableFailed {
+		return store.IdempotencyStartResult{Started: false, Record: record}, nil
+	}
+	record.Status = toStatus
+	record.ResultRef = resultRef
+	s.idempotencyKeys[key] = record
+	return store.IdempotencyStartResult{Started: true, Record: record}, nil
 }
 
 func (s *fakeStore) RecordCommand(_ context.Context, c store.CommandRecord) (bool, error) {

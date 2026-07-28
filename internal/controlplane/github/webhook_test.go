@@ -459,6 +459,24 @@ func (s *fakeStore) UpdateWebhookDeliveryStatus(_ context.Context, deliveryID st
 	return store.ErrNotFound
 }
 
+func (s *fakeStore) TryStartWebhookDeliveryProcessing(_ context.Context, deliveryID string, allowedStatuses []string) (store.WebhookDeliveryStartResult, error) {
+	for i := range s.deliveries {
+		if s.deliveries[i].DeliveryID != deliveryID {
+			continue
+		}
+		for _, status := range allowedStatuses {
+			if s.deliveries[i].Status == status {
+				s.deliveries[i].Status = "processor_started"
+				s.deliveries[i].Error = ""
+				s.deliveries[i].ProcessedAt = nil
+				return store.WebhookDeliveryStartResult{Started: true, Delivery: s.deliveries[i]}, nil
+			}
+		}
+		return store.WebhookDeliveryStartResult{Started: false, Delivery: s.deliveries[i]}, nil
+	}
+	return store.WebhookDeliveryStartResult{}, store.ErrNotFound
+}
+
 func (s *fakeStore) UpsertInstallation(_ context.Context, i store.Installation) error {
 	if s.upsertInstErr != nil {
 		return s.upsertInstErr

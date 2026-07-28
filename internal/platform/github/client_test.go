@@ -21,7 +21,7 @@ func TestResolveTokenFailsClosedInProductionRunner(t *testing.T) {
 	assert.Contains(t, err.Error(), "HERD_RUNNER=true")
 }
 
-func TestResolveTokenAllowsExplicitLocalOverrideInRunner(t *testing.T) {
+func TestResolveTokenRejectsLocalOverrideInRunner(t *testing.T) {
 	for _, key := range []string{"HERD_RUNNER", "HERD_LOCAL_GITHUB_AUTH", "GITHUB_TOKEN", "GH_TOKEN"} {
 		t.Setenv(key, "")
 	}
@@ -31,6 +31,7 @@ func TestResolveTokenAllowsExplicitLocalOverrideInRunner(t *testing.T) {
 
 	token, err := resolveToken()
 
-	require.NoError(t, err)
-	assert.Equal(t, "ghp_local", token)
+	require.Error(t, err)
+	assert.Empty(t, token)
+	assert.Contains(t, err.Error(), "local auth is disabled")
 }

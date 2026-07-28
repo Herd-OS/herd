@@ -33,6 +33,7 @@ type Store interface {
 	RecordWebhookDelivery(ctx context.Context, d store.WebhookDelivery) (created bool, err error)
 	GetWebhookDelivery(ctx context.Context, deliveryID string) (store.WebhookDelivery, error)
 	UpdateWebhookDeliveryStatus(ctx context.Context, deliveryID string, status string, errorMessage string, processedAt *time.Time) error
+	TryStartWebhookDeliveryProcessing(ctx context.Context, deliveryID string, allowedStatuses []string) (store.WebhookDeliveryStartResult, error)
 	UpsertInstallation(ctx context.Context, i store.Installation) error
 	UpsertRepository(ctx context.Context, r store.Repository) (store.Repository, error)
 }
@@ -213,10 +214,19 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "processor_started", "", nil); err != nil {
+	start, err := h.store.TryStartWebhookDeliveryProcessing(r.Context(), deliveryID, []string{"intent_recorded", "failed_pre_processor", "failed"})
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "update webhook delivery: storage unavailable",
 		})
+		return
+	}
+	if !start.Started {
+		if start.Delivery.Status == "processed" {
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "duplicate"})
+			return
+		}
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "webhook delivery outcome is unknown; repair required"})
 		return
 	}
 	if err := h.processEvent(r.Context(), event); err != nil {

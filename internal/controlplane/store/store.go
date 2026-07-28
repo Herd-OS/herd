@@ -23,6 +23,7 @@ type Store interface {
 	RecordWebhookDelivery(ctx context.Context, d WebhookDelivery) (created bool, err error)
 	GetWebhookDelivery(ctx context.Context, deliveryID string) (WebhookDelivery, error)
 	UpdateWebhookDeliveryStatus(ctx context.Context, deliveryID string, status string, errorMessage string, processedAt *time.Time) error
+	TryStartWebhookDeliveryProcessing(ctx context.Context, deliveryID string, allowedStatuses []string) (WebhookDeliveryStartResult, error)
 	UpsertInstallation(ctx context.Context, i Installation) error
 	UpsertRepository(ctx context.Context, r Repository) (Repository, error)
 	GetRepository(ctx context.Context, owner string, name string) (Repository, error)
@@ -194,6 +195,13 @@ type GitHubMutationAttempt struct {
 type GitHubMutationStartResult struct {
 	Started bool
 	Attempt GitHubMutationAttempt
+}
+
+// WebhookDeliveryStartResult reports the outcome of a guarded transition to
+// processor_started.
+type WebhookDeliveryStartResult struct {
+	Started  bool
+	Delivery WebhookDelivery
 }
 
 // IdempotencyStartResult reports the outcome of a guarded transition to an

@@ -179,8 +179,7 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		}
 		batchHeadSHA, err := s.Platform.Repository().GetBranchSHA(ctx, req.BatchBranch)
 		if err != nil {
-			_ = s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress})
-			_ = s.Platform.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+			_ = s.markDispatchFailed(ctx, issueNumber)
 			return dispatched, fmt.Errorf("resolve batch branch %s head before dispatching issue #%d: %w", req.BatchBranch, issueNumber, err)
 		}
 		result, err := s.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
@@ -203,8 +202,7 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			Reason:          req.Reason,
 		})
 		if err != nil {
-			_ = s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress})
-			_ = s.Platform.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+			_ = s.markDispatchFailed(ctx, issueNumber)
 			return dispatched, fmt.Errorf("dispatch worker for issue #%d: %w", issueNumber, err)
 		}
 		if result.Created {
@@ -212,6 +210,17 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		}
 	}
 	return dispatched, nil
+}
+
+func (s Service) markDispatchFailed(ctx context.Context, issueNumber int) error {
+	if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusInProgress, "remove", "dispatch-failed"), "issue_label_remove", func() (string, error) {
+		return "", s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress})
+	}); err != nil {
+		return err
+	}
+	return s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusFailed, "add", "dispatch-failed"), "issue_label_add", func() (string, error) {
+		return "", s.Platform.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+	})
 }
 
 type DispatchReadyWorkersRequest struct {

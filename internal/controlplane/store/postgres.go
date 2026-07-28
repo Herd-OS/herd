@@ -110,6 +110,30 @@ func (s *PostgresStore) UpdateWebhookDeliveryStatus(ctx context.Context, deliver
 	return requireAffected(result)
 }
 
+func (s *PostgresStore) TryStartWebhookDeliveryProcessing(ctx context.Context, deliveryID string, allowedStatuses []string) (WebhookDeliveryStartResult, error) {
+	var d WebhookDelivery
+	var metadata []byte
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE webhook_deliveries
+		SET status = 'processor_started', error = '', processed_at = NULL
+		WHERE delivery_id = $1 AND status = ANY($2)
+		RETURNING id, delivery_id, event, action, payload_hash, status, error, metadata, received_at, processed_at`,
+		deliveryID, pq.Array(allowedStatuses)).Scan(
+		&d.ID, &d.DeliveryID, &d.Event, &d.Action, &d.PayloadHash, &d.Status, &d.Error, &metadata, &d.ReceivedAt, &d.ProcessedAt)
+	if err == nil {
+		d.Metadata = json.RawMessage(metadata)
+		return WebhookDeliveryStartResult{Started: true, Delivery: d}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return WebhookDeliveryStartResult{}, err
+	}
+	existing, readErr := s.GetWebhookDelivery(ctx, deliveryID)
+	if readErr != nil {
+		return WebhookDeliveryStartResult{}, readErr
+	}
+	return WebhookDeliveryStartResult{Started: false, Delivery: existing}, nil
+}
+
 func (s *PostgresStore) UpsertInstallation(ctx context.Context, i Installation) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO app_installations (id, account_login, account_id, target_type, permissions, events, created_at, updated_at)
