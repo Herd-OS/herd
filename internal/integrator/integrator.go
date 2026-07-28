@@ -1326,7 +1326,8 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers [][]int) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "## Summary\n\nBatch **%s** — %d tasks across %d tiers.\n\n", ms.Title, len(allIssues), len(tiers))
+	b.WriteString(renderReviewerSummary(ms, allIssues, tiers))
+	b.WriteString("\n\n")
 
 	// Tasks table
 	b.WriteString("## Tasks\n\n")
@@ -1353,6 +1354,135 @@ func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers
 	}
 
 	return b.String()
+}
+
+func renderReviewerSummary(ms *platform.Milestone, allIssues []*platform.Issue, tiers [][]int) string {
+	_ = tiers
+
+	paragraph := ""
+	if ms != nil {
+		paragraph = strings.TrimSpace(ms.Description)
+	}
+	if paragraph == "" {
+		paragraph = fallbackPRSummaryParagraph(ms, allIssues)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Summary\n\n%s\n\n", paragraph)
+	b.WriteString("Major changes:\n")
+	for _, change := range fallbackMajorChanges(allIssues) {
+		fmt.Fprintf(&b, "- %s\n", change)
+	}
+	b.WriteString("\n## Validation\n\n")
+	for _, validation := range fallbackValidation(allIssues) {
+		fmt.Fprintf(&b, "- %s\n", validation)
+	}
+
+	return b.String()
+}
+
+func fallbackPRSummaryParagraph(ms *platform.Milestone, allIssues []*platform.Issue) string {
+	title := ""
+	if ms != nil {
+		title = strings.TrimSpace(ms.Title)
+	}
+	if title == "" {
+		title = "this batch"
+	}
+
+	taskWord := "tasks"
+	if len(allIssues) == 1 {
+		taskWord = "task"
+	}
+
+	return fmt.Sprintf("This batch implements %s across %d %s.", title, len(allIssues), taskWord)
+}
+
+func fallbackMajorChanges(allIssues []*platform.Issue) []string {
+	var titles []string
+	for _, issue := range allIssues {
+		if issue == nil {
+			continue
+		}
+		titles = append(titles, issue.Title)
+	}
+
+	changes := firstNonEmptyLines(titles, 5)
+	if len(changes) == 0 {
+		return []string{"See the task table below for the changed areas."}
+	}
+	if len(changes) == 5 {
+		nonEmptyCount := 0
+		for _, issue := range allIssues {
+			if issue != nil && strings.TrimSpace(issue.Title) != "" {
+				nonEmptyCount++
+			}
+		}
+		if nonEmptyCount > 5 {
+			changes = append(changes, "Additional task coverage is listed in the task table below.")
+		}
+	}
+
+	return changes
+}
+
+func fallbackValidation(allIssues []*platform.Issue) []string {
+	var validation []string
+	for _, issue := range allIssues {
+		if issue == nil {
+			continue
+		}
+		parsed, parseErr := issues.ParseBody(issue.Body)
+		if parseErr != nil {
+			continue
+		}
+		criteria := firstNonEmptyLines(parsed.Criteria, 1)
+		if len(criteria) == 0 {
+			continue
+		}
+		validation = append(validation, fmt.Sprintf("#%d: %s", issue.Number, trimCriterionMarker(criteria[0])))
+		if len(validation) == 5 {
+			return validation
+		}
+	}
+
+	if len(validation) == 0 {
+		return []string{"Review each task's acceptance criteria and the final CI results before merging."}
+	}
+
+	return validation
+}
+
+func firstNonEmptyLines(values []string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+
+	var lines []string
+	for _, value := range values {
+		for _, line := range strings.Split(value, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			lines = append(lines, line)
+			if len(lines) == limit {
+				return lines
+			}
+		}
+	}
+
+	return lines
+}
+
+func trimCriterionMarker(value string) string {
+	value = strings.TrimSpace(value)
+	for _, marker := range []string{"[ ]", "[x]", "[X]"} {
+		if strings.HasPrefix(value, marker) {
+			return strings.TrimSpace(strings.TrimPrefix(value, marker))
+		}
+	}
+	return value
 }
 
 // DispatchRebaseConflictWorker creates a conflict-resolution issue and dispatches
