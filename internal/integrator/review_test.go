@@ -456,9 +456,15 @@ func TestReconcileReviewFindingsWithLivePRStatePreservesRootFileFindings(t *test
 // --- Mock Agent ---
 
 type mockReviewAgent struct {
-	reviewResult *agent.ReviewResult
-	reviewErr    error
-	onReview     func()
+	reviewResult     *agent.ReviewResult
+	reviewErr        error
+	onReview         func()
+	synthesisResult  *agent.ReviewSynthesisResult
+	synthesisErr     error
+	onSynthesis      func(context.Context)
+	synthesisCalls   int
+	synthesisInput   agent.ReviewSynthesisInput
+	synthesisOptions agent.ReviewSynthesisOptions
 	// results, when non-nil, returns scripted ReviewResults on successive
 	// calls. After the slice is exhausted, the last entry is repeated.
 	results  []*agent.ReviewResult
@@ -490,8 +496,17 @@ func (m *mockReviewAgent) Review(_ context.Context, diff string, opts agent.Revi
 	m.calls++
 	return m.reviewResult, m.reviewErr
 }
-func (m *mockReviewAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
-	return nil, nil
+func (m *mockReviewAgent) SynthesizeReviewNonConvergence(ctx context.Context, input agent.ReviewSynthesisInput, opts agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	m.synthesisCalls++
+	m.synthesisInput = input
+	m.synthesisOptions = opts
+	if m.onSynthesis != nil {
+		m.onSynthesis(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return m.synthesisResult, m.synthesisErr
 }
 func (m *mockReviewAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil
@@ -7192,6 +7207,7 @@ func TestReview_NoStableDisagreementWhenAllNew(t *testing.T) {
 
 func TestReview_NonConvergenceEscalatesToStrategyFixIssue(t *testing.T) {
 	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+	fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false
 
 	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
 
@@ -7232,6 +7248,246 @@ func TestReview_NonConvergenceEscalatesToStrategyFixIssue(t *testing.T) {
 	assert.Equal(t, platform.ReviewRequestChanges, fx.prSvc.reviews[0].event)
 	assert.Contains(t, fx.prSvc.reviews[0].body, "Strategy-level fix worker dispatched")
 	assert.Contains(t, fx.prSvc.reviews[0].body, "#9601")
+}
+
+func TestReview_NonConvergenceSynthesisDisabledPreservesDeterministicBehavior(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+	fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false
+	fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Zero(t, fx.ag.synthesisCalls)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Contains(t, fx.createdIssues[0].body, "Solve the shared architecture/design problem")
+	assert.NotContains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Contains(t, requireCommentContaining(t, fx.prSvc.comments, "Herd review is not converging"), "Dominant package clusters")
+}
+
+func TestReview_NonConvergenceSynthesisCreatesStrategyFixIssue(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+	fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 1, result.FindingsCount)
+	assert.Equal(t, 1, fx.ag.synthesisCalls)
+	assert.Equal(t, 849, fx.ag.synthesisInput.PRNumber)
+	assert.Equal(t, 111, fx.ag.synthesisInput.BatchNumber)
+	assert.Equal(t, fx.headSHA, fx.ag.synthesisInput.HeadSHA)
+	assert.NotEmpty(t, fx.ag.synthesisInput.Cycles)
+	assert.NotEmpty(t, fx.ag.synthesisInput.CompletedFixIssues)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Contains(t, fx.createdIssues[0].title, "Dispatch idempotency boundary")
+	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	assert.Contains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+	assert.Contains(t, fx.createdIssues[0].body, "Root cause title:")
+	assert.Contains(t, fx.createdIssues[0].body, "Why previous individual fixes did not converge:")
+	marker, ok := parseReviewNonConvergenceFingerprintMarker(fx.createdIssues[0].body)
+	require.True(t, ok)
+	assert.Equal(t, fx.headSHA, marker.HeadSHA)
+	assert.Equal(t, synthesizedReviewStrategyFingerprint(fx.ag.synthesisResult), marker.Fingerprint)
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	comment := requireCommentContaining(t, fx.prSvc.comments, "Synthesized root cause")
+	assert.Contains(t, comment, "Strategy fix issue: #9601")
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Contains(t, fx.prSvc.reviews[0].body, "Synthesized strategy-level fix worker dispatched -> #9601")
+}
+
+func TestReview_NonConvergenceSynthesisGroupsDifferentlyWordedFindingsByRootCause(t *testing.T) {
+	descriptions := []string{
+		"retry path can emit a second workflow dispatch",
+		"unknown-state repair mutates labels before durable convergence",
+		"started state is checked after the visible side effect",
+		"review escalation can dispatch before idempotency is recorded",
+		"repair state lacks a shared terminal transition",
+		"retry queue replays without durable mutation guard",
+		"label updates happen before dispatch state is stable",
+		"GitHub-visible side effect is not behind shared idempotency",
+		"result recording diverges across retry and repair",
+	}
+	findings := make([]agent.ReviewFinding, 0, 28)
+	for i := 0; i < 28; i++ {
+		severity := "MEDIUM"
+		if i < 9 {
+			severity = "HIGH"
+		}
+		findings = append(findings, agent.ReviewFinding{
+			Severity:    severity,
+			Description: fmt.Sprintf("internal/controlplane/dispatch/path_%02d.go: %s", i+1, descriptions[i%len(descriptions)]),
+		})
+	}
+	fx := newReviewNonConvergenceIntegrationFixture(t, findings)
+	fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, fx.createdIssues, 1)
+	assert.NotEqual(t, "Review fixes (cycle 39)", fx.createdIssues[0].title)
+	assert.Contains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+	assert.Len(t, result.FixIssues, 1)
+}
+
+func TestReview_NonConvergenceSynthesisFallbacks(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*testing.T, *reviewNonConvergenceIntegrationFixture)
+	}{
+		{
+			name: "low confidence",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				result := highConfidenceReviewSynthesisResult()
+				result.Confidence = 0.40
+				fx.ag.synthesisResult = result
+			},
+		},
+		{
+			name: "synthesis error",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisErr = errors.New("invalid synthesis output")
+			},
+		},
+		{
+			name: "missing acceptance criteria",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				result := highConfidenceReviewSynthesisResult()
+				result.AcceptanceCriteria = []string{" "}
+				fx.ag.synthesisResult = result
+			},
+		},
+		{
+			name: "missing root cause title",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				result := highConfidenceReviewSynthesisResult()
+				result.RootCauseTitle = " "
+				fx.ag.synthesisResult = result
+			},
+		},
+		{
+			name: "insufficient symptoms",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				result := highConfidenceReviewSynthesisResult()
+				result.RecurringSymptoms = result.RecurringSymptoms[:1]
+				fx.ag.synthesisResult = result
+			},
+		},
+		{
+			name: "timeout",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				previous := reviewSynthesisTimeout
+				reviewSynthesisTimeout = time.Millisecond
+				fx.ag.onSynthesis = func(ctx context.Context) {
+					<-ctx.Done()
+				}
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence = 0.75
+				t.Cleanup(func() {
+					reviewSynthesisTimeout = previous
+				})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+			tt.configure(t, fx)
+
+			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, 1, fx.ag.synthesisCalls)
+			require.Len(t, fx.createdIssues, 1)
+			assert.Contains(t, fx.createdIssues[0].body, "Solve the shared architecture/design problem")
+			assert.NotContains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+			require.Len(t, fx.wf.dispatched, 1)
+			comments := strings.Join(fx.prSvc.comments, "\n")
+			assert.Contains(t, comments, "Dominant package clusters")
+			assert.NotContains(t, comments, "Synthesized root cause")
+		})
+	}
+}
+
+func TestReview_NonConvergenceSynthesisDuplicateSuppressesCreation(t *testing.T) {
+	tests := []struct {
+		name  string
+		state string
+		label string
+		head  string
+	}{
+		{name: "open ready", state: "open", label: issues.StatusReady, head: "older-head"},
+		{name: "open in-progress", state: "open", label: issues.StatusInProgress, head: "older-head"},
+		{name: "done same head", state: "closed", label: issues.StatusDone, head: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+			synthesis := highConfidenceReviewSynthesisResult()
+			fx.ag.synthesisResult = synthesis
+			head := tt.head
+			if head == "" {
+				head = fx.headSHA
+			}
+			fingerprint := synthesizedReviewStrategyFingerprint(synthesis)
+			duplicateBody := appendReviewNonConvergenceFingerprintWithHeadSHA(issues.RenderBody(issues.IssueBody{
+				FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: 849},
+				Task:        "Existing synthesized strategy fix.",
+			}), fingerprint, head)
+			fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
+				Number: 9700,
+				State:  tt.state,
+				Title:  buildSynthesizedStrategyFixIssueTitle(39, synthesis),
+				Labels: []string{issues.ReviewNonConverging, tt.label},
+				Body:   duplicateBody,
+			})
+
+			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, []int{9700}, result.FixIssues)
+			assert.Empty(t, fx.createdIssues)
+			assert.Empty(t, fx.wf.dispatched)
+			comment := requireCommentContaining(t, fx.prSvc.comments, "already being addressed by strategy issue #9700")
+			assert.Contains(t, comment, "Synthesized root cause")
+		})
+	}
+}
+
+func TestReview_NonConvergenceSynthesisDoneOlderHeadCanBeSuperseded(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+	synthesis := highConfidenceReviewSynthesisResult()
+	fx.ag.synthesisResult = synthesis
+	fingerprint := synthesizedReviewStrategyFingerprint(synthesis)
+	duplicateBody := appendReviewNonConvergenceFingerprintWithHeadSHA(issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: 849},
+		Task:        "Older synthesized strategy fix.",
+	}), fingerprint, "older-head")
+	fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
+		Number: 9701,
+		State:  "closed",
+		Title:  buildSynthesizedStrategyFixIssueTitle(38, synthesis),
+		Labels: []string{issues.ReviewNonConverging, issues.StatusDone},
+		Body:   duplicateBody,
+	})
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Contains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+	require.Len(t, fx.wf.dispatched, 1)
 }
 
 func TestReview_NonConvergenceEscalatesWithOlderHistoricalHeadSHAs(t *testing.T) {
@@ -7754,4 +8010,32 @@ func reviewNonConvergenceCurrentFindings(count int) []agent.ReviewFinding {
 		})
 	}
 	return findings
+}
+
+func highConfidenceReviewSynthesisResult() *agent.ReviewSynthesisResult {
+	return &agent.ReviewSynthesisResult{
+		ShouldEscalate:   true,
+		Confidence:       0.91,
+		RootCauseTitle:   "Dispatch idempotency boundary is split across review paths",
+		RootCauseSummary: "Workflow dispatch, retry, and repair code still make GitHub-visible mutations before a shared durable idempotency decision.",
+		RecurringSymptoms: []agent.ReviewSynthesisSymptom{
+			{
+				Description:   "Started workflow retry can dispatch twice before the durable record is repaired.",
+				Cycles:        []int{35, 37, 39},
+				AffectedFiles: []string{"internal/controlplane/dispatch/retry.go", "internal/controlplane/dispatch/review.go"},
+			},
+			{
+				Description:   "Unknown-state repair paths update labels before converging on one dispatch outcome.",
+				Cycles:        []int{36, 38, 39},
+				AffectedFiles: []string{"internal/controlplane/dispatch/repair.go", "internal/controlplane/dispatch/review.go"},
+			},
+		},
+		WhyIndividualFixesAreNotConverging: "Prior fixes patched individual call sites while leaving the shared idempotency invariant undefined.",
+		ProposedStrategy:                   "Introduce one dispatch state transition helper and route retry, repair, and review-dispatch callers through it.",
+		AcceptanceCriteria: []string{
+			"Retry, repair, and review-dispatch paths share one idempotent transition.",
+			"Regression tests cover duplicate dispatch and unknown-state repair.",
+		},
+		NonGoals: []string{"Do not redesign unrelated worker scheduling."},
+	}
 }

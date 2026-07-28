@@ -10,7 +10,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 )
@@ -74,6 +76,8 @@ const reviewNonConvergenceRepeatedRootCauseCycleThreshold = 2
 const reviewNonConvergenceFingerprintMarkerPrefix = "<!-- herd:review-nonconvergence "
 const reviewNonConvergenceFingerprintMarkerSuffix = " -->"
 
+var reviewSynthesisTimeout = 90 * time.Second
+
 var (
 	reviewCycleRE          = regexp.MustCompile(`(?i)\bcycle\s+(\d+)\b`)
 	reviewAggregationRE    = regexp.MustCompile(`(?i)^-\s*(Raw findings before dedupe|Findings after dedupe|Stale PR-state findings ignored):\s*(\d+)\s*$`)
@@ -84,6 +88,20 @@ var (
 	reviewPathRE           = regexp.MustCompile(`(?:^|[\s(\[` + "`" + `])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)(?::\d+)?`)
 	reviewRootCauseSplitRE = regexp.MustCompile(`(?i)\b(Suggested fix|Tests|Constraints)\s*:`)
 )
+
+type reviewSynthesisDecision string
+
+const (
+	reviewSynthesisDecisionEscalate reviewSynthesisDecision = "escalate"
+	reviewSynthesisDecisionFallback reviewSynthesisDecision = "fallback"
+)
+
+type reviewNonConvergenceFingerprintMarker struct {
+	Version     int    `json:"version"`
+	BatchPR     int    `json:"batch_pr"`
+	Fingerprint string `json:"fingerprint"`
+	HeadSHA     string `json:"head_sha,omitempty"`
+}
 
 type reviewClusterCounts struct {
 	findings int
@@ -435,6 +453,187 @@ func buildStrategyFixIssueBody(ms *platform.Milestone, pr *platform.PullRequest,
 	return appendReviewNonConvergenceFingerprint(body, analysis.Cluster.Fingerprint)
 }
 
+func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone, currentHeadSHA string, prComments []*platform.Comment, history []reviewHistoryCycle, allIssues []*platform.Issue, workerNoOpVerdicts []string, currentPRMetadata string) agent.ReviewSynthesisInput {
+	input := agent.ReviewSynthesisInput{
+		HeadSHA:            currentHeadSHA,
+		CurrentPRMetadata:  currentPRMetadata,
+		WorkerNoOpVerdicts: append([]string(nil), workerNoOpVerdicts...),
+	}
+	if pr != nil {
+		input.PRNumber = pr.Number
+		input.HeadRef = pr.Head
+	}
+	if ms != nil {
+		input.BatchNumber = ms.Number
+	}
+	for _, comment := range prComments {
+		if comment == nil || strings.TrimSpace(comment.Body) == "" {
+			continue
+		}
+		input.RecentReviewComments = append(input.RecentReviewComments, comment.Body)
+	}
+
+	affectedFiles := map[string]struct{}{}
+	for _, cycle := range history {
+		synthCycle := agent.ReviewSynthesisCycle{
+			Cycle:                cycle.Cycle,
+			HeadSHA:              cycle.HeadSHA,
+			FindingsAfterDedupe:  reviewFindingCount(cycle),
+			FindingsBySeverity:   copyReviewFindingsBySeverity(cycle.FindingsBySeverity),
+			FixIssueNumbers:      append([]int(nil), cycle.FixIssueNumbers...),
+			Status:               cycle.Status,
+			ChunkCoverageSummary: cycle.ChunkCoverageSummary,
+		}
+		for _, finding := range allReviewFindingDescriptions(cycle) {
+			for _, file := range reviewFilePathsFromText(finding) {
+				affectedFiles[file] = struct{}{}
+				synthCycle.AffectedFiles = appendUniqueString(synthCycle.AffectedFiles, file)
+			}
+		}
+		sort.Strings(synthCycle.AffectedFiles)
+		input.Cycles = append(input.Cycles, synthCycle)
+	}
+
+	for _, issue := range reviewHistoryIssuesForPR(allIssues, input.PRNumber) {
+		if issue == nil {
+			continue
+		}
+		parsed, err := issues.ParseBody(issue.Body)
+		if err != nil {
+			continue
+		}
+		fm := parsed.FrontMatter
+		if fm.Type != "fix" || fm.BatchPR != input.PRNumber || fm.FixCycle <= 0 || fm.CIFixCycle > 0 || fm.ConflictResolution {
+			continue
+		}
+		status := issues.StatusLabel(issue.Labels)
+		if status != issues.StatusDone && !bodyHasWorkerReport(issue.Body) {
+			continue
+		}
+		files := extractReviewFixFilesSummary(issue.Body, parsed.FilesToModify)
+		for _, file := range files {
+			affectedFiles[file] = struct{}{}
+		}
+		input.CompletedFixIssues = append(input.CompletedFixIssues, agent.ReviewSynthesisFixIssue{
+			Number:           issue.Number,
+			Title:            issue.Title,
+			Body:             issue.Body,
+			StatusLabel:      status,
+			FilesSummary:     files,
+			ValidationStatus: extractReviewValidationStatus(issue.Body),
+			WorkerReport:     bodyHasWorkerReport(issue.Body),
+		})
+	}
+	sort.SliceStable(input.CompletedFixIssues, func(i, j int) bool {
+		return input.CompletedFixIssues[i].Number < input.CompletedFixIssues[j].Number
+	})
+	input.AffectedFiles = sortedStringSet(affectedFiles)
+	return input
+}
+
+func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence float64, analysis reviewConvergenceAnalysis) (reviewSynthesisDecision, string) {
+	if result == nil {
+		return reviewSynthesisDecisionFallback, "synthesis returned nil result"
+	}
+	if !result.ShouldEscalate {
+		return reviewSynthesisDecisionFallback, fallbackString(result.Reason, "synthesis chose not to escalate")
+	}
+	if result.Confidence < minConfidence {
+		return reviewSynthesisDecisionFallback, fmt.Sprintf("synthesis confidence %.2f below threshold %.2f", result.Confidence, minConfidence)
+	}
+	if len(result.RecurringSymptoms) < 2 {
+		return reviewSynthesisDecisionFallback, fmt.Sprintf("synthesis reported %d recurring symptom(s); need at least 2", len(result.RecurringSymptoms))
+	}
+	if countReviewSynthesisSymptomCycles(result.RecurringSymptoms) < 2 && len(analysis.CompletedFixIssues) < 2 {
+		return reviewSynthesisDecisionFallback, "synthesis symptoms do not span two cycles and fewer than two completed fix attempts exist"
+	}
+	if strings.TrimSpace(result.RootCauseTitle) == "" {
+		return reviewSynthesisDecisionFallback, "synthesis root cause title is empty"
+	}
+	if len(trimBlankStrings(result.AcceptanceCriteria)) == 0 {
+		return reviewSynthesisDecisionFallback, "synthesis acceptance criteria are empty"
+	}
+	if synthesizedReviewStrategyFingerprint(result) == "" {
+		return reviewSynthesisDecisionFallback, "synthesis fingerprint is empty"
+	}
+	return reviewSynthesisDecisionEscalate, "synthesis passed safety gates"
+}
+
+func synthesizedReviewStrategyFingerprint(result *agent.ReviewSynthesisResult) string {
+	if result == nil {
+		return ""
+	}
+	root := normalizeReviewSynthesisFingerprintText(result.RootCauseTitle)
+	if root == "" {
+		return ""
+	}
+	var symptomEntries []string
+	for _, symptom := range result.RecurringSymptoms {
+		description := normalizeReviewSynthesisFingerprintText(symptom.Description)
+		if description == "" {
+			continue
+		}
+		cycles := uniqueSortedInts(symptom.Cycles)
+		files := normalizeReviewSynthesisFiles(symptom.AffectedFiles)
+		symptomEntries = append(symptomEntries, fmt.Sprintf("%s|cycles:%s|files:%s", description, formatIntList(cycles), strings.Join(files, ",")))
+	}
+	sort.Strings(symptomEntries)
+	if len(symptomEntries) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(root + "\n" + strings.Join(symptomEntries, "\n")))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+func buildSynthesizedStrategyFixIssueTitle(nextCycle int, result *agent.ReviewSynthesisResult) string {
+	title := "synthesized root cause"
+	if result != nil && strings.TrimSpace(result.RootCauseTitle) != "" {
+		title = strings.TrimSpace(result.RootCauseTitle)
+	}
+	return truncateReviewStrategyTitle(fmt.Sprintf("Review strategy fix (cycle %d): %s", nextCycle, title), 120)
+}
+
+func buildSynthesizedStrategyFixIssueBody(ms *platform.Milestone, pr *platform.PullRequest, nextCycle int, result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput, fingerprint string) string {
+	batchNumber := 0
+	if ms != nil {
+		batchNumber = ms.Number
+	}
+	prNumber := 0
+	if pr != nil {
+		prNumber = pr.Number
+	}
+	scope := synthesizedReviewAffectedScope(result)
+	if len(scope) == 0 {
+		scope = append([]string(nil), input.AffectedFiles...)
+	}
+
+	body := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:  1,
+			Batch:    batchNumber,
+			Type:     "fix",
+			FixCycle: nextCycle,
+			BatchPR:  prNumber,
+			Scope:    scope,
+		},
+		Task:                  "Implement a synthesized architectural/root-cause fix for the review/fix loop. This is not a normal individual review finding: fix the shared abstraction or root cause first, then verify the recurring symptoms below are covered by that strategy.",
+		ImplementationDetails: buildSynthesizedStrategyImplementationDetails(result, input),
+		Criteria:              trimBlankStrings(result.AcceptanceCriteria),
+		Context:               buildSynthesizedStrategyContext(input),
+	})
+	return appendReviewNonConvergenceFingerprintWithHeadSHA(body, fingerprint, input.HeadSHA)
+}
+
+func buildSynthesizedReviewNonConvergencePRComment(result *agent.ReviewSynthesisResult, strategyIssueNumber int) string {
+	var b strings.Builder
+	b.WriteString("⚠️ **Herd review is not converging**\n\n")
+	fmt.Fprintf(&b, "- Synthesized root cause: %s\n", fallbackString(strings.TrimSpace(result.RootCauseTitle), "unspecified"))
+	fmt.Fprintf(&b, "- Confidence: %.2f\n", result.Confidence)
+	fmt.Fprintf(&b, "- Recurring symptoms: %d\n", len(result.RecurringSymptoms))
+	fmt.Fprintf(&b, "- Strategy fix issue: #%d\n", strategyIssueNumber)
+	return b.String()
+}
+
 func buildReviewNonConvergencePRComment(analysis reviewConvergenceAnalysis, strategyIssueNumber int) string {
 	fixIssues := append([]int{}, analysis.CompletedFixIssues...)
 	fixIssues = append(fixIssues, analysis.InProgressFixIssues...)
@@ -453,14 +652,15 @@ func buildReviewNonConvergencePRComment(analysis reviewConvergenceAnalysis, stra
 }
 
 func appendReviewNonConvergenceFingerprint(body string, fingerprint string) string {
-	payload := struct {
-		Version     int    `json:"version"`
-		BatchPR     int    `json:"batch_pr"`
-		Fingerprint string `json:"fingerprint"`
-	}{
+	return appendReviewNonConvergenceFingerprintWithHeadSHA(body, fingerprint, "")
+}
+
+func appendReviewNonConvergenceFingerprintWithHeadSHA(body string, fingerprint string, headSHA string) string {
+	payload := reviewNonConvergenceFingerprintMarker{
 		Version:     1,
 		BatchPR:     parseReviewFingerprintBatchPR(body),
 		Fingerprint: fingerprint,
+		HeadSHA:     strings.TrimSpace(headSHA),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -470,23 +670,29 @@ func appendReviewNonConvergenceFingerprint(body string, fingerprint string) stri
 }
 
 func parseReviewNonConvergenceFingerprint(body string) (string, bool) {
+	marker, ok := parseReviewNonConvergenceFingerprintMarker(body)
+	if !ok {
+		return "", false
+	}
+	return marker.Fingerprint, true
+}
+
+func parseReviewNonConvergenceFingerprintMarker(body string) (reviewNonConvergenceFingerprintMarker, bool) {
 	start := strings.Index(body, reviewNonConvergenceFingerprintMarkerPrefix)
 	if start < 0 {
-		return "", false
+		return reviewNonConvergenceFingerprintMarker{}, false
 	}
 	payloadStart := start + len(reviewNonConvergenceFingerprintMarkerPrefix)
 	end := strings.Index(body[payloadStart:], reviewNonConvergenceFingerprintMarkerSuffix)
 	if end < 0 {
-		return "", false
+		return reviewNonConvergenceFingerprintMarker{}, false
 	}
 	payload := body[payloadStart : payloadStart+end]
-	var marker struct {
-		Fingerprint string `json:"fingerprint"`
-	}
+	var marker reviewNonConvergenceFingerprintMarker
 	if err := json.Unmarshal([]byte(payload), &marker); err != nil || marker.Fingerprint == "" {
-		return "", false
+		return reviewNonConvergenceFingerprintMarker{}, false
 	}
-	return marker.Fingerprint, true
+	return marker, true
 }
 
 func findDuplicateStrategyFixIssue(allIssues []*platform.Issue, prNumber int, fingerprint string) (*platform.Issue, bool) {
@@ -511,6 +717,39 @@ func findDuplicateStrategyFixIssue(allIssues []*platform.Issue, prNumber int, fi
 			return issue, true
 		}
 		if strings.Contains(issue.Body, fingerprint) {
+			return issue, true
+		}
+	}
+	return nil, false
+}
+
+func findDuplicateSynthesizedStrategyFixIssue(allIssues []*platform.Issue, prNumber int, fingerprint string, currentHeadSHA string) (*platform.Issue, bool) {
+	if fingerprint == "" {
+		return nil, false
+	}
+	currentHeadSHA = strings.TrimSpace(currentHeadSHA)
+	for _, issue := range allIssues {
+		if issue == nil || !issues.HasLabel(issue.Labels, issues.ReviewNonConverging) || !strings.HasPrefix(issue.Title, "Review strategy fix") {
+			continue
+		}
+		parsed, err := issues.ParseBody(issue.Body)
+		if err != nil {
+			continue
+		}
+		if parsed.FrontMatter.Type != "fix" || parsed.FrontMatter.BatchPR != prNumber {
+			continue
+		}
+		marker, ok := parseReviewNonConvergenceFingerprintMarker(issue.Body)
+		if !ok || marker.Fingerprint != fingerprint {
+			continue
+		}
+		status := issues.StatusLabel(issue.Labels)
+		if issue.State == "" || issue.State == "open" {
+			if status == "" || status == issues.StatusReady || status == issues.StatusInProgress {
+				return issue, true
+			}
+		}
+		if status == issues.StatusDone && currentHeadSHA != "" && marker.HeadSHA == currentHeadSHA {
 			return issue, true
 		}
 	}
@@ -764,6 +1003,228 @@ func addReviewClusterCount(index map[string]*reviewClusterCounts, key string, cy
 	}
 	index[key].findings++
 	index[key].cycles[cycle] = struct{}{}
+}
+
+func copyReviewFindingsBySeverity(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for key, values := range in {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+func reviewFilePathsFromText(text string) []string {
+	seen := map[string]struct{}{}
+	for _, match := range reviewPathRE.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		file := strings.Trim(match[1], "`.,);:")
+		if looksLikeReviewFilePath(file) {
+			seen[file] = struct{}{}
+		}
+	}
+	return sortedStringSet(seen)
+}
+
+func countReviewSynthesisSymptomCycles(symptoms []agent.ReviewSynthesisSymptom) int {
+	seen := map[int]struct{}{}
+	for _, symptom := range symptoms {
+		for _, cycle := range symptom.Cycles {
+			if cycle > 0 {
+				seen[cycle] = struct{}{}
+			}
+		}
+	}
+	return len(seen)
+}
+
+func normalizeReviewSynthesisFingerprintText(value string) string {
+	return strings.Join(strings.FieldsFunc(strings.ToLower(strings.TrimSpace(value)), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	}), " ")
+}
+
+func normalizeReviewSynthesisFiles(files []string) []string {
+	seen := map[string]struct{}{}
+	for _, file := range files {
+		normalized := normalizeReviewSynthesisFingerprintText(file)
+		if normalized != "" {
+			seen[normalized] = struct{}{}
+		}
+	}
+	return sortedStringSet(seen)
+}
+
+func synthesizedReviewAffectedScope(result *agent.ReviewSynthesisResult) []string {
+	seen := map[string]struct{}{}
+	if result != nil {
+		for _, symptom := range result.RecurringSymptoms {
+			for _, file := range symptom.AffectedFiles {
+				file = strings.TrimSpace(file)
+				if file != "" {
+					seen[file] = struct{}{}
+				}
+			}
+		}
+	}
+	return sortedStringSet(seen)
+}
+
+func buildSynthesizedStrategyImplementationDetails(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput) string {
+	var sections []string
+	sections = append(sections, "Root cause title: "+strings.TrimSpace(result.RootCauseTitle))
+	sections = append(sections, "Root cause summary:\n"+fallbackString(strings.TrimSpace(result.RootCauseSummary), "No summary provided."))
+	sections = append(sections, "Recurring symptoms:\n"+formatReviewSynthesisSymptoms(result.RecurringSymptoms))
+	sections = append(sections, "Why previous individual fixes did not converge:\n"+fallbackString(strings.TrimSpace(result.WhyIndividualFixesAreNotConverging), "No rationale provided."))
+	sections = append(sections, "Proposed strategy:\n"+fallbackString(strings.TrimSpace(result.ProposedStrategy), "No strategy provided."))
+	sections = append(sections, "Acceptance criteria:\n"+formatBullets(trimBlankStrings(result.AcceptanceCriteria)))
+	sections = append(sections, "Non-goals:\n"+formatBullets(trimBlankStrings(result.NonGoals)))
+	sections = append(sections, "Source review result comments/context:\n"+formatReviewSynthesisSourceContext(input))
+	return strings.Join(sections, "\n\n")
+}
+
+func buildSynthesizedStrategyContext(input agent.ReviewSynthesisInput) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "- PR: #%d\n", input.PRNumber)
+	fmt.Fprintf(&b, "- Batch: %d\n", input.BatchNumber)
+	fmt.Fprintf(&b, "- Head SHA: %s\n", fallbackString(input.HeadSHA, "unknown"))
+	fmt.Fprintf(&b, "- Head branch: %s\n", fallbackString(input.HeadRef, "unknown"))
+	fmt.Fprintf(&b, "- Cycles analyzed: %s\n", formatReviewSynthesisCycleList(input.Cycles))
+	fmt.Fprintf(&b, "- Completed fix issues: %s\n", formatReviewSynthesisFixIssueList(input.CompletedFixIssues))
+	fmt.Fprintf(&b, "- Affected files: %s\n", formatStringList(input.AffectedFiles))
+	if strings.TrimSpace(input.CurrentPRMetadata) != "" {
+		fmt.Fprintf(&b, "\nCurrent PR metadata:\n%s\n", strings.TrimSpace(input.CurrentPRMetadata))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatReviewSynthesisSymptoms(symptoms []agent.ReviewSynthesisSymptom) string {
+	if len(symptoms) == 0 {
+		return "- none"
+	}
+	var lines []string
+	for _, symptom := range symptoms {
+		description := fallbackString(strings.TrimSpace(symptom.Description), "unspecified symptom")
+		lines = append(lines, fmt.Sprintf("- %s (cycles: %s; affected files: %s)", description, formatIntList(uniqueSortedInts(symptom.Cycles)), formatStringList(trimBlankStrings(symptom.AffectedFiles))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatReviewSynthesisSourceContext(input agent.ReviewSynthesisInput) string {
+	var lines []string
+	for _, cycle := range input.Cycles {
+		lines = append(lines, fmt.Sprintf("- Cycle %d (%s): %d findings; fix issues %s; files %s", cycle.Cycle, fallbackString(cycle.Status, "unknown"), cycle.FindingsAfterDedupe, formatIntList(cycle.FixIssueNumbers), formatStringList(cycle.AffectedFiles)))
+	}
+	for i, comment := range input.RecentReviewComments {
+		trimmed := strings.TrimSpace(comment)
+		if trimmed == "" {
+			continue
+		}
+		if len([]rune(trimmed)) > 600 {
+			trimmed = string([]rune(trimmed)[:600]) + "..."
+		}
+		lines = append(lines, fmt.Sprintf("- Review comment %d excerpt:\n%s", i+1, trimmed))
+		if len(lines) >= len(input.Cycles)+3 {
+			break
+		}
+	}
+	if len(lines) == 0 {
+		return "- none"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatReviewSynthesisCycleList(cycles []agent.ReviewSynthesisCycle) string {
+	if len(cycles) == 0 {
+		return "none"
+	}
+	nums := make([]int, 0, len(cycles))
+	for _, cycle := range cycles {
+		nums = append(nums, cycle.Cycle)
+	}
+	return formatIntList(nums)
+}
+
+func formatReviewSynthesisFixIssueList(fixes []agent.ReviewSynthesisFixIssue) string {
+	if len(fixes) == 0 {
+		return "none"
+	}
+	nums := make([]int, 0, len(fixes))
+	for _, fix := range fixes {
+		nums = append(nums, fix.Number)
+	}
+	return formatIssueNumberList(nums)
+}
+
+func formatBullets(values []string) string {
+	if len(values) == 0 {
+		return "- none"
+	}
+	lines := make([]string, len(values))
+	for i, value := range values {
+		lines[i] = "- " + strings.TrimSpace(value)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func uniqueSortedInts(nums []int) []int {
+	seen := map[int]struct{}{}
+	for _, n := range nums {
+		if n > 0 {
+			seen[n] = struct{}{}
+		}
+	}
+	out := make([]int, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func trimBlankStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func sortedStringSet(seen map[string]struct{}) []string {
+	values := make([]string, 0, len(seen))
+	for value := range seen {
+		if strings.TrimSpace(value) != "" {
+			values = append(values, value)
+		}
+	}
+	sort.Strings(values)
+	return values
 }
 
 func buildStrategyFixIssueContext(analysis reviewConvergenceAnalysis) string {
