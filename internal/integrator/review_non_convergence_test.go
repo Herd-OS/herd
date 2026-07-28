@@ -549,6 +549,16 @@ func TestBuildStrategyFixIssueTitle(t *testing.T) {
 
 func TestBuildStrategyFixIssueBody(t *testing.T) {
 	analysis := reviewStrategyAnalysisFixture()
+	analysis.PriorStrategyFixIssues = []reviewPriorStrategyFixIssue{{
+		Number:           9700,
+		Cycle:            5,
+		StatusLabel:      issues.StatusDone,
+		State:            "closed",
+		HeadSHA:          "head-prior",
+		ValidationStatus: "success",
+		WorkerReport:     true,
+		Summary:          "Fix the strategy.",
+	}}
 	title := buildStrategyFixIssueTitle(6, analysis.Cluster)
 	body := buildStrategyFixIssueBody(
 		&platform.Milestone{Number: 111, Title: "Batch"},
@@ -579,6 +589,7 @@ func TestBuildStrategyFixIssueBody(t *testing.T) {
 	assert.Contains(t, parsed.ImplementationDetails, "Cycle 5 HIGH: internal/controlplane/dispatch/worker.go: retry can duplicate workflow dispatches after post-call unknown state")
 	assert.Contains(t, parsed.ImplementationDetails, "#951 (cycle 3): herd/status:done; success; worker report present; files: internal/controlplane/commands/review.go")
 	assert.Contains(t, parsed.ImplementationDetails, "#952 (cycle 4): herd/status:done; success; worker report present; files: internal/controlplane/dispatch/worker.go")
+	assert.Contains(t, parsed.ImplementationDetails, "Previous strategy fix #9700 was completed but the same root-cause cluster reappeared, so that fix was incomplete.")
 	assert.Contains(t, parsed.ImplementationDetails, "Fix the shared invariant or state transition")
 	assert.Contains(t, parsed.Criteria, "Architecture-level abstraction or invariant is documented in code.")
 	assert.Contains(t, parsed.Criteria, "Clustered packages are migrated to the strategy or explicitly justified if a package is left unchanged.")
@@ -694,7 +705,17 @@ func TestBuildSynthesizedStrategyFixIssueBody(t *testing.T) {
 	}
 	fingerprint := synthesizedReviewStrategyFingerprint(result)
 
-	body := buildSynthesizedStrategyFixIssueBody(&platform.Milestone{Number: 111}, &platform.PullRequest{Number: 849}, 40, result, input, fingerprint)
+	prior := []reviewPriorStrategyFixIssue{{
+		Number:           9700,
+		Cycle:            38,
+		StatusLabel:      issues.StatusDone,
+		State:            "closed",
+		HeadSHA:          "head-122",
+		ValidationStatus: "success",
+		WorkerReport:     true,
+		Summary:          "Existing synthesized strategy fix.",
+	}}
+	body := buildSynthesizedStrategyFixIssueBody(&platform.Milestone{Number: 111}, &platform.PullRequest{Number: 849}, 40, result, input, fingerprint, prior)
 
 	parsed, err := issues.ParseBody(body)
 	require.NoError(t, err)
@@ -715,7 +736,10 @@ func TestBuildSynthesizedStrategyFixIssueBody(t *testing.T) {
 	assert.Contains(t, parsed.ImplementationDetails, "Proposed strategy:")
 	assert.Contains(t, parsed.ImplementationDetails, "Acceptance criteria:")
 	assert.Contains(t, parsed.ImplementationDetails, "Non-goals:")
+	assert.Contains(t, parsed.ImplementationDetails, "Prior strategy fix attempts:")
+	assert.Contains(t, parsed.ImplementationDetails, "Previous strategy fix #9700 was completed but the same root-cause cluster reappeared, so that fix was incomplete.")
 	assert.Contains(t, parsed.ImplementationDetails, "Source review result comments/context:")
+	assert.Contains(t, parsed.Context, "Prior completed strategy fix issues: #9700")
 	assert.Equal(t, result.AcceptanceCriteria, parsed.Criteria)
 	marker, ok := parseReviewNonConvergenceFingerprintMarker(body)
 	require.True(t, ok)
@@ -909,11 +933,9 @@ func TestFindDuplicateSynthesizedStrategyFixIssue(t *testing.T) {
 			wantOK:     true,
 		},
 		{
-			name:       "done same head suppresses",
-			issue:      reviewStrategyIssue(203, "closed", []string{issues.ReviewNonConverging, issues.StatusDone}, bodyFor(849, "fp-match", "same-head")),
-			head:       "same-head",
-			wantNumber: 203,
-			wantOK:     true,
+			name:  "done same head can be superseded",
+			issue: reviewStrategyIssue(203, "closed", []string{issues.ReviewNonConverging, issues.StatusDone}, bodyFor(849, "fp-match", "same-head")),
+			head:  "same-head",
 		},
 		{
 			name:  "done older head can be superseded",
@@ -943,6 +965,95 @@ func TestFindDuplicateSynthesizedStrategyFixIssue(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFindPriorCompletedStrategyFixIssues(t *testing.T) {
+	bodyFor := func(pr int, fingerprint, head, task, report string) string {
+		body := issues.RenderBody(issues.IssueBody{
+			FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: pr, FixCycle: 7},
+			Task:        task,
+			Context:     "fallback context summary",
+		})
+		if report != "" {
+			body += "\n## Worker Report\n\n" + report + "\n"
+		}
+		return appendReviewNonConvergenceFingerprintWithHeadSHA(body, fingerprint, head)
+	}
+	tests := []struct {
+		name  string
+		issue *platform.Issue
+		want  []reviewPriorStrategyFixIssue
+	}{
+		{
+			name:  "closed done parses completed prior strategy issue",
+			issue: reviewStrategyIssue(301, "closed", []string{issues.ReviewNonConverging, issues.StatusDone}, bodyFor(849, "fp-match", "head-301", "Completed root strategy.", "Validation passed")),
+			want: []reviewPriorStrategyFixIssue{{
+				Number:           301,
+				Cycle:            7,
+				StatusLabel:      issues.StatusDone,
+				State:            "closed",
+				Title:            "Review strategy fix (cycle 6): internal/controlplane/dispatch",
+				Fingerprint:      "fp-match",
+				HeadSHA:          "head-301",
+				ValidationStatus: "success",
+				WorkerReport:     true,
+				Summary:          "Completed root strategy.",
+			}},
+		},
+		{
+			name:  "closed unlabeled strategy issue is completed prior",
+			issue: reviewStrategyIssue(302, "closed", []string{issues.ReviewNonConverging}, bodyFor(849, "fp-match", "head-302", "Closed strategy.", "")),
+			want: []reviewPriorStrategyFixIssue{{
+				Number:      302,
+				Cycle:       7,
+				State:       "closed",
+				Title:       "Review strategy fix (cycle 6): internal/controlplane/dispatch",
+				Fingerprint: "fp-match",
+				HeadSHA:     "head-302",
+				Summary:     "Closed strategy.",
+			}},
+		},
+		{
+			name:  "failed strategy issue is not completed prior",
+			issue: reviewStrategyIssue(303, "closed", []string{issues.ReviewNonConverging, issues.StatusFailed}, bodyFor(849, "fp-match", "head-303", "Failed strategy.", "Validation failed")),
+		},
+		{
+			name:  "active ready strategy issue is not completed prior",
+			issue: reviewStrategyIssue(304, "open", []string{issues.ReviewNonConverging, issues.StatusReady}, bodyFor(849, "fp-match", "head-304", "Active strategy.", "")),
+		},
+		{
+			name:  "wrong fingerprint ignored",
+			issue: reviewStrategyIssue(305, "closed", []string{issues.ReviewNonConverging, issues.StatusDone}, bodyFor(849, "fp-other", "head-305", "Other strategy.", "")),
+		},
+		{
+			name:  "wrong batch pr ignored",
+			issue: reviewStrategyIssue(306, "closed", []string{issues.ReviewNonConverging, issues.StatusDone}, bodyFor(850, "fp-match", "head-306", "Other PR strategy.", "")),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := findPriorCompletedStrategyFixIssues([]*platform.Issue{tt.issue}, 849, "fp-match")
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	summary := buildPriorStrategyFixIssueSummary([]reviewPriorStrategyFixIssue{{
+		Number:           301,
+		Cycle:            7,
+		StatusLabel:      issues.StatusDone,
+		State:            "closed",
+		HeadSHA:          "head-301",
+		ValidationStatus: "success",
+		WorkerReport:     true,
+		Summary:          "Completed root strategy.",
+	}})
+	assert.Contains(t, summary, "Previous strategy fix #301 was completed but the same root-cause cluster reappeared, so that fix was incomplete.")
+	assert.Contains(t, summary, "cycle 7")
+	assert.Contains(t, summary, "head head-301")
+	assert.Contains(t, summary, "validation success")
+	assert.Contains(t, summary, "worker report present")
+	assert.Contains(t, summary, "summary: Completed root strategy.")
+	assert.Empty(t, buildPriorStrategyFixIssueSummary(nil))
 }
 
 func reviewHistoryComment(t *testing.T, head string, cycle, count int, finding string, fixIssue int) *platform.Comment {

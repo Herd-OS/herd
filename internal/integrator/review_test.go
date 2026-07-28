@@ -7426,7 +7426,6 @@ func TestReview_NonConvergenceSynthesisDuplicateSuppressesCreation(t *testing.T)
 	}{
 		{name: "open ready", state: "open", label: issues.StatusReady, head: "older-head"},
 		{name: "open in-progress", state: "open", label: issues.StatusInProgress, head: "older-head"},
-		{name: "done same head", state: "closed", label: issues.StatusDone, head: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -7463,7 +7462,7 @@ func TestReview_NonConvergenceSynthesisDuplicateSuppressesCreation(t *testing.T)
 	}
 }
 
-func TestReview_NonConvergenceSynthesisDoneOlderHeadCanBeSuperseded(t *testing.T) {
+func TestReview_NonConvergenceSynthesisDoneStrategyIssueCanBeSuperseded(t *testing.T) {
 	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
 	synthesis := highConfidenceReviewSynthesisResult()
 	fx.ag.synthesisResult = synthesis
@@ -7471,7 +7470,8 @@ func TestReview_NonConvergenceSynthesisDoneOlderHeadCanBeSuperseded(t *testing.T
 	duplicateBody := appendReviewNonConvergenceFingerprintWithHeadSHA(issues.RenderBody(issues.IssueBody{
 		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: 849},
 		Task:        "Older synthesized strategy fix.",
-	}), fingerprint, "older-head")
+	}), fingerprint, fx.headSHA)
+	duplicateBody += "\n## Worker Report\n\nValidation passed\n"
 	fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
 		Number: 9701,
 		State:  "closed",
@@ -7487,6 +7487,7 @@ func TestReview_NonConvergenceSynthesisDoneOlderHeadCanBeSuperseded(t *testing.T
 	assert.Equal(t, []int{9601}, result.FixIssues)
 	require.Len(t, fx.createdIssues, 1)
 	assert.Contains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+	assert.Contains(t, fx.createdIssues[0].body, "Previous strategy fix #9701 was completed but the same root-cause cluster reappeared, so that fix was incomplete.")
 	require.Len(t, fx.wf.dispatched, 1)
 }
 
@@ -7681,6 +7682,68 @@ func TestReview_NonConvergenceDuplicateStrategyIssueDoesNotCreateOrDispatch(t *t
 	assert.Equal(t, 1, marker.FindingsCount)
 	require.Len(t, fx.prSvc.reviews, 1)
 	assert.Contains(t, fx.prSvc.reviews[0].body, "already in progress")
+}
+
+func TestReview_NonConvergenceCompletedPriorStrategyIssueCreatesNewIssue(t *testing.T) {
+	currentFindings := reviewNonConvergenceCurrentFindings(28)
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false
+	analysis := fx.analysisForCurrent(t, currentFindings)
+	priorBody := appendReviewNonConvergenceFingerprintWithHeadSHA(issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", FixCycle: 38, BatchPR: 849},
+		Task:        "Existing completed strategy fix.",
+	}), analysis.Cluster.Fingerprint, "prior-head")
+	priorBody += "\n## Worker Report\n\nValidation passed\n"
+	fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
+		Number: 9700,
+		State:  "closed",
+		Title:  buildStrategyFixIssueTitle(38, analysis.Cluster),
+		Labels: []string{issues.ReviewNonConverging, issues.StatusDone},
+		Body:   priorBody,
+	})
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Contains(t, fx.createdIssues[0].body, "Previous strategy fix #9700 was completed but the same root-cause cluster reappeared, so that fix was incomplete.")
+	assert.Contains(t, fx.createdIssues[0].body, "head prior-head")
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "already being addressed by strategy issue #9700"))
+}
+
+func TestReview_NonConvergenceFailedPriorStrategyIssueCreatesNewIssue(t *testing.T) {
+	currentFindings := reviewNonConvergenceCurrentFindings(28)
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false
+	analysis := fx.analysisForCurrent(t, currentFindings)
+	priorBody := appendReviewNonConvergenceFingerprintWithHeadSHA(issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", FixCycle: 38, BatchPR: 849},
+		Task:        "Existing failed strategy fix.",
+	}), analysis.Cluster.Fingerprint, "prior-head")
+	priorBody += "\n## Worker Report\n\nValidation failed\n"
+	fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
+		Number: 9700,
+		State:  "closed",
+		Title:  buildStrategyFixIssueTitle(38, analysis.Cluster),
+		Labels: []string{issues.ReviewNonConverging, issues.StatusFailed},
+		Body:   priorBody,
+	})
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	require.Len(t, fx.createdIssues, 1)
+	assert.NotContains(t, fx.createdIssues[0].body, "Previous strategy fix #9700 was completed")
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "already being addressed by strategy issue #9700"))
 }
 
 func TestReview_NonConvergenceStrategyDispatchFailureMarksIssueFailed(t *testing.T) {
