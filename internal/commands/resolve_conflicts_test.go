@@ -410,48 +410,60 @@ func TestHandleResolveConflicts_ConflictStatusesDispatchOnce(t *testing.T) {
 }
 
 func TestHandleResolveConflicts_UnknownMergeabilityRetriesBounded(t *testing.T) {
-	origSleep := resolveConflictsSleep
-	sleepCalls := 0
-	resolveConflictsSleep = func(context.Context, time.Duration) error {
-		sleepCalls++
-		return nil
+	tests := []struct {
+		name             string
+		mergeStateStatus string
+	}{
+		{name: "unknown", mergeStateStatus: "UNKNOWN"},
+		{name: "unavailable", mergeStateStatus: "unavailable"},
 	}
-	t.Cleanup(func() { resolveConflictsSleep = origSleep })
 
-	unknownPR := &platform.PullRequest{
-		Number:           849,
-		Head:             "herd/batch/111-review-cycle-non-convergence-synthesis",
-		Base:             "main",
-		HeadSHA:          "head123",
-		BaseSHA:          "base456",
-		MergeableKnown:   false,
-		Mergeable:        false,
-		MergeStateStatus: "UNKNOWN",
-	}
-	issueSvc := newTestIssueService()
-	wf := &testWorkflowService{}
-	prSvc := &testPRService{
-		getSequences: map[int][]*platform.PullRequest{
-			849: {unknownPR, unknownPR, unknownPR, unknownPR},
-		},
-	}
-	p := &testPlatform{
-		issues:     issueSvc,
-		prs:        prSvc,
-		workflows:  wf,
-		repo:       &testRepoService{defaultBranch: "main"},
-		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: {Number: 111, Title: "Review Cycle Non Convergence Synthesis"}}},
-	}
-	hctx := resolveConflictsHandlerContext(p, baseConfig())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origSleep := resolveConflictsSleep
+			sleepCalls := 0
+			resolveConflictsSleep = func(context.Context, time.Duration) error {
+				sleepCalls++
+				return nil
+			}
+			t.Cleanup(func() { resolveConflictsSleep = origSleep })
 
-	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+			unknownPR := &platform.PullRequest{
+				Number:           849,
+				Head:             "herd/batch/111-review-cycle-non-convergence-synthesis",
+				Base:             "main",
+				HeadSHA:          "head123",
+				BaseSHA:          "base456",
+				MergeableKnown:   false,
+				Mergeable:        false,
+				MergeStateStatus: tt.mergeStateStatus,
+			}
+			issueSvc := newTestIssueService()
+			wf := &testWorkflowService{}
+			prSvc := &testPRService{
+				getSequences: map[int][]*platform.PullRequest{
+					849: {unknownPR, unknownPR, unknownPR, unknownPR},
+				},
+			}
+			p := &testPlatform{
+				issues:     issueSvc,
+				prs:        prSvc,
+				workflows:  wf,
+				repo:       &testRepoService{defaultBranch: "main"},
+				milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: {Number: 111, Title: "Review Cycle Non Convergence Synthesis"}}},
+			}
+			hctx := resolveConflictsHandlerContext(p, baseConfig())
 
-	require.NoError(t, result.Error)
-	assert.Contains(t, result.Message, "could not determine whether this PR is currently conflicting")
-	assert.Equal(t, resolveConflictsMergeabilityAttempts, prSvc.getCalls[849])
-	assert.Equal(t, resolveConflictsMergeabilityAttempts-1, sleepCalls)
-	assert.Empty(t, issueSvc.createdIssues)
-	assert.Empty(t, wf.dispatched)
+			result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+			require.NoError(t, result.Error)
+			assert.Contains(t, result.Message, "could not determine whether this PR is currently conflicting")
+			assert.Equal(t, resolveConflictsMergeabilityAttempts, prSvc.getCalls[849])
+			assert.Equal(t, resolveConflictsMergeabilityAttempts-1, sleepCalls)
+			assert.Empty(t, issueSvc.createdIssues)
+			assert.Empty(t, wf.dispatched)
+		})
+	}
 }
 
 func TestResolveConflictPRStateClassification(t *testing.T) {
@@ -460,23 +472,29 @@ func TestResolveConflictPRStateClassification(t *testing.T) {
 		pr           *platform.PullRequest
 		wantConflict bool
 		wantClean    bool
+		wantKnown    bool
 	}{
-		{name: "DIRTY", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "DIRTY"}, wantConflict: true},
-		{name: "CONFLICTING", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "CONFLICTING"}, wantConflict: true},
-		{name: "CLEAN", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "CLEAN"}, wantClean: true},
-		{name: "BEHIND", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "BEHIND"}, wantClean: true},
-		{name: "HAS_HOOKS", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "HAS_HOOKS"}, wantClean: true},
-		{name: "UNSTABLE", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "UNSTABLE"}, wantClean: true},
+		{name: "DIRTY", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "DIRTY"}, wantConflict: true, wantKnown: true},
+		{name: "CONFLICTING", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "CONFLICTING"}, wantConflict: true, wantKnown: true},
+		{name: "CLEAN", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "CLEAN"}, wantClean: true, wantKnown: true},
+		{name: "BEHIND", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "BEHIND"}, wantClean: true, wantKnown: true},
+		{name: "HAS_HOOKS", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "HAS_HOOKS"}, wantClean: true, wantKnown: true},
+		{name: "UNSTABLE", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "UNSTABLE"}, wantClean: true, wantKnown: true},
 		{name: "UNKNOWN", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: "UNKNOWN"}},
+		{name: "UNAVAILABLE", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: "unavailable"}},
 		{name: "MergeableKnown=false", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: ""}},
-		{name: "known unmergeable empty status", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: ""}},
-		{name: "BLOCKED non-conflict", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "BLOCKED"}},
+		{name: "known unmergeable empty status", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: ""}, wantKnown: true},
+		{name: "BLOCKED non-conflict", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "BLOCKED"}, wantKnown: true},
+		{name: "unknown BLOCKED", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: "BLOCKED"}},
+		{name: "authoritative dirty with unknown mergeable flag", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: "DIRTY"}, wantConflict: true, wantKnown: true},
+		{name: "authoritative clean with unknown mergeable flag", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: "CLEAN"}, wantClean: true, wantKnown: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.wantConflict, prReportsConflict(tt.pr))
 			assert.Equal(t, tt.wantClean, prReportsClean(tt.pr))
+			assert.Equal(t, tt.wantKnown, prMergeabilityKnown(tt.pr))
 		})
 	}
 }
