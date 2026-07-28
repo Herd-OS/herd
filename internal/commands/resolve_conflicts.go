@@ -161,6 +161,9 @@ func prMergeabilityKnown(pr *platform.PullRequest) bool {
 	if pr == nil {
 		return false
 	}
+	if pr.MergeableKnown {
+		return true
+	}
 	status := strings.ToUpper(strings.TrimSpace(pr.MergeStateStatus))
-	return pr.MergeableKnown && status != "" && status != "UNKNOWN"
+	return status != "" && status != "UNKNOWN"
 }

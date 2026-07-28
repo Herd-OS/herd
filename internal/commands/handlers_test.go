@@ -1456,6 +1456,10 @@ func TestPRReportsConflictAndClean(t *testing.T) {
 			pr:   &platform.PullRequest{MergeableKnown: false, MergeStateStatus: "UNKNOWN"},
 		},
 		{
+			name: "known unmergeable empty status reports neither",
+			pr:   &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: ""},
+		},
+		{
 			name: "nil PR reports neither",
 			pr:   nil,
 		},
@@ -1483,8 +1487,6 @@ func TestLatestPRWithKnownMergeability_BoundedAttempts(t *testing.T) {
 			10: {
 				{Number: 10, MergeableKnown: false, MergeStateStatus: "UNKNOWN"},
 				{Number: 10, MergeableKnown: true, MergeStateStatus: ""},
-				{Number: 10, MergeableKnown: true, MergeStateStatus: "UNKNOWN"},
-				{Number: 10, MergeableKnown: false, MergeStateStatus: "CLEAN"},
 			},
 		},
 	}
@@ -1492,11 +1494,11 @@ func TestLatestPRWithKnownMergeability_BoundedAttempts(t *testing.T) {
 	pr, known, err := latestPRWithKnownMergeability(context.Background(), prSvc, 10)
 
 	require.NoError(t, err)
-	assert.False(t, known)
+	assert.True(t, known)
 	require.NotNil(t, pr)
-	assert.Equal(t, "CLEAN", pr.MergeStateStatus)
-	assert.Equal(t, resolveConflictsMergeabilityAttempts, prSvc.getCalls[10])
-	assert.Equal(t, resolveConflictsMergeabilityAttempts-1, sleepCalls)
+	assert.Empty(t, pr.MergeStateStatus)
+	assert.Equal(t, 2, prSvc.getCalls[10])
+	assert.Equal(t, 1, sleepCalls)
 }
 
 func TestLatestPRWithKnownMergeability_ReturnsKnownPR(t *testing.T) {

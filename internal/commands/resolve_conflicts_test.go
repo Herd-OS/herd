@@ -296,35 +296,47 @@ func TestHandleResolveConflicts_StaleResolverFrontMatterDoesNotBlockNewResolver(
 }
 
 func TestHandleResolveConflicts_CleanPRNoOps(t *testing.T) {
-	issueSvc := newTestIssueService()
-	wf := &testWorkflowService{}
-	prSvc := &testPRService{
-		getResult: map[int]*platform.PullRequest{
-			849: {
-				Number:           849,
-				Head:             "herd/batch/111-review-cycle-non-convergence-synthesis",
-				Base:             "main",
-				MergeableKnown:   true,
-				Mergeable:        true,
-				MergeStateStatus: "CLEAN",
-			},
-		},
+	tests := []struct {
+		name             string
+		mergeStateStatus string
+	}{
+		{name: "clean status", mergeStateStatus: "CLEAN"},
+		{name: "empty status with known mergeable", mergeStateStatus: ""},
 	}
-	p := &testPlatform{
-		issues:     issueSvc,
-		prs:        prSvc,
-		workflows:  wf,
-		repo:       &testRepoService{defaultBranch: "main"},
-		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: {Number: 111, Title: "Review Cycle Non Convergence Synthesis"}}},
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newTestIssueService()
+			wf := &testWorkflowService{}
+			prSvc := &testPRService{
+				getResult: map[int]*platform.PullRequest{
+					849: {
+						Number:           849,
+						Head:             "herd/batch/111-review-cycle-non-convergence-synthesis",
+						Base:             "main",
+						MergeableKnown:   true,
+						Mergeable:        true,
+						MergeStateStatus: tt.mergeStateStatus,
+					},
+				},
+			}
+			p := &testPlatform{
+				issues:     issueSvc,
+				prs:        prSvc,
+				workflows:  wf,
+				repo:       &testRepoService{defaultBranch: "main"},
+				milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: {Number: 111, Title: "Review Cycle Non Convergence Synthesis"}}},
+			}
+			hctx := resolveConflictsHandlerContext(p, baseConfig())
+
+			result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+			require.NoError(t, result.Error)
+			assert.Equal(t, "ℹ️ PR is not currently conflicting with base.", result.Message)
+			assert.Empty(t, issueSvc.createdIssues)
+			assert.Empty(t, wf.dispatched)
+		})
 	}
-	hctx := resolveConflictsHandlerContext(p, baseConfig())
-
-	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
-
-	require.NoError(t, result.Error)
-	assert.Equal(t, "ℹ️ PR is not currently conflicting with base.", result.Message)
-	assert.Empty(t, issueSvc.createdIssues)
-	assert.Empty(t, wf.dispatched)
 }
 
 func TestHandleResolveConflicts_BlockedPRNoOps(t *testing.T) {
@@ -457,6 +469,7 @@ func TestResolveConflictPRStateClassification(t *testing.T) {
 		{name: "UNSTABLE", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "UNSTABLE"}, wantClean: true},
 		{name: "UNKNOWN", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: "UNKNOWN"}},
 		{name: "MergeableKnown=false", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: ""}},
+		{name: "known unmergeable empty status", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: ""}},
 		{name: "BLOCKED non-conflict", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "BLOCKED"}},
 	}
 
