@@ -1443,9 +1443,8 @@ func TestPRReportsConflictAndClean(t *testing.T) {
 			wantClean: true,
 		},
 		{
-			name:         "known false unknown non-clean status conflicts",
-			pr:           &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "BLOCKED"},
-			wantConflict: true,
+			name: "blocked status is non-conflict",
+			pr:   &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "BLOCKED"},
 		},
 		{
 			name:      "known true unknown non-clean status is clean",

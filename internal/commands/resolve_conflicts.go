@@ -142,7 +142,7 @@ func prReportsConflict(pr *platform.PullRequest) bool {
 	case "CLEAN", "HAS_HOOKS", "UNSTABLE", "BEHIND":
 		return false
 	}
-	return pr.MergeableKnown && !pr.Mergeable
+	return false
 }
 
 func prReportsClean(pr *platform.PullRequest) bool {

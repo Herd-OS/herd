@@ -143,16 +143,26 @@ func FindActivePRConflictResolutionIssue(ctx context.Context, p platform.Platfor
 		if !fm.ConflictResolution || fm.BatchPR != prNumber {
 			continue
 		}
-		if headSHA != "" && !strings.Contains(iss.Body, headSHA) {
+		if !prConflictResolutionSHAMatches(fm.PRHeadSHA, headSHA, iss.Body) {
 			continue
 		}
-		if baseSHA != "" && !strings.Contains(iss.Body, baseSHA) {
+		if !prConflictResolutionSHAMatches(fm.PRBaseSHA, baseSHA, iss.Body) {
 			continue
 		}
 		return iss, nil
 	}
 
 	return nil, nil
+}
+
+func prConflictResolutionSHAMatches(frontMatterSHA string, requestedSHA string, body string) bool {
+	if requestedSHA == "" {
+		return true
+	}
+	if frontMatterSHA != "" {
+		return frontMatterSHA == requestedSHA
+	}
+	return strings.Contains(body, requestedSHA)
 }
 
 func isActiveConflictResolutionIssue(iss *platform.Issue) bool {

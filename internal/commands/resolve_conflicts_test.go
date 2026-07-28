@@ -255,6 +255,46 @@ func TestHandleResolveConflicts_FailedMatchingIssueDoesNotBlockNewResolver(t *te
 	assert.Equal(t, "200", wf.dispatched[0]["issue_number"])
 }
 
+func TestHandleResolveConflicts_StaleResolverFrontMatterDoesNotBlockNewResolver(t *testing.T) {
+	ms := &platform.Milestone{Number: 111, Title: "Review Cycle Non Convergence Synthesis"}
+	existingBody := integrator.BuildConflictResolutionIssueBody(integrator.ConflictResolutionIssueParams{
+		Kind:         integrator.ConflictResolutionKindPRBase,
+		Milestone:    ms,
+		BatchPR:      849,
+		PRHeadBranch: "herd/batch/111-review-cycle-non-convergence-synthesis",
+		PRHeadSHA:    "stale-head",
+		BaseBranch:   "main",
+		BaseSHA:      "stale-base",
+		UserContext:  "The new conflict mentions head123 and base456 in discussion, but front matter is stale.",
+	})
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 701, State: "open", Labels: []string{issues.TypeFix, issues.StatusInProgress}, Body: existingBody},
+	}
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			849: conflictingResolveConflictsPR(),
+		},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: ms}},
+	}
+	hctx := resolveConflictsHandlerContext(p, baseConfig())
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.NoError(t, result.Error)
+	assert.Equal(t, "🔧 Created conflict-resolution issue #200 and dispatched worker.", result.Message)
+	require.Len(t, issueSvc.createdIssues, 1)
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "200", wf.dispatched[0]["issue_number"])
+}
+
 func TestHandleResolveConflicts_CleanPRNoOps(t *testing.T) {
 	issueSvc := newTestIssueService()
 	wf := &testWorkflowService{}
@@ -285,6 +325,76 @@ func TestHandleResolveConflicts_CleanPRNoOps(t *testing.T) {
 	assert.Equal(t, "ℹ️ PR is not currently conflicting with base.", result.Message)
 	assert.Empty(t, issueSvc.createdIssues)
 	assert.Empty(t, wf.dispatched)
+}
+
+func TestHandleResolveConflicts_BlockedPRNoOps(t *testing.T) {
+	issueSvc := newTestIssueService()
+	wf := &testWorkflowService{}
+	pr := conflictingResolveConflictsPR()
+	pr.MergeStateStatus = "BLOCKED"
+	pr.MergeableKnown = true
+	pr.Mergeable = false
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			849: pr,
+		},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: {Number: 111, Title: "Review Cycle Non Convergence Synthesis"}}},
+	}
+	hctx := resolveConflictsHandlerContext(p, baseConfig())
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.NoError(t, result.Error)
+	assert.Equal(t, "ℹ️ PR is not currently conflicting with base.", result.Message)
+	assert.Empty(t, issueSvc.createdIssues)
+	assert.Empty(t, wf.dispatched)
+}
+
+func TestHandleResolveConflicts_ConflictStatusesDispatchOnce(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "dirty", status: "DIRTY"},
+		{name: "conflicting", status: "CONFLICTING"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newTestIssueService()
+			issueSvc.listResult = []*platform.Issue{}
+			wf := &testWorkflowService{}
+			pr := conflictingResolveConflictsPR()
+			pr.MergeStateStatus = tt.status
+			prSvc := &testPRService{
+				getResult: map[int]*platform.PullRequest{
+					849: pr,
+				},
+			}
+			p := &testPlatform{
+				issues:     issueSvc,
+				prs:        prSvc,
+				workflows:  wf,
+				repo:       &testRepoService{defaultBranch: "main"},
+				milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: {Number: 111, Title: "Review Cycle Non Convergence Synthesis"}}},
+			}
+			hctx := resolveConflictsHandlerContext(p, baseConfig())
+
+			result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+			require.NoError(t, result.Error)
+			assert.Equal(t, "🔧 Created conflict-resolution issue #200 and dispatched worker.", result.Message)
+			require.Len(t, issueSvc.createdIssues, 1)
+			require.Len(t, wf.dispatched, 1)
+			assert.Equal(t, "200", wf.dispatched[0]["issue_number"])
+		})
+	}
 }
 
 func TestHandleResolveConflicts_UnknownMergeabilityRetriesBounded(t *testing.T) {
@@ -347,7 +457,7 @@ func TestResolveConflictPRStateClassification(t *testing.T) {
 		{name: "UNSTABLE", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: true, MergeStateStatus: "UNSTABLE"}, wantClean: true},
 		{name: "UNKNOWN", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: "UNKNOWN"}},
 		{name: "MergeableKnown=false", pr: &platform.PullRequest{MergeableKnown: false, Mergeable: false, MergeStateStatus: ""}},
-		{name: "MergeableKnown=true/Mergeable=false fallback", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "BLOCKED"}, wantConflict: true},
+		{name: "BLOCKED non-conflict", pr: &platform.PullRequest{MergeableKnown: true, Mergeable: false, MergeStateStatus: "BLOCKED"}},
 	}
 
 	for _, tt := range tests {

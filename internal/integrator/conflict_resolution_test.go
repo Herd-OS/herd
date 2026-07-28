@@ -261,3 +261,26 @@ func TestFindActivePRConflictResolutionIssue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, missing)
 }
+
+func TestFindActivePRConflictResolutionIssue_IgnoresBodySHAsWhenFrontMatterIsStale(t *testing.T) {
+	body := BuildConflictResolutionIssueBody(ConflictResolutionIssueParams{
+		Kind:         ConflictResolutionKindPRBase,
+		Milestone:    &platform.Milestone{Number: 7, Title: "Batch 7"},
+		BatchPR:      123,
+		PRHeadBranch: "feature/refactor",
+		PRHeadSHA:    "stale-head",
+		BaseBranch:   "main",
+		BaseSHA:      "stale-base",
+		UserContext:  "The current conflict mentions abc123 and def456, but this resolver was created for stale SHAs.",
+	})
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 100, Labels: []string{issues.StatusInProgress}, Body: body},
+	}
+	mock := &mockPlatform{issues: issueSvc}
+
+	found, err := FindActivePRConflictResolutionIssue(context.Background(), mock, 7, 123, "abc123", "def456")
+
+	require.NoError(t, err)
+	assert.Nil(t, found)
+}
