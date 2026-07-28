@@ -3,11 +3,11 @@ package review
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
@@ -89,7 +89,8 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 	if !ok {
 		return fmt.Errorf("review status idempotency store is required")
 	}
-	if _, ok := s.Store.(StatusMutationStore); !ok {
+	mutationStore, ok := s.Store.(mutationguard.Store)
+	if !ok {
 		return fmt.Errorf("review status mutation store is required")
 	}
 	created, err := idem.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
@@ -108,82 +109,58 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 			return fmt.Errorf("get Herd Review status idempotency: %w", err)
 		}
 		if record.Status == "completed" {
+			if err := s.repairStatusMutationFromCompletedIdempotency(ctx, mutationStore, statusKey, responseStatusCreated, now); err != nil {
+				return err
+			}
 			return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
 		}
-		if mutationspkg.IsPreCallRetryable(record.Status) {
-			if repaired, err := s.repairCompletedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
-				return err
-			}
-			if repaired, err := s.repairStartedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, status, state, description, targetURL, now); repaired || err != nil {
-				return err
-			}
-		} else if record.Status == "started" {
-			if repaired, err := s.repairCompletedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
-				return err
-			}
-			if repaired, err := s.repairStartedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, status, state, description, targetURL, now); repaired || err != nil {
-				return err
-			}
-			if preCall, err := s.statusMutationPreCallRetryable(ctx, statusKey); err != nil {
-				return err
-			} else if !preCall {
-				return fmt.Errorf("herd review status %q is already in progress", statusKey)
-			}
-		}
 	}
-	if err := s.ensureStatusMutationAttempt(ctx, statusKey, repo, prNumber, headSHA, status, now); err != nil {
-		if created {
-			_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
-		}
-		return err
-	}
-	if err := s.markStatusMutationCallStarted(ctx, statusKey, now); err != nil {
-		_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
-		return err
-	}
-	if err := s.GitHub.CreateCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status); err != nil {
-		var preCallErr mutationspkg.PreCallError
-		if errors.As(err, &preCallErr) {
-			_ = s.completeStatusMutation(ctx, statusKey, mutationspkg.PhaseFailedPreCall, nil, err, now)
-			_ = idem.FailIdempotencyKey(ctx, statusKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
-		} else {
-			_ = s.completeStatusMutation(ctx, statusKey, mutationspkg.PhaseRepairRequired, nil, err, now)
-			_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
-		}
-		return err
-	}
-	if err := s.completeStatusMutation(ctx, statusKey, mutationspkg.PhaseCompleted, json.RawMessage(`{"status":"created"}`), nil, now); err != nil {
-		return err
-	}
-	if err := idem.CompleteIdempotencyKey(ctx, statusKey, "status:created"); err != nil {
-		return fmt.Errorf("complete Herd Review status idempotency: %w", err)
+	request := statusMutationRequest(repo, prNumber, headSHA, status)
+	_, err = mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
+		Key:          statusKey,
+		RepositoryID: repo.ID,
+		MutationType: "review_status",
+		Request:      request,
+		ResultRef: func(raw json.RawMessage) string {
+			var body struct {
+				Status string `json:"status"`
+			}
+			if len(raw) == 0 || json.Unmarshal(raw, &body) != nil || body.Status != "created" {
+				return ""
+			}
+			return "status:created"
+		},
+		Response: func(string) json.RawMessage {
+			return responseStatusCreated
+		},
+		Mutate: func() (string, error) {
+			if err := s.GitHub.CreateCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status); err != nil {
+				return "", err
+			}
+			return "status:created", nil
+		},
+		Repair: func() (string, bool, error) {
+			lookup, ok := s.GitHub.(StatusLookupClient)
+			if !ok {
+				return "", false, nil
+			}
+			found, err := lookup.FindCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status)
+			if err != nil {
+				return "", false, fmt.Errorf("repair Herd Review status lookup: %w", err)
+			}
+			return "status:created", found, nil
+		},
+		Now: s.now,
+	})
+	if err != nil {
+		return wrapStatusMutationError(err)
 	}
 	return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
 }
 
-func (s StatusService) statusMutationPreCallRetryable(ctx context.Context, key string) (bool, error) {
-	mutationStore, ok := s.Store.(StatusMutationStore)
-	if !ok {
-		return false, nil
-	}
-	attempt, err := mutationStore.GetGitHubMutationAttempt(ctx, key)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return false, nil
-		}
-		return false, fmt.Errorf("get Herd Review status mutation attempt: %w", err)
-	}
-	if !mutationspkg.IsPreCallRetryable(attempt.Status) {
-		return false, nil
-	}
-	return true, nil
-}
+var responseStatusCreated = json.RawMessage(`{"status":"created"}`)
 
-func (s StatusService) recordStatusMutationAttempt(ctx context.Context, key string, repo Repository, prNumber int, headSHA string, status platform.CommitStatus, now time.Time) error {
-	mutationStore, ok := s.Store.(StatusMutationStore)
-	if !ok {
-		return nil
-	}
+func statusMutationRequest(repo Repository, prNumber int, headSHA string, status platform.CommitStatus) json.RawMessage {
 	request, err := json.Marshal(map[string]any{
 		"owner":     repo.Owner,
 		"repo":      repo.Name,
@@ -192,124 +169,40 @@ func (s StatusService) recordStatusMutationAttempt(ctx context.Context, key stri
 		"status":    status,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal Herd Review status mutation: %w", err)
+		panic(err)
 	}
-	if err := mutationStore.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
-		IdempotencyKey: key,
-		RepositoryID:   repo.ID,
-		MutationType:   "review_status",
-		Status:         mutationspkg.PhaseIntentRecorded,
-		Request:        request,
-		CreatedAt:      now,
-	}); err != nil {
-		return fmt.Errorf("record Herd Review status mutation attempt: %w", err)
-	}
-	return nil
+	return request
 }
 
-func (s StatusService) ensureStatusMutationAttempt(ctx context.Context, key string, repo Repository, prNumber int, headSHA string, status platform.CommitStatus, now time.Time) error {
-	mutationStore, ok := s.Store.(StatusMutationStore)
-	if !ok {
-		return nil
+func wrapStatusMutationError(err error) error {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "record mutation attempt:"):
+		return fmt.Errorf("record Herd Review status mutation attempt: %w", err)
+	case strings.Contains(msg, "complete mutation attempt:"):
+		return fmt.Errorf("complete Herd Review status mutation attempt: %w", err)
+	case strings.Contains(msg, "complete idempotency key:"):
+		return fmt.Errorf("complete Herd Review status idempotency: %w", err)
+	default:
+		return err
 	}
+}
+
+func (s StatusService) repairStatusMutationFromCompletedIdempotency(ctx context.Context, mutationStore mutationguard.Store, key string, response json.RawMessage, now time.Time) error {
 	attempt, err := mutationStore.GetGitHubMutationAttempt(ctx, key)
 	if err == nil {
-		switch attempt.Status {
-		case mutationspkg.PhaseCompleted:
+		if mutationspkg.IsCompleted(attempt.Status) {
 			return nil
-		case mutationspkg.PhaseFailedPreCall:
-			return nil
-		case mutationspkg.PhaseIntentRecorded:
-			return nil
-		case mutationspkg.PhaseCallStarted, mutationspkg.PhaseRepairRequired, mutationspkg.LegacyStarted, mutationspkg.LegacyFailed:
-			return fmt.Errorf("herd review status mutation attempt %q is %s; repair required before retry", key, attempt.Status)
-		default:
-			return fmt.Errorf("herd review status mutation attempt %q is %s", key, attempt.Status)
 		}
-	}
-	if !errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("get Herd Review status mutation attempt: %w", err)
-	}
-	return s.recordStatusMutationAttempt(ctx, key, repo, prNumber, headSHA, status, now)
-}
-
-func (s StatusService) completeStatusMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error, now time.Time) error {
-	mutations, ok := s.Store.(StatusMutationStore)
-	if !ok {
+		if err := mutationStore.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCompleted, response, "", now); err != nil {
+			return fmt.Errorf("repair Herd Review status mutation attempt: %w", err)
+		}
 		return nil
 	}
-	errorMessage := ""
-	if resultErr != nil {
-		errorMessage = resultErr.Error()
+	if err == store.ErrNotFound {
+		return nil
 	}
-	if err := mutations.CompleteGitHubMutationAttempt(ctx, key, status, response, errorMessage, now); err != nil {
-		return fmt.Errorf("complete Herd Review status mutation attempt: %w", err)
-	}
-	return nil
-}
-
-func (s StatusService) markStatusMutationCallStarted(ctx context.Context, key string, now time.Time) error {
-	mutations, ok := s.Store.(StatusMutationStore)
-	if !ok {
-		return fmt.Errorf("review status mutation store is required")
-	}
-	start, err := mutations.TryStartGitHubMutationAttempt(ctx, key, []string{mutationspkg.PhaseIntentRecorded, mutationspkg.PhaseFailedPreCall}, now)
-	if err != nil {
-		_ = mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseFailedPreCall, nil, err.Error(), now)
-		return fmt.Errorf("mark Herd Review status mutation call started: %w", err)
-	}
-	if !start.Started {
-		return fmt.Errorf("herd review status mutation attempt %q is %s; repair required before retry", key, start.Attempt.Status)
-	}
-	return nil
-}
-
-func (s StatusService) repairCompletedStatusMutation(ctx context.Context, idem StatusIdempotencyStore, key string, repo Repository, prNumber int, headSHA string, state ReviewStatusState, description, targetURL string, now time.Time) (bool, error) {
-	mutations, ok := s.Store.(StatusMutationStore)
-	if !ok {
-		return false, nil
-	}
-	attempt, err := mutations.GetGitHubMutationAttempt(ctx, key)
-	if err != nil {
-		return false, nil
-	}
-	if !mutationspkg.IsCompleted(attempt.Status) {
-		return false, nil
-	}
-	if err := idem.CompleteIdempotencyKey(ctx, key, "status:created"); err != nil {
-		return true, fmt.Errorf("repair Herd Review status idempotency: %w", err)
-	}
-	return true, s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
-}
-
-func (s StatusService) repairStartedStatusMutation(ctx context.Context, idem StatusIdempotencyStore, key string, repo Repository, prNumber int, headSHA string, status platform.CommitStatus, state ReviewStatusState, description, targetURL string, now time.Time) (bool, error) {
-	mutations, ok := s.Store.(StatusMutationStore)
-	if !ok {
-		return false, nil
-	}
-	attempt, err := mutations.GetGitHubMutationAttempt(ctx, key)
-	if err != nil || !mutationspkg.IsPostCallUnknown(attempt.Status) {
-		return false, nil
-	}
-	lookup, ok := s.GitHub.(StatusLookupClient)
-	if !ok {
-		return false, nil
-	}
-	found, err := lookup.FindCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status)
-	if err != nil {
-		return false, fmt.Errorf("repair Herd Review status lookup: %w", err)
-	}
-	if !found {
-		return false, nil
-	}
-	response := json.RawMessage(`{"status":"created","repaired":true}`)
-	if err := mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCompleted, response, "", now); err != nil {
-		return true, fmt.Errorf("repair Herd Review status mutation attempt: %w", err)
-	}
-	if err := idem.CompleteIdempotencyKey(ctx, key, "status:created"); err != nil {
-		return true, fmt.Errorf("repair Herd Review status idempotency: %w", err)
-	}
-	return true, s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
+	return fmt.Errorf("get Herd Review status mutation attempt: %w", err)
 }
 
 func (s StatusService) recordReviewState(ctx context.Context, repo Repository, prNumber int, headSHA string, state ReviewStatusState, description, targetURL string, now time.Time) error {

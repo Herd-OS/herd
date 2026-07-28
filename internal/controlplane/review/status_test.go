@@ -212,6 +212,29 @@ func TestSetHerdReviewStatusRetryAfterGitHubFailureReusesFailedMutationAttempt(t
 	assert.Empty(t, st.states)
 }
 
+func TestSetHerdReviewStatusRetriesAfterPreCallFailure(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{}
+	gh := &fakeStatusGitHub{errs: []error{
+		mutationspkg.PreCallError{Op: "create status request", Err: errors.New("token unavailable")},
+		nil,
+	}}
+	svc := StatusService{Store: st, GitHub: gh}
+
+	firstErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+	secondErr := svc.SetHerdReviewStatus(ctx, testRepo(true), 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "token unavailable")
+	require.NoError(t, secondErr)
+	require.Len(t, gh.statuses, 1)
+	assert.Equal(t, HerdReviewContext, gh.statuses[0].status.Context)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationAttempts[0].Status)
+	require.Len(t, st.states, 1)
+	assert.Equal(t, "success", st.states[0].Status)
+}
+
 func TestSetHerdReviewStatusRetriesAfterGitHubFailureAndFailIdempotencyFailure(t *testing.T) {
 	ctx := context.Background()
 	st := &fakeStatusStore{failErrs: []error{errors.New("database down")}}
