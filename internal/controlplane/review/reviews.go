@@ -10,6 +10,7 @@ import (
 	"time"
 
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
@@ -256,7 +257,7 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 	created, err := s.Mutations.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       key,
 		Scope:     "review_submission",
-		Status:    "started",
+		Status:    mutationspkg.PhaseIntentRecorded,
 		Metadata:  request,
 		CreatedAt: s.now(),
 	})
@@ -268,22 +269,20 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		if err != nil {
 			return fmt.Errorf("get review submission idempotency: %w", err)
 		}
-		if record.Status == "completed" {
-			return nil
-		}
 		if repaired, repairErr := s.repairCompletedReviewSubmission(ctx, key); repaired || repairErr != nil {
 			return repairErr
 		}
 		if repaired, repairErr := s.repairStartedReviewSubmission(ctx, key, repo, result, event); repaired || repairErr != nil {
 			return repairErr
 		}
-		if record.Status == "started" {
-			if attempt, attemptErr := s.Mutations.GetGitHubMutationAttempt(ctx, key); attemptErr == nil && mutationspkg.IsPreCallRetryable(attempt.Status) {
-				// Safe redelivery: the review submission GitHub call had not started.
+		if record.Status == "completed" {
+			return nil
+		}
+		if mutationspkg.IsPreCallRetryable(record.Status) {
+			if attempt, attemptErr := s.Mutations.GetGitHubMutationAttempt(ctx, key); attemptErr == nil && !mutationspkg.IsPreCallRetryable(attempt.Status) && !mutationspkg.IsCompleted(attempt.Status) {
+				return fmt.Errorf("%w: %s has unknown outcome after mutation attempt", ErrReviewSubmissionInProgress, key)
 			} else if attemptErr != nil && !errors.Is(attemptErr, store.ErrNotFound) {
 				return fmt.Errorf("get review submission mutation attempt: %w", attemptErr)
-			} else {
-				return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
 			}
 		}
 		if record.Status == "failed" {
@@ -291,56 +290,46 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 				return fmt.Errorf("get failed review submission mutation attempt: %w", attemptErr)
 			} else if attemptErr == nil && !mutationspkg.IsPreCallRetryable(attempt.Status) && !mutationspkg.IsCompleted(attempt.Status) {
 				return fmt.Errorf("%w: %s has unknown outcome after failed mutation attempt", ErrReviewSubmissionInProgress, key)
-			} else if errors.Is(attemptErr, store.ErrNotFound) {
-				if err := s.Mutations.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
-					IdempotencyKey: key,
-					RepositoryID:   repo.ID,
-					MutationType:   "review_submission",
-					Status:         mutationspkg.PhaseIntentRecorded,
-					Request:        request,
-					CreatedAt:      s.now(),
-				}); err != nil {
-					if errors.Is(err, store.ErrAlreadyExists) {
-						return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
-					}
-					return fmt.Errorf("record retry review submission mutation attempt: %w", err)
-				}
 			}
 		}
-	} else if err := s.Mutations.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
-		IdempotencyKey: key,
-		RepositoryID:   repo.ID,
-		MutationType:   "review_submission",
-		Status:         mutationspkg.PhaseIntentRecorded,
-		Request:        request,
-		CreatedAt:      s.now(),
-	}); err != nil {
-		_ = s.Mutations.FailIdempotencyKey(ctx, key, err.Error())
-		if errors.Is(err, store.ErrAlreadyExists) {
+		if record.Status != "failed" && !mutationspkg.IsPreCallRetryable(record.Status) {
 			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
 		}
-		return fmt.Errorf("record review submission mutation attempt: %w", err)
-	}
-	start, err := s.Mutations.TryStartGitHubMutationAttempt(ctx, key, []string{mutationspkg.PhaseIntentRecorded, mutationspkg.PhaseFailedPreCall}, s.now())
-	if err != nil {
-		_ = s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseFailedPreCall, nil, err.Error(), s.now())
-		_ = s.Mutations.FailIdempotencyKey(ctx, key, err.Error())
-		return fmt.Errorf("mark review submission mutation call started: %w", err)
-	}
-	if !start.Started {
-		return fmt.Errorf("%w: %s mutation is %s", ErrReviewSubmissionInProgress, key, start.Attempt.Status)
-	}
-	if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA); err != nil {
-		_ = s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseRepairRequired, nil, err.Error(), s.now())
-		_ = s.Mutations.FailIdempotencyKey(ctx, key, err.Error())
-		return err
 	}
 	response, _ := json.Marshal(map[string]any{"submitted": true, "event": event, "head_sha": result.HeadSHA})
-	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCompleted, response, "", s.now()); err != nil {
-		return fmt.Errorf("complete review submission mutation attempt: %w", err)
-	}
-	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
-		return fmt.Errorf("complete review submission idempotency: %w", err)
+	_, err = mutationguard.Run(ctx, s.Mutations, mutationguard.RunRequest{
+		Key:          key,
+		RepositoryID: repo.ID,
+		MutationType: "review_submission",
+		Request:      request,
+		ResultRef: func(raw json.RawMessage) string {
+			if len(raw) == 0 {
+				return ""
+			}
+			return string(raw)
+		},
+		Response: func(string) json.RawMessage {
+			return response
+		},
+		Mutate: func() (string, error) {
+			if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA); err != nil {
+				return "", err
+			}
+			return string(response), nil
+		},
+		Now: s.now,
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "record mutation attempt") {
+			return fmt.Errorf("record review submission mutation attempt: %w", err)
+		}
+		if strings.Contains(err.Error(), "complete mutation attempt") {
+			return fmt.Errorf("complete review submission mutation attempt: %w", err)
+		}
+		if strings.Contains(err.Error(), "repair required before retry") {
+			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
+		}
+		return err
 	}
 	return nil
 }

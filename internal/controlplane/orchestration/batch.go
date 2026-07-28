@@ -11,6 +11,7 @@ import (
 
 	"github.com/herd-os/herd/internal/config"
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/dag"
@@ -358,70 +359,15 @@ func (s Service) withIdempotencyPhased(ctx context.Context, key string, mutation
 }
 
 func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutationType string, preflight func() error, fn func() (string, error)) (string, error) {
-	if err := s.Store.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
-		IdempotencyKey: key,
-		RepositoryID:   s.Repo.ID,
-		MutationType:   mutationType,
-		Status:         mutationStatusIntentRecorded,
-		CreatedAt:      s.now(),
-	}); err != nil {
-		if errors.Is(err, store.ErrAlreadyExists) {
-			attempt, readErr := s.Store.GetGitHubMutationAttempt(ctx, key)
-			if readErr != nil {
-				_ = s.Store.FailIdempotencyKey(ctx, key, readErr.Error())
-				return "", fmt.Errorf("get existing mutation attempt: %w", readErr)
-			}
-			if !mutations.IsPreCallRetryable(attempt.Status) {
-				_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
-				return "", fmt.Errorf("mutation attempt %q is %s; repair required before retry", key, attempt.Status)
-			}
-		} else {
-			_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
-			return "", fmt.Errorf("record mutation attempt: %w", err)
-		}
-	}
-	if preflight != nil {
-		if err := preflight(); err != nil {
-			_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailedPreCall, nil, err.Error(), s.now())
-			_ = s.Store.FailIdempotencyKey(ctx, key, mutationStatusFailedPreCall+":"+err.Error())
-			return "", err
-		}
-	}
-	start, err := s.Store.TryStartGitHubMutationAttempt(ctx, key, []string{mutationStatusIntentRecorded, mutationStatusFailedPreCall}, s.now())
-	if err != nil {
-		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailedPreCall, nil, err.Error(), s.now())
-		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
-		return "", fmt.Errorf("mark mutation call started: %w", err)
-	}
-	if !start.Started {
-		if mutations.IsCompleted(start.Attempt.Status) {
-			resultRef := mutationResultRef(start.Attempt.Response)
-			if strings.TrimSpace(resultRef) != "" {
-				if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
-					return "", fmt.Errorf("repair idempotency key: %w", err)
-				}
-				return resultRef, nil
-			}
-		}
-		return "", fmt.Errorf("mutation attempt %q is %s; repair required before retry", key, start.Attempt.Status)
-	}
-	resultRef, err := fn()
-	if err != nil {
-		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusRepairRequired, nil, err.Error(), s.now())
-		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
-		return "", err
-	}
-	response, _ := json.Marshal(map[string]string{"result_ref": resultRef})
-	if err := s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusCompleted, response, "", s.now()); err != nil {
-		if idemErr := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); idemErr != nil {
-			return "", fmt.Errorf("complete mutation attempt: %w; complete idempotency key after mutation attempt failure: %v", err, idemErr)
-		}
-		return "", fmt.Errorf("complete mutation attempt: %w", err)
-	}
-	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
-		return "", fmt.Errorf("complete idempotency key: %w", err)
-	}
-	return resultRef, nil
+	result, err := mutationguard.Run(ctx, s.Store, mutationguard.RunRequest{
+		Key:          key,
+		RepositoryID: s.Repo.ID,
+		MutationType: mutationType,
+		Preflight:    preflight,
+		Mutate:       fn,
+		Now:          s.now,
+	})
+	return result.ResultRef, err
 }
 
 func (s Service) repairCompletedMutationAttempt(ctx context.Context, key string, resultRef string) error {
