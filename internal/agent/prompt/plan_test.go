@@ -25,6 +25,7 @@ func writeTempPlan(t *testing.T, plan agent.Plan) string {
 func TestReadPlanFile_Valid(t *testing.T) {
 	plan := agent.Plan{
 		BatchName: "Add authentication",
+		PRSummary: "Adds authentication models and login flow with focused validation coverage.",
 		Tasks: []agent.PlannedTask{
 			{
 				Title:                   "Create User model",
@@ -51,12 +52,34 @@ func TestReadPlanFile_Valid(t *testing.T) {
 	got, err := ReadPlanFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "Add authentication", got.BatchName)
+	assert.Equal(t, "Adds authentication models and login flow with focused validation coverage.", got.PRSummary)
 	assert.Len(t, got.Tasks, 2)
 	assert.Equal(t, "Create User model", got.Tasks[0].Title)
 	assert.Equal(t, "Use bcrypt with 12 salt rounds", got.Tasks[0].ImplementationDetails)
 	assert.Equal(t, []string{"Follow existing model pattern"}, got.Tasks[0].Conventions)
 	assert.Equal(t, []string{"bcrypt is available as import"}, got.Tasks[0].ContextFromDependencies)
 	assert.Equal(t, []int{0}, got.Tasks[1].DependsOn)
+}
+
+func TestReadPlanFile_OmitsPRSummary(t *testing.T) {
+	contents := `{
+		"batch_name": "Older plan",
+		"tasks": [
+			{
+				"title": "Task A",
+				"acceptance_criteria": ["A works"]
+			}
+		]
+	}`
+	path := filepath.Join(t.TempDir(), "plan.json")
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o644))
+
+	got, err := ReadPlanFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "Older plan", got.BatchName)
+	assert.Empty(t, got.PRSummary)
+	require.Len(t, got.Tasks, 1)
+	assert.Equal(t, "Task A", got.Tasks[0].Title)
 }
 
 func TestReadPlanFile_NotExist(t *testing.T) {
@@ -82,17 +105,26 @@ func TestReadPlanFile_EmptyFile(t *testing.T) {
 
 func TestValidatePlan(t *testing.T) {
 	tests := []struct {
-		name       string
-		plan       *agent.Plan
-		wantErr    bool
-		errSubstr  string
+		name      string
+		plan      *agent.Plan
+		wantErr   bool
+		errSubstr string
 	}{
 		{
-			name:    "accepts valid plan",
-			plan:    &agent.Plan{BatchName: "b", Tasks: []agent.PlannedTask{
+			name: "accepts valid plan",
+			plan: &agent.Plan{BatchName: "b", Tasks: []agent.PlannedTask{
 				{Title: "a", AcceptanceCriteria: []string{"y"}, Complexity: "medium", Type: "feature"},
 				{Title: "b", AcceptanceCriteria: []string{"y"}, Complexity: "low", Type: "bugfix", DependsOn: []int{0}},
 			}},
+			wantErr: false,
+		},
+		{
+			name: "accepts empty pr_summary",
+			plan: &agent.Plan{
+				BatchName: "b",
+				PRSummary: "",
+				Tasks:     []agent.PlannedTask{{Title: "a", AcceptanceCriteria: []string{"y"}}},
+			},
 			wantErr: false,
 		},
 		{
@@ -187,6 +219,10 @@ func TestRenderPlanningPrompt_Basic(t *testing.T) {
 	assert.Contains(t, prompt, "You do the thinking, the Worker does the typing")
 	assert.Contains(t, prompt, "Exact file paths")
 	assert.Contains(t, prompt, "context_from_dependencies")
+	assert.Contains(t, prompt, `"pr_summary"`)
+	assert.Contains(t, prompt, "reviewer-facing summary for the generated batch PR body")
+	assert.Contains(t, prompt, "not operational bookkeeping")
+	assert.Contains(t, prompt, "Do not mention issue counts, tiers, worker branches, or Herd internals")
 	assert.NotContains(t, prompt, "Project-Specific Instructions")
 	assert.NotContains(t, prompt, "Repository Structure")
 	assert.NotContains(t, prompt, "Project Overview")
@@ -271,6 +307,7 @@ func TestPlannedTaskJSONRoundTrip(t *testing.T) {
 func TestPlanJSONRoundTrip(t *testing.T) {
 	plan := agent.Plan{
 		BatchName: "Feature X",
+		PRSummary: "Implements Feature X with staged task coverage and validation.",
 		Tasks: []agent.PlannedTask{
 			{Title: "Task 1", Description: "First", Complexity: "low", DependsOn: []int{}},
 			{Title: "Task 2", Description: "Second", Complexity: "medium", DependsOn: []int{0}},
@@ -283,6 +320,7 @@ func TestPlanJSONRoundTrip(t *testing.T) {
 	var got agent.Plan
 	require.NoError(t, json.Unmarshal(data, &got))
 	assert.Equal(t, plan, got)
+	assert.Equal(t, plan.PRSummary, got.PRSummary)
 }
 
 func TestRenderPlanningPrompt_WithRepoContext(t *testing.T) {

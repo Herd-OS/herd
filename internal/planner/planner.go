@@ -40,7 +40,7 @@ func CreateFromPlan(ctx context.Context, p platform.Platform, plan *agent.Plan, 
 	}
 
 	// 2. Create milestone
-	ms, resolvedTitle, err := createMilestoneWithUniqueName(ctx, p, plan.BatchName)
+	ms, resolvedTitle, err := createMilestoneWithUniqueName(ctx, p, plan.BatchName, strings.TrimSpace(plan.PRSummary))
 	if err != nil {
 		return nil, fmt.Errorf("creating milestone: %w", err)
 	}
