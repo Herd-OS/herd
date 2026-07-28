@@ -156,7 +156,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Event:       eventName,
 		Action:      action,
 		PayloadHash: hash,
-		Status:      "processing",
+		Status:      "intent_recorded",
 		Metadata:    mustJSON(map[string]string{"event": eventName, "action": action}),
 		ReceivedAt:  time.Now().UTC(),
 	})
@@ -182,17 +182,20 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "duplicate"})
 			return
 		}
-		if err := h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "processing", "", nil); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "update webhook delivery: storage unavailable",
-			})
+		switch existing.Status {
+		case "intent_recorded", "failed_pre_processor", "failed":
+		case "processor_started", "repair_required":
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "duplicate"})
+			return
+		default:
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "webhook delivery outcome is unknown; repair required"})
 			return
 		}
 	}
 
 	event, err := ParseEvent(eventName, payload)
 	if err != nil {
-		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "failed", err.Error(), nil)
+		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "failed_pre_processor", err.Error(), nil)
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "parse webhook payload: unsupported payload shape",
 		})
@@ -210,9 +213,15 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "processor_started", "", nil); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "update webhook delivery: storage unavailable",
+		})
+		return
+	}
 	if err := h.processEvent(r.Context(), event); err != nil {
 		h.logger.Printf("process GitHub webhook delivery=%s event=%s action=%s: %v", deliveryID, eventName, action, err)
-		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "failed", err.Error(), nil)
+		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "repair_required", err.Error(), nil)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "process webhook event: storage unavailable",
 		})

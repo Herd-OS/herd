@@ -1088,6 +1088,10 @@ func (s mutationRecorderOnlyResultStore) CompleteGitHubMutationAttempt(ctx conte
 	return s.inner.CompleteGitHubMutationAttempt(ctx, idempotencyKey, status, response, errorMessage, completedAt)
 }
 
+func (s mutationRecorderOnlyResultStore) TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error) {
+	return s.inner.TryStartGitHubMutationAttempt(ctx, idempotencyKey, allowedStatuses, completedAt)
+}
+
 type noMutationResultStore struct {
 	inner *resultStore
 }
@@ -1116,7 +1120,7 @@ func (s noMutationResultStore) FailIdempotencyKey(ctx context.Context, key strin
 	return s.inner.FailIdempotencyKey(ctx, key, errorMessage)
 }
 
-func TestHandlerRetriesReviewResultAfterProcessorFailure(t *testing.T) {
+func TestHandlerDoesNotRetryReviewResultAfterProcessorFailure(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
 	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
@@ -1134,16 +1138,11 @@ func TestHandlerRetriesReviewResultAfterProcessorFailure(t *testing.T) {
 	handler.ServeHTTP(first, resultRequest("job-1", payload))
 	second := httptest.NewRecorder()
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
-	third := httptest.NewRecorder()
-	handler.ServeHTTP(third, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	require.Equal(t, http.StatusAccepted, third.Code)
-	assert.Contains(t, second.Body.String(), `"created":true`)
-	assert.Contains(t, third.Body.String(), `"created":false`)
-	assert.Len(t, processor.calls, 2)
-	assert.Len(t, st.results, 1)
+	require.Equal(t, http.StatusInternalServerError, second.Code)
+	assert.Len(t, processor.calls, 1)
+	assert.Empty(t, st.results)
 }
 
 func TestHandlerRejectsReviewResultWhenProcessorMissing(t *testing.T) {

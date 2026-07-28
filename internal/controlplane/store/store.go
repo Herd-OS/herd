@@ -196,6 +196,13 @@ type GitHubMutationStartResult struct {
 	Attempt GitHubMutationAttempt
 }
 
+// IdempotencyStartResult reports the outcome of a guarded transition to an
+// operation-started idempotency state.
+type IdempotencyStartResult struct {
+	Started bool
+	Record  IdempotencyKey
+}
+
 // ReviewState stores the latest review state for a repo, PR, and head SHA.
 type ReviewState struct {
 	ID           int64

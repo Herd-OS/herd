@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -343,6 +344,25 @@ func TestRegistrationTokenHandlerDoesNotRetryAfterMinterFailure(t *testing.T) {
 	assert.Nil(t, st.tokens[token.ID].UsedAt)
 }
 
+func TestRegistrationTokenHandlerRetriesAfterPreCallMinterFailure(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	minter := &fakeMinter{
+		responses: []RegistrationTokenResponse{{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}},
+		errors:    []error{PreCallError{Err: errors.New("installation token unavailable")}, nil},
+	}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-pre-call-retry"}
+
+	first := serveRegistrationRequest(t, handler, req)
+	second := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusBadGateway, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+	assert.Equal(t, 2, minter.calls)
+	require.NotNil(t, st.tokens[token.ID].UsedAt)
+}
+
 func TestRegistrationTokenHandlerMintsWhenFirstCallStartedTransitionFails(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, token := newHandlerTestStore(t, now)
@@ -643,6 +663,23 @@ func (s *handlerFakeStore) TransitionIdempotencyKey(_ context.Context, key strin
 	record.ResultRef = resultRef
 	s.idempotency[key] = record
 	return true, nil
+}
+
+func (s *handlerFakeStore) TryStartIdempotencyKey(_ context.Context, key string, toStatus string, resultRef string, retryableFailedPrefix string) (store.IdempotencyStartResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idempotency[key]
+	if !ok {
+		return store.IdempotencyStartResult{}, store.ErrNotFound
+	}
+	retryableFailed := record.Status == "failed" && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
+	if record.Status != idempotencyStatusStarted && !retryableFailed {
+		return store.IdempotencyStartResult{Started: false, Record: record}, nil
+	}
+	record.Status = toStatus
+	record.ResultRef = resultRef
+	s.idempotency[key] = record
+	return store.IdempotencyStartResult{Started: true, Record: record}, nil
 }
 
 type fakeMinter struct {

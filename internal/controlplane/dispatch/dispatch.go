@@ -84,6 +84,10 @@ type MutationReader interface {
 	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
 }
 
+type MutationStarter interface {
+	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
+}
+
 type GitHubMutationResult struct {
 	Status      string
 	Response    json.RawMessage
@@ -294,8 +298,17 @@ func (d Dispatcher) markMutationDispatching(ctx context.Context, idempotencyKey 
 	if !ok {
 		return fmt.Errorf("workflow dispatch mutation recorder is required")
 	}
-	if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutationStatusDispatching, nil, "", time.Now().UTC()); err != nil {
+	starter, ok := d.Store.(MutationStarter)
+	if !ok {
+		return fmt.Errorf("workflow dispatch mutation starter is required")
+	}
+	start, err := starter.TryStartGitHubMutationAttempt(ctx, idempotencyKey, []string{mutationStatusPreDispatch, mutations.PhaseFailedPreCall}, time.Now().UTC())
+	if err != nil {
+		_ = recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutations.PhaseFailedPreCall, nil, err.Error(), time.Now().UTC())
 		return fmt.Errorf("mark workflow dispatch mutation in-flight: %w", err)
+	}
+	if !start.Started {
+		return fmt.Errorf("workflow dispatch mutation %q is %s; repair required before retry", idempotencyKey, start.Attempt.Status)
 	}
 	return nil
 }
@@ -334,9 +347,6 @@ func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchReque
 			}
 			switch attempt.Status {
 			case mutations.PhaseFailedPreCall:
-				if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutationStatusPreDispatch, nil, "", now); err != nil {
-					return fmt.Errorf("reopen workflow dispatch mutation attempt: %w", err)
-				}
 				return nil
 			case mutationStatusPreDispatch:
 				return nil
@@ -543,6 +553,9 @@ func (d Dispatcher) requireMutationStore() error {
 	}
 	if _, ok := d.Store.(MutationReader); !ok {
 		return fmt.Errorf("workflow dispatch mutation reader is required")
+	}
+	if _, ok := d.Store.(MutationStarter); !ok {
+		return fmt.Errorf("workflow dispatch mutation starter is required")
 	}
 	return nil
 }
