@@ -179,15 +179,59 @@ func TestPackageClusterFromFinding(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"internal dispatch", "internal/controlplane/dispatch/worker.go: bug", "internal/controlplane/dispatch"},
-		{"internal commands", "`internal/controlplane/commands/review.go`: bug", "internal/controlplane/commands"},
-		{"sibling package", "web/src/review/history.ts: bug", "web/src/review"},
+		{"cmd service", "cmd/herd-service/main.go: bug", "cmd/herd-service"},
+		{"internal jobs", "internal/controlplane/jobs/review.go: bug", "internal/controlplane/jobs"},
+		{"internal review", "`internal/controlplane/review/non_convergence.go`: bug", "internal/controlplane/review"},
+		{"internal orchestration", "internal/controlplane/orchestration/runner.go: bug", "internal/controlplane/orchestration"},
+		{"internal git", "internal/git/repo.go: bug", "internal/git"},
+		{"docs", "docs/review.md: bug", "docs"},
+		{"specs", "specs/api.md: bug", "specs"},
+		{"fraction", "1/9", ""},
+		{"fraction two", "2/9", ""},
+		{"chunk label", "Chunk 1/9", ""},
+		{"diff coverage", "Diff Coverage", ""},
+		{"review aggregation", "Review Aggregation", ""},
+		{"files reviewed", "Files reviewed", ""},
+		{"local git source", "Source: local-git", ""},
 		{"empty", "no path here", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, packageClusterFromFinding(tt.in))
 		})
+	}
+}
+
+func TestExtractReviewFindingsBySeverityStopsBeforeCoverageMetadata(t *testing.T) {
+	body := strings.Join([]string{
+		"🔍 **HerdOS Agent Review** (cycle 64 of 100)",
+		"",
+		"**HIGH**:",
+		"- internal/controlplane/jobs/a.go: durable mutation lacks idempotency before workflow retry",
+		"- internal/controlplane/jobs/b.go: durable mutation lacks idempotency before workflow retry",
+		"- internal/controlplane/jobs/c.go: durable mutation lacks idempotency before workflow retry",
+		"",
+		"## Diff Coverage",
+		"- Chunk 1/9",
+		"- 2/9",
+		"- Chunks reviewed: 9/9",
+		"",
+		"## Review Aggregation",
+		"- Files reviewed: internal/controlplane/jobs/a.go",
+		"- Source: local-git",
+	}, "\n")
+
+	findings := extractReviewFindingsBySeverity(body)
+	require.Len(t, findings["HIGH"], 3)
+	for _, noisy := range []string{"1/9", "2/9", "Chunk 1/9", "Chunks reviewed: 9/9", "Diff Coverage", "Review Aggregation", "Files reviewed", "Source: local-git"} {
+		assert.NotContains(t, strings.Join(findings["HIGH"], "\n"), noisy)
+	}
+
+	cluster := buildReviewConvergenceCluster([]reviewHistoryCycle{{Cycle: 64, FindingsBySeverity: findings}})
+	assert.Contains(t, cluster.PackageClusters, "internal/controlplane/jobs")
+	for _, noisy := range []string{"1/9", "2/9", "Chunk 1/9", "Chunks reviewed: 9/9"} {
+		assert.NotContains(t, cluster.PackageClusters, noisy)
+		assert.NotContains(t, cluster.Summary, noisy)
 	}
 }
 
@@ -377,22 +421,28 @@ func TestBuildStrategyFixIssueTitle(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "package cluster wins",
-			cycle:   6,
-			cluster: reviewConvergenceCluster{PackageClusters: []string{"internal/controlplane/dispatch"}, RootCauseTerms: []string{"idempotency"}},
-			want:    "Review strategy fix (cycle 6): internal/controlplane/dispatch",
+			name:    "durable mutation title",
+			cycle:   65,
+			cluster: reviewConvergenceCluster{PackageClusters: []string{"internal/controlplane/review"}, RootCauseTerms: []string{"durable", "mutation"}},
+			want:    "Review strategy fix (cycle 65): durable mutation boundary gaps",
 		},
 		{
-			name:    "root cause fallback",
-			cycle:   7,
-			cluster: reviewConvergenceCluster{RootCauseTerms: []string{"idempotency"}},
-			want:    "Review strategy fix (cycle 7): idempotency",
+			name:    "hosted app package plus terms",
+			cycle:   65,
+			cluster: reviewConvergenceCluster{PackageClusters: []string{"cmd/herd-hosted-app"}, RootCauseTerms: []string{"idempotency", "repair"}},
+			want:    "Review strategy fix (cycle 65): hosted App idempotency repair",
+		},
+		{
+			name:    "control plane retry title",
+			cycle:   65,
+			cluster: reviewConvergenceCluster{PackageClusters: []string{"internal/controlplane/jobs"}, RootCauseTerms: []string{"retry", "workflow"}},
+			want:    "Review strategy fix (cycle 65): repeated control-plane retry failures",
 		},
 		{
 			name:    "default fallback",
-			cycle:   8,
-			cluster: reviewConvergenceCluster{},
-			want:    "Review strategy fix (cycle 8): non-converging review loop",
+			cycle:   65,
+			cluster: reviewConvergenceCluster{PackageClusters: []string{"1/9", "Chunk 1/9"}, RootCauseTerms: []string{"Diff Coverage"}},
+			want:    "Review strategy fix (cycle 65): repeated review findings",
 		},
 		{
 			name:    "long title is truncated",
@@ -412,6 +462,7 @@ func TestBuildStrategyFixIssueTitle(t *testing.T) {
 
 func TestBuildStrategyFixIssueBody(t *testing.T) {
 	analysis := reviewStrategyAnalysisFixture()
+	title := buildStrategyFixIssueTitle(6, analysis.Cluster)
 	body := buildStrategyFixIssueBody(
 		&platform.Milestone{Number: 111, Title: "Batch"},
 		&platform.PullRequest{Number: 849, Title: "[herd] Batch"},
@@ -430,9 +481,18 @@ func TestBuildStrategyFixIssueBody(t *testing.T) {
 
 	assert.Contains(t, parsed.Task, "shared architecture/design problem")
 	assert.Contains(t, parsed.Task, "Do not process each endpoint-level finding independently")
-	assert.Contains(t, parsed.ImplementationDetails, "durable mutation/idempotency boundary")
-	assert.Contains(t, parsed.ImplementationDetails, "shared state transitions")
-	assert.Contains(t, parsed.ImplementationDetails, "repeated dispatch, retry, and unknown-state repair paths")
+	assert.Contains(t, parsed.ImplementationDetails, "## Repeated Pattern")
+	assert.Contains(t, parsed.ImplementationDetails, "## Representative Findings")
+	assert.Contains(t, parsed.ImplementationDetails, "## Prior Fix Attempts")
+	assert.Contains(t, parsed.ImplementationDetails, "## Strategy Guidance")
+	assert.Contains(t, parsed.ImplementationDetails, "internal/controlplane/commands, internal/controlplane/dispatch")
+	assert.Contains(t, parsed.ImplementationDetails, "durable GitHub-visible mutation boundaries")
+	assert.Contains(t, parsed.ImplementationDetails, "pre-call, call-started, post-call-unknown, completed, failed-pre-call, and repair-required states")
+	assert.Contains(t, parsed.ImplementationDetails, "comments, issues, or workflow dispatches")
+	assert.Contains(t, parsed.ImplementationDetails, "Cycle 5 HIGH: internal/controlplane/dispatch/worker.go: retry can duplicate workflow dispatches after post-call unknown state")
+	assert.Contains(t, parsed.ImplementationDetails, "#951 (cycle 3): herd/status:done; success; worker report present; files: internal/controlplane/commands/review.go")
+	assert.Contains(t, parsed.ImplementationDetails, "#952 (cycle 4): herd/status:done; success; worker report present; files: internal/controlplane/dispatch/worker.go")
+	assert.Contains(t, parsed.ImplementationDetails, "Fix the shared invariant or state transition")
 	assert.Contains(t, parsed.Criteria, "Architecture-level abstraction or invariant is documented in code.")
 	assert.Contains(t, parsed.Criteria, "Clustered packages are migrated to the strategy or explicitly justified if a package is left unchanged.")
 	assert.Contains(t, parsed.Criteria, "Idempotency and repair behavior is covered by regression tests.")
@@ -443,7 +503,7 @@ func TestBuildStrategyFixIssueBody(t *testing.T) {
 	assert.Contains(t, parsed.Context, "Completed fix issues: #951, #952")
 	assert.Contains(t, parsed.Context, "In-progress fix issues: #953")
 	assert.Contains(t, parsed.Context, "Dominant package clusters: internal/controlplane/commands, internal/controlplane/dispatch")
-	assert.Contains(t, parsed.Context, "Dominant root-cause terms: idempotency, retry")
+	assert.Contains(t, parsed.Context, "Dominant root-cause terms: durable, idempotency, mutation, retry")
 	assert.Contains(t, parsed.Context, "Rationale: finding trend is increasing or flat after completed fix cycles")
 
 	fingerprint, ok := parseReviewNonConvergenceFingerprint(body)
@@ -451,7 +511,11 @@ func TestBuildStrategyFixIssueBody(t *testing.T) {
 	assert.Equal(t, analysis.Cluster.Fingerprint, fingerprint)
 	assert.Contains(t, body, `"version":1`)
 	assert.Contains(t, body, `"batch_pr":849`)
-	assert.NotContains(t, body, "internal/controlplane/dispatch/worker.go: durable mutation lacks idempotency")
+	for _, noisy := range []string{"1/9", "Chunk 1/9", "Diff Coverage", "Review Aggregation", "Files reviewed", "Source: local-git"} {
+		assert.NotContains(t, body, noisy)
+		assert.NotContains(t, title, noisy)
+		assert.NotContains(t, parsed.Context, noisy)
+	}
 }
 
 func TestSynthesizedReviewStrategyFingerprintNormalizesRootCauseAndSymptoms(t *testing.T) {
@@ -580,7 +644,10 @@ func TestBuildReviewNonConvergencePRComment(t *testing.T) {
 	assert.Contains(t, comment, "Finding count trend: 14, 20, 20")
 	assert.Contains(t, comment, "Fix issues considered: #951, #952, #953")
 	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/commands, internal/controlplane/dispatch")
-	assert.Contains(t, comment, "Dominant root-cause terms: idempotency, retry")
+	assert.Contains(t, comment, "Dominant root-cause terms: durable, idempotency, mutation, retry")
+	for _, noisy := range []string{"1/9", "Chunk 1/9", "Diff Coverage", "Review Aggregation", "Files reviewed", "Source: local-git"} {
+		assert.NotContains(t, comment, noisy)
+	}
 	assert.Contains(t, comment, "Escalation reason: finding trend is increasing or flat after completed fix cycles")
 	assert.Contains(t, comment, "Strategy fix issue: #954")
 	assert.NotContains(t, comment, "/herd fix")
@@ -825,20 +892,60 @@ func reviewHistoryCycleWithFinding(cycle, count int, finding string) reviewHisto
 
 func reviewStrategyAnalysisFixture() reviewConvergenceAnalysis {
 	return reviewConvergenceAnalysis{
-		Decision:             reviewDecisionEscalateToArchitectureFix,
-		Confidence:           0.86,
-		Rationale:            "finding trend is increasing or flat after completed fix cycles",
-		Cycles:               []reviewHistoryCycle{{Cycle: 3}, {Cycle: 4}, {Cycle: 5}},
+		Decision:   reviewDecisionEscalateToArchitectureFix,
+		Confidence: 0.86,
+		Rationale:  "finding trend is increasing or flat after completed fix cycles",
+		Cycles: []reviewHistoryCycle{
+			{
+				Cycle: 3,
+				FindingsBySeverity: map[string][]string{
+					"HIGH": {
+						"internal/controlplane/commands/review.go: durable mutation lacks idempotency before retry",
+						"Chunk 1/9",
+					},
+				},
+				FixIssues: []reviewHistoryFixIssue{{
+					Number:           951,
+					StatusLabel:      issues.StatusDone,
+					WorkerReport:     true,
+					ValidationStatus: "success",
+					FilesSummary:     []string{"internal/controlplane/commands/review.go", "1/9"},
+				}},
+			},
+			{
+				Cycle: 4,
+				FindingsBySeverity: map[string][]string{
+					"HIGH": {"internal/controlplane/dispatch/worker.go: mutation boundary allows duplicate issue comments"},
+				},
+				FixIssues: []reviewHistoryFixIssue{{
+					Number:           952,
+					StatusLabel:      issues.StatusDone,
+					WorkerReport:     true,
+					ValidationStatus: "success",
+					FilesSummary:     []string{"internal/controlplane/dispatch/worker.go", "Source: local-git"},
+				}},
+			},
+			{
+				Cycle: 5,
+				FindingsBySeverity: map[string][]string{
+					"HIGH": {
+						"internal/controlplane/dispatch/worker.go: retry can duplicate workflow dispatches after post-call unknown state",
+						"Diff Coverage",
+					},
+				},
+				FixIssues: []reviewHistoryFixIssue{{Number: 953, StatusLabel: issues.StatusInProgress}},
+			},
+		},
 		TrendCounts:          []int{14, 20, 20},
 		CompletedFixIssues:   []int{951, 952},
 		InProgressFixIssues:  []int{953},
 		LatestFindingCount:   20,
 		EarliestFindingCount: 14,
 		Cluster: reviewConvergenceCluster{
-			PackageClusters: []string{"internal/controlplane/commands", "internal/controlplane/dispatch"},
-			RootCauseTerms:  []string{"idempotency", "retry"},
+			PackageClusters: []string{"internal/controlplane/commands", "internal/controlplane/dispatch", "Chunk 1/9"},
+			RootCauseTerms:  []string{"durable", "idempotency", "mutation", "retry", "Diff Coverage"},
 			Fingerprint:     "fp-match",
-			Summary:         "packages: internal/controlplane/commands, internal/controlplane/dispatch; root causes: idempotency, retry",
+			Summary:         "packages: internal/controlplane/commands, internal/controlplane/dispatch; root causes: durable, idempotency, mutation, retry",
 		},
 	}
 }
