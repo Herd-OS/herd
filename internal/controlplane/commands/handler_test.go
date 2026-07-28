@@ -237,13 +237,15 @@ func TestHandlerEditedCommentIdempotent(t *testing.T) {
 
 func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
 	tests := []struct {
-		body string
-		kind CommandKind
+		body      string
+		kind      CommandKind
+		wantIssue int
+		wantPR    int
 	}{
-		{body: "@herd-os review", kind: CommandReview},
-		{body: "@herd-os fix", kind: CommandFix},
-		{body: "@herd-os fix-ci", kind: CommandFixCI},
-		{body: "@herd-os resolve-conflicts", kind: CommandResolveConflicts},
+		{body: "@herd-os review", kind: CommandReview, wantIssue: 7, wantPR: 7},
+		{body: "@herd-os fix update auth error handling", kind: CommandFix, wantIssue: 0, wantPR: 7},
+		{body: "@herd-os fix-ci failing tests mention missing env var", kind: CommandFixCI, wantIssue: 0, wantPR: 7},
+		{body: "@herd-os resolve-conflicts", kind: CommandResolveConflicts, wantIssue: 7, wantPR: 7},
 	}
 
 	for _, tt := range tests {
@@ -260,6 +262,8 @@ func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
 			require.Len(t, gh.comments, 1)
 			require.Len(t, dispatcher.dispatched, 1)
 			assert.Equal(t, tt.kind, dispatcher.dispatched[0].Command.Kind)
+			assert.Equal(t, tt.wantIssue, dispatcher.dispatched[0].IssueNumber)
+			assert.Equal(t, tt.wantPR, dispatcher.dispatched[0].PRNumber)
 		})
 	}
 }

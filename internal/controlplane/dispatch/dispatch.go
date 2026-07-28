@@ -49,6 +49,7 @@ type DispatchRequest struct {
 	BaseSHA         string
 	HeadSHA         string
 	ExpectedHeadSHA string
+	Mode            string
 	RunnerLabel     string
 	TimeoutMinutes  int
 	ControlPlaneURL string
@@ -167,6 +168,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		"owner":             req.Owner,
 		"repo":              req.Repo,
 		"expected_head_sha": req.ExpectedHeadSHA,
+		"mode":              req.Mode,
 		"runner_label":      req.RunnerLabel,
 		"timeout_minutes":   req.TimeoutMinutes,
 		"reason":            req.Reason,

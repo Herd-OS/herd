@@ -136,9 +136,13 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		dispatchable = false
 	}
 	if dispatchable {
-		metadataBody["issue_number"] = event.IssueNumber
 		if strings.TrimSpace(event.PullRequestURL) != "" {
 			metadataBody["pr_number"] = event.IssueNumber
+			if commandUsesPRAsIssueNumber(cmd.Kind) {
+				metadataBody["issue_number"] = event.IssueNumber
+			}
+		} else {
+			metadataBody["issue_number"] = event.IssueNumber
 		}
 	}
 	metadata, err := json.Marshal(metadataBody)
@@ -160,19 +164,25 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 	if strings.TrimSpace(event.PullRequestURL) != "" {
 		prNumber = event.IssueNumber
 	}
+	issueNumber := event.IssueNumber
+	if prNumber > 0 && commandCreatesDurableFixIssue(cmd.Kind) {
+		issueNumber = 0
+	}
 	if dispatchPending && dispatchable {
 		if h.Dispatcher == nil {
 			return Result{}, fmt.Errorf("command dispatcher is not configured")
 		}
-		if err := h.markCommandDispatching(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
-			return Result{}, err
+		if !commandCreatesDurableFixIssue(cmd.Kind) {
+			if err := h.markCommandDispatching(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
+				return Result{}, err
+			}
 		}
 		if err := h.Dispatcher.DispatchCommand(ctx, DispatchCommand{
 			RepositoryID:   repo.ID,
 			InstallationID: repo.InstallationID,
 			Owner:          event.Owner,
 			Repo:           event.Repo,
-			IssueNumber:    event.IssueNumber,
+			IssueNumber:    issueNumber,
 			PRNumber:       prNumber,
 			CommentID:      event.CommentID,
 			Actor:          event.SenderLogin,
@@ -241,9 +251,13 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 		"action":             event.Action,
 	}
 	if dispatchable {
-		metadataBody["issue_number"] = event.IssueNumber
 		if strings.TrimSpace(event.PullRequestURL) != "" {
 			metadataBody["pr_number"] = event.IssueNumber
+			if commandUsesPRAsIssueNumber(cmd.Kind) {
+				metadataBody["issue_number"] = event.IssueNumber
+			}
+		} else {
+			metadataBody["issue_number"] = event.IssueNumber
 		}
 	}
 	metadata, err := json.Marshal(metadataBody)
@@ -524,6 +538,19 @@ func commandRequiresPR(kind CommandKind) bool {
 	default:
 		return false
 	}
+}
+
+func commandCreatesDurableFixIssue(kind CommandKind) bool {
+	switch kind {
+	case CommandFix, CommandFixCI:
+		return true
+	default:
+		return false
+	}
+}
+
+func commandUsesPRAsIssueNumber(kind CommandKind) bool {
+	return !commandCreatesDurableFixIssue(kind)
 }
 
 func migrationResponse(appLogin string) string {

@@ -37,6 +37,9 @@ func WorkflowInputs(req DispatchRequest, jobID string) (map[string]string, error
 	if req.PRNumber > 0 {
 		inputs["pr_number"] = strconv.Itoa(req.PRNumber)
 	}
+	if req.Mode != "" {
+		inputs["mode"] = req.Mode
+	}
 	if req.RunnerLabel != "" {
 		inputs["runner_label"] = req.RunnerLabel
 	}

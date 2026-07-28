@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/cli"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
 	"github.com/herd-os/herd/internal/controlplane/commands"
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
 	"github.com/herd-os/herd/internal/controlplane/jobs"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/controlplane/workflowevents"
 	"github.com/herd-os/herd/internal/integrator"
@@ -130,7 +130,7 @@ func TestCommandTargetFromPullRequest(t *testing.T) {
 		name      string
 		kind      commands.CommandKind
 		issue     int
-		milestone *gh.Milestone
+		head      string
 		wantBatch int
 		wantIssue int
 		wantErr   string
@@ -138,13 +138,14 @@ func TestCommandTargetFromPullRequest(t *testing.T) {
 		{
 			name:      "review without batch milestone uses PR number context",
 			kind:      commands.CommandReview,
+			head:      "feature-branch",
 			wantBatch: 42,
 			wantIssue: 42,
 		},
 		{
-			name:      "review with batch milestone uses milestone",
+			name:      "review with batch branch uses batch number",
 			kind:      commands.CommandReview,
-			milestone: &gh.Milestone{Number: gh.Ptr(849)},
+			head:      "herd/batch/849-hosted-app",
 			wantBatch: 849,
 			wantIssue: 42,
 		},
@@ -152,17 +153,20 @@ func TestCommandTargetFromPullRequest(t *testing.T) {
 			name:      "fix with tracking issue uses durable issue number",
 			kind:      commands.CommandFix,
 			issue:     101,
+			head:      "feature-branch",
 			wantBatch: 42,
 			wantIssue: 101,
 		},
 		{
 			name:    "fix without tracking issue is rejected",
 			kind:    commands.CommandFix,
+			head:    "feature-branch",
 			wantErr: "durable fix issue number",
 		},
 		{
 			name:    "fix-ci without tracking issue is rejected",
 			kind:    commands.CommandFixCI,
+			head:    "herd/batch/42-command-surface",
 			wantErr: "durable fix issue number",
 		},
 	}
@@ -172,19 +176,20 @@ func TestCommandTargetFromPullRequest(t *testing.T) {
 				IssueNumber: tt.issue,
 				PRNumber:    42,
 				Command:     commands.ParsedCommand{Kind: tt.kind},
-			}, &gh.PullRequest{
-				Head: &gh.PullRequestBranch{
-					Ref: gh.Ptr("feature-branch"),
-					SHA: gh.Ptr("head-sha"),
-				},
-				Base: &gh.PullRequestBranch{
-					Ref: gh.Ptr("main"),
-					SHA: gh.Ptr("base-sha"),
-				},
-				Milestone: tt.milestone,
+			}, &platform.PullRequest{
+				Head:    tt.head,
+				HeadSHA: "head-sha",
+				Base:    "main",
+				BaseSHA: "base-sha",
 			})
 
 			if tt.wantErr != "" {
+				require.NoError(t, err)
+				err = validateCommandTarget(commands.DispatchCommand{
+					IssueNumber: tt.issue,
+					PRNumber:    42,
+					Command:     commands.ParsedCommand{Kind: tt.kind},
+				}, target)
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
 				return
@@ -192,8 +197,8 @@ func TestCommandTargetFromPullRequest(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantBatch, target.BatchNumber)
 			assert.Equal(t, tt.wantIssue, target.IssueNumber)
-			assert.Equal(t, "feature-branch", target.Ref)
-			assert.Equal(t, "feature-branch", target.BatchBranch)
+			assert.Equal(t, tt.head, target.Ref)
+			assert.Equal(t, tt.head, target.BatchBranch)
 			assert.Equal(t, "head-sha", target.BaseSHA)
 			assert.Equal(t, "head-sha", target.HeadSHA)
 		})
@@ -335,6 +340,184 @@ func TestProductionDispatchCommandDispatchesReadyIssue(t *testing.T) {
 	assert.Contains(t, p.issues.byNumber[42].Labels, issues.StatusInProgress)
 	assert.NotContains(t, p.issues.byNumber[42].Labels, issues.StatusReady)
 	assert.Contains(t, strings.Join(p.issues.comments[7], "\n"), "Dispatched worker for issue #42")
+}
+
+func TestProductionFixCommandsCreateTrackingIssueAndDispatchCreatedIssue(t *testing.T) {
+	tests := []struct {
+		name          string
+		kind          commands.CommandKind
+		args          []string
+		wantBody      []string
+		wantCIFix     bool
+		wantFixCycle  bool
+		wantIssueType string
+	}{
+		{
+			name:          "fix",
+			kind:          commands.CommandFix,
+			args:          []string{"update", "auth", "error", "handling"},
+			wantBody:      []string{"update auth error handling", "via `@herd-os fix`", "batch_pr: 849", "fix_cycle: 1"},
+			wantFixCycle:  true,
+			wantIssueType: issues.TypeFix,
+		},
+		{
+			name:          "fix-ci",
+			kind:          commands.CommandFixCI,
+			args:          []string{"failing", "tests", "mention", "missing", "env", "var"},
+			wantBody:      []string{"failing tests mention missing env var", "via `@herd-os fix-ci`", "batch_pr: 849", "ci_fix_cycle: 1"},
+			wantCIFix:     true,
+			wantIssueType: issues.TypeFix,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newFakeCommandPlatform([]*platform.PullRequest{{
+				Number:  849,
+				Head:    "herd/batch/106-hosted-app",
+				Base:    "main",
+				HeadSHA: "head-sha",
+				BaseSHA: "base-sha",
+			}})
+			p.ms.milestones[106] = &platform.Milestone{Number: 106, Title: "Hosted App"}
+			workflow := &recordingWorkflowClient{}
+			d := productionCommandDispatcher{
+				Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: workflow},
+				ControlPlaneURL: "https://control.example.test",
+				DefaultRunner:   "herd-worker",
+				TimeoutMinutes:  30,
+				PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+					return p, nil
+				},
+			}
+
+			err := d.DispatchCommand(context.Background(), commands.DispatchCommand{
+				RepositoryID:   42,
+				InstallationID: 77,
+				Owner:          "octo",
+				Repo:           "herd",
+				IssueNumber:    0,
+				PRNumber:       849,
+				CommentID:      123,
+				Actor:          "maintainer",
+				Command:        commands.ParsedCommand{Kind: tt.kind, Args: tt.args},
+			})
+
+			require.NoError(t, err)
+			require.Len(t, p.issues.created, 1)
+			created := p.issues.created[0]
+			require.NotEqual(t, 849, created.Number)
+			assert.Equal(t, 100, created.Number)
+			assert.Equal(t, &platform.Milestone{Number: 106}, created.Milestone)
+			assert.Contains(t, created.Labels, tt.wantIssueType)
+			assert.Contains(t, created.Labels, issues.StatusInProgress)
+			for _, want := range tt.wantBody {
+				assert.Contains(t, created.Body, want)
+			}
+			parsed, parseErr := issues.ParseBody(created.Body)
+			require.NoError(t, parseErr)
+			assert.Equal(t, "fix", parsed.FrontMatter.Type)
+			assert.Equal(t, tt.wantFixCycle, parsed.FrontMatter.FixCycle > 0)
+			assert.Equal(t, tt.wantCIFix, parsed.FrontMatter.CIFixCycle > 0)
+
+			require.Len(t, workflow.dispatches, 1)
+			assert.Equal(t, "herd-worker.yml", workflow.dispatches[0].workflowFile)
+			assert.Equal(t, "herd/batch/106-hosted-app", workflow.dispatches[0].ref)
+			assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
+			assert.Equal(t, "849", workflow.dispatches[0].inputs["pr_number"])
+		})
+	}
+}
+
+func TestProductionFixCommandDuplicateDoesNotCreateSecondIssueOrDispatch(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{{
+		Number:  849,
+		Head:    "herd/batch/106-hosted-app",
+		Base:    "main",
+		HeadSHA: "head-sha",
+		BaseSHA: "base-sha",
+	}})
+	p.ms.milestones[106] = &platform.Milestone{Number: 106, Title: "Hosted App"}
+	workflow := &recordingWorkflowClient{}
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+	cmd := commands.DispatchCommand{
+		RepositoryID:   42,
+		InstallationID: 77,
+		Owner:          "octo",
+		Repo:           "herd",
+		PRNumber:       849,
+		CommentID:      123,
+		Actor:          "maintainer",
+		Command:        commands.ParsedCommand{Kind: commands.CommandFix, Args: []string{"update", "auth", "error", "handling"}},
+	}
+
+	err := d.DispatchCommand(context.Background(), cmd)
+	require.NoError(t, err)
+	err = d.DispatchCommand(context.Background(), cmd)
+	require.NoError(t, err)
+
+	assert.Len(t, p.issues.created, 1)
+	assert.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
+}
+
+func TestProductionFixCommandRecoversCreatedIssueAfterCompletionFailure(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{{
+		Number:  849,
+		Head:    "herd/batch/106-hosted-app",
+		Base:    "main",
+		HeadSHA: "head-sha",
+		BaseSHA: "base-sha",
+	}})
+	p.ms.milestones[106] = &platform.Milestone{Number: 106, Title: "Hosted App"}
+	workflow := &recordingWorkflowClient{}
+	st := store.NewMemoryStore()
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: st, GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+	cmd := commands.DispatchCommand{
+		RepositoryID:   42,
+		InstallationID: 77,
+		Owner:          "octo",
+		Repo:           "herd",
+		PRNumber:       849,
+		CommentID:      123,
+		Actor:          "maintainer",
+		Command:        commands.ParsedCommand{Kind: commands.CommandFix, Args: []string{"update", "auth", "error", "handling"}},
+	}
+
+	key := commandFixIssueKey(cmd)
+	_, err := st.AcquireIdempotencyKey(context.Background(), store.IdempotencyKey{Key: key, Scope: "command_fix_issue_create", Status: mutations.PhaseIntentRecorded, CreatedAt: time.Now().UTC()})
+	require.NoError(t, err)
+	p.issues.created = append(p.issues.created, &platform.Issue{
+		Number:    100,
+		Title:     "Fix: update auth error handling",
+		Body:      injectCommandFixIssueMarker(issues.RenderBody(issues.IssueBody{FrontMatter: issues.FrontMatter{Version: 1, Batch: 106, Type: "fix", FixCycle: 1, BatchPR: 849}, Task: "update auth error handling"}), cmd),
+		Labels:    []string{issues.TypeFix, issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 106},
+	})
+	p.issues.byNumber[100] = p.issues.created[0]
+
+	err = d.DispatchCommand(context.Background(), cmd)
+
+	require.NoError(t, err)
+	assert.Len(t, p.issues.created, 1)
+	require.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
+	assert.NotEqual(t, "849", workflow.dispatches[0].inputs["issue_number"])
 }
 
 func validProductionServiceConfig(t *testing.T) service.Config {
@@ -554,7 +737,9 @@ func (s *fakeCommandIssueService) Get(_ context.Context, number int) (*platform.
 	return issue, nil
 }
 func (s *fakeCommandIssueService) List(context.Context, platform.IssueFilters) ([]*platform.Issue, error) {
-	return s.listed, nil
+	out := append([]*platform.Issue(nil), s.listed...)
+	out = append(out, s.created...)
+	return out, nil
 }
 func (s *fakeCommandIssueService) AddLabels(_ context.Context, number int, labels []string) error {
 	issue, ok := s.byNumber[number]

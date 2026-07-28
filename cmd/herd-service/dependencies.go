@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strconv"
@@ -17,6 +19,7 @@ import (
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
 	cpgithub "github.com/herd-os/herd/internal/controlplane/github"
 	"github.com/herd-os/herd/internal/controlplane/jobs"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/reconciler"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/runners"
@@ -187,7 +190,7 @@ func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd co
 	if err != nil {
 		return err
 	}
-	if d.TokenSource == nil {
+	if d.TokenSource == nil && d.PlatformFactory == nil {
 		return fmt.Errorf("production command dispatch requires GitHub App token source")
 	}
 	if d.Dispatcher.Store == nil || d.Dispatcher.GitHub == nil {
@@ -212,6 +215,7 @@ func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd co
 		BaseSHA:         target.BaseSHA,
 		HeadSHA:         target.HeadSHA,
 		ExpectedHeadSHA: target.HeadSHA,
+		Mode:            target.Mode,
 		RunnerLabel:     d.DefaultRunner,
 		TimeoutMinutes:  d.TimeoutMinutes,
 		ControlPlaneURL: d.ControlPlaneURL,
@@ -506,6 +510,7 @@ type commandTarget struct {
 	BaseSHA     string
 	HeadSHA     string
 	Ref         string
+	Mode        string
 }
 
 func (d productionCommandDispatcher) resolveCommandTarget(ctx context.Context, cmd commands.DispatchCommand) (commandTarget, error) {
@@ -515,43 +520,58 @@ func (d productionCommandDispatcher) resolveCommandTarget(ctx context.Context, c
 	if cmd.PRNumber <= 0 {
 		return commandTarget{}, fmt.Errorf("production command dispatch requires durable PR context")
 	}
-	client, _, err := appauth.NewInstallationClient(ctx, d.TokenSource, cmd.InstallationID)
+	p, err := d.commandPlatform(ctx, cmd)
 	if err != nil {
-		return commandTarget{}, fmt.Errorf("create installation client for command dispatch: %w", err)
+		return commandTarget{}, err
 	}
-	pr, _, err := client.PullRequests.Get(ctx, cmd.Owner, cmd.Repo, cmd.PRNumber)
+	pr, err := p.PullRequests().Get(ctx, cmd.PRNumber)
 	if err != nil {
 		return commandTarget{}, fmt.Errorf("lookup PR #%d for command dispatch: %w", cmd.PRNumber, err)
 	}
-	return commandTargetFromPullRequest(cmd, pr)
+	target, err := commandTargetFromPullRequest(cmd, pr)
+	if err != nil {
+		return commandTarget{}, err
+	}
+	if cmd.Command.Kind == commands.CommandFix || cmd.Command.Kind == commands.CommandFixCI {
+		issueNumber, err := d.ensureCommandFixIssue(ctx, p, cmd, pr, target)
+		if err != nil {
+			return commandTarget{}, err
+		}
+		target.IssueNumber = issueNumber
+		if !strings.HasPrefix(pr.Head, "herd/batch/") {
+			target.Mode = "standalone"
+		}
+	}
+	if err := validateCommandTarget(cmd, target); err != nil {
+		return commandTarget{}, err
+	}
+	return target, nil
 }
 
-func commandTargetFromPullRequest(cmd commands.DispatchCommand, pr *gh.PullRequest) (commandTarget, error) {
+func commandTargetFromPullRequest(cmd commands.DispatchCommand, pr *platform.PullRequest) (commandTarget, error) {
 	if pr == nil {
 		return commandTarget{}, fmt.Errorf("production command dispatch requires PR #%d", cmd.PRNumber)
 	}
-	head := pr.GetHead()
-	headSHA := head.GetSHA()
+	headSHA := pr.HeadSHA
 	if strings.TrimSpace(headSHA) == "" {
 		return commandTarget{}, fmt.Errorf("production command dispatch requires PR #%d head SHA", cmd.PRNumber)
 	}
-	batchBranch := head.GetRef()
+	batchBranch := pr.Head
 	if strings.TrimSpace(batchBranch) == "" {
 		return commandTarget{}, fmt.Errorf("production command dispatch requires PR #%d head branch", cmd.PRNumber)
 	}
 	batchNumber := 0
-	if pr.Milestone != nil {
-		batchNumber = pr.Milestone.GetNumber()
+	if strings.HasPrefix(batchBranch, "herd/batch/") {
+		if parsed, err := integrator.ParseBatchBranchMilestone(batchBranch); err == nil {
+			batchNumber = parsed
+		}
 	}
 	if batchNumber <= 0 {
 		batchNumber = cmd.PRNumber
 	}
 	issueNumber := cmd.IssueNumber
 	if issueNumber <= 0 {
-		if cmd.Command.Kind == commands.CommandFix || cmd.Command.Kind == commands.CommandFixCI {
-			return commandTarget{}, fmt.Errorf("production %s command dispatch requires a durable fix issue number for PR #%d", cmd.Command.Kind, cmd.PRNumber)
-		}
-		issueNumber = cmd.PRNumber
+		issueNumber = fallbackIssueNumber(cmd)
 	}
 	// The worker workflow checks out batch_branch and records that checkout SHA
 	// as HERD_BASE_SHA in callbacks/artifact metadata. For command-dispatched
@@ -564,6 +584,352 @@ func commandTargetFromPullRequest(cmd commands.DispatchCommand, pr *gh.PullReque
 		HeadSHA:     headSHA,
 		Ref:         batchBranch,
 	}, nil
+}
+
+func fallbackIssueNumber(cmd commands.DispatchCommand) int {
+	if cmd.Command.Kind == commands.CommandFix || cmd.Command.Kind == commands.CommandFixCI {
+		return 0
+	}
+	return cmd.PRNumber
+}
+
+func validateCommandTarget(cmd commands.DispatchCommand, target commandTarget) error {
+	if cmd.Command.Kind != commands.CommandFix && cmd.Command.Kind != commands.CommandFixCI {
+		return nil
+	}
+	if target.IssueNumber <= 0 || target.IssueNumber == cmd.PRNumber {
+		return fmt.Errorf("production %s command dispatch requires a durable fix issue number for PR #%d", cmd.Command.Kind, cmd.PRNumber)
+	}
+	return nil
+}
+
+func (d productionCommandDispatcher) ensureCommandFixIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget) (int, error) {
+	key := commandFixIssueKey(cmd)
+	created, err := d.Dispatcher.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "command_fix_issue_create",
+		Status:    mutations.PhaseIntentRecorded,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("acquire command fix issue idempotency key: %w", err)
+	}
+	if !created {
+		issueNumber, recovered, recoverErr := d.recoverCommandFixIssue(ctx, p, cmd, pr, target, key)
+		if recovered || recoverErr != nil {
+			return issueNumber, recoverErr
+		}
+		record, err := d.Dispatcher.Store.GetIdempotencyKey(ctx, key)
+		if err != nil {
+			return 0, fmt.Errorf("get command fix issue idempotency key: %w", err)
+		}
+		if record.Status == "completed" && strings.TrimSpace(record.ResultRef) != "" {
+			issueNumber, ok := parseIssueResultRef(record.ResultRef)
+			if !ok {
+				return 0, fmt.Errorf("invalid command fix issue result ref %q", record.ResultRef)
+			}
+			return issueNumber, nil
+		}
+		if mutations.IsPreCallRetryable(record.Status) || record.Status == "failed" {
+			return d.createCommandFixIssue(ctx, p, cmd, pr, target, key)
+		}
+		status := strings.TrimSpace(record.Status)
+		if status == "" {
+			status = "unknown"
+		}
+		return 0, fmt.Errorf("command fix issue idempotency key %q is %s without a completed issue result; retry after reconciliation", key, status)
+	}
+	return d.createCommandFixIssue(ctx, p, cmd, pr, target, key)
+}
+
+func (d productionCommandDispatcher) createCommandFixIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget, key string) (int, error) {
+	body, title, labels, milestone, err := d.commandFixIssueRequest(ctx, p, cmd, pr, target)
+	if err != nil {
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, err.Error())
+		return 0, err
+	}
+	body = injectCommandFixIssueMarker(body, cmd)
+	truncatedBody, overflow := issues.TruncateIssueBody(body)
+	issue, err := p.Issues().Create(ctx, title, truncatedBody, labels, milestone)
+	if err != nil {
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, err.Error())
+		return 0, fmt.Errorf("creating command fix issue: %w", err)
+	}
+	for _, comment := range issues.SplitOverflowComments(overflow) {
+		if cerr := p.Issues().AddComment(ctx, issue.Number, comment); cerr != nil {
+			_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, cerr.Error())
+			return 0, fmt.Errorf("adding command fix issue overflow comment: %w", cerr)
+		}
+	}
+	resultRef := fmt.Sprintf("issue:%d", issue.Number)
+	if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+		return 0, fmt.Errorf("complete command fix issue idempotency key: %w", err)
+	}
+	return issue.Number, nil
+}
+
+func (d productionCommandDispatcher) commandFixIssueRequest(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget) (string, string, []string, *int, error) {
+	prompt := strings.TrimSpace(strings.Join(cmd.Command.Args, " "))
+	if prompt == "" && cmd.Command.Kind == commands.CommandFix {
+		return "", "", nil, nil, fmt.Errorf("@herd-os fix requires a description")
+	}
+	if strings.HasPrefix(pr.Head, "herd/batch/") {
+		return d.batchCommandFixIssueRequest(ctx, p, cmd, pr, target, prompt)
+	}
+	if cmd.Command.Kind == commands.CommandFixCI {
+		return "", "", nil, nil, fmt.Errorf("@herd-os fix-ci can only be used on Herd batch PRs")
+	}
+	return d.standaloneCommandFixIssueRequest(ctx, p, cmd, pr, prompt)
+}
+
+func (d productionCommandDispatcher) batchCommandFixIssueRequest(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget, prompt string) (string, string, []string, *int, error) {
+	batchNumber, err := integrator.ParseBatchBranchMilestone(pr.Head)
+	if err != nil {
+		return "", "", nil, nil, fmt.Errorf("parsing batch number from %s: %w", pr.Head, err)
+	}
+	ms, err := p.Milestones().Get(ctx, batchNumber)
+	if err != nil {
+		return "", "", nil, nil, fmt.Errorf("getting milestone #%d: %w", batchNumber, err)
+	}
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{State: "all", Milestone: &ms.Number})
+	if err != nil {
+		return "", "", nil, nil, fmt.Errorf("listing milestone issues: %w", err)
+	}
+	cycle := nextCommandFixCycle(allIssues, cmd.Command.Kind)
+	contextText := fmt.Sprintf("Requested by @%s via `@herd-os %s` on batch PR #%d.", cmd.Actor, cmd.Command.Kind, pr.Number)
+	body := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:    1,
+			Batch:      ms.Number,
+			Type:       "fix",
+			FixCycle:   reviewFixCycle(cmd.Command.Kind, cycle),
+			CIFixCycle: ciFixCycle(cmd.Command.Kind, cycle),
+			BatchPR:    pr.Number,
+			PRHeadSHA:  pr.HeadSHA,
+			PRBaseSHA:  pr.BaseSHA,
+		},
+		Task:                commandFixTask(cmd.Command.Kind, prompt),
+		Context:             contextText,
+		ConversationHistory: commandConversationHistory(ctx, p, cmd.PRNumber),
+	})
+	if cmd.Command.Kind == commands.CommandFix && commandLooksLikeConflict(prompt) {
+		body = appendCommandConflictInstructions(body, pr.Base)
+	}
+	title := "Fix: " + truncateCommandRunes(firstCommandLine(commandFixTitleText(cmd.Command.Kind, prompt, target.BatchBranch, cycle)), 70)
+	if cmd.Command.Kind == commands.CommandFixCI {
+		title = fmt.Sprintf("Fix CI failure on %s (cycle %d)", target.BatchBranch, cycle)
+	}
+	return body, title, []string{issues.TypeFix, issues.StatusInProgress}, &ms.Number, nil
+}
+
+func (d productionCommandDispatcher) standaloneCommandFixIssueRequest(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, prompt string) (string, string, []string, *int, error) {
+	existing, err := p.Issues().List(ctx, platform.IssueFilters{State: "open", Labels: []string{issues.TypeStandaloneFix}})
+	if err != nil {
+		return "", "", nil, nil, fmt.Errorf("listing standalone fix issues: %w", err)
+	}
+	for _, iss := range existing {
+		parsed, parseErr := issues.ParseBody(iss.Body)
+		if parseErr != nil || parsed.FrontMatter.TargetPR != pr.Number {
+			continue
+		}
+		if issues.HasLabel(iss.Labels, issues.StatusInProgress) || issues.HasLabel(iss.Labels, issues.StatusReady) {
+			return "", "", nil, nil, fmt.Errorf("standalone fix issue #%d is already active for PR #%d", iss.Number, pr.Number)
+		}
+	}
+	body := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{
+			Version:      1,
+			Type:         "standalone-fix",
+			TargetPR:     pr.Number,
+			TargetBranch: pr.Head,
+			PRHeadSHA:    pr.HeadSHA,
+			PRBaseSHA:    pr.BaseSHA,
+		},
+		Task:    prompt,
+		Context: fmt.Sprintf("Requested by @%s via `@herd-os fix` on PR #%d.", cmd.Actor, pr.Number),
+	})
+	return body, "Standalone fix: " + truncateCommandRunes(firstCommandLine(prompt), 70), []string{issues.TypeStandaloneFix, issues.StatusInProgress}, nil, nil
+}
+
+func (d productionCommandDispatcher) recoverCommandFixIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget, key string) (int, bool, error) {
+	filters := platform.IssueFilters{State: "all"}
+	if strings.HasPrefix(pr.Head, "herd/batch/") {
+		milestone := target.BatchNumber
+		if parsed, err := integrator.ParseBatchBranchMilestone(pr.Head); err == nil {
+			milestone = parsed
+		}
+		filters.Milestone = &milestone
+	} else {
+		filters.Labels = []string{issues.TypeStandaloneFix}
+	}
+	found, err := p.Issues().List(ctx, filters)
+	if err != nil {
+		return 0, false, fmt.Errorf("list command fix issues for recovery: %w", err)
+	}
+	marker := strings.TrimSpace(commandFixIssueMarker(cmd))
+	for _, issue := range found {
+		if issue == nil || !strings.Contains(issue.Body, marker) {
+			continue
+		}
+		resultRef := fmt.Sprintf("issue:%d", issue.Number)
+		if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+			return 0, false, fmt.Errorf("complete recovered command fix issue idempotency key: %w", err)
+		}
+		return issue.Number, true, nil
+	}
+	return 0, false, nil
+}
+
+func commandFixIssueKey(cmd commands.DispatchCommand) string {
+	return commandStableKey("command-fix-issue", cmd.RepositoryID, cmd.PRNumber, cmd.CommentID, string(cmd.Command.Kind))
+}
+
+func commandStableKey(parts ...any) string {
+	text := make([]string, 0, len(parts))
+	for _, part := range parts {
+		text = append(text, fmt.Sprint(part))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(text, ":")))
+	return "command:" + hex.EncodeToString(sum[:])
+}
+
+func commandFixIssueMarker(cmd commands.DispatchCommand) string {
+	return fmt.Sprintf("\n\n<!-- herd:command-fix {\"version\":1,\"repo_id\":%d,\"pr_number\":%d,\"comment_id\":%d,\"command\":\"%s\"} -->\n", cmd.RepositoryID, cmd.PRNumber, cmd.CommentID, cmd.Command.Kind)
+}
+
+func injectCommandFixIssueMarker(body string, cmd commands.DispatchCommand) string {
+	marker := strings.TrimSpace(commandFixIssueMarker(cmd))
+	const frontMatterEnd = "---\n\n"
+	idx := strings.Index(body, frontMatterEnd)
+	if idx < 0 {
+		return marker + "\n\n" + body
+	}
+	insertAt := idx + len(frontMatterEnd)
+	return body[:insertAt] + marker + "\n\n" + body[insertAt:]
+}
+
+func commandConversationHistory(ctx context.Context, p platform.Platform, prNumber int) string {
+	comments, err := p.Issues().ListComments(ctx, prNumber)
+	if err != nil || len(comments) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, c := range comments {
+		if i > 0 {
+			b.WriteString("\n---\n\n")
+		}
+		b.WriteString(fmt.Sprintf("**@%s:**\n\n%s\n", c.AuthorLogin, c.Body))
+	}
+	return b.String()
+}
+
+func nextCommandFixCycle(allIssues []*platform.Issue, kind commands.CommandKind) int {
+	current := 0
+	for _, iss := range allIssues {
+		if iss == nil {
+			continue
+		}
+		parsed, err := issues.ParseBody(iss.Body)
+		if err != nil {
+			continue
+		}
+		if kind == commands.CommandFixCI {
+			if parsed.FrontMatter.CIFixCycle > current {
+				current = parsed.FrontMatter.CIFixCycle
+			}
+			continue
+		}
+		if parsed.FrontMatter.FixCycle > current {
+			current = parsed.FrontMatter.FixCycle
+		}
+	}
+	return current + 1
+}
+
+func reviewFixCycle(kind commands.CommandKind, cycle int) int {
+	if kind == commands.CommandFix {
+		return cycle
+	}
+	return 0
+}
+
+func ciFixCycle(kind commands.CommandKind, cycle int) int {
+	if kind == commands.CommandFixCI {
+		return cycle
+	}
+	return 0
+}
+
+func commandFixTask(kind commands.CommandKind, prompt string) string {
+	if kind == commands.CommandFixCI {
+		task := "CI is failing on the batch branch. Investigate the failures, fix the issues, and ensure all tests pass."
+		if strings.TrimSpace(prompt) != "" {
+			return strings.TrimSpace(prompt) + "\n\n" + task
+		}
+		return task
+	}
+	return prompt
+}
+
+func commandFixTitleText(kind commands.CommandKind, prompt string, batchBranch string, cycle int) string {
+	if kind == commands.CommandFixCI {
+		return fmt.Sprintf("CI failure on %s cycle %d", batchBranch, cycle)
+	}
+	return prompt
+}
+
+func commandLooksLikeConflict(description string) bool {
+	lower := strings.ToLower(description)
+	keywords := []string{"merge conflict", "rebase conflict", "conflict with main", "conflict with master", "conflicts with main", "conflicts with master"}
+	for _, keyword := range keywords {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendCommandConflictInstructions(body, baseBranch string) string {
+	instructions := fmt.Sprintf("\n\n## Git Instructions\n\n"+
+		"This task involves a merge or rebase conflict. Follow these steps:\n\n"+
+		"**For merge conflicts:**\n"+
+		"1. `git fetch origin`\n"+
+		"2. `git merge origin/%s`\n"+
+		"3. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch.\n"+
+		"4. `git add <resolved files>`\n"+
+		"5. `git commit`\n\n"+
+		"**For rebase conflicts:**\n"+
+		"1. `git fetch origin`\n"+
+		"2. `git rebase origin/%s`\n"+
+		"3. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch.\n"+
+		"4. `git add <resolved files>`\n"+
+		"5. `git rebase --continue`\n"+
+		"6. Repeat steps 3-5 for each conflicting commit.\n",
+		baseBranch, baseBranch)
+	return body + instructions
+}
+
+func truncateCommandRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
+}
+
+func firstCommandLine(s string) string {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		return s[:idx]
+	}
+	return s
+}
+
+func parseIssueResultRef(ref string) (int, bool) {
+	var number int
+	if _, err := fmt.Sscanf(ref, "issue:%d", &number); err != nil || number <= 0 {
+		return 0, false
+	}
+	return number, true
 }
 
 func commandJobKind(kind commands.CommandKind) (cpdispatch.JobKind, error) {
