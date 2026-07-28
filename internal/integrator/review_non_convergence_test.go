@@ -850,6 +850,71 @@ func TestBuildSynthesizedStrategyFixIssueBodySanitizesInputAffectedFiles(t *test
 	}
 }
 
+func TestBuildSynthesizedStrategyFixIssueBodySanitizesMixedRecurringSymptoms(t *testing.T) {
+	result := highConfidenceReviewSynthesisResult()
+	result.RecurringSymptoms = []agent.ReviewSynthesisSymptom{
+		{
+			Description:   "Review dispatch retries bypass the shared durable idempotency decision.",
+			Cycles:        []int{39, 38, 39},
+			AffectedFiles: []string{"Diff Coverage", "internal/controlplane/dispatch/review.go", "1/9"},
+		},
+		{
+			Description:   "Chunk 1/9",
+			Cycles:        []int{38},
+			AffectedFiles: []string{"internal/controlplane/dispatch/repair.go", "Diff Coverage"},
+		},
+		{
+			Description:   "1/9",
+			Cycles:        []int{39},
+			AffectedFiles: []string{"internal/controlplane/dispatch/retry.go"},
+		},
+	}
+	input := agent.ReviewSynthesisInput{
+		PRNumber:      849,
+		BatchNumber:   111,
+		HeadSHA:       "head-123",
+		HeadRef:       "herd/batch/111-batch",
+		AffectedFiles: []string{"internal/controlplane/dispatch/fallback.go", "Chunk 1/9", "Diff Coverage"},
+	}
+
+	decision, reason := evaluateReviewSynthesis(result, 0.75, reviewConvergenceAnalysis{CompletedFixIssues: []int{951, 952}})
+	require.Equal(t, reviewSynthesisDecisionEscalate, decision)
+	assert.Contains(t, reason, "passed")
+
+	clean := *result
+	clean.RecurringSymptoms = []agent.ReviewSynthesisSymptom{{
+		Description:   "Review dispatch retries bypass the shared durable idempotency decision.",
+		Cycles:        []int{38, 39},
+		AffectedFiles: []string{"internal/controlplane/dispatch/review.go"},
+	}}
+	fingerprint := synthesizedReviewStrategyFingerprint(result)
+	require.NotEmpty(t, fingerprint)
+	assert.Equal(t, synthesizedReviewStrategyFingerprint(&clean), fingerprint)
+
+	title := buildSynthesizedStrategyFixIssueTitle(40, result)
+	body := buildSynthesizedStrategyFixIssueBody(&platform.Milestone{Number: 111}, &platform.PullRequest{Number: 849}, 40, result, input, fingerprint, nil)
+	parsed, err := issues.ParseBody(body)
+	require.NoError(t, err)
+
+	assert.Equal(t, "Review strategy fix (cycle 40): Dispatch idempotency boundary is split across review paths", title)
+	assert.ElementsMatch(t, []string{"internal/controlplane/dispatch/review.go"}, parsed.FrontMatter.Scope)
+	assert.Contains(t, parsed.ImplementationDetails, "Review dispatch retries bypass the shared durable idempotency decision.")
+	assert.Contains(t, parsed.ImplementationDetails, "internal/controlplane/dispatch/review.go")
+	assert.NotContains(t, parsed.ImplementationDetails, "internal/controlplane/dispatch/repair.go")
+	assert.NotContains(t, parsed.ImplementationDetails, "internal/controlplane/dispatch/retry.go")
+	assert.NotContains(t, parsed.Context, "Chunk 1/9")
+	assert.NotContains(t, parsed.Context, "Diff Coverage")
+	assert.Contains(t, parsed.Context, "internal/controlplane/dispatch/fallback.go")
+
+	marker, ok := parseReviewNonConvergenceFingerprintMarker(body)
+	require.True(t, ok)
+	assert.Equal(t, fingerprint, marker.Fingerprint)
+	for _, noisy := range []string{"Chunk 1/9", "1/9", "Diff Coverage"} {
+		assert.NotContains(t, title, noisy)
+		assert.NotContains(t, body, noisy)
+	}
+}
+
 func TestBuildReviewNonConvergencePRComment(t *testing.T) {
 	comment := buildReviewNonConvergencePRComment(reviewStrategyAnalysisFixture(), 954)
 

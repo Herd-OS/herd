@@ -600,10 +600,7 @@ func synthesizedReviewStrategyFingerprint(result *agent.ReviewSynthesisResult) s
 		return ""
 	}
 	var symptomEntries []string
-	for _, symptom := range result.RecurringSymptoms {
-		if isReviewFindingMetadataNoise(symptom.Description) {
-			continue
-		}
+	for _, symptom := range sanitizedReviewSynthesisSymptoms(result.RecurringSymptoms) {
 		description := normalizeReviewSynthesisFingerprintText(symptom.Description)
 		if description == "" {
 			continue
@@ -1231,11 +1228,31 @@ func normalizeReviewSynthesisFiles(files []string) []string {
 	return sortedStringSet(seen)
 }
 
+func sanitizedReviewSynthesisSymptoms(symptoms []agent.ReviewSynthesisSymptom) []agent.ReviewSynthesisSymptom {
+	var sanitized []agent.ReviewSynthesisSymptom
+	for _, symptom := range symptoms {
+		description := strings.TrimSpace(symptom.Description)
+		if description == "" || isReviewFindingMetadataNoise(description) || normalizeReviewSynthesisFingerprintText(description) == "" {
+			continue
+		}
+		files := sanitizedReviewSynthesisFilePaths(symptom.AffectedFiles)
+		if len(files) == 0 {
+			continue
+		}
+		sanitized = append(sanitized, agent.ReviewSynthesisSymptom{
+			Description:   description,
+			Cycles:        uniqueSortedInts(symptom.Cycles),
+			AffectedFiles: files,
+		})
+	}
+	return sanitized
+}
+
 func synthesizedReviewAffectedScope(result *agent.ReviewSynthesisResult) []string {
 	seen := map[string]struct{}{}
 	if result != nil {
-		for _, symptom := range result.RecurringSymptoms {
-			for _, file := range sanitizedReviewSynthesisFilePaths(symptom.AffectedFiles) {
+		for _, symptom := range sanitizedReviewSynthesisSymptoms(result.RecurringSymptoms) {
+			for _, file := range symptom.AffectedFiles {
 				seen[file] = struct{}{}
 			}
 		}
@@ -1247,7 +1264,7 @@ func buildSynthesizedStrategyImplementationDetails(result *agent.ReviewSynthesis
 	var sections []string
 	sections = append(sections, "Root cause title: "+strings.TrimSpace(result.RootCauseTitle))
 	sections = append(sections, "Root cause summary:\n"+fallbackString(strings.TrimSpace(result.RootCauseSummary), "No summary provided."))
-	sections = append(sections, "Recurring symptoms:\n"+formatReviewSynthesisSymptoms(result.RecurringSymptoms))
+	sections = append(sections, "Recurring symptoms:\n"+formatReviewSynthesisSymptoms(sanitizedReviewSynthesisSymptoms(result.RecurringSymptoms)))
 	sections = append(sections, "Why previous individual fixes did not converge:\n"+fallbackString(strings.TrimSpace(result.WhyIndividualFixesAreNotConverging), "No rationale provided."))
 	sections = append(sections, "Proposed strategy:\n"+fallbackString(strings.TrimSpace(result.ProposedStrategy), "No strategy provided."))
 	sections = append(sections, "Acceptance criteria:\n"+formatBullets(trimBlankStrings(result.AcceptanceCriteria)))
@@ -1282,7 +1299,7 @@ func formatReviewSynthesisSymptoms(symptoms []agent.ReviewSynthesisSymptom) stri
 	var lines []string
 	for _, symptom := range symptoms {
 		description := fallbackString(strings.TrimSpace(symptom.Description), "unspecified symptom")
-		lines = append(lines, fmt.Sprintf("- %s (cycles: %s; affected files: %s)", description, formatIntList(uniqueSortedInts(symptom.Cycles)), formatStringList(trimBlankStrings(symptom.AffectedFiles))))
+		lines = append(lines, fmt.Sprintf("- %s (cycles: %s; affected files: %s)", description, formatIntList(uniqueSortedInts(symptom.Cycles)), formatStringList(sanitizedReviewSynthesisFilePaths(symptom.AffectedFiles))))
 	}
 	return strings.Join(lines, "\n")
 }
