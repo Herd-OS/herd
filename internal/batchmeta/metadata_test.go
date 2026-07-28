@@ -101,6 +101,32 @@ func TestParse(t *testing.T) {
 			wantOK:      true,
 		},
 		{
+			name: "skips closed malformed marker before valid marker",
+			description: "before\n\n" +
+				`<!-- herd:batch-metadata {bad} -->` +
+				"\n\nmiddle\n\n" +
+				validMarker +
+				"\n\nafter",
+			want:   Metadata{Version: CurrentVersion, PRSummary: "Adds auth"},
+			wantOK: true,
+		},
+		{
+			name: "skips closed blank marker before valid marker",
+			description: `<!-- herd:batch-metadata {"version":1,"pr_summary":" "} -->` +
+				"\n\n" +
+				validMarker,
+			want:   Metadata{Version: CurrentVersion, PRSummary: "Adds auth"},
+			wantOK: true,
+		},
+		{
+			name: "skips unsupported version before valid marker",
+			description: `<!-- herd:batch-metadata {"version":2,"pr_summary":"Old summary"} -->` +
+				"\n\n" +
+				validMarker,
+			want:   Metadata{Version: CurrentVersion, PRSummary: "Adds auth"},
+			wantOK: true,
+		},
+		{
 			name:        "trims summary",
 			description: `<!-- herd:batch-metadata {"version":1,"pr_summary":"  Adds auth \n"} -->`,
 			want:        Metadata{Version: CurrentVersion, PRSummary: "Adds auth"},
@@ -117,6 +143,14 @@ func TestParse(t *testing.T) {
 		{
 			name:        "missing close suffix",
 			description: `<!-- herd:batch-metadata {"version":1,"pr_summary":"Adds auth"}`,
+		},
+		{
+			name: "skips unterminated marker before valid marker",
+			description: `<!-- herd:batch-metadata {"version":1,"pr_summary":"Broken"` +
+				"\n\n" +
+				validMarker,
+			want:   Metadata{Version: CurrentVersion, PRSummary: "Adds auth"},
+			wantOK: true,
 		},
 		{
 			name:        "unsupported version",
@@ -170,9 +204,26 @@ func TestMilestonePRSummary(t *testing.T) {
 			want: "Structured summary",
 		},
 		{
+			name: "structured metadata wins after closed malformed marker and prose",
+			ms: &platform.Milestone{Description: "Before\n\n" +
+				malformedMarker +
+				"\n\nMiddle prose\n\n" +
+				structuredMarker +
+				"\n\nAfter"},
+			want: "Structured summary",
+		},
+		{
 			name: "closed malformed marker falls back to surrounding prose",
 			ms:   &platform.Milestone{Description: "Before\n\n" + malformedMarker + "\n\nAfter"},
 			want: "Before\n\n\n\nAfter",
+		},
+		{
+			name: "multiple closed invalid markers are stripped from fallback prose",
+			ms: &platform.Milestone{Description: "Plain\n\n" +
+				`<!-- herd:batch-metadata {bad} -->` +
+				"\n\n" +
+				`<!-- herd:batch-metadata {"version":1,"pr_summary":" "} -->`},
+			want: "Plain",
 		},
 		{
 			name: "closed malformed marker only returns empty",

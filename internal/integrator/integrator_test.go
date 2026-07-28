@@ -1123,6 +1123,28 @@ func TestRenderReviewerSummaryFallbacks(t *testing.T) {
 			},
 		},
 		{
+			name: "structured metadata wins after invalid closed markers",
+			ms: &platform.Milestone{Title: "Mixed duplicate markers", Description: `Plain prose should not win.
+
+<!-- herd:batch-metadata {bad} -->
+
+<!-- herd:batch-metadata {"version":1,"pr_summary":" "} -->
+
+<!-- herd:batch-metadata {"version":1,"pr_summary":"Valid structured summary."} -->`},
+			allIssues: []*platform.Issue{
+				{Number: 17, Title: "Add marker scan"},
+			},
+			wantContains: []string{
+				"Valid structured summary.",
+			},
+			wantNotContains: []string{
+				"Plain prose should not win.",
+				"herd:batch-metadata",
+				"<!--",
+				"pr_summary",
+			},
+		},
+		{
 			name: "malformed metadata with surrounding prose falls back to prose",
 			ms: &platform.Milestone{Title: "Malformed with prose", Description: `Plain prose survives.
 
@@ -1151,6 +1173,25 @@ func TestRenderReviewerSummaryFallbacks(t *testing.T) {
 			wantNotContains: []string{
 				"herd:batch-metadata",
 				"pr_summary",
+			},
+		},
+		{
+			name: "multiple invalid closed markers are stripped from fallback prose",
+			ms: &platform.Milestone{Title: "Duplicate invalid markers", Description: `Plain fallback survives.
+
+<!-- herd:batch-metadata {bad} -->
+
+<!-- herd:batch-metadata {"version":1,"pr_summary":" "} -->`},
+			allIssues: []*platform.Issue{
+				{Number: 18, Title: "Strip invalid metadata"},
+			},
+			wantContains: []string{
+				"Plain fallback survives.",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"pr_summary",
+				"<!--",
 			},
 		},
 		{
