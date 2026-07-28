@@ -440,6 +440,50 @@ func TestProductionDispatchCommandDispatchesReadyIssue(t *testing.T) {
 	assert.Contains(t, strings.Join(p.issues.comments[7], "\n"), "Dispatched worker for issue #42")
 }
 
+func TestProductionDispatchCommandRedeliveryAfterInProgressLabelDispatchesOnce(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{})
+	p.issues.byNumber[42] = &platform.Issue{
+		Number:    42,
+		Title:     "Do work",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 7, Title: "Command Surface"},
+	}
+	p.repo.branchSHAs["herd/batch/7-command-surface"] = "batch-sha"
+	workflow := &recordingWorkflowClient{}
+	st := store.NewMemoryStore()
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: st, GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+	cmd := resolveConflictsCommand()
+	cmd.IssueNumber = 7
+	cmd.PRNumber = 7
+	cmd.Command = commands.ParsedCommand{Kind: commands.CommandDispatch, Args: []string{"42"}}
+	labelKey := dispatchIssueLabelKey(cmd, 42, issues.StatusInProgress, "add", "start")
+	require.NoError(t, st.RecordGitHubMutationAttempt(context.Background(), store.GitHubMutationAttempt{
+		IdempotencyKey: labelKey,
+		RepositoryID:   42,
+		MutationType:   "dispatch_issue_label_add",
+		Status:         mutations.PhaseCompleted,
+		CreatedAt:      time.Now().UTC(),
+	}))
+
+	err := d.DispatchCommand(context.Background(), cmd)
+	require.NoError(t, err)
+	err = d.DispatchCommand(context.Background(), cmd)
+	require.NoError(t, err)
+
+	require.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "42", workflow.dispatches[0].inputs["issue_number"])
+	assert.Contains(t, p.issues.byNumber[42].Labels, issues.StatusInProgress)
+	assert.NotContains(t, p.issues.byNumber[42].Labels, issues.StatusFailed)
+}
+
 func TestProductionFixCommandsCreateTrackingIssueAndDispatchCreatedIssue(t *testing.T) {
 	tests := []struct {
 		name          string

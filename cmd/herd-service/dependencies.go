@@ -210,7 +210,7 @@ func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd co
 		manualReview = true
 		manualDispatchKey = commandManualDispatchKey(cmd)
 	}
-	_, err = d.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
+	err = d.dispatchWorkflowCommand(ctx, cpdispatch.DispatchRequest{
 		RepoID:            cmd.RepositoryID,
 		Owner:             cmd.Owner,
 		Repo:              cmd.Repo,
@@ -242,6 +242,50 @@ func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd co
 
 func commandManualDispatchKey(cmd commands.DispatchCommand) string {
 	return fmt.Sprintf("comment:%d:command:%s", cmd.CommentID, cmd.Command.Kind)
+}
+
+func (d productionCommandDispatcher) dispatchWorkflowCommand(ctx context.Context, req cpdispatch.DispatchRequest) error {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, err := d.Dispatcher.Dispatch(ctx, req)
+		if err == nil {
+			return nil
+		}
+		if !transientWorkflowDispatchReplayError(err) || time.Now().After(deadline) {
+			return err
+		}
+		if sleepErr := sleepContext(ctx, 25*time.Millisecond); sleepErr != nil {
+			return sleepErr
+		}
+	}
+}
+
+func transientWorkflowDispatchReplayError(err error) bool {
+	msg := err.Error()
+	if strings.Contains(msg, "outcome is unknown") || strings.Contains(msg, "repair required") {
+		return false
+	}
+	return strings.Contains(msg, "get existing dispatch job:") || strings.Contains(msg, "already in progress")
+}
+
+func dispatchIssueStatusAllowsDispatch(status string, recoveredRemovedStatus string, recoveredInProgress bool) bool {
+	switch status {
+	case issues.StatusReady, issues.StatusFailed:
+		return true
+	case "":
+		return recoveredRemovedStatus != ""
+	case issues.StatusInProgress:
+		return recoveredInProgress
+	default:
+		return false
+	}
+}
+
+func dispatchIssueLabelRecordAllowsRetry(record store.IdempotencyKey) bool {
+	if mutations.IsPreCallRetryable(record.Status) {
+		return true
+	}
+	return record.Status == "failed" && strings.HasPrefix(record.ResultRef, mutations.PhaseFailedPreCall+":")
 }
 
 func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context.Context, cmd commands.DispatchCommand) error {
@@ -307,7 +351,7 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 	if strings.TrimSpace(headSHA) == "" {
 		return fmt.Errorf("PR #%d head SHA is required for conflict-resolution dispatch", pr.Number)
 	}
-	_, err = d.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
+	err = d.dispatchWorkflowCommand(ctx, cpdispatch.DispatchRequest{
 		RepoID:          cmd.RepositoryID,
 		Owner:           cmd.Owner,
 		Repo:            cmd.Repo,
@@ -468,7 +512,24 @@ func (d productionCommandDispatcher) dispatchIssueCommand(ctx context.Context, c
 		return addIssueCommandResult(ctx, p, cmd.IssueNumber, fmt.Sprintf("Issue #%d is a manual task and cannot be dispatched to a worker.", issueNumber))
 	}
 	status := issues.StatusLabel(issue.Labels)
-	if status != issues.StatusReady && status != issues.StatusFailed {
+	recoveredRemovedStatus := ""
+	if status == "" {
+		for _, candidate := range []string{issues.StatusReady, issues.StatusFailed} {
+			completed, completedErr := d.dispatchIssueLabelMutationCompleted(ctx, cmd, issueNumber, candidate, "remove", "start")
+			if completedErr != nil {
+				return completedErr
+			}
+			if completed {
+				recoveredRemovedStatus = candidate
+				break
+			}
+		}
+	}
+	recoveredInProgress, err := d.dispatchIssueLabelMutationCompleted(ctx, cmd, issueNumber, issues.StatusInProgress, "add", "start")
+	if err != nil {
+		return err
+	}
+	if !dispatchIssueStatusAllowsDispatch(status, recoveredRemovedStatus, recoveredInProgress) {
 		return fmt.Errorf("issue #%d is %q, expected ready or failed", issueNumber, status)
 	}
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
@@ -480,15 +541,25 @@ func (d productionCommandDispatcher) dispatchIssueCommand(ctx context.Context, c
 	if err != nil {
 		return fmt.Errorf("getting %s SHA: %w", batchBranch, err)
 	}
-	if status != "" {
-		if err := p.Issues().RemoveLabels(ctx, issueNumber, []string{status}); err != nil {
+	statusToRemove := status
+	if statusToRemove == "" {
+		statusToRemove = recoveredRemovedStatus
+	}
+	if statusToRemove == issues.StatusReady || statusToRemove == issues.StatusFailed {
+		if err := d.mutateDispatchIssueLabel(ctx, cmd, issueNumber, statusToRemove, "remove", "start", func() error {
+			return p.Issues().RemoveLabels(ctx, issueNumber, []string{statusToRemove})
+		}); err != nil {
 			return fmt.Errorf("removing label: %w", err)
 		}
 	}
-	if err := p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusInProgress}); err != nil {
-		return fmt.Errorf("adding in-progress label: %w", err)
+	if status != issues.StatusInProgress {
+		if err := d.mutateDispatchIssueLabel(ctx, cmd, issueNumber, issues.StatusInProgress, "add", "start", func() error {
+			return p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusInProgress})
+		}); err != nil {
+			return fmt.Errorf("adding in-progress label: %w", err)
+		}
 	}
-	_, err = d.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
+	err = d.dispatchWorkflowCommand(ctx, cpdispatch.DispatchRequest{
 		RepoID:          cmd.RepositoryID,
 		Owner:           cmd.Owner,
 		Repo:            cmd.Repo,
@@ -509,8 +580,12 @@ func (d productionCommandDispatcher) dispatchIssueCommand(ctx context.Context, c
 		Reason:          fmt.Sprintf("@herd-os dispatch comment %d by %s", cmd.CommentID, cmd.Actor),
 	})
 	if err != nil {
-		_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress})
-		_ = p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+		_ = d.mutateDispatchIssueLabel(ctx, cmd, issueNumber, issues.StatusInProgress, "remove", "dispatch-failed", func() error {
+			return p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress})
+		})
+		_ = d.mutateDispatchIssueLabel(ctx, cmd, issueNumber, issues.StatusFailed, "add", "dispatch-failed", func() error {
+			return p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+		})
 		return fmt.Errorf("dispatching issue #%d worker: %w", issueNumber, err)
 	}
 	return addIssueCommandResult(ctx, p, cmd.IssueNumber, fmt.Sprintf("🔧 Dispatched worker for issue #%d.", issueNumber))
@@ -996,6 +1071,10 @@ func commandFixIssueKey(cmd commands.DispatchCommand) string {
 	return commandStableKey("command-fix-issue", cmd.RepositoryID, cmd.PRNumber, cmd.CommentID, string(cmd.Command.Kind))
 }
 
+func dispatchIssueLabelKey(cmd commands.DispatchCommand, issueNumber int, label string, action string, reason string) string {
+	return commandStableKey("dispatch-issue-label", cmd.RepositoryID, cmd.CommentID, string(cmd.Command.Kind), issueNumber, label, action, reason)
+}
+
 func commandStableKey(parts ...any) string {
 	text := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -1208,6 +1287,88 @@ func (d productionCommandDispatcher) completeIssueCreateMutation(ctx context.Con
 		errMsg = mutationErr.Error()
 	}
 	return mutationsStore.CompleteGitHubMutationAttempt(ctx, key, status, response, errMsg, time.Now().UTC())
+}
+
+func (d productionCommandDispatcher) mutateDispatchIssueLabel(ctx context.Context, cmd commands.DispatchCommand, issueNumber int, label string, action string, reason string, fn func() error) error {
+	key := dispatchIssueLabelKey(cmd, issueNumber, label, action, reason)
+	now := time.Now().UTC()
+	created, err := d.Dispatcher.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "dispatch_issue_label_" + action,
+		Status:    mutations.PhaseIntentRecorded,
+		CreatedAt: now,
+	})
+	if err != nil {
+		return fmt.Errorf("acquire dispatch issue label idempotency key: %w", err)
+	}
+	if !created {
+		completed, completedErr := d.dispatchIssueLabelMutationCompletedByKey(ctx, key)
+		if completedErr != nil || completed {
+			return completedErr
+		}
+		record, recordErr := d.Dispatcher.Store.GetIdempotencyKey(ctx, key)
+		if recordErr != nil {
+			return fmt.Errorf("get dispatch issue label idempotency key: %w", recordErr)
+		}
+		if !dispatchIssueLabelRecordAllowsRetry(record) {
+			status := strings.TrimSpace(record.Status)
+			if status == "" {
+				status = "unknown"
+			}
+			return fmt.Errorf("dispatch issue label idempotency key %q is %s; retry after reconciliation", key, status)
+		}
+	}
+	if err := d.recordIssueCreateMutationAttempt(ctx, key, cmd.RepositoryID, "dispatch_issue_label_"+action, now); err != nil {
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseFailedPreCall+":"+err.Error())
+		return err
+	}
+	started, err := d.tryStartIssueCreateMutation(ctx, key, "dispatch issue label")
+	if err != nil || !started {
+		if err != nil {
+			return err
+		}
+		completed, completedErr := d.dispatchIssueLabelMutationCompletedByKey(ctx, key)
+		if completedErr != nil || completed {
+			return completedErr
+		}
+		return fmt.Errorf("dispatch issue label mutation %q is in progress; retry after reconciliation", key)
+	}
+	if err := fn(); err != nil {
+		_ = d.completeIssueCreateMutation(ctx, key, mutations.PhaseRepairRequired, nil, err)
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseRepairRequired+":"+err.Error())
+		return err
+	}
+	response := json.RawMessage(fmt.Sprintf(`{"issue_number":%d,"label":%q,"action":%q}`, issueNumber, label, action))
+	_ = d.completeIssueCreateMutation(ctx, key, mutations.PhaseCompleted, response, nil)
+	if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, "void:dispatch_issue_label_"+action); err != nil {
+		return fmt.Errorf("complete dispatch issue label idempotency key: %w", err)
+	}
+	return nil
+}
+
+func (d productionCommandDispatcher) dispatchIssueLabelMutationCompleted(ctx context.Context, cmd commands.DispatchCommand, issueNumber int, label string, action string, reason string) (bool, error) {
+	return d.dispatchIssueLabelMutationCompletedByKey(ctx, dispatchIssueLabelKey(cmd, issueNumber, label, action, reason))
+}
+
+func (d productionCommandDispatcher) dispatchIssueLabelMutationCompletedByKey(ctx context.Context, key string) (bool, error) {
+	mutationsStore, err := d.issueCreateMutationStore()
+	if err != nil {
+		return false, err
+	}
+	attempt, err := mutationsStore.GetGitHubMutationAttempt(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get dispatch issue label mutation attempt: %w", err)
+	}
+	if !mutations.IsCompleted(attempt.Status) {
+		return false, nil
+	}
+	if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, "void:"+attempt.MutationType); err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("repair dispatch issue label idempotency key: %w", err)
+	}
+	return true, nil
 }
 
 func (d productionCommandDispatcher) waitForCommandFixIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget, key string) (int, error) {

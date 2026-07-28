@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -213,6 +214,7 @@ func TestHandlerIdempotencyDuplicateCommentAndCommand(t *testing.T) {
 	assert.Len(t, st.commandRecords, 1)
 	assert.Len(t, st.idempotencyKeys, 1)
 	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	assert.Equal(t, int64(42), dispatcher.dispatched[0].RepositoryID)
 	assert.Equal(t, int64(77), dispatcher.dispatched[0].InstallationID)
 	assert.Equal(t, 7, dispatcher.dispatched[0].PRNumber)
@@ -234,6 +236,7 @@ func TestHandlerEditedCommentIdempotent(t *testing.T) {
 	assert.Len(t, gh.comments, 1)
 	assert.Len(t, st.commandRecords, 1)
 	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.underlyingDispatches, 1)
 }
 
 func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
@@ -406,7 +409,8 @@ func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
 	assert.Len(t, gh.comments, 1)
 	assert.Len(t, st.commandRecords, 1)
 	assert.Len(t, st.idempotencyKeys, 1)
-	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.dispatched, 2)
+	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	for _, record := range st.idempotencyKeys {
 		assert.Equal(t, "completed", record.Status)
 	}
@@ -585,6 +589,7 @@ func TestHandlerDispatchStatusAndFallbackFailureRedeliveryDoesNotDispatchAgain(t
 	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
 	assert.Len(t, dispatcher.dispatched, 2)
+	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	key := "repo:42:comment:123:command:review"
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
 	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
@@ -866,12 +871,15 @@ func (g *fakeGitHub) AddIssueComment(_ context.Context, owner, repo string, issu
 }
 
 type fakeDispatcher struct {
-	dispatched []DispatchCommand
-	err        error
-	errs       []error
+	dispatched           []DispatchCommand
+	underlyingDispatches []DispatchCommand
+	err                  error
+	errs                 []error
+	completed            map[string]bool
 }
 
 func (d *fakeDispatcher) DispatchCommand(_ context.Context, cmd DispatchCommand) error {
+	d.dispatched = append(d.dispatched, cmd)
 	if len(d.errs) > 0 {
 		err := d.errs[0]
 		d.errs = d.errs[1:]
@@ -882,6 +890,14 @@ func (d *fakeDispatcher) DispatchCommand(_ context.Context, cmd DispatchCommand)
 	if d.err != nil {
 		return d.err
 	}
-	d.dispatched = append(d.dispatched, cmd)
+	if d.completed == nil {
+		d.completed = map[string]bool{}
+	}
+	key := fmt.Sprintf("%d:%d:%s", cmd.RepositoryID, cmd.CommentID, cmd.Command.Kind)
+	if d.completed[key] {
+		return nil
+	}
+	d.completed[key] = true
+	d.underlyingDispatches = append(d.underlyingDispatches, cmd)
 	return nil
 }

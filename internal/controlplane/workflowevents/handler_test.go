@@ -308,8 +308,9 @@ func TestHandlerConcurrentDuplicateWorkflowEventProcessesOnce(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()
 	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	blockStarted := make(chan struct{})
 	processor := &capturingProcessor{
-		blockStarted: make(chan struct{}),
+		blockStarted: blockStarted,
 		unblock:      make(chan struct{}),
 	}
 	handler := NewHandler(HandlerOptions{
@@ -329,7 +330,7 @@ func TestHandlerConcurrentDuplicateWorkflowEventProcessesOnce(t *testing.T) {
 		handler.ServeHTTP(rec, eventRequest(validEventPayload()))
 		firstResult <- rec.Code
 	}()
-	<-processor.blockStarted
+	<-blockStarted
 	second := httptest.NewRecorder()
 	handler.ServeHTTP(second, eventRequest(validEventPayload()))
 	close(processor.unblock)
