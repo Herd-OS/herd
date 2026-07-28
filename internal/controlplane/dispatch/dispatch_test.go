@@ -49,12 +49,14 @@ func TestDispatcherDispatchIncludesReviewPrompt(t *testing.T) {
 	req.PRNumber = 8
 	req.IssueNumber = 0
 	req.ReviewPrompt = "focus on auth and retries"
+	req.ManualReview = true
 
 	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 
 	require.NoError(t, err)
 	require.Len(t, gh.calls, 1)
 	assert.Equal(t, "focus on auth and retries", gh.calls[0].inputs["review_prompt"])
+	assert.Equal(t, "true", gh.calls[0].inputs["manual_review"])
 	require.Contains(t, st.jobs, result.JobID)
 	var metadata map[string]any
 	require.NoError(t, json.Unmarshal(st.jobs[result.JobID].Metadata, &metadata))

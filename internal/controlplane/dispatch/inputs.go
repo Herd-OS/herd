@@ -52,5 +52,8 @@ func WorkflowInputs(req DispatchRequest, jobID string) (map[string]string, error
 	if req.ReviewPrompt != "" {
 		inputs["review_prompt"] = req.ReviewPrompt
 	}
+	if req.Kind == JobKindReview && req.ManualReview {
+		inputs["manual_review"] = "true"
+	}
 	return inputs, nil
 }

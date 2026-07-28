@@ -244,6 +244,7 @@ func TestProductionReviewCommandDispatchesReviewPrompt(t *testing.T) {
 	require.Len(t, workflow.dispatches, 1)
 	assert.Equal(t, "herd-review.yml", workflow.dispatches[0].workflowFile)
 	assert.Equal(t, "focus on auth and retries", workflow.dispatches[0].inputs["review_prompt"])
+	assert.Equal(t, "true", workflow.dispatches[0].inputs["manual_review"])
 	assert.Equal(t, "849", workflow.dispatches[0].inputs["pr_number"])
 }
 

@@ -55,6 +55,7 @@ type DispatchRequest struct {
 	ControlPlaneURL string
 	Reason          string
 	ReviewPrompt    string
+	ManualReview    bool
 }
 
 type DispatchResult struct {

@@ -23,6 +23,11 @@ on:
         description: 'Optional review focus or extra instructions'
         required: false
         type: string
+      manual_review:
+        description: 'Treat this review as a manual user-triggered review'
+        required: false
+        type: boolean
+        default: false
       batch_branch:
         description: 'Resolved branch or ref to check out'
         required: true
@@ -83,12 +88,13 @@ jobs:
           HERD_CONTROL_PLANE_URL: {{if .ControlPlaneURL}}{{yamlScalar .ControlPlaneURL}}{{else}}${{`{{`}} vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' {{`}}`}}{{end}}
           HERD_REVIEW_TIMEOUT_MINUTES: ${{`{{`}} inputs.timeout_minutes {{`}}`}}
           HERD_REVIEW_PROMPT: ${{`{{`}} inputs.review_prompt {{`}}`}}
+          HERD_MANUAL_REVIEW: ${{`{{`}} inputs.manual_review {{`}}`}}
 {{- if .ControlPlaneURL }}
           HERD_CONFIG_CONTROL_PLANE_URL: {{ yamlScalar .ControlPlaneURL }}
 {{- end }}
         run: |
           set +e
-          timeout "${HERD_REVIEW_TIMEOUT_MINUTES}m" herd review-worker --pr "${{`{{`}} inputs.pr_number {{`}}`}}" --prompt "$HERD_REVIEW_PROMPT" --result-file /tmp/herd-review-command-result.json
+          timeout "${HERD_REVIEW_TIMEOUT_MINUTES}m" herd review-worker --pr "${{`{{`}} inputs.pr_number {{`}}`}}" --prompt "$HERD_REVIEW_PROMPT" --manual="${HERD_MANUAL_REVIEW}" --result-file /tmp/herd-review-command-result.json
           rc=$?
           set -e
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then

@@ -134,6 +134,40 @@ func TestWorkflowInputsReviewPromptIsOptional(t *testing.T) {
 	}
 }
 
+func TestWorkflowInputsManualReviewIsOptional(t *testing.T) {
+	tests := []struct {
+		name       string
+		kind       JobKind
+		manual     bool
+		wantManual bool
+	}{
+		{name: "review default omitted", kind: JobKindReview},
+		{name: "review manual included", kind: JobKindReview, manual: true, wantManual: true},
+		{name: "non-review manual omitted", kind: JobKindWorker, manual: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := validRequest()
+			req.Kind = tt.kind
+			req.ManualReview = tt.manual
+			if tt.kind == JobKindReview {
+				req.PRNumber = 8
+				req.IssueNumber = 0
+			}
+
+			got, err := WorkflowInputs(req, "job-1")
+
+			require.NoError(t, err)
+			if tt.wantManual {
+				assert.Equal(t, "true", got["manual_review"])
+			} else {
+				assert.NotContains(t, got, "manual_review")
+			}
+		})
+	}
+}
+
 func TestWorkflowInputsValidation(t *testing.T) {
 	tests := []struct {
 		name    string

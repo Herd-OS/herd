@@ -17,6 +17,7 @@ func newReviewWorkerCmd() *cobra.Command {
 	var prNumber int
 	var resultFile string
 	var reviewPrompt string
+	var manual bool
 	cmd := &cobra.Command{
 		Use:    "review-worker",
 		Short:  "Run hosted review worker (internal)",
@@ -64,7 +65,7 @@ func newReviewWorkerCmd() *cobra.Command {
 				return fmt.Errorf("getting current directory: %w", err)
 			}
 
-			result, err := integrator.Review(cmd.Context(), client, ag, git.New(cwd), cfg, reviewWorkerParams(prNumber, cwd, reviewPrompt))
+			result, err := integrator.Review(cmd.Context(), client, ag, git.New(cwd), cfg, reviewWorkerParams(prNumber, cwd, reviewPrompt, manual))
 			if err != nil {
 				_ = writeHostedReviewResult(resultFile, hostedReviewWorkflowResult{
 					Status:  "failed",
@@ -81,14 +82,16 @@ func newReviewWorkerCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number")
 	cmd.Flags().StringVar(&reviewPrompt, "prompt", "", "Optional review focus or extra instructions")
+	cmd.Flags().BoolVar(&manual, "manual", false, "Treat this review as a manual user-triggered review")
 	cmd.Flags().StringVar(&resultFile, "result-file", "", "Write hosted review workflow result JSON")
 	return cmd
 }
 
-func reviewWorkerParams(prNumber int, repoRoot string, reviewPrompt string) integrator.ReviewParams {
+func reviewWorkerParams(prNumber int, repoRoot string, reviewPrompt string, manual bool) integrator.ReviewParams {
 	return integrator.ReviewParams{
 		PRNumber:          prNumber,
 		RepoRoot:          repoRoot,
 		ExtraInstructions: strings.TrimSpace(reviewPrompt),
+		Manual:            manual,
 	}
 }
