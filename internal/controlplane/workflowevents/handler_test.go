@@ -235,7 +235,7 @@ func TestHandlerProcessedMarkerAndCompletionFailureRedeliveryDoesNotProcessAgain
 	}
 }
 
-func TestHandlerProcessedAndPendingMarkerFailuresCompleteForRepair(t *testing.T) {
+func TestHandlerProcessedAndPendingMarkerFailuresDoNotCompleteIdempotency(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()
 	st.updateErrs = []error{nil, errors.New("processed down"), errors.New("pending down"), nil}
@@ -258,7 +258,11 @@ func TestHandlerProcessedAndPendingMarkerFailuresCompleteForRepair(t *testing.T)
 	require.Equal(t, http.StatusConflict, second.Code)
 	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.commands, 1)
-	assert.Equal(t, "processing", st.commands[0].Status)
+	assert.Equal(t, "repair_required", st.commands[0].Status)
+	for _, record := range st.idem {
+		assert.Equal(t, "failed", record.Status)
+		assert.Contains(t, record.ResultRef, "repair_required")
+	}
 }
 
 func TestHandlerProcessingMarkerRedeliveryBlocksDuplicateProcessing(t *testing.T) {

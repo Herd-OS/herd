@@ -95,7 +95,7 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 	created, err := idem.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       statusKey,
 		Scope:     "review_status",
-		Status:    "started",
+		Status:    mutationspkg.PhaseIntentRecorded,
 		Metadata:  mustStatusMetadata(repo, prNumber, headSHA, state, description, targetURL),
 		CreatedAt: now,
 	})
@@ -110,7 +110,14 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 		if record.Status == "completed" {
 			return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
 		}
-		if record.Status == "started" {
+		if mutationspkg.IsPreCallRetryable(record.Status) {
+			if repaired, err := s.repairCompletedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
+				return err
+			}
+			if repaired, err := s.repairStartedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, status, state, description, targetURL, now); repaired || err != nil {
+				return err
+			}
+		} else if record.Status == "started" {
 			if repaired, err := s.repairCompletedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, state, description, targetURL, now); repaired || err != nil {
 				return err
 			}

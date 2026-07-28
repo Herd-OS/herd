@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/appauth"
 	"github.com/herd-os/herd/internal/controlplane"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
@@ -165,6 +166,68 @@ func TestHandlerProcessesReviewCompletedResult(t *testing.T) {
 	assert.Equal(t, "https://example.test/run", processor.calls[0].result.TargetURL)
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusApproved, st.results[0].Status)
+}
+
+func TestHandlerMintsHostedReviewReadToken(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	source := &fakeAppTokenSource{token: appauth.InstallationToken{
+		Token:       "ghs_read_token",
+		ExpiresAt:   now.Add(time.Hour),
+		Permissions: map[string]string{"contents": "read", "pull_requests": "read"},
+	}}
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		RepositoryID:   7,
+		InstallationID: 9,
+		PRNumber:       42,
+		HeadSHA:        "head",
+		WorkerBranch:   "herd/worker/837",
+		Metadata:       validReviewJobMetadata(),
+	}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		AppTokenSource: source,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/job-1/review-read-token", nil)
+	req.SetPathValue("job_id", "job-1")
+	req.Header.Set("Authorization", "Bearer oidc")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, int64(9), source.installationID)
+	require.NotNil(t, source.permissions)
+	assert.Equal(t, "read", source.permissions.GetContents())
+	assert.Equal(t, "read", source.permissions.GetPullRequests())
+	assert.Equal(t, "read", source.permissions.GetIssues())
+	assert.JSONEq(t, `{"token":"ghs_read_token","expires_at":"2026-07-11T13:00:00Z","permissions":{"contents":"read","pull_requests":"read"}}`, rec.Body.String())
+}
+
+func TestHandlerRejectsHostedReviewReadTokenWithoutEligibleJob(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", InstallationID: 9, Metadata: validReviewJobMetadata()}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		AppTokenSource: &fakeAppTokenSource{},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/job-1/review-read-token", nil)
+	req.SetPathValue("job_id", "job-1")
+	req.Header.Set("Authorization", "Bearer oidc")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not eligible")
 }
 
 func TestHandlerDuplicateReviewCallbackUsesStableIdentityAcrossJSONFormatting(t *testing.T) {
@@ -1488,10 +1551,26 @@ type fixedPatchApplier struct {
 	err    error
 }
 
-type fakeAppTokenSource struct{}
+type fakeAppTokenSource struct {
+	token          appauth.InstallationToken
+	installationID int64
+	permissions    *gh.InstallationPermissions
+}
 
-func (fakeAppTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+func (s fakeAppTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+	if strings.TrimSpace(s.token.Token) != "" {
+		return s.token, nil
+	}
 	return appauth.InstallationToken{Token: "token"}, nil
+}
+
+func (s *fakeAppTokenSource) InstallationTokenWithPermissions(_ context.Context, installationID int64, permissions gh.InstallationPermissions) (appauth.InstallationToken, error) {
+	s.installationID = installationID
+	s.permissions = &permissions
+	if strings.TrimSpace(s.token.Token) != "" {
+		return s.token, nil
+	}
+	return appauth.InstallationToken{Token: "token", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
 func (a fixedPatchApplier) Apply(context.Context, artifacts.ApplyRequest) (artifacts.ApplyResult, error) {

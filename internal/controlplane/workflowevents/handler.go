@@ -267,8 +267,16 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := h.markWorkflowEventProcessed(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
-		_ = h.markWorkflowEventProcessedPending(r.Context(), repo.ID, commentID, commandKey, metadata)
-		_ = h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey)
+		if pendingErr := h.markWorkflowEventProcessedPending(r.Context(), repo.ID, commentID, commandKey, metadata); pendingErr != nil {
+			_ = h.markWorkflowEventRepairRequired(r.Context(), repo.ID, commentID, commandKey, metadata)
+			_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseRepairRequired+":"+pendingErr.Error())
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
+			return
+		}
+		if err := h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete workflow event idempotency"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
 		return
 	}

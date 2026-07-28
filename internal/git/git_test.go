@@ -82,13 +82,21 @@ func TestConfigureIdentity_DoesNotOverwrite(t *testing.T) {
 }
 
 func TestGitErrorsRedactCommandScopedAuthConfig(t *testing.T) {
+	binDir := t.TempDir()
+	fakeGit := filepath.Join(binDir, "git")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' 'fatal: unable to access repo with Authorization: Bearer ghs_secret_installation_token and extraHeader'\n" +
+		"exit 1\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	token := "ghs_secret_installation_token"
-	err := CloneWithConfig("https://example.invalid/repo.git", filepath.Join(t.TempDir(), "repo"),
+	err := CloneWithConfig("https://github.com/acme/widgets.git", filepath.Join(t.TempDir(), "repo"),
 		"http.https://github.com/.extraHeader=Authorization: Bearer "+token)
 
 	require.Error(t, err)
 	msg := err.Error()
-	assert.Contains(t, msg, "clone https://example.invalid/repo.git")
+	assert.Contains(t, msg, "clone https://github.com/acme/widgets.git")
 	assert.NotContains(t, msg, "-c")
 	assert.NotContains(t, msg, "extraHeader")
 	assert.NotContains(t, msg, token)

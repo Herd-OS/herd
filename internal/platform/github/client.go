@@ -36,6 +36,20 @@ func New(owner, repo string) (*Client, error) {
 		return nil, err
 	}
 
+	return NewWithToken(owner, repo, token)
+}
+
+func NewWithToken(owner, repo string, token string) (*Client, error) {
+	if strings.TrimSpace(owner) == "" {
+		return nil, fmt.Errorf("repository owner is required")
+	}
+	if strings.TrimSpace(repo) == "" {
+		return nil, fmt.Errorf("repository name is required")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, fmt.Errorf("GitHub token is required")
+	}
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	httpClient := oauth2.NewClient(context.Background(), ts)
 	httpClient.Transport = newRetryTransport(httpClient.Transport, time.Second)

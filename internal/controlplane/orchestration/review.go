@@ -47,7 +47,7 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 	created, err := s.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       key,
 		Scope:     "review_fix_issue_create",
-		Status:    mutationStatusStarted,
+		Status:    mutationStatusIntentRecorded,
 		CreatedAt: s.now(),
 	})
 	if err != nil {

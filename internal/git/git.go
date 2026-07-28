@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -55,7 +56,7 @@ func CloneWithConfigAndEnv(repoURL, dst string, config []string, env []string) e
 	cmd.Env = gitEnv(config, env)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(args), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(args), err, redactGitOutput(out))
 	}
 	return nil
 }
@@ -318,7 +319,7 @@ func (g *Git) run(args ...string) error {
 	cmd.Env = gitEnv(g.ExtraConfig, g.Env)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, redactGitOutput(out))
 	}
 	return nil
 }
@@ -331,7 +332,7 @@ func (g *Git) output(args ...string) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, strings.TrimSpace(string(exitErr.Stderr)))
+			return "", fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, redactGitOutput(exitErr.Stderr))
 		}
 		return "", fmt.Errorf("git %s: %w", gitCommandDisplay(cmdArgs), err)
 	}
@@ -347,7 +348,7 @@ func (g *Git) outputBytes(args ...string) ([]byte, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, redactGitOutput(stderr.Bytes()))
 	}
 	return out, nil
 }
@@ -394,6 +395,23 @@ func gitCommandDisplay(args []string) string {
 		out = append(out, args[i])
 	}
 	return strings.Join(out, " ")
+}
+
+var gitSecretPattern = regexp.MustCompile(`(?i)(authorization:\s*(?:bearer|basic)\s+)[^\s]+|\b(?:gh[opsru]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b|extraHeader`)
+
+func redactGitOutput(out []byte) string {
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		return ""
+	}
+	return gitSecretPattern.ReplaceAllStringFunc(msg, func(match string) string {
+		lower := strings.ToLower(match)
+		if strings.HasPrefix(lower, "authorization:") {
+			prefix, _, _ := strings.Cut(match, " ")
+			return prefix + " [redacted]"
+		}
+		return "[redacted]"
+	})
 }
 
 func redactGitConfig(entry string) string {

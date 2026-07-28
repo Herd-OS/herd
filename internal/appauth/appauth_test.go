@@ -126,6 +126,40 @@ func TestGitHubTokenSourceInstallationTokenSuccess(t *testing.T) {
 	assert.Equal(t, []string{"herd", "infra"}, token.Repositories)
 }
 
+func TestGitHubTokenSourceInstallationTokenWithPermissions(t *testing.T) {
+	expiresAt := time.Date(2030, 7, 11, 13, 0, 0, 0, time.UTC)
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		assert.Equal(t, http.MethodPost, req.Method)
+		var body struct {
+			Permissions map[string]string `json:"permissions"`
+		}
+		require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+		assert.Equal(t, map[string]string{"contents": "read", "pull_requests": "read"}, body.Permissions)
+		return jsonResponse(http.StatusCreated, `{"token":"installation-token","expires_at":"`+expiresAt.Format(time.RFC3339)+`"}`), nil
+	})
+	httpClient := oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(&oauth2.Token{
+		AccessToken: "app-jwt",
+		TokenType:   "Bearer",
+	}))
+	oauthTransport, ok := httpClient.Transport.(*oauth2.Transport)
+	require.True(t, ok)
+	oauthTransport.Base = rt
+	ghClient, err := github.NewClient(httpClient).WithEnterpriseURLs("https://example.test/api/v3/", "https://example.test/api/uploads/")
+	require.NoError(t, err)
+	source, err := NewGitHubTokenSourceWithClient(ghClient)
+	require.NoError(t, err)
+	read := "read"
+
+	token, err := source.InstallationTokenWithPermissions(context.Background(), 99, github.InstallationPermissions{
+		Contents:     &read,
+		PullRequests: &read,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "installation-token", token.Token)
+	assert.Equal(t, expiresAt, token.ExpiresAt)
+}
+
 func TestGitHubTokenSourceRefreshesAppJWTAfterExpiry(t *testing.T) {
 	current := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	generatedAt := []time.Time{}

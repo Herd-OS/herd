@@ -217,7 +217,7 @@ func TestEnsureReviewFixIssuePreCallIdempotencyIsRetryable(t *testing.T) {
 	result := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 42, BatchBranch: "herd/batch/9-demo", HeadSHA: "head", FixCycle: 1}
 	finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
 	key := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
-	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "review_fix_issue_create", Status: mutationStatusStarted}
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "review_fix_issue_create", Status: mutationStatusIntentRecorded}
 
 	issueNumber, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
 
@@ -225,6 +225,30 @@ func TestEnsureReviewFixIssuePreCallIdempotencyIsRetryable(t *testing.T) {
 	assert.Equal(t, 1, issueNumber)
 	assert.True(t, created)
 	assert.Len(t, fake.issues.created, 1)
+}
+
+func TestEnsureReviewFixIssueCreatedIntentWithoutMutationAttemptCreatesOnce(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, nil)
+	repo := review.Repository{ID: 123, InstallationID: 456, Owner: "owner", Name: "repo", DefaultBranch: "main"}
+	result := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 42, BatchBranch: "herd/batch/9-demo", HeadSHA: "head", FixCycle: 1}
+	finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
+	key := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "review_fix_issue_create", Status: mutationStatusIntentRecorded}
+
+	firstIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+	require.NoError(t, err)
+	secondIssue, createdAgain, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+	require.NoError(t, err)
+
+	assert.True(t, created)
+	assert.False(t, createdAgain)
+	assert.Equal(t, firstIssue, secondIssue)
+	assert.Len(t, fake.issues.created, 1)
+	assert.Equal(t, mutationStatusCompleted, st.keys[key].Status)
+	assert.Equal(t, "issue:1", st.keys[key].ResultRef)
 }
 
 func TestEnsureReviewFixIssuePostCallUnknownRequiresRepair(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/appauth"
 	"github.com/herd-os/herd/internal/controlplane"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
@@ -43,6 +44,10 @@ type MutationStarter interface {
 
 type MutationReader interface {
 	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
+}
+
+type ReadTokenSource interface {
+	InstallationTokenWithPermissions(ctx context.Context, installationID int64, permissions gh.InstallationPermissions) (appauth.InstallationToken, error)
 }
 
 type PatchApplier interface {
@@ -132,6 +137,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	pathJobID := strings.TrimSpace(r.PathValue("job_id"))
 	if pathJobID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "job_id path parameter is required"})
+		return
+	}
+	if r.Method == http.MethodGet {
+		h.serveReadToken(w, r, pathJobID)
 		return
 	}
 
@@ -284,6 +293,78 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"job_id":          envelope.JobID,
 		"kind":            envelope.Kind,
 		"idempotency_key": idempotencyKey,
+	})
+}
+
+type ReviewReadTokenResponse struct {
+	Token       string            `json:"token"`
+	ExpiresAt   time.Time         `json:"expires_at"`
+	Permissions map[string]string `json:"permissions,omitempty"`
+}
+
+func (h Handler) serveReadToken(w http.ResponseWriter, r *http.Request, jobID string) {
+	if h.appTokenSource == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "GitHub App token source is not configured"})
+		return
+	}
+	source, ok := h.appTokenSource.(ReadTokenSource)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "GitHub App read token source is not configured"})
+		return
+	}
+	job, err := h.store.GetJob(r.Context(), jobID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "lookup job"})
+		return
+	}
+	if job.InstallationID == 0 || job.PRNumber <= 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not eligible for hosted review read token"})
+		return
+	}
+	expected := ExpectedIdentityFromJob(job, "")
+	if expected.Repository == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job repository metadata is missing"})
+		return
+	}
+	token, err := BearerToken(r.Header.Get("Authorization"))
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	claims, err := h.validator.Validate(r.Context(), token)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "validate OIDC token"})
+		return
+	}
+	if err := ValidateOIDCClaims(claims, expected, OIDCOptions{Audience: h.audience, Now: h.now}); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	read := "read"
+	minted, err := source.InstallationTokenWithPermissions(r.Context(), job.InstallationID, gh.InstallationPermissions{
+		Actions:      &read,
+		Checks:       &read,
+		Contents:     &read,
+		Issues:       &read,
+		Metadata:     &read,
+		PullRequests: &read,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mint GitHub read token"})
+		return
+	}
+	if strings.TrimSpace(minted.Token) == "" || minted.ExpiresAt.IsZero() || !h.now().Before(minted.ExpiresAt) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "minted GitHub read token is invalid"})
+		return
+	}
+	writeJSON(w, http.StatusOK, ReviewReadTokenResponse{
+		Token:       minted.Token,
+		ExpiresAt:   minted.ExpiresAt,
+		Permissions: minted.Permissions,
 	})
 }
 

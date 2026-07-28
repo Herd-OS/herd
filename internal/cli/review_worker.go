@@ -1,12 +1,18 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
 	"github.com/herd-os/herd/internal/agent/factory"
 	"github.com/herd-os/herd/internal/config"
+	cpclient "github.com/herd-os/herd/internal/controlplane/client"
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/platform/github"
@@ -40,7 +46,15 @@ func newReviewWorkerCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			readToken, err := hostedReviewReadToken(cmd.Context(), cfg)
+			if err != nil {
+				_ = writeHostedReviewResult(resultFile, hostedReviewWorkflowResult{
+					Status:  "failed",
+					Summary: "Herd Review failed before review execution.",
+				})
+				return err
+			}
+			client, err := github.NewWithToken(cfg.Platform.Owner, cfg.Platform.Repo, readToken)
 			if err != nil {
 				_ = writeHostedReviewResult(resultFile, hostedReviewWorkflowResult{
 					Status:  "failed",
@@ -94,4 +108,72 @@ func reviewWorkerParams(prNumber int, repoRoot string, reviewPrompt string, manu
 		ExtraInstructions: strings.TrimSpace(reviewPrompt),
 		Manual:            manual,
 	}
+}
+
+func hostedReviewReadToken(ctx context.Context, cfg *config.Config) (string, error) {
+	jobID := strings.TrimSpace(os.Getenv("HERD_JOB_ID"))
+	if jobID == "" {
+		return "", fmt.Errorf("HERD_JOB_ID is required for hosted review read token")
+	}
+	oidcToken, err := githubActionsOIDCToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	cp, err := cpclient.New(cfg.EffectiveControlPlaneURL(), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := cp.GetReviewReadToken(ctx, jobID, oidcToken)
+	if err != nil {
+		return "", fmt.Errorf("getting hosted review read token: %w", err)
+	}
+	return resp.Token, nil
+}
+
+func githubActionsOIDCToken(ctx context.Context) (string, error) {
+	requestURL := strings.TrimSpace(os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL"))
+	requestToken := strings.TrimSpace(os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+	if requestURL == "" || requestToken == "" {
+		return "", fmt.Errorf("GitHub Actions OIDC request environment is required for hosted review")
+	}
+	parsed, err := url.Parse(requestURL)
+	if err != nil {
+		return "", fmt.Errorf("parse GitHub Actions OIDC request URL: %w", err)
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return "", fmt.Errorf("GitHub Actions OIDC request URL must use http or https")
+	}
+	if parsed.Host == "" || parsed.User != nil {
+		return "", fmt.Errorf("GitHub Actions OIDC request URL is invalid")
+	}
+	q := parsed.Query()
+	q.Set("audience", "herd-control-plane")
+	parsed.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil) //nolint:gosec // URL is supplied by GitHub Actions OIDC runtime and validated above.
+	if err != nil {
+		return "", fmt.Errorf("create GitHub Actions OIDC request: %w", err)
+	}
+	req.Header.Set("Authorization", "bearer "+requestToken)
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // Request URL is the validated GitHub Actions OIDC runtime endpoint.
+	if err != nil {
+		return "", fmt.Errorf("fetch GitHub Actions OIDC token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("read GitHub Actions OIDC response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("fetch GitHub Actions OIDC token: status %d", resp.StatusCode)
+	}
+	var body struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return "", fmt.Errorf("decode GitHub Actions OIDC response: %w", err)
+	}
+	if strings.TrimSpace(body.Value) == "" {
+		return "", fmt.Errorf("GitHub Actions OIDC response did not include a token")
+	}
+	return strings.TrimSpace(body.Value), nil
 }

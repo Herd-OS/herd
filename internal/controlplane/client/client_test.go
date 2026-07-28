@@ -102,6 +102,44 @@ func TestSubmitJobResultWithRetryDoesNotRetryBadRequest(t *testing.T) {
 	assert.Equal(t, 1, attempts)
 }
 
+func TestGetReviewReadToken(t *testing.T) {
+	expires := time.Date(2026, 7, 11, 13, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/jobs/job-1/review-read-token", r.URL.Path)
+		assert.Equal(t, "Bearer oidc-token", r.Header.Get("Authorization"))
+		_ = json.NewEncoder(w).Encode(ReviewReadTokenResponse{
+			Token:       "ghs_read",
+			ExpiresAt:   expires,
+			Permissions: map[string]string{"contents": "read"},
+		})
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, srv.Client())
+	require.NoError(t, err)
+
+	got, err := c.GetReviewReadToken(context.Background(), "job-1", "oidc-token")
+
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_read", got.Token)
+	assert.Equal(t, expires, got.ExpiresAt)
+	assert.Equal(t, "read", got.Permissions["contents"])
+}
+
+func TestGetReviewReadTokenRejectsMissingFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ReviewReadTokenResponse{})
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, srv.Client())
+	require.NoError(t, err)
+
+	_, err = c.GetReviewReadToken(context.Background(), "job-1", "oidc-token")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing token or expires_at")
+}
+
 func TestBoundedExponentialBackoffCapsDelay(t *testing.T) {
 	tests := []struct {
 		name    string

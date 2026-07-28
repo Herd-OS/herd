@@ -139,10 +139,27 @@ func ResultIdempotencyKey(result Result, _ []byte) string {
 	case WorkerCompletedResult:
 		parts = append(parts, r.TargetBranch, r.BaseSHA, r.ExpectedHeadSHA, r.PatchArtifact, r.Status)
 	case ReviewCompletedResult:
-		parts = append(parts, fmt.Sprintf("%d", r.PRNumber), r.HeadSHA, r.Status)
+		parts = append(parts, fmt.Sprintf("%d", r.PRNumber), r.HeadSHA, r.Status, canonicalReviewOutputIdentity(r))
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return envelope.Kind + ":" + hex.EncodeToString(sum[:])
+}
+
+func canonicalReviewOutputIdentity(result ReviewCompletedResult) string {
+	payload := struct {
+		Summary  string          `json:"summary"`
+		FixCycle int             `json:"fix_cycle"`
+		Findings []ReviewFinding `json:"findings,omitempty"`
+	}{
+		Summary:  result.Summary,
+		FixCycle: result.FixCycle,
+		Findings: result.Findings,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func validateEnvelope(envelope ResultEnvelope) error {

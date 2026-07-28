@@ -316,6 +316,17 @@ func TestResultIdempotencyKeyUsesStableResultIdentity(t *testing.T) {
 	assert.Len(t, ResultPayloadHash(payload), 64)
 }
 
+func TestResultIdempotencyKeyIncludesReviewVisibleOutput(t *testing.T) {
+	basePayload := []byte(`{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":1,"pr_number":2,"head_sha":"head","status":"changes_requested","summary":"first","fix_cycle":1,"findings":[{"fingerprint":"fp-1","severity":"high","description":"fix it"}]}`)
+	changedPayload := []byte(`{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":1,"pr_number":2,"head_sha":"head","status":"changes_requested","summary":"second","fix_cycle":1,"findings":[{"fingerprint":"fp-2","severity":"high","description":"fix something else"}]}`)
+	baseResult, err := ParseResultPayload(basePayload)
+	require.NoError(t, err)
+	changedResult, err := ParseResultPayload(changedPayload)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, ResultIdempotencyKey(baseResult, basePayload), ResultIdempotencyKey(changedResult, changedPayload))
+}
+
 func TestParseReviewCompletedTerminalFailureStatuses(t *testing.T) {
 	tests := []string{StatusFailure, StatusTimedOut, StatusUnparseable, StatusMaxCyclesHit}
 	for _, status := range tests {

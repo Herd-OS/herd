@@ -224,7 +224,7 @@ func TestSetHerdReviewStatusRetriesAfterGitHubFailureAndFailIdempotencyFailure(t
 	require.Error(t, firstErr)
 	assert.Contains(t, firstErr.Error(), "github down")
 	require.Error(t, secondErr)
-	assert.Contains(t, secondErr.Error(), "already in progress")
+	assert.Contains(t, secondErr.Error(), "repair required")
 	assert.Empty(t, gh.statuses)
 	require.Len(t, st.mutationAttempts, 1)
 	assert.Equal(t, "repair_required", st.mutationAttempts[0].Status)
@@ -249,6 +249,28 @@ func TestSetHerdReviewStatusRetriesAfterMutationAttemptRecordFailure(t *testing.
 	assert.Equal(t, "success", st.states[0].Status)
 	require.Len(t, st.mutationAttempts, 1)
 	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+}
+
+func TestSetHerdReviewStatusRetriesIntentRecordWithoutMutationAttempt(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStatusStore{}
+	gh := &fakeStatusGitHub{}
+	svc := StatusService{Store: st, GitHub: gh}
+	repo := testRepo(true)
+	key := statusMutationKey(repo.ID, 42, "head-sha", ReviewStatusSuccess, "https://example.test/run", "approved")
+	st.idem = map[string]store.IdempotencyKey{
+		key: {Key: key, Scope: "review_status", Status: mutationspkg.PhaseIntentRecorded},
+	}
+
+	err := svc.SetHerdReviewStatus(ctx, repo, 42, "head-sha", ReviewStatusSuccess, "approved", "https://example.test/run")
+
+	require.NoError(t, err)
+	require.Len(t, gh.statuses, 1)
+	assert.Equal(t, HerdReviewContext, gh.statuses[0].status.Context)
+	require.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationAttempts[0].Status)
+	require.Len(t, st.states, 1)
+	assert.Equal(t, "success", st.states[0].Status)
 }
 
 type fakeStatusStore struct {

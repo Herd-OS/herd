@@ -33,6 +33,12 @@ type RegisterRepositoryResponse struct {
 	ControlPlaneURL      string `json:"control_plane_url,omitempty"`
 }
 
+type ReviewReadTokenResponse struct {
+	Token       string            `json:"token"`
+	ExpiresAt   time.Time         `json:"expires_at"`
+	Permissions map[string]string `json:"permissions,omitempty"`
+}
+
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
@@ -171,6 +177,49 @@ func (c *Client) SubmitJobResultWithRetry(ctx context.Context, jobID string, pay
 		}
 	}
 	return lastErr
+}
+
+func (c *Client) GetReviewReadToken(ctx context.Context, jobID string, bearerToken string) (ReviewReadTokenResponse, error) {
+	if c == nil {
+		return ReviewReadTokenResponse{}, fmt.Errorf("control-plane client is nil")
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return ReviewReadTokenResponse{}, fmt.Errorf("job ID is required")
+	}
+	path := "/api/v1/jobs/" + url.PathEscape(jobID) + "/review-read-token"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return ReviewReadTokenResponse{}, fmt.Errorf("create review read token request: %w", err)
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(bearerToken) != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(bearerToken))
+	}
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return ReviewReadTokenResponse{}, fmt.Errorf("get hosted review read token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCallbackPayloadBytes))
+	if err != nil {
+		return ReviewReadTokenResponse{}, fmt.Errorf("read hosted review read token response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(data))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return ReviewReadTokenResponse{}, StatusError{StatusCode: resp.StatusCode, Message: msg}
+	}
+	var out ReviewReadTokenResponse
+	if err := json.Unmarshal(data, &out); err != nil {
+		return ReviewReadTokenResponse{}, fmt.Errorf("decode hosted review read token response: %w", err)
+	}
+	if strings.TrimSpace(out.Token) == "" || out.ExpiresAt.IsZero() {
+		return ReviewReadTokenResponse{}, fmt.Errorf("hosted review read token response is missing token or expires_at")
+	}
+	return out, nil
 }
 
 func BoundedExponentialBackoff(attempt int, initialBackoff, maxBackoff time.Duration) time.Duration {

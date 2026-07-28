@@ -63,11 +63,19 @@ func NewGitHubTokenSourceWithClient(client *github.Client) (*GitHubTokenSource, 
 
 // InstallationToken creates an installation access token for installationID.
 func (s *GitHubTokenSource) InstallationToken(ctx context.Context, installationID int64) (InstallationToken, error) {
+	return s.installationToken(ctx, installationID, nil)
+}
+
+func (s *GitHubTokenSource) InstallationTokenWithPermissions(ctx context.Context, installationID int64, permissions github.InstallationPermissions) (InstallationToken, error) {
+	return s.installationToken(ctx, installationID, &github.InstallationTokenOptions{Permissions: &permissions})
+}
+
+func (s *GitHubTokenSource) installationToken(ctx context.Context, installationID int64, opts *github.InstallationTokenOptions) (InstallationToken, error) {
 	if s == nil || s.client == nil {
 		return InstallationToken{}, fmt.Errorf("GitHub token source client is required")
 	}
 
-	token, _, err := s.client.Apps.CreateInstallationToken(ctx, installationID, nil)
+	token, _, err := s.client.Apps.CreateInstallationToken(ctx, installationID, opts)
 	if err != nil {
 		return InstallationToken{}, fmt.Errorf("creating GitHub App installation token for installation %d: %w", installationID, err)
 	}

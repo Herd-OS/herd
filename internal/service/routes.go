@@ -117,6 +117,7 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) error 
 		jobResultsHandler = http.HandlerFunc(notImplementedHandler)
 	}
 	mux.Handle("POST /api/v1/jobs/{job_id}/results", jobResultsHandler)
+	mux.Handle("GET /api/v1/jobs/{job_id}/review-read-token", jobResultsHandler)
 	workflowEventsHandler := deps.WorkflowEventsRoute
 	if workflowEventsHandler == nil && deps.Store != nil {
 		eventStore, ok := deps.Store.(workflowevents.Store)
