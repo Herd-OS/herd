@@ -251,7 +251,7 @@ Once workers are dispatched, the system runs autonomously via GitHub Actions:
 
 6. **Monitor patrols** — A cron-triggered Action detects stale workers (in-progress with no active run), failed issues (auto-redispatches with exponential backoff), CI failures on batch PRs, and stuck PRs (open longer than `max_pr_age_hours`). It escalates to `notify_users` when retries are exhausted.
 
-7. **You review and merge** — The batch PR arrives with a summary table of all tasks and their tiers. If `pull_requests.auto_merge` is true and the agent review passed, it merges automatically. If you close the PR without merging, cleanup still runs: non-done issues are labelled `herd/status:cancelled`, the milestone is closed, and the branch is deleted.
+7. **You review and merge** — The batch PR arrives with a reviewer-facing summary, major changes, validation notes, and then the task/tier table. If `pull_requests.auto_merge` is true and the agent review passed, it merges automatically. If you close the PR without merging, cleanup still runs: non-done issues are labelled `herd/status:cancelled`, the milestone is closed, and the branch is deleted.
 
 ### Role Instruction Files
 
