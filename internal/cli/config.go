@@ -169,6 +169,11 @@ func flattenConfig(cfg *config.Config) []keyValue {
 	kvs = append(kvs, keyValue{"integrator.review_max_fix_cycles", itoa(cfg.Integrator.ReviewMaxFixCycles)})
 	kvs = append(kvs, keyValue{"integrator.review_strictness", displayValue(cfg.Integrator.ReviewStrictness)})
 	kvs = append(kvs, keyValue{"integrator.review_fix_severity", displayValue(cfg.Integrator.ReviewFixSeverity)})
+	kvs = append(kvs, keyValue{"integrator.review_non_convergence.enabled", btoa(cfg.Integrator.ReviewNonConvergence.Enabled)})
+	kvs = append(kvs, keyValue{"integrator.review_non_convergence.window", itoa(cfg.Integrator.ReviewNonConvergence.Window)})
+	kvs = append(kvs, keyValue{"integrator.review_non_convergence.min_completed_cycles", itoa(cfg.Integrator.ReviewNonConvergence.MinCompletedCycles)})
+	kvs = append(kvs, keyValue{"integrator.review_non_convergence.synthesis_enabled", btoa(cfg.Integrator.ReviewNonConvergence.SynthesisEnabled)})
+	kvs = append(kvs, keyValue{"integrator.review_non_convergence.synthesis_min_confidence", ftoa(cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence)})
 	kvs = append(kvs, keyValue{"integrator.review_diff.max_chunk_bytes", itoa(cfg.Integrator.ReviewDiff.MaxChunkBytes)})
 	kvs = append(kvs, keyValue{"integrator.review_diff.max_file_bytes", itoa(cfg.Integrator.ReviewDiff.MaxFileBytes)})
 	kvs = append(kvs, keyValue{"integrator.review_diff.max_files_per_chunk", itoa(cfg.Integrator.ReviewDiff.MaxFilesPerChunk)})
@@ -279,6 +284,12 @@ func setConfigValue(cfg *config.Config, key, value string) error {
 			return fail("%s must be true or false, got %q", key, value)
 		}
 		targetField.SetBool(b)
+	case reflect.Float64:
+		f, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fail("%s must be a number, got %q", key, value)
+		}
+		targetField.SetFloat(f)
 	default:
 		return fail("cannot set %s via CLI (use 'herd config edit')", key)
 	}
@@ -322,6 +333,9 @@ func displayValue(s string) string {
 
 func itoa(n int) string  { return strconv.Itoa(n) }
 func btoa(b bool) string { return strconv.FormatBool(b) }
+func ftoa(f float64) string {
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
 
 func formatStringSlice(ss []string) string {
 	if len(ss) == 0 {

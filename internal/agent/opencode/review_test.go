@@ -234,6 +234,68 @@ echo '{"approved": true, "findings": [], "summary": "diff reviewed"}'
 	}
 }
 
+func TestSynthesizeReviewNonConvergence_PrependsSystemPromptAndParsesOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	argvDump := dir + "/argv.bin"
+	stdinDump := dir + "/stdin.txt"
+	script := dir + "/opencode.sh"
+	content := fmt.Sprintf(`#!/bin/sh
+printf '%%s\0' "$@" > '%s'
+cat > '%s'
+echo '{"should_escalate":false,"confidence":0.64,"reason":"evidence is weak"}'
+`, argvDump, stdinDump)
+	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+
+	a := New(script, "anthropic/claude-sonnet-4")
+	result, err := a.SynthesizeReviewNonConvergence(context.Background(), agent.ReviewSynthesisInput{
+		PRNumber:          21,
+		BatchNumber:       116,
+		HeadSHA:           "sha-21",
+		CurrentPRMetadata: "metadata marker",
+	}, agent.ReviewSynthesisOptions{RepoRoot: dir})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.ShouldEscalate)
+	assert.Equal(t, 0.64, result.Confidence)
+	assert.Equal(t, "evidence is weak", result.Reason)
+
+	stdinBytes, err := os.ReadFile(stdinDump)
+	require.NoError(t, err)
+	stdinContent := string(stdinBytes)
+	assert.True(t, strings.HasPrefix(stdinContent, prompt.ReviewSynthesisSystemPrompt))
+	assert.Contains(t, stdinContent, "sha-21")
+	assert.Contains(t, stdinContent, "metadata marker")
+
+	argv := readArgvDump(t, argvDump)
+	assert.Equal(t, "run", argv[0])
+	assert.Contains(t, argv, "--model")
+	assert.Contains(t, argv, "anthropic/claude-sonnet-4")
+}
+
+func TestSynthesizeReviewNonConvergence_InvalidOutputReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	script := dir + "/opencode.sh"
+	content := `#!/bin/sh
+cat > /dev/null
+echo 'this is not json at all and is long enough to pass the suspicious-output filter'
+`
+	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+
+	a := New(script, "")
+	result, err := a.SynthesizeReviewNonConvergence(context.Background(), agent.ReviewSynthesisInput{}, agent.ReviewSynthesisOptions{RepoRoot: dir})
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "parsing review synthesis output")
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

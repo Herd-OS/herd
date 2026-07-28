@@ -32,9 +32,11 @@ func Default() *Config {
 			ReviewStrictness:              "standard",
 			ReviewFixSeverity:             "low",
 			ReviewNonConvergence: ReviewNonConvergence{
-				Enabled:            true,
-				Window:             5,
-				MinCompletedCycles: 3,
+				Enabled:                true,
+				Window:                 5,
+				MinCompletedCycles:     3,
+				SynthesisEnabled:       true,
+				SynthesisMinConfidence: 0.75,
 			},
 			ReviewDiff: ReviewDiff{
 				MaxChunkBytes:    180000,

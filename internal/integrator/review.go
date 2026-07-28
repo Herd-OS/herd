@@ -302,6 +302,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		if parsed.FrontMatter.Type == "fix" || parsed.FrontMatter.CIFixCycle > 0 {
 			status := issues.StatusLabel(iss.Labels)
 			if status == issues.StatusInProgress || status == issues.StatusReady {
+				if issues.HasLabel(iss.Labels, issues.ReviewNonConverging) && strings.HasPrefix(iss.Title, "Review strategy fix") {
+					continue
+				}
 				fmt.Printf("Skipping review: fix issue #%d is still %s\n", iss.Number, status)
 				return &ReviewResult{BatchPRNumber: pr.Number}, nil
 			}
@@ -662,6 +665,82 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		history = appendCurrentReviewHistoryCycleIfMissing(history, nextCycle, currentHeadSHA, rawReviewFindings, actionableFindings, actionableHighFindings, actionableMediumFindings, actionableLowFindings, actionableCriteriaFindings)
 		analysis := analyzeReviewConvergence(history, cfg.Integrator.ReviewNonConvergence.MinCompletedCycles)
 		if analysis.Decision == reviewDecisionEscalateToArchitectureFix {
+			if cfg.Integrator.ReviewNonConvergence.SynthesisEnabled {
+				synthesisCtx, cancel := context.WithTimeout(ctx, reviewSynthesisTimeout)
+				synthesisInput := buildReviewSynthesisInput(pr, ms, currentHeadSHA, prComments, history, allIssues, workerNoOpVerdicts, reviewOpts.CurrentPRMetadata)
+				synthesisResult, synthesisErr := ag.SynthesizeReviewNonConvergence(synthesisCtx, synthesisInput, agent.ReviewSynthesisOptions{
+					RepoRoot:     params.RepoRoot,
+					SystemPrompt: reviewOpts.SystemPrompt,
+				})
+				cancel()
+				if synthesisErr != nil {
+					fmt.Printf("Review non-convergence synthesis fallback: %v\n", synthesisErr)
+				} else if decision, reason := evaluateReviewSynthesis(synthesisResult, cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence, analysis); decision != reviewSynthesisDecisionEscalate {
+					fmt.Printf("Review non-convergence synthesis fallback: %s\n", reason)
+				} else {
+					fingerprint := synthesizedReviewStrategyFingerprint(synthesisResult)
+					if duplicate, ok := findDuplicateSynthesizedStrategyFixIssue(allIssues, pr.Number, fingerprint, currentHeadSHA); ok {
+						fmt.Printf("Review non-convergence synthesis duplicate suppressed by strategy issue #%d\n", duplicate.Number)
+						comment := buildSynthesizedReviewNonConvergencePRComment(synthesisResult, duplicate.Number)
+						comment += fmt.Sprintf("\nNon-convergence is already being addressed by strategy issue #%d.\n", duplicate.Number)
+						comment = appendReviewMetadataAndCoverage(comment)
+						comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, nextCycle, 1)
+						if err != nil {
+							return nil, err
+						}
+						_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+						_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, fmt.Sprintf("Review/fix loop is not converging. Synthesized strategy-level fix is already in progress -> #%d.", duplicate.Number), platform.ReviewRequestChanges)
+						return &ReviewResult{
+							FixIssues:     []int{duplicate.Number},
+							FixCycle:      nextCycle,
+							BatchPRNumber: pr.Number,
+							FindingsCount: 1,
+						}, nil
+					}
+
+					strategyBody := buildSynthesizedStrategyFixIssueBody(ms, pr, nextCycle, synthesisResult, synthesisInput, fingerprint)
+					truncatedBody, overflow := issues.TruncateIssueBody(strategyBody)
+					fixIssue, createErr := p.Issues().Create(postReviewCtx, buildSynthesizedStrategyFixIssueTitle(nextCycle, synthesisResult), truncatedBody,
+						[]string{issues.TypeFix, issues.StatusInProgress, issues.ReviewNonConverging}, &ms.Number)
+					if createErr != nil {
+						return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: 1}, nil
+					}
+					for _, comment := range issues.SplitOverflowComments(overflow) {
+						if cerr := p.Issues().AddComment(postReviewCtx, fixIssue.Number, comment); cerr != nil {
+							fmt.Printf("Warning: failed to post overflow comment on fix issue #%d: %v\n", fixIssue.Number, cerr)
+						}
+					}
+
+					_, dispatchErr := p.Workflows().Dispatch(postReviewCtx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
+						"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
+						"batch_branch":    batchBranch,
+						"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
+						"runner_label":    cfg.Workers.RunnerLabel,
+					})
+					if dispatchErr != nil {
+						_ = p.Issues().RemoveLabels(postReviewCtx, fixIssue.Number, []string{issues.StatusInProgress})
+						_ = p.Issues().AddLabels(postReviewCtx, fixIssue.Number, []string{issues.StatusFailed})
+						_ = p.Issues().AddComment(postReviewCtx, fixIssue.Number, fmt.Sprintf("Failed to dispatch strategy-level fix worker: %v", dispatchErr))
+						return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: 1}, nil
+					}
+
+					comment := buildSynthesizedReviewNonConvergencePRComment(synthesisResult, fixIssue.Number)
+					comment = appendReviewMetadataAndCoverage(comment)
+					comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, nextCycle, 1)
+					if err != nil {
+						return nil, err
+					}
+					_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+					_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, fmt.Sprintf("Review/fix loop is not converging. Synthesized strategy-level fix worker dispatched -> #%d.", fixIssue.Number), platform.ReviewRequestChanges)
+					return &ReviewResult{
+						FixIssues:     []int{fixIssue.Number},
+						FixCycle:      nextCycle,
+						BatchPRNumber: pr.Number,
+						FindingsCount: 1,
+					}, nil
+				}
+			}
+
 			if duplicate, ok := findDuplicateStrategyFixIssue(allIssues, pr.Number, analysis.Cluster.Fingerprint); ok {
 				comment := buildReviewNonConvergencePRComment(analysis, duplicate.Number)
 				comment += fmt.Sprintf("\nNon-convergence is already being addressed by strategy issue #%d.\n", duplicate.Number)

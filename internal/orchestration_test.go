@@ -739,6 +739,9 @@ func (a *mockAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOpt
 func (a *mockAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return &agent.ReviewResult{Approved: a.approved, Summary: "LGTM"}, nil
 }
+func (a *mockAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
+}
 func (a *mockAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil
 }

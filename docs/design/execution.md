@@ -580,22 +580,25 @@ and track which review cycle spawned them via a `fix_cycle` field and a
 
 Before creating another review-fix issue, the Integrator parses recent HerdOS
 review result comments and completed review-fix issues for the batch PR. The
-first implementation is deterministic-only: it compares review-cycle trends,
-deduped finding counts, and repeated package/root-cause clusters to decide
-whether the fix loop is still making progress or needs a different strategy.
+trigger is deterministic: it compares review-cycle trends, deduped finding
+counts, and repeated package/root-cause clusters to decide whether the fix loop
+is still making progress or needs a different strategy. Deterministic analysis
+also remains the fallback when synthesis is disabled, unavailable, invalid, low
+confidence, or rejected by safety gates.
 
-When the deterministic heuristics detect non-convergence, the Integrator creates
-one strategy-level fix issue instead of another broad endpoint-level review-fix
-issue. The strategy issue carries the recurring finding clusters and a duplicate
-fingerprint. Before creating one, HerdOS checks for an existing strategy fix by
-label, title, and fingerprint so repeated review triggers do not dispatch
-duplicate strategy workers.
+When the deterministic heuristics detect non-convergence, the Integrator can run
+bounded agent synthesis to group recent findings into one dominant architectural
+or root-cause cluster. Safety gates require sufficient confidence, recurring
+symptoms, cycle and fix-attempt evidence, concrete acceptance criteria, and
+duplicate fingerprint checks before HerdOS uses synthesized strategy text.
+Otherwise HerdOS creates the deterministic strategy issue.
 
 Strategy fixes use the existing worker workflow. The Integrator creates the
 issue internally and dispatches the worker directly, so no human `@herd-os fix`
-comment is required. Future implementations can add optional agent synthesis for
-the strategy text, but this version intentionally keeps the decision and issue
-construction deterministic.
+comment is required. The strategy issue carries the recurring finding clusters
+and a duplicate fingerprint. Before creating one, HerdOS checks for an existing
+strategy fix by label, title, and fingerprint so repeated review triggers do not
+dispatch duplicate strategy workers.
 
 #### Review fix-issue dedup
 

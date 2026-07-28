@@ -17,6 +17,7 @@ import (
 //
 //go:embed schemas/plan.json
 //go:embed schemas/review.json
+//go:embed schemas/review_synthesis.json
 var schemaFS embed.FS
 
 // writeSchemaFile materializes an embedded schema (by base name, e.g.

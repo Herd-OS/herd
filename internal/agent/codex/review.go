@@ -106,3 +106,82 @@ func (c *CodexAgent) Review(ctx context.Context, diff string, opts agent.ReviewO
 
 	return result, nil
 }
+
+func (c *CodexAgent) SynthesizeReviewNonConvergence(ctx context.Context, input agent.ReviewSynthesisInput, opts agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	synthesisPrompt, err := prompt.RenderReviewSynthesisPrompt(input, opts)
+	if err != nil {
+		return nil, fmt.Errorf("rendering review synthesis prompt: %w", err)
+	}
+
+	message := prompt.ReviewSynthesisSystemPrompt + "\n\n" + synthesisPrompt
+
+	schemaFile, err := writeSchemaFile("review_synthesis.json")
+	if err != nil {
+		return nil, fmt.Errorf("review synthesis: writing schema file: %w", err)
+	}
+	defer func() { _ = os.Remove(schemaFile) }()
+
+	outFile, err := os.CreateTemp("", "codex-review-synthesis-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("review synthesis: creating output temp file: %w", err)
+	}
+	outPath := outFile.Name()
+	_ = outFile.Close()
+	defer func() { _ = os.Remove(outPath) }()
+
+	args := c.buildExecBaseArgs()
+	args = append(args, "--output-schema", schemaFile, "--output-last-message", outPath, "-")
+
+	runOnce := func() (finalMsg, stdout, stderr string, err error) {
+		var outBuf, errBuf bytes.Buffer
+		runErr := agentprocess.Run(ctx, agentprocess.Command{
+			Path:         c.BinaryPath,
+			Args:         args,
+			Dir:          opts.RepoRoot,
+			Env:          childEnv(),
+			Stdin:        strings.NewReader(message),
+			Stdout:       io.MultiWriter(os.Stdout, &outBuf),
+			Stderr:       io.MultiWriter(os.Stderr, &errBuf),
+			ProcessGroup: true,
+		})
+		if runErr != nil {
+			return "", "", errBuf.String(), fmt.Errorf("agent review synthesis exited with error: %w\n%s", runErr, errBuf.String())
+		}
+
+		msg := outBuf.String()
+		if data, readErr := os.ReadFile(outPath); readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
+			msg = string(data)
+		}
+		return msg, outBuf.String(), errBuf.String(), nil
+	}
+
+	finalMsg, stdout, stderr, err := runOnce()
+	if err != nil {
+		return nil, err
+	}
+
+	if prompt.IsSuspiciousOutput(finalMsg) {
+		fmt.Printf("Review synthesis agent returned suspicious output (len=%d), retrying in %s...\nfinal: %s\nstdout: %s\nstderr: %s\n",
+			len(strings.TrimSpace(finalMsg)), prompt.RetryDelay, strings.TrimSpace(finalMsg), strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+		select {
+		case <-time.After(prompt.RetryDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		finalMsg, stdout, stderr, err = runOnce()
+		if err != nil {
+			return nil, err
+		}
+		if prompt.IsSuspiciousOutput(finalMsg) {
+			return nil, fmt.Errorf("review synthesis agent returned suspicious output after retry: final=%q stdout=%q stderr=%q",
+				strings.TrimSpace(finalMsg), strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+		}
+	}
+
+	result, err := prompt.ParseReviewSynthesisOutput(finalMsg)
+	if err != nil {
+		return nil, fmt.Errorf("parsing review synthesis output: %w", err)
+	}
+	return result, nil
+}

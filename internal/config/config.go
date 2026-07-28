@@ -149,9 +149,11 @@ type Integrator struct {
 }
 
 type ReviewNonConvergence struct {
-	Enabled            bool `yaml:"enabled"`
-	Window             int  `yaml:"window"`
-	MinCompletedCycles int  `yaml:"min_completed_cycles"`
+	Enabled                bool    `yaml:"enabled"`
+	Window                 int     `yaml:"window"`
+	MinCompletedCycles     int     `yaml:"min_completed_cycles"`
+	SynthesisEnabled       bool    `yaml:"synthesis_enabled"`
+	SynthesisMinConfidence float64 `yaml:"synthesis_min_confidence"`
 }
 
 type ReviewDiff struct {

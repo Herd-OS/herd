@@ -81,3 +81,59 @@ func (o *OpenCodeAgent) Review(ctx context.Context, diff string, opts agent.Revi
 
 	return result, nil
 }
+
+func (o *OpenCodeAgent) SynthesizeReviewNonConvergence(ctx context.Context, input agent.ReviewSynthesisInput, opts agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	synthesisPrompt, err := prompt.RenderReviewSynthesisPrompt(input, opts)
+	if err != nil {
+		return nil, fmt.Errorf("rendering review synthesis prompt: %w", err)
+	}
+
+	message := prompt.ReviewSynthesisSystemPrompt + "\n\n" + synthesisPrompt
+	args := buildRunArgs(o.Model)
+
+	runOnce := func() (string, string, error) {
+		var stdout, stderr bytes.Buffer
+		if err := process.Run(ctx, process.Command{
+			Path:         o.BinaryPath,
+			Args:         args,
+			Dir:          opts.RepoRoot,
+			Stdin:        strings.NewReader(message),
+			Stdout:       io.MultiWriter(os.Stdout, &stdout),
+			Stderr:       io.MultiWriter(os.Stderr, &stderr),
+			ProcessGroup: true,
+		}); err != nil {
+			return "", stderr.String(), fmt.Errorf("agent review synthesis exited with error: %w\n%s", err, stderr.String())
+		}
+		return stdout.String(), stderr.String(), nil
+	}
+
+	stdout, stderr, err := runOnce()
+	if err != nil {
+		return nil, err
+	}
+
+	if prompt.IsSuspiciousOutput(stdout) {
+		fmt.Printf("Review synthesis agent returned suspicious output (len=%d), retrying in %s...\nstdout: %s\nstderr: %s\n",
+			len(strings.TrimSpace(stdout)), prompt.RetryDelay, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+		select {
+		case <-time.After(prompt.RetryDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		stdout, stderr, err = runOnce()
+		if err != nil {
+			return nil, err
+		}
+		if prompt.IsSuspiciousOutput(stdout) {
+			return nil, fmt.Errorf("review synthesis agent returned suspicious output after retry: stdout=%q stderr=%q",
+				strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+		}
+	}
+
+	result, err := prompt.ParseReviewSynthesisOutput(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("parsing review synthesis output: %w", err)
+	}
+	return result, nil
+}
