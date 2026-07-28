@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -3691,6 +3692,65 @@ func TestHandleConflictResolution_TaskBodyKeepsAgentOnWorkerBranch(t *testing.T)
 		"3. `git checkout",
 		"git push origin " + batchBranch,
 	})
+}
+
+func TestHandleConflictResolution_RelabelsSourceWhenResolverDispatchFails(t *testing.T) {
+	tests := []struct {
+		name       string
+		repo       *mockRepoService
+		workflows  *mockWorkflowService
+		wantErrMsg string
+	}{
+		{
+			name:       "default branch lookup fails",
+			repo:       &mockRepoService{defaultBranchErr: errors.New("default branch unavailable")},
+			workflows:  &mockWorkflowService{},
+			wantErrMsg: "getting default branch for conflict-resolution dispatch",
+		},
+		{
+			name:       "workflow dispatch fails",
+			repo:       &mockRepoService{defaultBranch: "main"},
+			workflows:  &mockWorkflowService{dispatchErr: errors.New("workflow unavailable")},
+			wantErrMsg: "dispatching conflict-resolution worker for issue #777",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.createResult = &platform.Issue{Number: 777}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       &mockPRService{},
+				workflows: tc.workflows,
+				repo:      tc.repo,
+			}
+			cfg := &config.Config{
+				Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+				Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+			}
+			ms := &platform.Milestone{Number: 1, Title: "Batch 1"}
+			issue := &platform.Issue{
+				Number:    42,
+				Title:     "Some task",
+				Labels:    []string{issues.StatusDone},
+				Milestone: ms,
+			}
+
+			result, err := handleConflictResolution(context.Background(), mock, cfg, issue, ms, "herd/worker/42-some-task", "herd/batch/1-batch")
+
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), tc.wantErrMsg)
+			assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+			assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+			assert.Contains(t, issueSvc.removedLabels[777], issues.StatusInProgress)
+			assert.Contains(t, issueSvc.addedLabels[777], issues.StatusFailed)
+			require.NotEmpty(t, issueSvc.comments[777])
+			assert.Contains(t, issueSvc.comments[777][0], "Failed to dispatch conflict-resolution worker")
+			assert.Empty(t, tc.workflows.dispatched, "no successful workflow dispatch should be recorded")
+		})
+	}
 }
 
 func TestDispatchReadyIssues_SkipsAlreadyInProgress(t *testing.T) {

@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1210,6 +1211,11 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 		BatchBranch:       batchBranch,
 	}, []string{issues.TypeFix, issues.StatusInProgress}, batchBranch)
 	if err != nil {
+		var dispatchErr *conflictResolutionDispatchError
+		if errors.As(err, &dispatchErr) && dispatchErr.issueNumber > 0 {
+			_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
+			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
+		}
 		return nil, err
 	}
 

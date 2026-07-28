@@ -42,6 +42,20 @@ type ConflictResolutionDispatchResult struct {
 	Duplicated  bool
 }
 
+type conflictResolutionDispatchError struct {
+	issueNumber int
+	message     string
+	err         error
+}
+
+func (e *conflictResolutionDispatchError) Error() string {
+	return fmt.Sprintf("%s: %v", e.message, e.err)
+}
+
+func (e *conflictResolutionDispatchError) Unwrap() error {
+	return e.err
+}
+
 func BuildConflictResolutionIssueBody(params ConflictResolutionIssueParams) string {
 	fm := issues.FrontMatter{
 		Version:             1,
@@ -98,7 +112,11 @@ func DispatchConflictResolutionIssue(ctx context.Context, p platform.Platform, c
 	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
 	if err != nil {
 		markConflictResolutionDispatchFailed(ctx, p, fixIssue.Number, err)
-		return nil, fmt.Errorf("getting default branch for conflict-resolution dispatch: %w", err)
+		return nil, &conflictResolutionDispatchError{
+			issueNumber: fixIssue.Number,
+			message:     "getting default branch for conflict-resolution dispatch",
+			err:         err,
+		}
 	}
 	if _, err := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
 		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
@@ -107,7 +125,11 @@ func DispatchConflictResolutionIssue(ctx context.Context, p platform.Platform, c
 		"runner_label":    cfg.Workers.RunnerLabel,
 	}); err != nil {
 		markConflictResolutionDispatchFailed(ctx, p, fixIssue.Number, err)
-		return nil, fmt.Errorf("dispatching conflict-resolution worker for issue #%d: %w", fixIssue.Number, err)
+		return nil, &conflictResolutionDispatchError{
+			issueNumber: fixIssue.Number,
+			message:     fmt.Sprintf("dispatching conflict-resolution worker for issue #%d", fixIssue.Number),
+			err:         err,
+		}
 	}
 
 	return &ConflictResolutionDispatchResult{
