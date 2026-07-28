@@ -18,14 +18,14 @@ const maxMilestoneNameAttempts = 10
 // the title that was actually used. Non-conflict errors are returned
 // immediately without retry. If every attempt conflicts, the original
 // already_exists error from the first attempt is returned.
-func createMilestoneWithUniqueName(ctx context.Context, p platform.Platform, baseTitle string) (*platform.Milestone, string, error) {
+func createMilestoneWithUniqueName(ctx context.Context, p platform.Platform, baseTitle, description string) (*platform.Milestone, string, error) {
 	var firstConflictErr error
 	for attempt := 1; attempt <= maxMilestoneNameAttempts; attempt++ {
 		title := baseTitle
 		if attempt > 1 {
 			title = fmt.Sprintf("%s (%d)", baseTitle, attempt)
 		}
-		ms, err := p.Milestones().Create(ctx, title, "", nil)
+		ms, err := p.Milestones().Create(ctx, title, description, nil)
 		if err == nil {
 			return ms, title, nil
 		}

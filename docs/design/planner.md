@@ -138,6 +138,7 @@ The good version continues with exact interface signatures, type definitions, th
 The agent produces a structured plan containing:
 
 - **Batch name** -- a short descriptive name for the overall unit of work, which becomes the GitHub Milestone title. If the chosen name collides with an existing milestone, the Planner appends a numeric suffix (`<name> (2)`, `<name> (3)`, ..., up to `<name> (10)`) and uses the first variant that does not exist. See [Milestone Name Conflicts](#milestone-name-conflicts) below.
+- **`pr_summary`** -- a concise reviewer-facing paragraph for the generated batch PR body. This is review context, not operational bookkeeping. Herd stores it in durable batch metadata via the GitHub Milestone description when creating the batch.
 - **Tasks** -- an ordered list where each task includes:
   - **Title** -- concise name for the task, becomes the GitHub Issue title.
   - **Description** -- what to build (the "what").

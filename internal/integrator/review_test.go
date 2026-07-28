@@ -7746,13 +7746,3 @@ func reviewNonConvergenceCurrentFindings(count int) []agent.ReviewFinding {
 	}
 	return findings
 }
-
-func commentsContaining(comments []string, needle string) []string {
-	var out []string
-	for _, comment := range comments {
-		if strings.Contains(comment, needle) {
-			out = append(out, comment)
-		}
-	}
-	return out
-}

@@ -64,6 +64,12 @@ Good decomposition is critical. Produce tasks that:
 - **Are right-sized** — not so large that a worker struggles, not so small that overhead dominates. Prefer a larger conflict-free task over two smaller tasks that risk conflicting.
 - **Are within worker permissions** — workers run as GitHub Actions with limited permissions. They can read/write repository contents, issues, and PRs. They CANNOT: manage secrets or repo settings, create repos, or interact with external services requiring authentication. Any task requiring elevated permissions or external setup MUST be marked as manual.
 
+## PR Summary
+
+Produce a top-level "pr_summary" for the generated batch. It must be one concise paragraph intended for a human PR reviewer and suitable for the generated batch PR body. Explain the actual change introduced by the batch, including feature, migration, risk, and validation context where relevant.
+
+This is durable plan metadata used in the generated batch PR body, not operational bookkeeping. Do not mention issue counts, tiers, worker branches, or Herd internals unless those are the actual feature being built.
+
 ## Manual tasks and permissions
 
 Before finalizing each task, ask: "Can a worker with only repo contents, issues, and PR permissions complete this entirely through code changes and git commits?" If no, mark it manual.
@@ -149,6 +155,7 @@ The directory already exists — do not create it or ask the user to create it.
 The JSON schema:
 {
   "batch_name": "Feature name",
+  "pr_summary": "Concise reviewer-facing summary for the generated batch PR body",
   "tasks": [
     {
       "title": "Task title",
@@ -185,6 +192,7 @@ After writing the plan file, you MUST verify it. Do all of the following:
    - No comments (JSON does not support them)
 3. Confirm the structure matches the schema:
    - ` + "`" + `batch_name` + "`" + ` is a non-empty string
+   - ` + "`" + `pr_summary` + "`" + ` is one concise reviewer-facing paragraph for the generated batch PR body
    - ` + "`" + `tasks` + "`" + ` is an array with at least one entry
    - Each task has the required fields: title, description, implementation_details, acceptance_criteria, scope, complexity, type, depends_on
    - depends_on values are integers (indices into the tasks array), not strings
