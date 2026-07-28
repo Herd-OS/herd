@@ -8,7 +8,6 @@ import (
 
 	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/issues"
-	"github.com/herd-os/herd/internal/planner"
 	"github.com/herd-os/herd/internal/platform"
 )
 
@@ -91,8 +90,7 @@ func handleResolveConflicts(hctx *HandlerContext, cmd Command) Result {
 		TriggerComment: triggerComment,
 		UserContext:    strings.TrimSpace(cmd.Prompt),
 	}
-	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
-	dispatch, err := integrator.DispatchConflictResolutionIssue(hctx.Ctx, hctx.Platform, hctx.Config, params, []string{issues.TypeFix, issues.StatusInProgress}, batchBranch)
+	dispatch, err := integrator.DispatchConflictResolutionIssue(hctx.Ctx, hctx.Platform, hctx.Config, params, []string{issues.TypeFix, issues.StatusInProgress}, pr.Head)
 	if err != nil {
 		return Result{Error: err}
 	}

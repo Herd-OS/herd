@@ -363,6 +363,7 @@ func (m *mockWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*pl
 
 type mockRepoService struct {
 	defaultBranch          string
+	defaultBranchErr       error
 	branchExists           map[string]bool
 	branchSHAs             map[string]string
 	commitMessages         map[string]string
@@ -382,6 +383,9 @@ func (m *mockRepoService) GetDefaultBranch(ctx context.Context) (string, error) 
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
+	}
+	if m.defaultBranchErr != nil {
+		return "", m.defaultBranchErr
 	}
 	return m.defaultBranch, nil
 }

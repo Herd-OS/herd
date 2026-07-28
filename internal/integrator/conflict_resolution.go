@@ -95,18 +95,31 @@ func DispatchConflictResolutionIssue(ctx context.Context, p platform.Platform, c
 		}
 	}
 
-	defaultBranch, _ := p.Repository().GetDefaultBranch(ctx)
-	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
+	defaultBranch, err := p.Repository().GetDefaultBranch(ctx)
+	if err != nil {
+		markConflictResolutionDispatchFailed(ctx, p, fixIssue.Number, err)
+		return nil, fmt.Errorf("getting default branch for conflict-resolution dispatch: %w", err)
+	}
+	if _, err := p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
 		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
 		"batch_branch":    dispatchBatchBranch,
 		"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
 		"runner_label":    cfg.Workers.RunnerLabel,
-	})
+	}); err != nil {
+		markConflictResolutionDispatchFailed(ctx, p, fixIssue.Number, err)
+		return nil, fmt.Errorf("dispatching conflict-resolution worker for issue #%d: %w", fixIssue.Number, err)
+	}
 
 	return &ConflictResolutionDispatchResult{
 		IssueNumber: fixIssue.Number,
 		Body:        truncatedBody,
 	}, nil
+}
+
+func markConflictResolutionDispatchFailed(ctx context.Context, p platform.Platform, issueNumber int, dispatchErr error) {
+	_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress, issues.StatusReady})
+	_ = p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+	_ = p.Issues().AddComment(ctx, issueNumber, fmt.Sprintf("Failed to dispatch conflict-resolution worker: %v", dispatchErr))
 }
 
 func FindActivePRConflictResolutionIssue(ctx context.Context, p platform.Platform, milestoneNumber int, prNumber int, headSHA string, baseSHA string) (*platform.Issue, error) {
@@ -119,6 +132,9 @@ func FindActivePRConflictResolutionIssue(ctx context.Context, p platform.Platfor
 	}
 
 	for _, iss := range allIssues {
+		if !isActiveConflictResolutionIssue(iss) {
+			continue
+		}
 		parsed, parseErr := issues.ParseBody(iss.Body)
 		if parseErr != nil {
 			continue
@@ -137,6 +153,13 @@ func FindActivePRConflictResolutionIssue(ctx context.Context, p platform.Platfor
 	}
 
 	return nil, nil
+}
+
+func isActiveConflictResolutionIssue(iss *platform.Issue) bool {
+	if iss == nil {
+		return false
+	}
+	return issues.HasLabel(iss.Labels, issues.StatusInProgress) || issues.HasLabel(iss.Labels, issues.StatusReady)
 }
 
 func conflictResolutionBranches(params ConflictResolutionIssueParams) []string {

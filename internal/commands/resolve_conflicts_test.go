@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,67 @@ func TestHandleResolveConflicts_ConflictingBatchPRCreatesFocusedIssue(t *testing
 		"timeout_minutes": "45",
 		"runner_label":    "large-runner",
 	}, wf.dispatched[0])
+}
+
+func TestHandleResolveConflicts_DispatchesUsingLivePRHeadBranch(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	wf := &testWorkflowService{}
+	cfg := baseConfig()
+	pr := conflictingResolveConflictsPR()
+	pr.Head = "herd/batch/111-original-title"
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			849: pr,
+		},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: {Number: 111, Title: "Renamed Milestone Title"}}},
+	}
+	hctx := resolveConflictsHandlerContext(p, cfg)
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.NoError(t, result.Error)
+	assert.Equal(t, "🔧 Created conflict-resolution issue #200 and dispatched worker.", result.Message)
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "herd/batch/111-original-title", wf.dispatched[0]["batch_branch"])
+	require.Len(t, issueSvc.createdIssues, 1)
+	assert.Contains(t, issueSvc.createdIssues[0].Body, "Head branch: `herd/batch/111-original-title`")
+}
+
+func TestHandleResolveConflicts_DispatchErrorReturnsError(t *testing.T) {
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{}
+	wf := &testWorkflowService{dispatchErr: errors.New("workflow dispatch failed")}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			849: conflictingResolveConflictsPR(),
+		},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: {Number: 111, Title: "Review Cycle Non Convergence Synthesis"}}},
+	}
+	hctx := resolveConflictsHandlerContext(p, baseConfig())
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.Error(t, result.Error)
+	assert.Empty(t, result.Message)
+	assert.Contains(t, result.Error.Error(), "dispatching conflict-resolution worker for issue #200")
+	assert.Contains(t, result.Error.Error(), "workflow dispatch failed")
+	require.Len(t, issueSvc.createdIssues, 1)
+	assert.Empty(t, wf.dispatched)
+	assert.Contains(t, issueSvc.removedLabels[200], issues.StatusInProgress)
+	assert.Contains(t, issueSvc.addedLabels[200], issues.StatusFailed)
 }
 
 func TestHandleResolveConflicts_DoesNotIncludeHistoricalReviewFindings(t *testing.T) {
@@ -152,6 +214,45 @@ func TestHandleResolveConflicts_DuplicateActiveIssue(t *testing.T) {
 	assert.Contains(t, result.Message, "#701")
 	assert.Empty(t, issueSvc.createdIssues)
 	assert.Empty(t, wf.dispatched)
+}
+
+func TestHandleResolveConflicts_FailedMatchingIssueDoesNotBlockNewResolver(t *testing.T) {
+	ms := &platform.Milestone{Number: 111, Title: "Review Cycle Non Convergence Synthesis"}
+	existingBody := integrator.BuildConflictResolutionIssueBody(integrator.ConflictResolutionIssueParams{
+		Kind:         integrator.ConflictResolutionKindPRBase,
+		Milestone:    ms,
+		BatchPR:      849,
+		PRHeadBranch: "herd/batch/111-review-cycle-non-convergence-synthesis",
+		PRHeadSHA:    "head123",
+		BaseBranch:   "main",
+		BaseSHA:      "base456",
+	})
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 701, State: "open", Labels: []string{issues.TypeFix, issues.StatusFailed}, Body: existingBody},
+	}
+	wf := &testWorkflowService{}
+	prSvc := &testPRService{
+		getResult: map[int]*platform.PullRequest{
+			849: conflictingResolveConflictsPR(),
+		},
+	}
+	p := &testPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       &testRepoService{defaultBranch: "main"},
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{111: ms}},
+	}
+	hctx := resolveConflictsHandlerContext(p, baseConfig())
+
+	result := handleResolveConflicts(hctx, Command{Name: "resolve-conflicts"})
+
+	require.NoError(t, result.Error)
+	assert.Equal(t, "🔧 Created conflict-resolution issue #200 and dispatched worker.", result.Message)
+	require.Len(t, issueSvc.createdIssues, 1)
+	require.Len(t, wf.dispatched, 1)
+	assert.Equal(t, "200", wf.dispatched[0]["issue_number"])
 }
 
 func TestHandleResolveConflicts_CleanPRNoOps(t *testing.T) {

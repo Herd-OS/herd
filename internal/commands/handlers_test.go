@@ -1699,7 +1699,7 @@ func TestHandleResolveConflicts_ConflictingBatchPRCreatesIssueAndDispatches(t *t
 
 	require.Len(t, wf.dispatched, 1)
 	assert.Equal(t, "200", wf.dispatched[0]["issue_number"])
-	assert.Equal(t, "herd/batch/12-foo-batch", wf.dispatched[0]["batch_branch"])
+	assert.Equal(t, "herd/batch/12-foo", wf.dispatched[0]["batch_branch"])
 }
 
 func TestHandleResolveConflicts_DuplicateActiveResolverNoops(t *testing.T) {

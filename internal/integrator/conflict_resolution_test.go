@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -174,6 +175,61 @@ func TestDispatchConflictResolutionIssue_PostsOverflowComments(t *testing.T) {
 	assert.Contains(t, issueSvc.comments[606][0], "Continued from issue body")
 }
 
+func TestDispatchConflictResolutionIssue_PropagatesDispatchFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		repo       *mockRepoService
+		workflows  *mockWorkflowService
+		wantErrMsg string
+	}{
+		{
+			name:       "default branch lookup fails",
+			repo:       &mockRepoService{defaultBranchErr: errors.New("default branch unavailable")},
+			workflows:  &mockWorkflowService{},
+			wantErrMsg: "getting default branch for conflict-resolution dispatch",
+		},
+		{
+			name:       "workflow dispatch fails",
+			repo:       &mockRepoService{defaultBranch: "main"},
+			workflows:  &mockWorkflowService{dispatchErr: errors.New("workflow unavailable")},
+			wantErrMsg: "dispatching conflict-resolution worker for issue #707",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.createResult = &platform.Issue{Number: 707}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       &mockPRService{},
+				workflows: tt.workflows,
+				repo:      tt.repo,
+			}
+
+			result, err := DispatchConflictResolutionIssue(context.Background(), mock, &config.Config{}, ConflictResolutionIssueParams{
+				Kind:         ConflictResolutionKindPRBase,
+				Milestone:    &platform.Milestone{Number: 7, Title: "Batch 7"},
+				BatchPR:      123,
+				PRHeadBranch: "herd/batch/7-batch",
+				PRHeadSHA:    "abc123",
+				BaseBranch:   "main",
+				BaseSHA:      "def456",
+			}, []string{issues.TypeFix, issues.StatusInProgress}, "herd/batch/7-batch")
+
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), tt.wantErrMsg)
+			assert.Equal(t, "Resolve PR conflict: #123 (herd/batch/7-batch onto main)", issueSvc.createdTitle)
+			assert.Contains(t, issueSvc.removedLabels[707], issues.StatusInProgress)
+			assert.Contains(t, issueSvc.addedLabels[707], issues.StatusFailed)
+			require.NotEmpty(t, issueSvc.comments[707])
+			assert.Contains(t, issueSvc.comments[707][0], "Failed to dispatch conflict-resolution worker")
+			assert.Empty(t, tt.workflows.dispatched)
+		})
+	}
+}
+
 func TestFindActivePRConflictResolutionIssue(t *testing.T) {
 	body := BuildConflictResolutionIssueBody(ConflictResolutionIssueParams{
 		Kind:         ConflictResolutionKindPRBase,
@@ -188,16 +244,18 @@ func TestFindActivePRConflictResolutionIssue(t *testing.T) {
 	issueSvc.listResult = []*platform.Issue{
 		{
 			Number: 100,
+			Labels: []string{issues.StatusInProgress},
 			Body:   fmt.Sprintf("---\nherd:\n  version: 1\n  batch: 7\n  type: fix\n  batch_pr: 123\n  conflict_resolution: true\n---\n\n## Context\nHead SHA: `%s`\n\nBase SHA: `stale`\n", "abc123"),
 		},
-		{Number: 101, Body: body},
+		{Number: 101, Labels: []string{issues.StatusFailed}, Body: body},
+		{Number: 102, Labels: []string{issues.StatusReady}, Body: body},
 	}
 	mock := &mockPlatform{issues: issueSvc}
 
 	found, err := FindActivePRConflictResolutionIssue(context.Background(), mock, 7, 123, "abc123", "def456")
 	require.NoError(t, err)
 	require.NotNil(t, found)
-	assert.Equal(t, 101, found.Number)
+	assert.Equal(t, 102, found.Number)
 
 	missing, err := FindActivePRConflictResolutionIssue(context.Background(), mock, 7, 123, "missing", "def456")
 	require.NoError(t, err)
