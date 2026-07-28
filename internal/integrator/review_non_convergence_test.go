@@ -808,6 +808,48 @@ func TestBuildSynthesizedStrategyFixIssueBody(t *testing.T) {
 	assert.Equal(t, "head-123", marker.HeadSHA)
 }
 
+func TestBuildSynthesizedStrategyFixIssueBodySanitizesInputAffectedFiles(t *testing.T) {
+	tests := []struct {
+		name          string
+		affectedFiles []string
+		wantFile      string
+		noisyValues   []string
+	}{
+		{
+			name:          "chunk and coverage metadata",
+			affectedFiles: []string{"Chunk 1/9", "1/9", "Diff Coverage", "internal/controlplane/dispatch/review.go"},
+			wantFile:      "internal/controlplane/dispatch/review.go",
+			noisyValues:   []string{"Chunk 1/9", "1/9", "Diff Coverage"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := highConfidenceReviewSynthesisResult()
+			for i := range result.RecurringSymptoms {
+				result.RecurringSymptoms[i].AffectedFiles = nil
+			}
+			input := agent.ReviewSynthesisInput{
+				PRNumber:      849,
+				BatchNumber:   111,
+				HeadSHA:       "head-123",
+				HeadRef:       "herd/batch/111-batch",
+				AffectedFiles: tt.affectedFiles,
+			}
+
+			body := buildSynthesizedStrategyFixIssueBody(&platform.Milestone{Number: 111}, &platform.PullRequest{Number: 849}, 40, result, input, synthesizedReviewStrategyFingerprint(result), nil)
+
+			parsed, err := issues.ParseBody(body)
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []string{tt.wantFile}, parsed.FrontMatter.Scope)
+			assert.Contains(t, body, tt.wantFile)
+			for _, noisy := range tt.noisyValues {
+				assert.NotContains(t, body, noisy)
+			}
+		})
+	}
+}
+
 func TestBuildReviewNonConvergencePRComment(t *testing.T) {
 	comment := buildReviewNonConvergencePRComment(reviewStrategyAnalysisFixture(), 954)
 

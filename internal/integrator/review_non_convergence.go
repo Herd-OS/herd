@@ -1268,7 +1268,7 @@ func buildSynthesizedStrategyContext(input agent.ReviewSynthesisInput, prior []r
 	fmt.Fprintf(&b, "- Cycles analyzed: %s\n", formatReviewSynthesisCycleList(input.Cycles))
 	fmt.Fprintf(&b, "- Completed fix issues: %s\n", formatReviewSynthesisFixIssueList(input.CompletedFixIssues))
 	fmt.Fprintf(&b, "- Prior completed strategy fix issues: %s\n", formatPriorStrategyFixIssueNumberList(prior))
-	fmt.Fprintf(&b, "- Affected files: %s\n", formatStringList(input.AffectedFiles))
+	fmt.Fprintf(&b, "- Affected files: %s\n", formatStringList(sanitizedReviewSynthesisFilePaths(input.AffectedFiles)))
 	if strings.TrimSpace(input.CurrentPRMetadata) != "" {
 		fmt.Fprintf(&b, "\nCurrent PR metadata:\n%s\n", strings.TrimSpace(input.CurrentPRMetadata))
 	}
