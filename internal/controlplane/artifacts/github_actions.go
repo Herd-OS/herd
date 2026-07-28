@@ -44,7 +44,7 @@ func (s GitHubActionsStore) OpenArtifact(ctx context.Context, name string) (io.R
 		},
 	}
 	for {
-		list, resp, err := client.Actions.ListArtifacts(ctx, owner, repo, opts)
+		list, resp, err := listArtifacts(ctx, client, owner, repo, artifactCtx.WorkflowRunID, opts)
 		if err != nil {
 			return nil, fmt.Errorf("list GitHub Actions artifacts: %w", err)
 		}
@@ -85,4 +85,11 @@ func (s GitHubActionsStore) OpenArtifact(ctx context.Context, name string) (io.R
 		return nil, fmt.Errorf("fetch GitHub Actions artifact archive: %s", resp.Status)
 	}
 	return resp.Body, nil
+}
+
+func listArtifacts(ctx context.Context, client *gh.Client, owner, repo string, workflowRunID int64, opts *gh.ListArtifactsOptions) (*gh.ArtifactList, *gh.Response, error) {
+	if workflowRunID > 0 {
+		return client.Actions.ListWorkflowRunArtifacts(ctx, owner, repo, workflowRunID, &opts.ListOptions)
+	}
+	return client.Actions.ListArtifacts(ctx, owner, repo, opts)
 }

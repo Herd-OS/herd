@@ -21,6 +21,7 @@ import (
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
 	cpgithub "github.com/herd-os/herd/internal/controlplane/github"
 	"github.com/herd-os/herd/internal/controlplane/jobs"
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/reconciler"
 	"github.com/herd-os/herd/internal/controlplane/review"
@@ -372,12 +373,91 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 		Reason:          fmt.Sprintf("@herd-os resolve-conflicts comment %d by %s", cmd.CommentID, cmd.Actor),
 	})
 	if err != nil {
-		_ = p.Issues().RemoveLabels(ctx, fixIssueNumber, []string{issues.StatusInProgress, issues.StatusReady})
-		_ = p.Issues().AddLabels(ctx, fixIssueNumber, []string{issues.StatusFailed})
-		_ = p.Issues().AddComment(ctx, fixIssueNumber, fmt.Sprintf("Failed to dispatch conflict-resolution worker: %v", err))
+		rollbackErr := d.markConflictResolutionDispatchFailed(ctx, p, cmd, fixIssueNumber, err)
+		if rollbackErr != nil {
+			return fmt.Errorf("dispatching conflict-resolution worker for issue #%d: %w; record dispatch failure state: %v", fixIssueNumber, err, rollbackErr)
+		}
 		return fmt.Errorf("dispatching conflict-resolution worker for issue #%d: %w", fixIssueNumber, err)
 	}
 	return addPRCommandResult(ctx, p, cmd.PRNumber, fmt.Sprintf("🔧 Created conflict-resolution issue #%d and dispatched worker.", fixIssueNumber))
+}
+
+func (d productionCommandDispatcher) markConflictResolutionDispatchFailed(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, issueNumber int, dispatchErr error) error {
+	if err := d.commandIssueVoidMutation(ctx, cmd, issueNumber, "remove", "dispatch-failed-statuses", func() error {
+		return p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress, issues.StatusReady})
+	}); err != nil {
+		return err
+	}
+	if err := d.commandIssueVoidMutation(ctx, cmd, issueNumber, "add", "dispatch-failed-label", func() error {
+		return p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
+	}); err != nil {
+		return err
+	}
+	body := fmt.Sprintf("Failed to dispatch conflict-resolution worker: %v", dispatchErr)
+	return d.commandIssueCommentMutation(ctx, cmd, issueNumber, "dispatch-failed-comment", body, func() (int64, error) {
+		return p.Issues().AddCommentReturningID(ctx, issueNumber, body)
+	})
+}
+
+func (d productionCommandDispatcher) commandIssueVoidMutation(ctx context.Context, cmd commands.DispatchCommand, issueNumber int, action string, purpose string, fn func() error) error {
+	return d.commandIssueMutation(ctx, cmd, issueNumber, action, purpose, func() (string, error) {
+		if err := fn(); err != nil {
+			return "", err
+		}
+		return "void:" + purpose, nil
+	})
+}
+
+func (d productionCommandDispatcher) commandIssueCommentMutation(ctx context.Context, cmd commands.DispatchCommand, issueNumber int, purpose string, body string, fn func() (int64, error)) error {
+	return d.commandIssueMutation(ctx, cmd, issueNumber, "comment", purpose, func() (string, error) {
+		commentID, err := fn()
+		if err != nil {
+			return "", err
+		}
+		if commentID <= 0 {
+			return "issue_comment:unknown:" + purpose, nil
+		}
+		return fmt.Sprintf("issue_comment:%d", commentID), nil
+	}, []byte(body))
+}
+
+func (d productionCommandDispatcher) commandIssueMutation(ctx context.Context, cmd commands.DispatchCommand, issueNumber int, action string, purpose string, fn func() (string, error), requestExtra ...[]byte) error {
+	if d.Dispatcher.Store == nil {
+		return fmt.Errorf("durable dispatcher store is required")
+	}
+	mutationStore, ok := d.Dispatcher.Store.(mutationguard.Store)
+	if !ok {
+		return fmt.Errorf("durable dispatcher store does not support GitHub mutation attempts")
+	}
+	key := commandStableKey("command-issue-mutation", cmd.RepositoryID, issueNumber, cmd.CommentID, cmd.Command.Kind, action, purpose)
+	requestValues := map[string]any{
+		"repository_id": cmd.RepositoryID,
+		"issue_number":  issueNumber,
+		"comment_id":    cmd.CommentID,
+		"command":       cmd.Command.Kind,
+		"action":        action,
+		"purpose":       purpose,
+	}
+	if len(requestExtra) > 0 {
+		sum := sha256.Sum256(requestExtra[0])
+		requestValues["body_sha256"] = hex.EncodeToString(sum[:])
+	}
+	request, err := json.Marshal(requestValues)
+	if err != nil {
+		return err
+	}
+	_, err = mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
+		Key:          key,
+		RepositoryID: cmd.RepositoryID,
+		MutationType: "command_issue_" + action,
+		Request:      request,
+		Mutate:       fn,
+		Now:          time.Now,
+	})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (d productionCommandDispatcher) ensureConflictResolutionIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams) (int, error) {

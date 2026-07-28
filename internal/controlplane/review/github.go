@@ -7,6 +7,7 @@ import (
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/appauth"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/platform"
 )
 
@@ -19,7 +20,7 @@ type AppGitHubClient struct {
 func (c AppGitHubClient) CreateCommitStatus(ctx context.Context, installationID int64, owner, repo, sha string, status platform.CommitStatus) error {
 	client, err := c.installationClient(ctx, installationID)
 	if err != nil {
-		return err
+		return mutationspkg.PreCallError{Op: "create installation GitHub client", Err: err}
 	}
 	req := &gh.RepoStatus{
 		State:       gh.Ptr(status.State),
@@ -39,7 +40,7 @@ func (c AppGitHubClient) CreateCommitStatus(ctx context.Context, installationID 
 func (c AppGitHubClient) FindCommitStatus(ctx context.Context, installationID int64, owner, repo, sha string, status platform.CommitStatus) (bool, error) {
 	client, err := c.installationClient(ctx, installationID)
 	if err != nil {
-		return false, err
+		return false, mutationspkg.PreCallError{Op: "create installation GitHub client", Err: err}
 	}
 	opts := &gh.ListOptions{PerPage: 100}
 	for {
@@ -65,7 +66,7 @@ func (c AppGitHubClient) FindCommitStatus(ctx context.Context, installationID in
 func (c AppGitHubClient) GetPullRequest(ctx context.Context, installationID int64, owner, repo string, number int) (*platform.PullRequest, error) {
 	client, err := c.installationClient(ctx, installationID)
 	if err != nil {
-		return nil, err
+		return nil, mutationspkg.PreCallError{Op: "create installation GitHub client", Err: err}
 	}
 	pr, _, err := client.PullRequests.Get(ctx, owner, repo, number)
 	if err != nil {
@@ -86,7 +87,7 @@ func (c AppGitHubClient) GetPullRequest(ctx context.Context, installationID int6
 func (c AppGitHubClient) CreateReviewForCommit(ctx context.Context, installationID int64, owner, repo string, number int, body string, event platform.ReviewEvent, commitID string) error {
 	client, err := c.installationClient(ctx, installationID)
 	if err != nil {
-		return err
+		return mutationspkg.PreCallError{Op: "create installation GitHub client", Err: err}
 	}
 	req := &gh.PullRequestReviewRequest{
 		Body:  gh.Ptr(body),
@@ -108,7 +109,7 @@ func (c AppGitHubClient) FindReviewForCommit(ctx context.Context, installationID
 	}
 	client, err := c.installationClient(ctx, installationID)
 	if err != nil {
-		return false, err
+		return false, mutationspkg.PreCallError{Op: "create installation GitHub client", Err: err}
 	}
 	wantState := reviewEventState(event)
 	opts := &gh.ListOptions{PerPage: 100}
@@ -162,7 +163,7 @@ func reviewEventState(event platform.ReviewEvent) string {
 func (c AppGitHubClient) AddPullRequestComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) error {
 	client, err := c.installationClient(ctx, installationID)
 	if err != nil {
-		return err
+		return mutationspkg.PreCallError{Op: "create installation GitHub client", Err: err}
 	}
 	_, _, err = client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)})
 	if err != nil {

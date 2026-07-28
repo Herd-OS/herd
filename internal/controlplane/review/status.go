@@ -135,8 +135,14 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 		return err
 	}
 	if err := s.GitHub.CreateCommitStatus(ctx, repo.InstallationID, repo.Owner, repo.Name, headSHA, status); err != nil {
-		_ = s.completeStatusMutation(ctx, statusKey, mutationspkg.PhaseRepairRequired, nil, err, now)
-		_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
+		var preCallErr mutationspkg.PreCallError
+		if errors.As(err, &preCallErr) {
+			_ = s.completeStatusMutation(ctx, statusKey, mutationspkg.PhaseFailedPreCall, nil, err, now)
+			_ = idem.FailIdempotencyKey(ctx, statusKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
+		} else {
+			_ = s.completeStatusMutation(ctx, statusKey, mutationspkg.PhaseRepairRequired, nil, err, now)
+			_ = idem.FailIdempotencyKey(ctx, statusKey, err.Error())
+		}
 		return err
 	}
 	if err := s.completeStatusMutation(ctx, statusKey, mutationspkg.PhaseCompleted, json.RawMessage(`{"status":"created"}`), nil, now); err != nil {

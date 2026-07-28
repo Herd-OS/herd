@@ -159,28 +159,8 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		if status != issues.StatusReady && status != issues.StatusBlocked {
 			continue
 		}
-		if status == issues.StatusBlocked {
-			if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusBlocked, "remove"), "issue_label_remove", func() (string, error) {
-				return "", s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusBlocked})
-			}); err != nil {
-				return dispatched, err
-			}
-		}
-		if status == issues.StatusReady {
-			if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusReady, "remove"), "issue_label_remove", func() (string, error) {
-				return "", s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusReady})
-			}); err != nil {
-				return dispatched, err
-			}
-		}
-		if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusInProgress, "add"), "issue_label_add", func() (string, error) {
-			return "", s.Platform.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusInProgress})
-		}); err != nil {
-			return dispatched, err
-		}
 		batchHeadSHA, err := s.Platform.Repository().GetBranchSHA(ctx, req.BatchBranch)
 		if err != nil {
-			_ = s.markDispatchFailed(ctx, issueNumber)
 			return dispatched, fmt.Errorf("resolve batch branch %s head before dispatching issue #%d: %w", req.BatchBranch, issueNumber, err)
 		}
 		result, err := s.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
@@ -203,25 +183,32 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			Reason:          req.Reason,
 		})
 		if err != nil {
-			_ = s.markDispatchFailed(ctx, issueNumber)
 			return dispatched, fmt.Errorf("dispatch worker for issue #%d: %w", issueNumber, err)
+		}
+		if status == issues.StatusBlocked {
+			if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusBlocked, "remove"), "issue_label_remove", func() (string, error) {
+				return "", s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusBlocked})
+			}); err != nil {
+				return dispatched, err
+			}
+		}
+		if status == issues.StatusReady {
+			if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusReady, "remove"), "issue_label_remove", func() (string, error) {
+				return "", s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusReady})
+			}); err != nil {
+				return dispatched, err
+			}
+		}
+		if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusInProgress, "add"), "issue_label_add", func() (string, error) {
+			return "", s.Platform.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusInProgress})
+		}); err != nil {
+			return dispatched, err
 		}
 		if result.Created {
 			dispatched++
 		}
 	}
 	return dispatched, nil
-}
-
-func (s Service) markDispatchFailed(ctx context.Context, issueNumber int) error {
-	if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusInProgress, "remove", "dispatch-failed"), "issue_label_remove", func() (string, error) {
-		return "", s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress})
-	}); err != nil {
-		return err
-	}
-	return s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusFailed, "add", "dispatch-failed"), "issue_label_add", func() (string, error) {
-		return "", s.Platform.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusFailed})
-	})
 }
 
 type DispatchReadyWorkersRequest struct {

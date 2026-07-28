@@ -46,12 +46,21 @@ type artifactContextKey struct{}
 type ArtifactContext struct {
 	Repository     string
 	InstallationID int64
+	WorkflowRunID  int64
 }
 
 func ContextWithArtifactRepository(ctx context.Context, repository string, installationID int64) context.Context {
 	return context.WithValue(ctx, artifactContextKey{}, ArtifactContext{
 		Repository:     repository,
 		InstallationID: installationID,
+	})
+}
+
+func ContextWithWorkflowRunArtifactRepository(ctx context.Context, repository string, installationID int64, workflowRunID int64) context.Context {
+	return context.WithValue(ctx, artifactContextKey{}, ArtifactContext{
+		Repository:     repository,
+		InstallationID: installationID,
+		WorkflowRunID:  workflowRunID,
 	})
 }
 
