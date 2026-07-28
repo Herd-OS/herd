@@ -742,13 +742,18 @@ conflicts with its base branch. You can add optional context after the command:
 
 The handler checks live PR mergeability before creating work:
 
-1. If GitHub reports `Mergeable == true`, the command no-ops because the PR is
-   currently mergeable.
+1. If GitHub reports a clean or mergeable state, the command no-ops because the
+   PR is not currently conflicting with its base.
 2. If GitHub reports mergeability as unknown, HerdOS waits briefly and retries.
    If it is still unknown after the bounded retry, the command no-ops with a
    retry-later warning.
-3. If GitHub reports `Mergeable == false`, HerdOS creates and dispatches a
-   focused conflict-resolution issue for the current PR head and base.
+3. If GitHub reports an explicit conflict state, such as `DIRTY` or
+   `CONFLICTING`, HerdOS creates and dispatches a focused conflict-resolution
+   issue for the current PR head and base.
+
+Known non-conflict blockers, such as branch protection, required reviews,
+failing checks, or `BLOCKED` states, no-op as "not currently conflicting with
+base" rather than dispatching a resolver.
 
 Duplicate active resolver issues are keyed by batch PR, head SHA, and base SHA,
 so repeated comments do not dispatch duplicate workers for the same conflict
