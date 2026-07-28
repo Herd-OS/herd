@@ -402,7 +402,7 @@ func (s *MemoryStore) ListStartedIdempotencyKeys(_ context.Context, scope string
 		if limit > 0 && len(out) >= limit {
 			break
 		}
-		if record.Scope != scope || record.Status != "started" {
+		if record.Scope != scope || (!mutations.IsPostCallUnknown(record.Status) && !mutations.IsPreCallRetryable(record.Status)) {
 			continue
 		}
 		if !record.CreatedAt.IsZero() && !record.CreatedAt.Before(createdBefore) {

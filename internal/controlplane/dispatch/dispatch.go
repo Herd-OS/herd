@@ -143,7 +143,7 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 	created, err := d.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       idempotencyKey,
 		Scope:     "workflow_dispatch",
-		Status:    "started",
+		Status:    mutations.PhaseIntentRecorded,
 		Metadata:  keyMetadata,
 		CreatedAt: now,
 	})
@@ -406,7 +406,7 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		return DispatchResult{}, fmt.Errorf("dispatch idempotency record is missing job_id")
 	}
 	job, err := d.Store.GetJob(ctx, metadata.JobID)
-	if record.Status == "failed" && errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) && (record.Status == "failed" || mutations.IsPreCallRetryable(record.Status)) {
 		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
 		if inputErr != nil {
 			return DispatchResult{}, inputErr
@@ -432,7 +432,14 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		}
 		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
 	}
-	if record.Status == "started" {
+	if mutations.IsPreCallRetryable(record.Status) {
+		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
+		if inputErr != nil {
+			return DispatchResult{}, inputErr
+		}
+		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
+	}
+	if mutations.Normalize(record.Status) == mutations.PhaseCallStarted {
 		preCall, preCallErr := d.preDispatchMutation(ctx, idempotencyKey)
 		if preCallErr != nil {
 			return DispatchResult{}, preCallErr

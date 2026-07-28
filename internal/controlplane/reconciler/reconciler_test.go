@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
@@ -45,10 +46,10 @@ func TestRunOnceRepairsRecoverableWork(t *testing.T) {
 	require.NoError(t, err)
 	counts := report.CountsByClassification()
 	assert.Equal(t, 1, counts[ClassificationFailedSurfaced])
-	assert.Equal(t, 3, counts[ClassificationSafeToRetry])
+	assert.Equal(t, 2, counts[ClassificationSafeToRetry])
 	assert.Equal(t, 1, counts[ClassificationComplete])
 	assert.Equal(t, 1, counts[ClassificationStaleAbandoned])
-	assert.Equal(t, 1, counts[ClassificationStillNeeded])
+	assert.Equal(t, 2, counts[ClassificationStillNeeded])
 
 	failedJob, err := st.GetJob(ctx, "job-timeout")
 	require.NoError(t, err)
@@ -189,6 +190,42 @@ func TestRunOnceRetriesCommandWhenInitialRequeueFails(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.Equal(t, "retry_needed", items[0].Command.Status)
+}
+
+func TestRunOnceClassifiesCommandIdempotencyByMutationPhase(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name           string
+		status         string
+		classification Classification
+	}{
+		{name: "intent recorded is retryable", status: mutations.PhaseIntentRecorded, classification: ClassificationSafeToRetry},
+		{name: "failed before call is retryable", status: mutations.PhaseFailedPreCall, classification: ClassificationSafeToRetry},
+		{name: "call started needs inspection", status: mutations.PhaseCallStarted, classification: ClassificationStillNeeded},
+		{name: "repair required needs inspection", status: mutations.PhaseRepairRequired, classification: ClassificationStillNeeded},
+		{name: "legacy started needs inspection", status: mutations.LegacyStarted, classification: ClassificationStillNeeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := store.NewMemoryStore()
+			_ = seedRepo(t, st, ctx)
+			_, err := st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+				Key:       "repo:1:comment:202:command:review",
+				Scope:     "issue_comment_command",
+				Status:    tt.status,
+				CreatedAt: now.Add(-time.Hour),
+			})
+			require.NoError(t, err)
+			r := &Reconciler{Store: st, Now: func() time.Time { return now }, Config: Config{CommandTimeout: time.Minute}}
+
+			report, err := r.RunOnce(ctx)
+
+			require.NoError(t, err)
+			assert.Equal(t, 1, report.CountsByClassification()[tt.classification])
+		})
+	}
 }
 
 func TestRunOnceDoesNotFailCompletedIdempotencyForStuckMutationAttempt(t *testing.T) {

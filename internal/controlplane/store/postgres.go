@@ -478,7 +478,9 @@ func (s *PostgresStore) ListStartedIdempotencyKeys(ctx context.Context, scope st
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT key, scope, status, result_ref, expires_at, metadata, created_at, completed_at
 		FROM idempotency_keys
-		WHERE scope = $1 AND status = 'started' AND created_at < $2
+		WHERE scope = $1
+		  AND status IN ('intent_recorded', 'failed_pre_call', 'call_started', 'repair_required', 'started')
+		  AND created_at < $2
 		ORDER BY created_at ASC
 		LIMIT $3`, scope, createdBefore, limit)
 	if err != nil {

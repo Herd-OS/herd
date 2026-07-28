@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/appauth"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -251,6 +252,51 @@ func TestDispatcherDuplicateFreshPreDispatchMutationRetries(t *testing.T) {
 	assert.Equal(t, "job-existing", result.JobID)
 	assert.Len(t, gh.calls, 1)
 	assert.Equal(t, "completed", st.mutationAttempts[0].Status)
+}
+
+func TestDispatcherDuplicateIntentWithoutJobRetries(t *testing.T) {
+	st := newFakeStore()
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.idempotencyKeys[key] = store.IdempotencyKey{
+		Key:      key,
+		Scope:    "workflow_dispatch",
+		Status:   mutations.PhaseIntentRecorded,
+		Metadata: json.RawMessage(`{"job_id":"job-existing"}`),
+	}
+
+	gh := &fakeWorkflowClient{}
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.True(t, result.Created)
+	assert.Equal(t, "job-existing", result.JobID)
+	assert.Len(t, gh.calls, 1)
+	assert.Contains(t, st.jobs, "job-existing")
+	assert.Equal(t, mutations.PhaseCompleted, st.idempotencyKeys[key].Status)
+}
+
+func TestDispatcherDuplicateIntentWithJobRetriesWithoutCreatingJob(t *testing.T) {
+	st := newFakeStore()
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.idempotencyKeys[key] = store.IdempotencyKey{
+		Key:      key,
+		Scope:    "workflow_dispatch",
+		Status:   mutations.PhaseIntentRecorded,
+		Metadata: json.RawMessage(`{"job_id":"job-existing"}`),
+	}
+	st.jobs["job-existing"] = store.Job{JobID: "job-existing"}
+
+	gh := &fakeWorkflowClient{}
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.True(t, result.Created)
+	assert.Equal(t, "job-existing", result.JobID)
+	assert.Len(t, gh.calls, 1)
+	assert.Len(t, st.jobs, 1)
+	assert.Equal(t, mutations.PhaseCompleted, st.idempotencyKeys[key].Status)
 }
 
 func TestDispatcherRequiresMutationStore(t *testing.T) {
@@ -521,6 +567,35 @@ func TestDispatcherDoesNotRetryAfterUnknownWorkflowDispatchFailure(t *testing.T)
 	assert.Len(t, st.jobs, 1)
 	record := st.idempotencyKeys[IdempotencyKey(req)]
 	assert.Equal(t, "failed", record.Status)
+}
+
+func TestDispatcherRepairsUnknownWorkflowDispatchFromCompletedMutation(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeWorkflowClient{errors: []error{errors.New("github timeout"), nil}}
+	req := validRequest()
+	key := IdempotencyKey(req)
+
+	_, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.Error(t, err)
+	require.Len(t, st.mutationAttempts, 1)
+	keyRecord := st.idempotencyKeys[key]
+	var metadata struct {
+		JobID string `json:"job_id"`
+	}
+	require.NoError(t, json.Unmarshal(keyRecord.Metadata, &metadata))
+	require.NotEmpty(t, metadata.JobID)
+	resultJSON := json.RawMessage(`{"url":"https://github.com/octo/herd/actions","created":true}`)
+	st.mutationAttempts[0].Status = mutations.PhaseCompleted
+	st.mutationAttempts[0].Response = resultJSON
+
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.False(t, result.Created)
+	assert.Equal(t, metadata.JobID, result.JobID)
+	assert.Equal(t, "https://github.com/octo/herd/actions", result.URL)
+	assert.Len(t, gh.calls, 0)
+	assert.Equal(t, mutations.PhaseCompleted, st.idempotencyKeys[key].Status)
 }
 
 func TestDispatcherRetriesAfterCreateJobFailure(t *testing.T) {

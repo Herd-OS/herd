@@ -222,7 +222,15 @@ func (r *Reconciler) runIdempotency(ctx context.Context, cfg Config, now time.Ti
 		return
 	}
 	for _, key := range keys {
-		r.add(report, "idempotency_key", key.Key, ClassificationSafeToRetry, "surface_started", "command idempotency key is still started")
+		if mutations.IsPreCallRetryable(key.Status) {
+			r.add(report, "idempotency_key", key.Key, ClassificationSafeToRetry, "retry", "command idempotency key has not reached a GitHub-visible side effect")
+			continue
+		}
+		if mutations.IsPostCallUnknown(key.Status) {
+			r.add(report, "idempotency_key", key.Key, ClassificationStillNeeded, "inspect_required", "command idempotency key may already have reached a GitHub-visible side effect")
+			continue
+		}
+		r.add(report, "idempotency_key", key.Key, ClassificationStillNeeded, "inspect_required", "command idempotency key status is not completed")
 	}
 }
 
