@@ -49,6 +49,25 @@ func New(owner, repo string) (*Client, error) {
 	}, nil
 }
 
+// NewWithClient creates a platform client around an already-authenticated
+// go-github client, such as a GitHub App installation client.
+func NewWithClient(owner, repo string, client *gh.Client) (*Client, error) {
+	if strings.TrimSpace(owner) == "" {
+		return nil, fmt.Errorf("repository owner is required")
+	}
+	if strings.TrimSpace(repo) == "" {
+		return nil, fmt.Errorf("repository name is required")
+	}
+	if client == nil {
+		return nil, fmt.Errorf("GitHub client is required")
+	}
+	return &Client{
+		gh:    client,
+		owner: owner,
+		repo:  repo,
+	}, nil
+}
+
 func resolveToken() (string, error) {
 	if os.Getenv("HERD_RUNNER") == "true" && os.Getenv("HERD_LOCAL_GITHUB_AUTH") != "true" {
 		return "", fmt.Errorf("GitHub client local auth is disabled when HERD_RUNNER=true; use the Herd control plane GitHub App path or set HERD_LOCAL_GITHUB_AUTH=true for local development")

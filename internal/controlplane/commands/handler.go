@@ -132,12 +132,14 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		"action":             event.Action,
 	}
 	dispatchable := shouldDispatch(cmd.Kind)
-	if dispatchable && strings.TrimSpace(event.PullRequestURL) == "" {
+	if dispatchable && commandRequiresPR(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
 		dispatchable = false
 	}
 	if dispatchable {
 		metadataBody["issue_number"] = event.IssueNumber
-		metadataBody["pr_number"] = event.IssueNumber
+		if strings.TrimSpace(event.PullRequestURL) != "" {
+			metadataBody["pr_number"] = event.IssueNumber
+		}
 	}
 	metadata, err := json.Marshal(metadataBody)
 	if err != nil {
@@ -154,6 +156,10 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 	if err != nil {
 		return Result{}, err
 	}
+	prNumber := 0
+	if strings.TrimSpace(event.PullRequestURL) != "" {
+		prNumber = event.IssueNumber
+	}
 	if dispatchPending && dispatchable {
 		if h.Dispatcher == nil {
 			return Result{}, fmt.Errorf("command dispatcher is not configured")
@@ -167,7 +173,7 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 			Owner:          event.Owner,
 			Repo:           event.Repo,
 			IssueNumber:    event.IssueNumber,
-			PRNumber:       event.IssueNumber,
+			PRNumber:       prNumber,
 			CommentID:      event.CommentID,
 			Actor:          event.SenderLogin,
 			Command:        cmd,
@@ -225,7 +231,7 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 		return nil
 	}
 	dispatchable := shouldDispatch(cmd.Kind)
-	if dispatchable && strings.TrimSpace(event.PullRequestURL) == "" {
+	if dispatchable && commandRequiresPR(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
 		return nil
 	}
 	metadataBody := map[string]any{
@@ -236,7 +242,9 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 	}
 	if dispatchable {
 		metadataBody["issue_number"] = event.IssueNumber
-		metadataBody["pr_number"] = event.IssueNumber
+		if strings.TrimSpace(event.PullRequestURL) != "" {
+			metadataBody["pr_number"] = event.IssueNumber
+		}
 	}
 	metadata, err := json.Marshal(metadataBody)
 	if err != nil {
@@ -502,7 +510,16 @@ func acknowledgement(cmd ParsedCommand) string {
 
 func shouldDispatch(kind CommandKind) bool {
 	switch kind {
-	case CommandReview, CommandFix, CommandFixCI:
+	case CommandReview, CommandFix, CommandFixCI, CommandResolveConflicts, CommandDispatch:
+		return true
+	default:
+		return false
+	}
+}
+
+func commandRequiresPR(kind CommandKind) bool {
+	switch kind {
+	case CommandReview, CommandFix, CommandFixCI, CommandResolveConflicts:
 		return true
 	default:
 		return false

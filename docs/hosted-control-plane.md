@@ -73,9 +73,6 @@ Mention commands use the App login:
 @herd-os fix-ci <hint>
 @herd-os resolve-conflicts
 @herd-os resolve-conflicts <context>
-@herd-os retry
-@herd-os retry <issue-number>
-@herd-os integrate
 @herd-os dispatch
 @herd-os dispatch <issue-number>
 ```

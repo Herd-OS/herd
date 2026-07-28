@@ -22,6 +22,9 @@ import (
 	"github.com/herd-os/herd/internal/controlplane/jobs"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/controlplane/workflowevents"
+	"github.com/herd-os/herd/internal/integrator"
+	"github.com/herd-os/herd/internal/issues"
+	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -197,6 +200,143 @@ func TestCommandTargetFromPullRequest(t *testing.T) {
 	}
 }
 
+func TestProductionResolveConflictsCommand(t *testing.T) {
+	originalSleep := resolveConflictsSleep
+	resolveConflictsSleep = func(context.Context, time.Duration) error { return nil }
+	t.Cleanup(func() { resolveConflictsSleep = originalSleep })
+
+	tests := []struct {
+		name             string
+		prs              []*platform.PullRequest
+		existingIssues   []*platform.Issue
+		wantCreatedIssue bool
+		wantDispatch     bool
+		wantComment      string
+		wantGets         int
+	}{
+		{
+			name:             "conflicting PR creates resolver issue and dispatches",
+			prs:              []*platform.PullRequest{batchPR("DIRTY", false, false)},
+			wantCreatedIssue: true,
+			wantDispatch:     true,
+			wantComment:      "Created conflict-resolution issue #100",
+			wantGets:         1,
+		},
+		{
+			name:        "clean PR no-ops",
+			prs:         []*platform.PullRequest{batchPR("CLEAN", true, true)},
+			wantComment: "not currently conflicting",
+			wantGets:    1,
+		},
+		{
+			name:        "blocked PR no-ops",
+			prs:         []*platform.PullRequest{batchPR("BLOCKED", false, false)},
+			wantComment: "not currently conflicting",
+			wantGets:    1,
+		},
+		{
+			name: "unknown mergeability retries then warns",
+			prs: []*platform.PullRequest{
+				batchPR("UNKNOWN", false, false),
+				batchPR("UNKNOWN", false, false),
+				batchPR("UNKNOWN", false, false),
+				batchPR("UNKNOWN", false, false),
+			},
+			wantComment: "could not determine",
+			wantGets:    4,
+		},
+		{
+			name: "duplicate active resolver issue no-ops",
+			prs:  []*platform.PullRequest{batchPR("CONFLICTING", false, false)},
+			existingIssues: []*platform.Issue{{
+				Number: 55,
+				Body: integrator.BuildConflictResolutionIssueBody(integrator.ConflictResolutionIssueParams{
+					Kind:         integrator.ConflictResolutionKindPRBase,
+					Milestone:    &platform.Milestone{Number: 7, Title: "Command Surface"},
+					BatchPR:      7,
+					PRHeadBranch: "herd/batch/7-command-surface",
+					PRHeadSHA:    "head-sha",
+					BaseBranch:   "main",
+					BaseSHA:      "base-sha",
+				}),
+				Labels: []string{issues.TypeFix, issues.StatusInProgress},
+			}},
+			wantComment: "already active",
+			wantGets:    1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newFakeCommandPlatform(tt.prs)
+			p.issues.listed = tt.existingIssues
+			workflow := &recordingWorkflowClient{}
+			d := productionCommandDispatcher{
+				Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: workflow},
+				ControlPlaneURL: "https://control.example.test",
+				DefaultRunner:   "herd-worker",
+				TimeoutMinutes:  30,
+				PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+					return p, nil
+				},
+			}
+
+			err := d.DispatchCommand(context.Background(), resolveConflictsCommand())
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantGets, p.prs.gets)
+			assert.Contains(t, strings.Join(p.prs.comments, "\n"), tt.wantComment)
+			assert.Equal(t, tt.wantCreatedIssue, len(p.issues.created) == 1)
+			assert.Equal(t, tt.wantDispatch, len(workflow.dispatches) == 1)
+			if tt.wantDispatch {
+				require.Len(t, p.issues.created, 1)
+				assert.Contains(t, p.issues.created[0].Body, "PR #7 cannot be merged cleanly")
+				assert.NotContains(t, p.issues.created[0].Body, "full PR conversation")
+				assert.Equal(t, "herd/batch/7-command-surface", workflow.dispatches[0].ref)
+				assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
+				assert.Equal(t, "7", workflow.dispatches[0].inputs["pr_number"])
+			}
+		})
+	}
+}
+
+func TestProductionDispatchCommandDispatchesReadyIssue(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{})
+	p.issues.byNumber[42] = &platform.Issue{
+		Number:    42,
+		Title:     "Do work",
+		Labels:    []string{issues.StatusReady},
+		Milestone: &platform.Milestone{Number: 7, Title: "Command Surface"},
+	}
+	p.repo.branchSHAs["herd/batch/7-command-surface"] = "batch-sha"
+	workflow := &recordingWorkflowClient{}
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+
+	cmd := resolveConflictsCommand()
+	cmd.IssueNumber = 7
+	cmd.PRNumber = 7
+	cmd.Command = commands.ParsedCommand{Kind: commands.CommandDispatch, Args: []string{"42"}}
+	err := d.DispatchCommand(context.Background(), cmd)
+
+	require.NoError(t, err)
+	require.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "herd-worker.yml", workflow.dispatches[0].workflowFile)
+	assert.Equal(t, "main", workflow.dispatches[0].ref)
+	assert.Equal(t, "42", workflow.dispatches[0].inputs["issue_number"])
+	assert.Equal(t, "herd/batch/7-command-surface", workflow.dispatches[0].inputs["batch_branch"])
+	assert.Contains(t, p.issues.byNumber[42].Labels, issues.StatusInProgress)
+	assert.NotContains(t, p.issues.byNumber[42].Labels, issues.StatusReady)
+	assert.Contains(t, strings.Join(p.issues.comments[7], "\n"), "Dispatched worker for issue #42")
+}
+
 func validProductionServiceConfig(t *testing.T) service.Config {
 	t.Helper()
 	return service.Config{
@@ -250,4 +390,265 @@ type fixedCommandDispatcher struct{}
 
 func (fixedCommandDispatcher) DispatchCommand(context.Context, commands.DispatchCommand) error {
 	return nil
+}
+
+func batchPR(state string, mergeableKnown bool, mergeable bool) *platform.PullRequest {
+	return &platform.PullRequest{
+		Number:           7,
+		Head:             "herd/batch/7-command-surface",
+		Base:             "main",
+		HeadSHA:          "head-sha",
+		BaseSHA:          "base-sha",
+		MergeStateStatus: state,
+		MergeableKnown:   mergeableKnown,
+		Mergeable:        mergeable,
+	}
+}
+
+func resolveConflictsCommand() commands.DispatchCommand {
+	return commands.DispatchCommand{
+		RepositoryID:   42,
+		InstallationID: 77,
+		Owner:          "octo",
+		Repo:           "herd",
+		IssueNumber:    7,
+		PRNumber:       7,
+		CommentID:      123,
+		Actor:          "maintainer",
+		Command: commands.ParsedCommand{
+			Kind: commands.CommandResolveConflicts,
+			Args: []string{"keep", "generated", "files"},
+		},
+	}
+}
+
+type recordingWorkflowClient struct {
+	dispatches []recordedWorkflowDispatch
+}
+
+type recordedWorkflowDispatch struct {
+	installationID int64
+	owner          string
+	repo           string
+	workflowFile   string
+	ref            string
+	inputs         map[string]string
+}
+
+func (c *recordingWorkflowClient) DispatchWorkflow(_ context.Context, installationID int64, owner, repo, workflowFile, ref string, inputs map[string]string) error {
+	copied := map[string]string{}
+	for k, v := range inputs {
+		copied[k] = v
+	}
+	c.dispatches = append(c.dispatches, recordedWorkflowDispatch{
+		installationID: installationID,
+		owner:          owner,
+		repo:           repo,
+		workflowFile:   workflowFile,
+		ref:            ref,
+		inputs:         copied,
+	})
+	return nil
+}
+
+type fakeCommandPlatform struct {
+	issues *fakeCommandIssueService
+	prs    *fakeCommandPRService
+	repo   *fakeCommandRepoService
+	ms     *fakeCommandMilestoneService
+}
+
+func newFakeCommandPlatform(prs []*platform.PullRequest) *fakeCommandPlatform {
+	return &fakeCommandPlatform{
+		issues: &fakeCommandIssueService{byNumber: map[int]*platform.Issue{}},
+		prs:    &fakeCommandPRService{prs: prs},
+		repo: &fakeCommandRepoService{
+			defaultBranch: "main",
+			branchSHAs:    map[string]string{"main": "main-sha"},
+		},
+		ms: &fakeCommandMilestoneService{milestones: map[int]*platform.Milestone{
+			7: {Number: 7, Title: "Command Surface"},
+		}},
+	}
+}
+
+func (p *fakeCommandPlatform) Issues() platform.IssueService             { return p.issues }
+func (p *fakeCommandPlatform) PullRequests() platform.PullRequestService { return p.prs }
+func (p *fakeCommandPlatform) Workflows() platform.WorkflowService       { return nil }
+func (p *fakeCommandPlatform) Labels() platform.LabelService             { return nil }
+func (p *fakeCommandPlatform) Milestones() platform.MilestoneService     { return p.ms }
+func (p *fakeCommandPlatform) Runners() platform.RunnerService           { return nil }
+func (p *fakeCommandPlatform) Repository() platform.RepositoryService    { return p.repo }
+func (p *fakeCommandPlatform) Checks() platform.CheckService             { return nil }
+
+type fakeCommandPRService struct {
+	prs      []*platform.PullRequest
+	gets     int
+	comments []string
+}
+
+func (s *fakeCommandPRService) Get(context.Context, int) (*platform.PullRequest, error) {
+	if len(s.prs) == 0 {
+		return nil, store.ErrNotFound
+	}
+	idx := s.gets
+	if idx >= len(s.prs) {
+		idx = len(s.prs) - 1
+	}
+	s.gets++
+	return s.prs[idx], nil
+}
+func (s *fakeCommandPRService) AddComment(_ context.Context, _ int, body string) error {
+	s.comments = append(s.comments, body)
+	return nil
+}
+func (s *fakeCommandPRService) Create(context.Context, string, string, string, string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (s *fakeCommandPRService) List(context.Context, platform.PRFilters) ([]*platform.PullRequest, error) {
+	return nil, nil
+}
+func (s *fakeCommandPRService) Update(context.Context, int, *string, *string) (*platform.PullRequest, error) {
+	return nil, nil
+}
+func (s *fakeCommandPRService) Merge(context.Context, int, platform.MergeMethod) (*platform.MergeResult, error) {
+	return nil, nil
+}
+func (s *fakeCommandPRService) UpdateBranch(context.Context, int) error { return nil }
+func (s *fakeCommandPRService) CreateReview(context.Context, int, string, platform.ReviewEvent) error {
+	return nil
+}
+func (s *fakeCommandPRService) ListReviewComments(context.Context, int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
+func (s *fakeCommandPRService) ListFiles(context.Context, int) ([]*platform.PullRequestFile, error) {
+	return nil, nil
+}
+func (s *fakeCommandPRService) GetDiff(context.Context, int) (string, error) { return "", nil }
+func (s *fakeCommandPRService) Close(context.Context, int) error             { return nil }
+
+type fakeCommandIssueService struct {
+	byNumber map[int]*platform.Issue
+	listed   []*platform.Issue
+	created  []*platform.Issue
+	comments map[int][]string
+}
+
+func (s *fakeCommandIssueService) Create(_ context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+	issue := &platform.Issue{Number: 100 + len(s.created), Title: title, Body: body, Labels: append([]string(nil), labels...)}
+	if milestone != nil {
+		issue.Milestone = &platform.Milestone{Number: *milestone}
+	}
+	s.created = append(s.created, issue)
+	if s.byNumber == nil {
+		s.byNumber = map[int]*platform.Issue{}
+	}
+	s.byNumber[issue.Number] = issue
+	return issue, nil
+}
+func (s *fakeCommandIssueService) Get(_ context.Context, number int) (*platform.Issue, error) {
+	issue, ok := s.byNumber[number]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return issue, nil
+}
+func (s *fakeCommandIssueService) List(context.Context, platform.IssueFilters) ([]*platform.Issue, error) {
+	return s.listed, nil
+}
+func (s *fakeCommandIssueService) AddLabels(_ context.Context, number int, labels []string) error {
+	issue, ok := s.byNumber[number]
+	if !ok {
+		return store.ErrNotFound
+	}
+	for _, label := range labels {
+		if !issues.HasLabel(issue.Labels, label) {
+			issue.Labels = append(issue.Labels, label)
+		}
+	}
+	return nil
+}
+func (s *fakeCommandIssueService) RemoveLabels(_ context.Context, number int, labels []string) error {
+	issue, ok := s.byNumber[number]
+	if !ok {
+		return store.ErrNotFound
+	}
+	remove := map[string]bool{}
+	for _, label := range labels {
+		remove[label] = true
+	}
+	kept := issue.Labels[:0]
+	for _, label := range issue.Labels {
+		if !remove[label] {
+			kept = append(kept, label)
+		}
+	}
+	issue.Labels = kept
+	return nil
+}
+func (s *fakeCommandIssueService) AddComment(_ context.Context, number int, body string) error {
+	if s.comments == nil {
+		s.comments = map[int][]string{}
+	}
+	s.comments[number] = append(s.comments[number], body)
+	return nil
+}
+func (s *fakeCommandIssueService) AddCommentReturningID(ctx context.Context, number int, body string) (int64, error) {
+	return 1, s.AddComment(ctx, number, body)
+}
+func (s *fakeCommandIssueService) Update(context.Context, int, platform.IssueUpdate) (*platform.Issue, error) {
+	return nil, nil
+}
+func (s *fakeCommandIssueService) UpdateComment(context.Context, int64, string) error { return nil }
+func (s *fakeCommandIssueService) DeleteComment(context.Context, int64) error         { return nil }
+func (s *fakeCommandIssueService) ListComments(context.Context, int) ([]*platform.Comment, error) {
+	return nil, nil
+}
+func (s *fakeCommandIssueService) CreateCommentReaction(context.Context, int64, string) error {
+	return nil
+}
+
+type fakeCommandMilestoneService struct {
+	milestones map[int]*platform.Milestone
+}
+
+func (s *fakeCommandMilestoneService) Get(_ context.Context, number int) (*platform.Milestone, error) {
+	ms, ok := s.milestones[number]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return ms, nil
+}
+func (s *fakeCommandMilestoneService) Create(context.Context, string, string, *time.Time) (*platform.Milestone, error) {
+	return nil, nil
+}
+func (s *fakeCommandMilestoneService) List(context.Context) ([]*platform.Milestone, error) {
+	return nil, nil
+}
+func (s *fakeCommandMilestoneService) Update(context.Context, int, platform.MilestoneUpdate) (*platform.Milestone, error) {
+	return nil, nil
+}
+
+type fakeCommandRepoService struct {
+	defaultBranch string
+	branchSHAs    map[string]string
+}
+
+func (s *fakeCommandRepoService) GetDefaultBranch(context.Context) (string, error) {
+	return s.defaultBranch, nil
+}
+func (s *fakeCommandRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
+	sha, ok := s.branchSHAs[name]
+	if !ok {
+		return "", store.ErrNotFound
+	}
+	return sha, nil
+}
+func (s *fakeCommandRepoService) GetInfo(context.Context) (*platform.RepoInfo, error) {
+	return &platform.RepoInfo{DefaultBranch: s.defaultBranch}, nil
+}
+func (s *fakeCommandRepoService) CreateBranch(context.Context, string, string) error { return nil }
+func (s *fakeCommandRepoService) DeleteBranch(context.Context, string) error         { return nil }
+func (s *fakeCommandRepoService) CreateBranchWithCommit(context.Context, string, string, string) (string, error) {
+	return "", nil
 }

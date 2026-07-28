@@ -151,20 +151,32 @@ func TestHandlerIgnoresBotAuthoredComments(t *testing.T) {
 }
 
 func TestHandlerLegacySlashCommandMigrationResponseNoDispatch(t *testing.T) {
-	st := newFakeStore()
-	gh := &fakeGitHub{}
-	dispatcher := &fakeDispatcher{}
-	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "review", body: "/herd review"},
+		{name: "resolve conflicts", body: "/herd resolve-conflicts"},
+	}
 
-	result, err := h.HandleIssueComment(context.Background(), validComment("OWNER", "/herd review"))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			gh := &fakeGitHub{}
+			dispatcher := &fakeDispatcher{}
+			h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
 
-	require.NoError(t, err)
-	assert.Equal(t, StatusIgnored, result.Status)
-	require.Len(t, gh.comments, 1)
-	assert.Contains(t, gh.comments[0].body, "@herd-os <command>")
-	assert.Len(t, st.commandRecords, 1)
-	assert.Equal(t, "migration", st.commandRecords[0].CommandKey)
-	assert.Empty(t, dispatcher.dispatched)
+			result, err := h.HandleIssueComment(context.Background(), validComment("OWNER", tt.body))
+
+			require.NoError(t, err)
+			assert.Equal(t, StatusIgnored, result.Status)
+			require.Len(t, gh.comments, 1)
+			assert.Contains(t, gh.comments[0].body, "@herd-os <command>")
+			assert.Len(t, st.commandRecords, 1)
+			assert.Equal(t, "migration", st.commandRecords[0].CommandKey)
+			assert.Empty(t, dispatcher.dispatched)
+		})
+	}
 }
 
 func TestHandlerLegacySlashCommandUnauthorizedNoResponseNoDispatch(t *testing.T) {
@@ -231,6 +243,7 @@ func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
 		{body: "@herd-os review", kind: CommandReview},
 		{body: "@herd-os fix", kind: CommandFix},
 		{body: "@herd-os fix-ci", kind: CommandFixCI},
+		{body: "@herd-os resolve-conflicts", kind: CommandResolveConflicts},
 	}
 
 	for _, tt := range tests {
@@ -249,6 +262,24 @@ func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
 			assert.Equal(t, tt.kind, dispatcher.dispatched[0].Command.Kind)
 		})
 	}
+}
+
+func TestHandlerDispatchesDispatchCommandFromIssueComments(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os dispatch 42")
+	event.PullRequestURL = ""
+
+	result, err := h.HandleIssueComment(context.Background(), event)
+
+	require.NoError(t, err)
+	assert.Equal(t, StatusAcknowledged, result.Status)
+	require.Len(t, dispatcher.dispatched, 1)
+	assert.Equal(t, CommandDispatch, dispatcher.dispatched[0].Command.Kind)
+	assert.Equal(t, 7, dispatcher.dispatched[0].IssueNumber)
+	assert.Equal(t, 0, dispatcher.dispatched[0].PRNumber)
 }
 
 func TestHandlerDoesNotDispatchPRCommandsFromIssueComments(t *testing.T) {

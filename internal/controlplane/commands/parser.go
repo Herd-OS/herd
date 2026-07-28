@@ -9,12 +9,12 @@ import (
 type CommandKind string
 
 const (
-	CommandPlan      CommandKind = "plan"
-	CommandFix       CommandKind = "fix"
-	CommandReview    CommandKind = "review"
-	CommandFixCI     CommandKind = "fix-ci"
-	CommandRetry     CommandKind = "retry"
-	CommandIntegrate CommandKind = "integrate"
+	CommandPlan             CommandKind = "plan"
+	CommandFix              CommandKind = "fix"
+	CommandReview           CommandKind = "review"
+	CommandFixCI            CommandKind = "fix-ci"
+	CommandResolveConflicts CommandKind = "resolve-conflicts"
+	CommandDispatch         CommandKind = "dispatch"
 )
 
 var ErrUnknownCommand = errors.New("unknown herd-os command")
@@ -66,7 +66,7 @@ func ParseMentionCommand(appLogin, body string) (ParsedCommand, bool, error) {
 
 func isSupportedCommand(kind CommandKind) bool {
 	switch kind {
-	case CommandPlan, CommandFix, CommandReview, CommandFixCI, CommandRetry, CommandIntegrate:
+	case CommandPlan, CommandFix, CommandReview, CommandFixCI, CommandResolveConflicts, CommandDispatch:
 		return true
 	default:
 		return false

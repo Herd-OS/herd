@@ -334,11 +334,8 @@ status update.
 | `@herd-os fix-ci <hint>` | Batch PR | Same as above, with context passed to the fix worker |
 | `@herd-os resolve-conflicts` | Batch PR | Checks live GitHub mergeability, waits briefly if mergeability is unknown, and creates a focused conflict-resolution issue only when the PR currently conflicts with its base branch. The resolver issue avoids full PR conversation history. |
 | `@herd-os resolve-conflicts <context>` | Batch PR | Same as above, with extra context included in the focused resolver issue. |
-| `@herd-os retry` | Issue | Re-dispatches the current failed issue |
-| `@herd-os retry <issue-number>` | Any issue/PR | Re-dispatches failed issue number |
-| `@herd-os integrate` | Any batch issue or PR | Manually triggers the integrator cycle (consolidate → check-ci → advance → review) for the batch. Useful for retrying after integrator failures. |
-| `@herd-os dispatch` | Issue | Dispatches the current ready or blocked issue |
-| `@herd-os dispatch <issue-number>` | Any issue/PR | Dispatches ready or blocked issue number |
+| `@herd-os dispatch` | Issue | Dispatches the current ready or failed issue |
+| `@herd-os dispatch <issue-number>` | Any issue/PR | Dispatches ready or failed issue number |
 
 **Image support:** When you attach screenshots to `@herd-os fix` comments, workers automatically download GitHub-hosted attachment images and can view them directly. This is useful for UI bug fixes -- paste a screenshot of the problem or the desired result, and the worker will see it. Only GitHub attachment URLs are downloaded; external image URLs are left as-is for the agent to handle.
 
@@ -346,16 +343,13 @@ status update.
 
 ```text
 @herd-os fix-ci the Node version file is missing from the Docker image
-@herd-os retry 42
 @herd-os review focus on error handling in the auth module
 @herd-os fix add missing error check in auth.go line 42
 @herd-os resolve-conflicts keep generated files intact
-@herd-os integrate
+@herd-os dispatch 42
 ```
 
-`@herd-os retry` always re-runs the worker, and it is never a no-op just because a previous attempt's progress checklist looks complete. If the previous attempt finished its work but failed pre-push validation, the retry re-invokes the agent with the saved validation errors (the agent is told the progress file is stale) rather than skipping straight to reporting — the agent is skipped only when both the progress file is complete and the worker's validation marker is present. See [design/execution.md → Retry Resume](design/execution.md#retry-resume) for details.
-
-When the integrator fails during any step (consolidation, CI check, advancement, or review), it posts a comment on the relevant issue or batch PR with the error details and a reminder to retry with `@herd-os integrate`.
+Worker retry and manual integrator recovery remain local CLI operations until they are wired through the hosted App/control-plane command path.
 
 Quotes around the prompt text are optional. You can paste error logs, JSON snippets, or any text directly after the command — everything after the command name (including subsequent lines) is treated as the prompt. The quoted format (`@herd-os fix "description"`) is also supported.
 

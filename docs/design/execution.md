@@ -413,7 +413,7 @@ This matters whenever an integrator run is interrupted mid-loop —
 GitHub Actions failures can all leave one or more `herd/status:done` issues
 whose worker branches were never merged. No manual cleanup is needed: the
 next workflow run that triggers consolidate (the next worker completion,
-manual `@herd-os integrate`, or any other event that fires the integrator)
+a manual local integrator run, or any other event that fires the integrator)
 re-scans the milestone, finds the stranded branches still on the remote, and
 merges them in.
 
@@ -678,17 +678,16 @@ the Integrator halts the cycle.
   verdicts, and the resolution options.
 
 While the `herd/stable-disagreement` label is present, automatic review is
-suspended. Manual `@herd-os review` and `@herd-os integrate` mention commands still
-execute — they bypass the label.
+suspended. Manual `@herd-os review` still executes — it bypasses the label.
 
 **Recovery.** The user has three options:
 
 1. **The workers were right** — post `@herd-os fix` with explicit acceptance
-   criteria that close out the findings, or `@herd-os integrate` to merge as-is.
+   criteria that close out the findings, or run the local integrator to merge as-is.
 2. **The reviewer was right** — post `@herd-os fix` with concrete `file:line`
    evidence that contradicts the worker verdicts.
 3. **Resume automatic review** — remove the `herd/stable-disagreement` label
-   and post `@herd-os integrate`.
+   and run the local integrator.
 
 ---
 
@@ -865,14 +864,14 @@ The batch PR comment lists three options in priority order:
    git fetch origin && git checkout <worker-branch>
    ```
 2. **Rebase and resolve** locally, force-push the worker branch, then
-   post `@herd-os integrate` on the batch PR to resume consolidation.
+   run the local integrator to resume consolidation.
 3. **Or close** the original failing issue if the work is no longer
-   needed, then post `@herd-os integrate` to advance past it.
+   needed, then run the local integrator to advance past it.
 
 Once the underlying problem is handled, remove the `herd/cascade-failed`
 label from the batch PR, or let the next integrator pass remove it when GitHub
-reports the PR clean and mergeable. The next `@herd-os integrate` (or workflow_run
-trigger) will resume conflict resolution normally.
+reports the PR clean and mergeable. The next local integrator run or workflow_run
+trigger will resume conflict resolution normally.
 
 #### Why we intentionally stop retrying
 
@@ -1308,11 +1307,8 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 | `@herd-os fix-ci <hint>` | App mention | Issue or PR | Same as above, with context passed to the fix worker |
 | `@herd-os resolve-conflicts` | App mention | PR | On a batch PR, check live mergeability and dispatch a focused conflict-resolution worker only when the PR currently conflicts with its base |
 | `@herd-os resolve-conflicts <context>` | App mention | PR | Same as above, with extra context included in the resolver issue |
-| `@herd-os retry` | App mention | Issue | Re-dispatch the current failed issue's worker |
-| `@herd-os retry <N>` | App mention | Issue or PR | Re-dispatch failed issue #N's worker |
-| `@herd-os integrate` | App mention | Issue or PR | Run the full integrator cycle: consolidate → check-ci → advance → review |
-| `@herd-os dispatch` | App mention | Issue | Dispatch the current issue (must be ready or blocked) |
-| `@herd-os dispatch <N>` | App mention | Issue or PR | Dispatch issue #N (must be ready or blocked) |
+| `@herd-os dispatch` | App mention | Issue | Dispatch the current issue (must be ready or failed) |
+| `@herd-os dispatch <N>` | App mention | Issue or PR | Dispatch issue #N (must be ready or failed) |
 | `herd review <pr-number>` | CLI | Local terminal | Open an interactive Claude Code session pre-loaded with diff coverage, comments, CI status, and chunk 1/N of the PR diff. The agent acts as a reviewer assistant — you drive the conversation; it can read code and discuss findings, and it drafts `@herd-os fix` comments for any actionable changes (it never edits files locally). It does NOT auto-dispatch workers or create issues. |
 | `herd dashboard` | CLI | Local terminal | Live read-only TUI showing active workers, open batches, and recent failures. Refreshes on a `--refresh-seconds` timer (default 15, clamp 5–300). Keybinds: `q` quit, `r` refresh, ↑/↓ select batch, Enter to open the batch's PR or milestone. Worker rows render as OSC 8 hyperlinks where supported. Single-repo and read-only in v1. |
 
@@ -1362,14 +1358,10 @@ When integrator steps fail, the CLI posts a comment on the relevant issue or bat
 ```
 ⚠️ **Integrator failed** during <step>: <error>
 
-You can retry with `@herd-os integrate` on this issue or the batch PR.
+Retry the integrator from the local CLI after addressing the failure.
 ```
 
-The `@herd-os integrate` command manually triggers the full integrator cycle for a batch. It can be posted on:
-- **Any issue belonging to a batch** — extracts the batch number from the issue's YAML frontmatter
-- **A batch PR** — extracts the batch number from the `herd/batch/<N>-<slug>` branch name
-
-The cycle runs: consolidate any remaining worker branches → check CI → advance tiers → review. This replaces the previous workaround of relabeling a done issue as failed to re-trigger the integrator.
+Manual integrator recovery remains a local CLI operation until it is wired through the hosted App/control-plane command path. The cycle runs: consolidate any remaining worker branches → check CI → advance tiers → review.
 
 Comments are posted to the issue being processed (for run-based triggers) or the batch PR (for batch-based triggers).
 

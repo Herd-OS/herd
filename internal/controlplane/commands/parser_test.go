@@ -85,6 +85,38 @@ func TestParseMentionCommand(t *testing.T) {
 			},
 		},
 		{
+			name:     "resolve conflicts command with context",
+			appLogin: "herd-os",
+			body:     "@herd-os resolve-conflicts keep generated files intact",
+			wantOK:   true,
+			want: ParsedCommand{
+				Kind: CommandResolveConflicts,
+				Args: []string{"keep", "generated", "files", "intact"},
+				Raw:  "@herd-os resolve-conflicts keep generated files intact",
+			},
+		},
+		{
+			name:     "dispatch command without issue number",
+			appLogin: "herd-os",
+			body:     "@herd-os dispatch",
+			wantOK:   true,
+			want: ParsedCommand{
+				Kind: CommandDispatch,
+				Raw:  "@herd-os dispatch",
+			},
+		},
+		{
+			name:     "dispatch command with issue number",
+			appLogin: "herd-os",
+			body:     "@herd-os dispatch 42",
+			wantOK:   true,
+			want: ParsedCommand{
+				Kind: CommandDispatch,
+				Args: []string{"42"},
+				Raw:  "@herd-os dispatch 42",
+			},
+		},
+		{
 			name:       "missing app login",
 			appLogin:   " ",
 			body:       "@herd-os review",
