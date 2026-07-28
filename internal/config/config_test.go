@@ -26,9 +26,11 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, 0, cfg.Integrator.ReviewMaxFixCycles)
 	assert.Equal(t, "standard", cfg.Integrator.ReviewStrictness)
 	assert.Equal(t, ReviewNonConvergence{
-		Enabled:            true,
-		Window:             5,
-		MinCompletedCycles: 3,
+		Enabled:                true,
+		Window:                 5,
+		MinCompletedCycles:     3,
+		SynthesisEnabled:       true,
+		SynthesisMinConfidence: 0.75,
 	}, cfg.Integrator.ReviewNonConvergence)
 	assert.Equal(t, ReviewDiff{
 		MaxChunkBytes:    180000,
@@ -72,6 +74,8 @@ integrator:
     enabled: false
     window: 7
     min_completed_cycles: 4
+    synthesis_enabled: false
+    synthesis_min_confidence: 0.6
   review_diff:
     max_chunk_bytes: 90000
     max_file_bytes: 20000
@@ -113,9 +117,11 @@ image_publish:
 	assert.Equal(t, "dispatch-resolver", cfg.Integrator.OnConflict)
 	assert.Equal(t, false, cfg.Integrator.RequireCI)
 	assert.Equal(t, ReviewNonConvergence{
-		Enabled:            false,
-		Window:             7,
-		MinCompletedCycles: 4,
+		Enabled:                false,
+		Window:                 7,
+		MinCompletedCycles:     4,
+		SynthesisEnabled:       false,
+		SynthesisMinConfidence: 0.6,
 	}, cfg.Integrator.ReviewNonConvergence)
 	assert.Equal(t, ReviewDiff{
 		MaxChunkBytes:    90000,
@@ -259,9 +265,11 @@ platform:
 		MaxChunks:        8,
 	}, cfg.Integrator.ReviewDiff)
 	assert.Equal(t, ReviewNonConvergence{
-		Enabled:            true,
-		Window:             5,
-		MinCompletedCycles: 3,
+		Enabled:                true,
+		Window:                 5,
+		MinCompletedCycles:     3,
+		SynthesisEnabled:       true,
+		SynthesisMinConfidence: 0.75,
 	}, cfg.Integrator.ReviewNonConvergence)
 	assert.Nil(t, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, true, cfg.Monitor.AutoRedispatch)
@@ -269,6 +277,33 @@ platform:
 	assert.Equal(t, []string{"linux/amd64", "linux/arm64"}, cfg.ImagePublish.Platforms)
 	assert.NotNil(t, cfg.ImagePublish.BuildSecrets)
 	assert.Empty(t, cfg.ImagePublish.BuildSecrets)
+}
+
+func TestLoadSparseReviewNonConvergenceGetsSynthesisDefaults(t *testing.T) {
+	dir := t.TempDir()
+	content := `version: 1
+platform:
+  provider: "github"
+  owner: "org"
+  repo: "repo"
+integrator:
+  review_non_convergence:
+    enabled: false
+    window: 9
+    min_completed_cycles: 6
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(content), 0644))
+
+	cfg, err := Load(dir)
+	require.NoError(t, err)
+
+	assert.Equal(t, ReviewNonConvergence{
+		Enabled:                false,
+		Window:                 9,
+		MinCompletedCycles:     6,
+		SynthesisEnabled:       true,
+		SynthesisMinConfidence: 0.75,
+	}, cfg.Integrator.ReviewNonConvergence)
 }
 
 func TestEnvOverrides(t *testing.T) {

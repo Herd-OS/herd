@@ -146,6 +146,9 @@ func Validate(cfg *Config) *ValidationError {
 	if cfg.Integrator.ReviewNonConvergence.MinCompletedCycles <= 0 {
 		ve.Errors = append(ve.Errors, "integrator.review_non_convergence.min_completed_cycles must be > 0")
 	}
+	if cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence < 0 || cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence > 1 {
+		ve.Errors = append(ve.Errors, fmt.Sprintf("integrator.review_non_convergence.synthesis_min_confidence must be between 0 and 1, got %g", cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence))
+	}
 	if cfg.Integrator.ReviewDiff.MaxChunkBytes <= 0 {
 		ve.Errors = append(ve.Errors, "integrator.review_diff.max_chunk_bytes must be > 0")
 	}

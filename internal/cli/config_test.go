@@ -39,6 +39,10 @@ func TestGetConfigValue(t *testing.T) {
 	val, err = getConfigValue(cfg, "integrator.review_diff.max_chunk_bytes")
 	require.NoError(t, err)
 	assert.Equal(t, "180000", val)
+
+	val, err = getConfigValue(cfg, "integrator.review_non_convergence.synthesis_min_confidence")
+	require.NoError(t, err)
+	assert.Equal(t, "0.75", val)
 }
 
 func TestGetConfigValueImagePublishRunsOn(t *testing.T) {
@@ -325,6 +329,11 @@ func TestFlattenConfig(t *testing.T) {
 	kvs := flattenConfig(cfg)
 	assert.True(t, len(kvs) > 20, "should have many keys, got %d", len(kvs))
 	got := keyValueMap(kvs)
+	assert.Equal(t, "true", got["integrator.review_non_convergence.enabled"])
+	assert.Equal(t, "5", got["integrator.review_non_convergence.window"])
+	assert.Equal(t, "3", got["integrator.review_non_convergence.min_completed_cycles"])
+	assert.Equal(t, "true", got["integrator.review_non_convergence.synthesis_enabled"])
+	assert.Equal(t, "0.75", got["integrator.review_non_convergence.synthesis_min_confidence"])
 	assert.Equal(t, "180000", got["integrator.review_diff.max_chunk_bytes"])
 	assert.Equal(t, "40000", got["integrator.review_diff.max_file_bytes"])
 	assert.Equal(t, "80", got["integrator.review_diff.max_files_per_chunk"])
@@ -479,6 +488,20 @@ func TestSetGetConfigValue_IntegratorReviewDiffRoundTrip(t *testing.T) {
 	val, err := getConfigValue(cfg, "integrator.review_diff.max_chunks")
 	require.NoError(t, err)
 	assert.Equal(t, "12", val)
+}
+
+func TestSetGetConfigValue_IntegratorReviewNonConvergenceSynthesisRoundTrip(t *testing.T) {
+	cfg := config.Default()
+
+	require.NoError(t, setConfigValue(cfg, "integrator.review_non_convergence.synthesis_enabled", "false"))
+	assert.False(t, cfg.Integrator.ReviewNonConvergence.SynthesisEnabled)
+
+	require.NoError(t, setConfigValue(cfg, "integrator.review_non_convergence.synthesis_min_confidence", "0.5"))
+	assert.Equal(t, 0.5, cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence)
+
+	val, err := getConfigValue(cfg, "integrator.review_non_convergence.synthesis_min_confidence")
+	require.NoError(t, err)
+	assert.Equal(t, "0.5", val)
 }
 
 func TestSetGetConfigValue_AgentEmbeddedRoleRoundTrip(t *testing.T) {
