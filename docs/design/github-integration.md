@@ -217,9 +217,9 @@ All groups use `cancel-in-progress: false` (except `check-ci-on-completion`) so 
 
 #### Agent Review Locking
 
-Batch PR reviews acquire an application-level GitHub-backed lock before the Integrator fetches context or starts the review agent. The lock is per PR, so only one Herd agent review may run for a batch PR at a time while independent batch PRs can still review concurrently. Workflow concurrency is defense-in-depth only; correctness comes from the app-level lock and GitHub's atomic ref-update behavior.
+Batch PR reviews acquire an application-level GitHub-backed lock before the Integrator fetches context or starts the review agent. The lock branch remains `herd/review-lock/pr-N` for PR N, but blocking is scoped to the current PR head. An active lock with a valid recorded `batch_branch_sha` equal to the current head blocks duplicate review for that head; an active lock with a valid recorded `batch_branch_sha` from an older head is stale for the updated diff and may be reclaimed immediately. Independent batch PRs can still review concurrently. Workflow concurrency is defense-in-depth only; correctness comes from the app-level lock and GitHub's atomic ref-update behavior.
 
-Lock acquisition and release are compare-and-swap operations against opaque lock state stored in GitHub. If two runs attempt to acquire or release the lock concurrently, only the run whose view of the current state is still valid succeeds; the other run reloads the latest state and either retries or observes that another review already owns the lock. A release is scoped to the holder that acquired the lock, so stale holders cannot release a newer review's lock.
+Lock acquisition and release are compare-and-swap operations against opaque lock state stored in GitHub. Lock history is append-only on `herd/review-lock/pr-N`: normal acquisition appends a lock commit, release appends a release commit, and old-head reclaim appends a replacement lock commit for the current head. If two runs attempt to acquire, reclaim, or release the lock concurrently, only the run whose view of the current state is still valid succeeds; the other run reloads the latest state and either retries or observes that another review already owns the lock. GitHub atomic ref updates ensure concurrent stale reclaim still has one winner. A release is scoped to the holder that acquired the lock, so stale holders cannot release a newer review's lock.
 
 Duplicate triggers do not launch another agent review. They log or comment:
 
@@ -227,9 +227,9 @@ Duplicate triggers do not launch another agent review. They log or comment:
 Review already in progress for PR #N; skipping duplicate review trigger.
 ```
 
-Stale locks expire conservatively after their recorded expiry window so a dead Actions job does not block future reviews forever. The implementation treats expiry as recovery from an abandoned review, not as permission for overlapping active reviews. Manual `/herd review` still bypasses stable-disagreement suspension, but it never bypasses the active-review lock.
+Stale locks expire conservatively after their recorded expiry window so a dead Actions job does not block future reviews forever. The implementation treats expiry as recovery from an abandoned review, not as permission for overlapping same-head active reviews. Manual `/herd review` still bypasses stable-disagreement suspension, but it never bypasses a same-head active-review lock.
 
-Pre-append-only lock branches from older HerdOS versions are migrated only when their old marker commit is recognizable as a Herd review lock and is stale according to its acquisition timestamp. Unknown or fresh legacy state fails closed rather than risking duplicate reviews.
+Malformed lock state and legacy active locks without a recorded head SHA fail closed or preserve existing blocking behavior until release or expiry rather than risking duplicate reviews. Pre-append-only lock branches from older HerdOS versions are migrated only when their old marker commit is recognizable as a Herd review lock and is stale according to its acquisition timestamp. Unknown or fresh legacy state fails closed rather than risking duplicate reviews.
 
 Hidden PR comments are not authoritative for locking. If diagnostic lock comments exist, HerdOS filters them out of review context and never uses them to decide whether a lock is active; the GitHub-backed lock state is authoritative.
 

@@ -278,7 +278,9 @@ Approved review results are also idempotent per PR head SHA for automatic trigge
 
 When a batch review starts, HerdOS records the batch PR head SHA, then checks the current PR head again before applying the agent result. If the head changed while the agent was running, HerdOS discards that result, posts a comment on the batch PR, and leaves the updated diff for the next automatic trigger or manual `/herd review`.
 
-If a manual `/herd review` is skipped because another review is active, HerdOS posts diagnostic lock metadata when available: owner, acquired time, expiry time, recorded head SHA, and current head SHA. A recorded head SHA that differs from the current PR head on an unexpired lock is diagnostic only; it does not allow a second concurrent review. Review lock expiry or release controls recovery.
+Active review locks block duplicate reviews only for the current PR head. If the active lock has a valid recorded `batch_branch_sha` equal to the current PR head, HerdOS skips the duplicate trigger. If the active lock has a valid recorded `batch_branch_sha` that differs from the current PR head, HerdOS treats that lock as stale for the current head, appends a replacement lock commit, and continues reviewing the updated diff. Malformed locks still fail closed, and legacy locks without a recorded head SHA preserve existing blocking behavior until release or expiry rather than assuming they are safe to reclaim.
+
+When a manual `/herd review` successfully reclaims a stale old-head lock, HerdOS posts a concise informational comment. Automatic review paths only log the reclaim so routine worker-completion and CI events do not add PR noise.
 
 Review-lock metadata is not merge approval. Merge approval uses the batch PR metadata and does not merge, approve, or consult `herd/review-lock/pr-N` branches.
 

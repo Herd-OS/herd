@@ -205,6 +205,11 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				fmt.Printf("Warning: failed to release review lock for PR #%d: %s\n", pr.Number, err)
 			}
 		}()
+		if params.Manual && reviewLock != nil && reviewLock.reclaimedStale != nil {
+			if err := p.PullRequests().AddComment(ctx, pr.Number, buildReclaimedStaleReviewLockComment(*reviewLock.reclaimedStale, reviewedHeadSHA)); err != nil {
+				fmt.Printf("Warning: failed to post stale review lock informational comment for PR #%d: %s\n", pr.Number, err)
+			}
+		}
 
 		currentHeadSHA, err := p.Repository().GetBranchSHA(ctx, batchBranch)
 		if err != nil {
@@ -1502,6 +1507,21 @@ func buildActiveReviewLockSkipComment(state reviewLockState, currentHeadSHA stri
 		b.WriteString(fmt.Sprintf("- Current head SHA: `%s`\n", currentHeadSHA))
 	}
 	b.WriteString("\nWait for the active review to finish or for the lock to expire before retrying.")
+	return b.String()
+}
+
+func buildReclaimedStaleReviewLockComment(state reviewLockState, currentHeadSHA string) string {
+	var b strings.Builder
+	b.WriteString("ℹ️ Herd reclaimed a stale review lock from an older PR head and is continuing review for the current head.")
+	if state.BatchBranchSHA != "" || currentHeadSHA != "" {
+		b.WriteString("\n\n")
+	}
+	if state.BatchBranchSHA != "" {
+		b.WriteString(fmt.Sprintf("- Locked head: `%s`\n", state.BatchBranchSHA))
+	}
+	if currentHeadSHA != "" {
+		b.WriteString(fmt.Sprintf("- Current head: `%s`", currentHeadSHA))
+	}
 	return b.String()
 }
 
