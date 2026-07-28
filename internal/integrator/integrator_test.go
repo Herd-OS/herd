@@ -58,6 +58,8 @@ type mockIssueService struct {
 	removeLabelsErr        error
 	createdTitle           string
 	createdBody            string
+	createdLabels          []string
+	createdMilestone       *int
 	respectCanceledContext bool
 }
 
@@ -73,7 +75,7 @@ func newMockIssueService() *mockIssueService {
 	}
 }
 
-func (m *mockIssueService) Create(ctx context.Context, title, body string, _ []string, _ *int) (*platform.Issue, error) {
+func (m *mockIssueService) Create(ctx context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
 	if m.respectCanceledContext {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -81,6 +83,13 @@ func (m *mockIssueService) Create(ctx context.Context, title, body string, _ []s
 	}
 	m.createdTitle = title
 	m.createdBody = body
+	m.createdLabels = append([]string(nil), labels...)
+	if milestone != nil {
+		milestoneCopy := *milestone
+		m.createdMilestone = &milestoneCopy
+	} else {
+		m.createdMilestone = nil
+	}
 	if m.createErr != nil {
 		return nil, m.createErr
 	}
@@ -3656,6 +3665,12 @@ func TestHandleConflictResolution_TaskBodyKeepsAgentOnWorkerBranch(t *testing.T)
 	require.NoError(t, err)
 
 	body := issueSvc.createdBody
+	parsed, parseErr := issues.ParseBody(body)
+	require.NoError(t, parseErr)
+	assert.Equal(t, "fix", parsed.FrontMatter.Type)
+	assert.True(t, parsed.FrontMatter.ConflictResolution)
+	assert.Equal(t, []string{workerBranch, batchBranch}, parsed.FrontMatter.ConflictingBranches)
+	assert.Len(t, wf.dispatched, 1)
 	// The new body tells the agent to stay on its own worker branch and merge
 	// origin/<workerBranch>. The negation warning ("do NOT run `git checkout
 	// <batch>`") must be present, but no positive checkout/push step.

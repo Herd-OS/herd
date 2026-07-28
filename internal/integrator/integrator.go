@@ -1201,63 +1201,27 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 		}, nil
 	}
 
-	// Create conflict-resolution issue
-	body := issues.RenderBody(issues.IssueBody{
-		FrontMatter: issues.FrontMatter{
-			Version:             1,
-			Batch:               ms.Number,
-			Type:                "fix",
-			ConflictResolution:  true,
-			ConflictingBranches: []string{workerBranch, batchBranch},
-		},
-		Task: fmt.Sprintf("Resolve merge conflict between `%s` and `%s`.\n\n"+
-			"**IMPORTANT:** You are already on your own worker branch (`herd/worker/<this-issue>-<slug>`). Do NOT checkout `%s` or any other branch — your commits must land on your worker branch so the worker framework can push them. The integrator will then merge your worker branch into `%s`.\n\n"+
-			"Follow these steps exactly:\n"+
-			"1. `git fetch origin`\n"+
-			"2. Stay on your current worker branch — do NOT run `git checkout %s`.\n"+
-			"3. `git merge origin/%s`\n"+
-			"4. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch — only fix the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) produced by git.\n"+
-			"5. `git add <resolved files>`\n"+
-			"6. `git commit` (accept the default merge commit message).\n"+
-			"7. Do NOT push — the worker framework handles pushing your worker branch.",
-			workerBranch, batchBranch, batchBranch, batchBranch, batchBranch, workerBranch),
-		Context: fmt.Sprintf("Worker branch `%s` (from issue #%d) conflicts with the batch branch `%s`.", workerBranch, issue.Number, batchBranch),
-	})
-
-	truncatedBody, overflow := issues.TruncateIssueBody(body)
-	fixIssue, err := p.Issues().Create(ctx,
-		fmt.Sprintf("Resolve conflict: #%d (%s)", issue.Number, truncate(issue.Title, 40)),
-		truncatedBody,
-		[]string{issues.TypeFix, issues.StatusInProgress},
-		&ms.Number,
-	)
+	dispatch, err := DispatchConflictResolutionIssue(ctx, p, cfg, ConflictResolutionIssueParams{
+		Kind:              ConflictResolutionKindWorkerMerge,
+		Milestone:         ms,
+		SourceIssueNumber: issue.Number,
+		SourceIssueTitle:  issue.Title,
+		WorkerBranch:      workerBranch,
+		BatchBranch:       batchBranch,
+	}, []string{issues.TypeFix, issues.StatusInProgress}, batchBranch)
 	if err != nil {
-		return nil, fmt.Errorf("creating conflict-resolution issue: %w", err)
-	}
-	for _, comment := range issues.SplitOverflowComments(overflow) {
-		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
-			fmt.Printf("Warning: failed to post overflow comment on conflict-resolution issue #%d: %v\n", fixIssue.Number, cerr)
-		}
+		return nil, err
 	}
 
 	// Relabel original issue from done → failed to block tier advancement
 	_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
 	_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
 
-	// Dispatch resolver worker
-	defaultBranch, _ := p.Repository().GetDefaultBranch(ctx)
-	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
-		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
-		"batch_branch":    batchBranch,
-		"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
-		"runner_label":    cfg.Workers.RunnerLabel,
-	})
-
 	return &ConsolidateResult{
 		IssueNumber:      issue.Number,
 		WorkerBranch:     workerBranch,
 		ConflictDetected: true,
-		ConflictIssue:    fixIssue.Number,
+		ConflictIssue:    dispatch.IssueNumber,
 	}, nil
 }
 
@@ -1406,55 +1370,17 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 		return 0, nil // At cap
 	}
 
-	// Create conflict-resolution issue
-	body := issues.RenderBody(issues.IssueBody{
-		FrontMatter: issues.FrontMatter{
-			Version:             1,
-			Batch:               ms.Number,
-			Type:                "fix",
-			ConflictResolution:  true,
-			ConflictingBranches: []string{batchBranch, defaultBranch},
-		},
-		Task: fmt.Sprintf("Resolve the conflict between batch branch `%s` and the latest `%s`.\n\n"+
-			"**IMPORTANT:** You are already on your own worker branch (`herd/worker/<this-issue>-<slug>`). Do NOT checkout `%s` or `%s` — your commits must land on your worker branch so the worker framework can push them. The integrator will then merge your worker branch into `%s`.\n\n"+
-			"Follow these steps exactly:\n"+
-			"1. `git fetch origin`\n"+
-			"2. Stay on your current worker branch — do NOT run `git checkout %s` or `git checkout %s`.\n"+
-			"3. `git merge origin/%s` (this brings the latest default-branch commits into your worker branch).\n"+
-			"4. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch — only fix the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) produced by git.\n"+
-			"5. `git add <resolved files>`\n"+
-			"6. `git commit` (accept the default merge commit message).\n"+
-			"7. Do NOT push — the worker framework handles pushing your worker branch.",
-			batchBranch, defaultBranch, batchBranch, defaultBranch, batchBranch, batchBranch, defaultBranch, defaultBranch),
-		Context: fmt.Sprintf("Automatic rebase of batch branch `%s` onto `%s` failed due to conflicts.", batchBranch, defaultBranch),
-	})
-
-	truncatedBody, overflow := issues.TruncateIssueBody(body)
-	fixIssue, err := p.Issues().Create(ctx,
-		fmt.Sprintf("Resolve rebase conflict: %s onto %s", batchBranch, defaultBranch),
-		truncatedBody,
-		[]string{issues.TypeFix, issues.StatusInProgress},
-		&ms.Number,
-	)
+	dispatch, err := DispatchConflictResolutionIssue(ctx, p, cfg, ConflictResolutionIssueParams{
+		Kind:        ConflictResolutionKindBatchRebase,
+		Milestone:   ms,
+		BatchBranch: batchBranch,
+		BaseBranch:  defaultBranch,
+	}, []string{issues.TypeFix, issues.StatusInProgress}, defaultBranch)
 	if err != nil {
-		return 0, fmt.Errorf("creating rebase conflict-resolution issue: %w", err)
-	}
-	for _, comment := range issues.SplitOverflowComments(overflow) {
-		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
-			fmt.Printf("Warning: failed to post overflow comment on rebase conflict-resolution issue #%d: %v\n", fixIssue.Number, cerr)
-		}
+		return 0, err
 	}
 
-	// Dispatch resolver worker
-	refBranch, _ := p.Repository().GetDefaultBranch(ctx)
-	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", refBranch, map[string]string{
-		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
-		"batch_branch":    defaultBranch,
-		"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
-		"runner_label":    cfg.Workers.RunnerLabel,
-	})
-
-	return fixIssue.Number, nil
+	return dispatch.IssueNumber, nil
 }
 
 func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) error {
