@@ -88,6 +88,12 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 	}
 	resultRef, err := req.Mutate()
 	if err != nil {
+		var preCallErr mutations.PreCallError
+		if errors.As(err, &preCallErr) {
+			_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseFailedPreCall, nil, err.Error(), now(req.Now))
+			_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseFailedPreCall+":"+err.Error())
+			return RunResult{}, err
+		}
 		_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseRepairRequired, nil, err.Error(), now(req.Now))
 		_ = st.FailIdempotencyKey(ctx, req.Key, err.Error())
 		return RunResult{}, err

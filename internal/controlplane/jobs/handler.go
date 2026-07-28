@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -356,7 +357,12 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 	})
 	status := mutationspkg.PhaseCompleted
 	if err != nil {
-		status = mutationspkg.PhaseRepairRequired
+		var preCallErr mutationspkg.PreCallError
+		if errors.As(err, &preCallErr) {
+			status = mutationspkg.PhaseFailedPreCall
+		} else {
+			status = mutationspkg.PhaseRepairRequired
+		}
 	}
 	response, _ := json.Marshal(map[string]any{
 		"job_id":        reviewResult.JobID,
@@ -600,7 +606,7 @@ func (h Handler) validateWorkerPatch(ctx context.Context, result Result, job sto
 	metadata := map[string]any{
 		"patch_artifact": worker.PatchArtifact,
 	}
-	artifactCtx := artifacts.ContextWithArtifactRepository(ctx, worker.Repository, job.InstallationID)
+	artifactCtx := artifacts.ContextWithWorkflowRunArtifactRepository(ctx, worker.Repository, job.InstallationID, metadataWorkflowRunID(job.Metadata))
 	artifact, err := artifacts.Validate(artifactCtx, h.artifactStore, artifacts.ValidationRequest{
 		Repository:       worker.Repository,
 		JobID:            worker.JobID,
@@ -618,6 +624,25 @@ func (h Handler) validateWorkerPatch(ctx context.Context, result Result, job sto
 		metadata["empty"] = true
 	}
 	return &artifact, metadata, nil
+}
+
+func metadataWorkflowRunID(metadata json.RawMessage) int64 {
+	values := metadataMap(metadata)
+	for _, key := range []string{"workflow_run_id", "run_id", "github_run_id"} {
+		switch v := values[key].(type) {
+		case float64:
+			return int64(v)
+		case int64:
+			return v
+		case json.Number:
+			id, _ := v.Int64()
+			return id
+		case string:
+			id, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			return id
+		}
+	}
+	return 0
 }
 
 func transientPatchValidationError(err error) bool {

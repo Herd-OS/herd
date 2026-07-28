@@ -18,6 +18,7 @@ import (
 	"github.com/herd-os/herd/internal/appauth"
 	"github.com/herd-os/herd/internal/controlplane"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
@@ -1145,6 +1146,32 @@ func TestHandlerDoesNotRetryReviewResultAfterProcessorFailure(t *testing.T) {
 	assert.Empty(t, st.results)
 }
 
+func TestHandlerRetriesReviewResultAfterProcessorPreCallFailure(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	processor := &capturingReviewProcessor{errs: []error{mutationspkg.PreCallError{Op: "create client", Err: assert.AnError}, nil}}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+	payload := validReviewPayload()
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, processor.calls, 2)
+	require.Len(t, st.results, 1)
+	assert.Equal(t, StatusApproved, st.results[0].Status)
+}
+
 func TestHandlerRejectsReviewResultWhenProcessorMissing(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -1315,6 +1342,16 @@ func (s *resultStore) CompleteGitHubMutationAttempt(_ context.Context, key strin
 		errorMessage: errorMessage,
 		completedAt:  completedAt,
 	})
+	for i, attempt := range s.mutationAttempts {
+		if attempt.IdempotencyKey == key {
+			attempt.Status = status
+			attempt.Response = response
+			attempt.Error = errorMessage
+			attempt.CompletedAt = &completedAt
+			s.mutationAttempts[i] = attempt
+			break
+		}
+	}
 	return nil
 }
 

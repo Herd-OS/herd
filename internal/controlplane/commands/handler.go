@@ -427,7 +427,7 @@ func (h Handler) addAcknowledgement(ctx context.Context, repo store.Repository, 
 	ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)
 	if err != nil {
 		if failures, ok := h.Store.(IdempotencyFailureStore); ok {
-			_ = failures.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseFailedPreCall+":"+err.Error())
+			_ = failures.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseRepairRequired+":"+err.Error())
 		}
 		return store.Repository{}, false, "", nil, fmt.Errorf("add acknowledgement comment: %w", err)
 	}

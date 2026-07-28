@@ -100,6 +100,52 @@ func TestRecordWorkerCallback_ClassifiesStaleAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestDispatchReadyWorkers_RedeliveryRepairsLabelsAfterDispatchBeforeInProgressFailure(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branches["herd/batch/7-demo"] = "batch-head"
+	disp := &fakeDispatcher{}
+	svc := newTestService(fake, newFakeStore(), disp)
+	allIssues := []*platform.Issue{
+		{
+			Number: 1,
+			Title:  "Task",
+			Labels: []string{issues.StatusReady},
+			Body:   "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n",
+		},
+	}
+	_, err := disp.Dispatch(ctx, cpdispatch.DispatchRequest{
+		RepoID:          svc.Repo.ID,
+		Owner:           svc.Repo.Owner,
+		Repo:            svc.Repo.Name,
+		InstallationID:  svc.Repo.InstallationID,
+		Kind:            cpdispatch.JobKindWorker,
+		WorkflowFile:    "herd-worker.yml",
+		Ref:             "main",
+		BatchNumber:     7,
+		IssueNumber:     1,
+		BatchBranch:     "herd/batch/7-demo",
+		BaseSHA:         "batch-head",
+		HeadSHA:         "batch-head",
+		ExpectedHeadSHA: "batch-head",
+	})
+	require.NoError(t, err)
+	req := DispatchReadyWorkersRequest{
+		BatchNumber: 7,
+		BatchBranch: "herd/batch/7-demo",
+		TierIssues:  []int{1},
+		AllIssues:   allIssues,
+	}
+
+	count, dispatchErr := svc.DispatchReadyWorkers(ctx, req)
+
+	require.NoError(t, dispatchErr)
+	assert.Equal(t, 0, count)
+	assert.Len(t, disp.requests, 1)
+	assert.Contains(t, fake.issues.removed[1], issues.StatusReady)
+	assert.Contains(t, fake.issues.added[1], issues.StatusInProgress)
+}
+
 func TestAdvanceBatch_OpensPRWhenAllTiersComplete(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()

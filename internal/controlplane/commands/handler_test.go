@@ -418,7 +418,7 @@ func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
 
 func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(t *testing.T) {
 	st := newFakeStore()
-	gh := &fakeGitHub{errs: []error{errors.New("github down"), nil}}
+	gh := &fakeGitHub{createThenErrs: []error{errors.New("github down")}}
 	dispatcher := &fakeDispatcher{}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
 	event := validComment("OWNER", "@herd-os review")
@@ -429,13 +429,15 @@ func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "add acknowledgement comment")
-	require.NoError(t, retryErr)
+	require.Error(t, retryErr)
+	assert.Contains(t, retryErr.Error(), "outcome is unknown")
 	assert.Len(t, gh.comments, 1)
-	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Empty(t, dispatcher.dispatched)
 	key := "repo:42:comment:123:command:review"
-	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	require.Equal(t, "failed", st.idempotencyKeys[key].Status)
+	assert.Contains(t, st.idempotencyKeys[key].ResultRef, "repair_required")
 	require.Len(t, st.commandRecords, 1)
-	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
+	assert.JSONEq(t, `{"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
 func TestHandlerAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing.T) {
@@ -843,9 +845,10 @@ func (s *fakeStore) UpdateCommandStatus(_ context.Context, repoID int64, comment
 }
 
 type fakeGitHub struct {
-	err      error
-	errs     []error
-	comments []fakeComment
+	err            error
+	errs           []error
+	createThenErrs []error
+	comments       []fakeComment
 }
 
 type fakeComment struct {
@@ -856,6 +859,12 @@ type fakeComment struct {
 }
 
 func (g *fakeGitHub) AddIssueComment(_ context.Context, owner, repo string, issueNumber int, body string) (int64, error) {
+	if len(g.createThenErrs) > 0 {
+		err := g.createThenErrs[0]
+		g.createThenErrs = g.createThenErrs[1:]
+		g.comments = append(g.comments, fakeComment{owner: owner, repo: repo, issueNumber: issueNumber, body: body})
+		return int64(1000 + len(g.comments)), err
+	}
 	if len(g.errs) > 0 {
 		err := g.errs[0]
 		g.errs = g.errs[1:]
