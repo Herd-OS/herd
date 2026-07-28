@@ -37,6 +37,7 @@ type Store interface {
 	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
 	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
+	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
 	RecordJobResult(ctx context.Context, r store.JobResult) (created bool, err error)
 }
 
@@ -296,6 +297,10 @@ func (s Service) mutate(ctx context.Context, key string, mutationType string, fn
 }
 
 func (s Service) withIdempotency(ctx context.Context, key string, mutationType string, fn func() (string, error)) (string, error) {
+	return s.withIdempotencyPhased(ctx, key, mutationType, nil, fn)
+}
+
+func (s Service) withIdempotencyPhased(ctx context.Context, key string, mutationType string, preflight func() error, fn func() (string, error)) (string, error) {
 	created, err := s.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       key,
 		Scope:     mutationType,
@@ -325,25 +330,25 @@ func (s Service) withIdempotency(ctx context.Context, key string, mutationType s
 		status := strings.TrimSpace(record.Status)
 		if status == "failed" || status == mutationStatusFailedPreCall {
 			if attempt, err := s.Store.GetGitHubMutationAttempt(ctx, key); errors.Is(err, store.ErrNotFound) {
-				return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
+				return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, fn)
 			} else if err != nil {
 				return "", fmt.Errorf("get mutation attempt: %w", err)
 			} else if mutations.IsPreCallRetryable(attempt.Status) {
-				return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
+				return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, fn)
 			}
 		}
 		if mutations.IsPreCallRetryable(status) {
-			return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
+			return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, fn)
 		}
 		if status == "" {
 			status = "unknown"
 		}
 		return "", fmt.Errorf("idempotency key %q for %s is %s without a completed result; retry after reconciliation", key, mutationType, status)
 	}
-	return s.withAcquiredIdempotency(ctx, key, mutationType, fn)
+	return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, fn)
 }
 
-func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutationType string, fn func() (string, error)) (string, error) {
+func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutationType string, preflight func() error, fn func() (string, error)) (string, error) {
 	if err := s.Store.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
 		IdempotencyKey: key,
 		RepositoryID:   s.Repo.ID,
@@ -366,10 +371,30 @@ func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutati
 			return "", fmt.Errorf("record mutation attempt: %w", err)
 		}
 	}
-	if err := s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusCallStarted, nil, "", s.now()); err != nil {
+	if preflight != nil {
+		if err := preflight(); err != nil {
+			_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailedPreCall, nil, err.Error(), s.now())
+			_ = s.Store.FailIdempotencyKey(ctx, key, mutationStatusFailedPreCall+":"+err.Error())
+			return "", err
+		}
+	}
+	start, err := s.Store.TryStartGitHubMutationAttempt(ctx, key, []string{mutationStatusIntentRecorded, mutationStatusFailedPreCall}, s.now())
+	if err != nil {
 		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailedPreCall, nil, err.Error(), s.now())
 		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
 		return "", fmt.Errorf("mark mutation call started: %w", err)
+	}
+	if !start.Started {
+		if mutations.IsCompleted(start.Attempt.Status) {
+			resultRef := mutationResultRef(start.Attempt.Response)
+			if strings.TrimSpace(resultRef) != "" {
+				if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+					return "", fmt.Errorf("repair idempotency key: %w", err)
+				}
+				return resultRef, nil
+			}
+		}
+		return "", fmt.Errorf("mutation attempt %q is %s; repair required before retry", key, start.Attempt.Status)
 	}
 	resultRef, err := fn()
 	if err != nil {

@@ -405,6 +405,34 @@ func (s *MemoryStore) CompleteGitHubMutationAttempt(_ context.Context, idempoten
 	return nil
 }
 
+func (s *MemoryStore) TryStartGitHubMutationAttempt(_ context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (GitHubMutationStartResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attempt, ok := s.mutationAttempts[idempotencyKey]
+	if !ok {
+		return GitHubMutationStartResult{}, ErrNotFound
+	}
+	allowed := false
+	for _, status := range allowedStatuses {
+		if attempt.Status == status {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return GitHubMutationStartResult{Started: false, Attempt: attempt}, nil
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	attempt.Status = "call_started"
+	attempt.Response = json.RawMessage(`{}`)
+	attempt.Error = ""
+	attempt.CompletedAt = &completedAt
+	s.mutationAttempts[idempotencyKey] = attempt
+	return GitHubMutationStartResult{Started: true, Attempt: attempt}, nil
+}
+
 func (s *MemoryStore) GetGitHubMutationAttempt(_ context.Context, idempotencyKey string) (GitHubMutationAttempt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

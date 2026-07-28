@@ -265,6 +265,101 @@ func TestValidatedEffectiveControlPlaneURLRejectsUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestResolvedInitControlPlaneURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		explicit string
+		existing string
+		want     string
+	}{
+		{name: "explicit overrides existing", explicit: "https://override.example/", existing: "https://existing.example", want: "https://override.example"},
+		{name: "existing used when flag omitted", existing: "https://existing.example/", want: "https://existing.example"},
+		{name: "default when neither set", want: config.DefaultControlPlaneURL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolvedInitControlPlaneURL(tt.explicit, tt.existing)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestRunInitReusesExistingSelfHostedControlPlaneURL(t *testing.T) {
+	dir := setupTestGitRepoWithCommit(t, "git@github.com:acme/widgets.git")
+	cfg := config.Default()
+	cfg.Platform.Owner = "acme"
+	cfg.Platform.Repo = "widgets"
+	cfg.ControlPlaneURL = "https://herd.internal"
+	require.NoError(t, config.Save(dir, cfg))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("HERD_CONTROL_PLANE_URL=https://herd.internal\nCLAUDE_CODE_OAUTH_TOKEN=claude\n"), 0600))
+
+	oldAuth := newSetupAuthorizer
+	oldRegistrar := newRepositoryRegistrar
+	var registrarURL string
+	reg := &fakeInitRegistrar{resp: cpclient.RegisterRepositoryResponse{RunnerBootstrapToken: "hrb_bootstrap"}}
+	newSetupAuthorizer = func() setupAuthorizer {
+		return fakeInitAuthorizer{token: "gho_human"}
+	}
+	newRepositoryRegistrar = func(controlPlaneURL string) (repositoryRegistrar, error) {
+		registrarURL = controlPlaneURL
+		return reg, nil
+	}
+	t.Cleanup(func() {
+		newSetupAuthorizer = oldAuth
+		newRepositoryRegistrar = oldRegistrar
+	})
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	err = runInitWithOptions(initOptions{SkipLabels: true, SkipWorkflows: true})
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://herd.internal", registrarURL)
+	require.Len(t, reg.reqs, 1)
+	env, err := os.ReadFile(filepath.Join(dir, ".env"))
+	require.NoError(t, err)
+	assert.Contains(t, string(env), "HERD_CONTROL_PLANE_URL=https://herd.internal")
+}
+
+func TestRunInitExplicitControlPlaneURLOverridesExistingConfig(t *testing.T) {
+	dir := setupTestGitRepoWithCommit(t, "git@github.com:acme/widgets.git")
+	cfg := config.Default()
+	cfg.Platform.Owner = "acme"
+	cfg.Platform.Repo = "widgets"
+	cfg.ControlPlaneURL = "https://herd.internal"
+	require.NoError(t, config.Save(dir, cfg))
+
+	oldAuth := newSetupAuthorizer
+	oldRegistrar := newRepositoryRegistrar
+	var registrarURL string
+	newSetupAuthorizer = func() setupAuthorizer {
+		return fakeInitAuthorizer{token: "gho_human"}
+	}
+	newRepositoryRegistrar = func(controlPlaneURL string) (repositoryRegistrar, error) {
+		registrarURL = controlPlaneURL
+		return &fakeInitRegistrar{resp: cpclient.RegisterRepositoryResponse{RunnerBootstrapToken: "hrb_bootstrap"}}, nil
+	}
+	t.Cleanup(func() {
+		newSetupAuthorizer = oldAuth
+		newRepositoryRegistrar = oldRegistrar
+	})
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	err = runInitWithOptions(initOptions{SkipLabels: true, SkipWorkflows: true, ControlPlaneURL: "https://override.example"})
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://override.example", registrarURL)
+	env, err := os.ReadFile(filepath.Join(dir, ".env"))
+	require.NoError(t, err)
+	assert.Contains(t, string(env), "HERD_CONTROL_PLANE_URL=https://override.example")
+}
+
 func TestInstallWorkflows(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, installWorkflows(dir, config.Default()))

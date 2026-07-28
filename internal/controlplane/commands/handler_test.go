@@ -269,21 +269,61 @@ func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
 }
 
 func TestHandlerDispatchesDispatchCommandFromIssueComments(t *testing.T) {
-	st := newFakeStore()
-	gh := &fakeGitHub{}
-	dispatcher := &fakeDispatcher{}
-	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
-	event := validComment("OWNER", "@herd-os dispatch 42")
-	event.PullRequestURL = ""
+	tests := []struct {
+		name string
+		pr   bool
+	}{
+		{name: "issue comment"},
+		{name: "PR comment", pr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			gh := &fakeGitHub{}
+			dispatcher := &fakeDispatcher{}
+			h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+			event := validComment("OWNER", "@herd-os dispatch 42")
+			if !tt.pr {
+				event.PullRequestURL = ""
+			}
 
-	result, err := h.HandleIssueComment(context.Background(), event)
+			result, err := h.HandleIssueComment(context.Background(), event)
+			duplicate, duplicateErr := h.HandleIssueComment(context.Background(), event)
 
-	require.NoError(t, err)
-	assert.Equal(t, StatusAcknowledged, result.Status)
-	require.Len(t, dispatcher.dispatched, 1)
-	assert.Equal(t, CommandDispatch, dispatcher.dispatched[0].Command.Kind)
-	assert.Equal(t, 7, dispatcher.dispatched[0].IssueNumber)
-	assert.Equal(t, 0, dispatcher.dispatched[0].PRNumber)
+			require.NoError(t, err)
+			require.NoError(t, duplicateErr)
+			assert.Equal(t, StatusAcknowledged, result.Status)
+			assert.Equal(t, StatusAcknowledged, duplicate.Status)
+			require.Len(t, dispatcher.dispatched, 1)
+			assert.Equal(t, CommandDispatch, dispatcher.dispatched[0].Command.Kind)
+			assert.Equal(t, 42, dispatcher.dispatched[0].IssueNumber)
+			if tt.pr {
+				assert.Equal(t, 7, dispatcher.dispatched[0].PRNumber)
+			} else {
+				assert.Equal(t, 0, dispatcher.dispatched[0].PRNumber)
+			}
+		})
+	}
+}
+
+func TestHandlerRejectsInvalidDispatchTarget(t *testing.T) {
+	tests := []string{"@herd-os dispatch nope", "@herd-os dispatch 0", "@herd-os dispatch -1"}
+	for _, body := range tests {
+		t.Run(body, func(t *testing.T) {
+			st := newFakeStore()
+			gh := &fakeGitHub{}
+			dispatcher := &fakeDispatcher{}
+			h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+
+			_, err := h.HandleIssueComment(context.Background(), validComment("OWNER", body))
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "positive numeric issue number")
+			assert.Empty(t, gh.comments)
+			assert.Empty(t, dispatcher.dispatched)
+			assert.Empty(t, st.commandRecords)
+		})
+	}
 }
 
 func TestHandlerDoesNotDispatchPRCommandsFromIssueComments(t *testing.T) {
@@ -328,7 +368,8 @@ func TestHandlerNonDispatchableAcknowledgementRecordFailureRedeliveryDoesNotAckA
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
-	event := validComment("OWNER", "@herd-os plan")
+	event := validComment("OWNER", "@herd-os review")
+	event.PullRequestURL = ""
 
 	_, err := h.HandleIssueComment(context.Background(), event)
 	_, retryErr := h.HandleIssueComment(context.Background(), event)
@@ -338,12 +379,12 @@ func TestHandlerNonDispatchableAcknowledgementRecordFailureRedeliveryDoesNotAckA
 	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
 	assert.Empty(t, dispatcher.dispatched)
-	key := "repo:42:comment:123:command:plan"
+	key := "repo:42:comment:123:command:review"
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
 	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
 	assert.Equal(t, StatusAcknowledged, st.commandRecords[0].Status)
-	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","raw":"@herd-os plan"}`, string(st.commandRecords[0].Metadata))
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
 func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
@@ -444,7 +485,8 @@ func TestHandlerAcknowledgementCompletionFailureRedeliveryDoesNotAckAgain(t *tes
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
-	event := validComment("OWNER", "@herd-os plan")
+	event := validComment("OWNER", "@herd-os review")
+	event.PullRequestURL = ""
 
 	_, err := h.HandleIssueComment(context.Background(), event)
 	_, retryErr := h.HandleIssueComment(context.Background(), event)
@@ -454,11 +496,11 @@ func TestHandlerAcknowledgementCompletionFailureRedeliveryDoesNotAckAgain(t *tes
 	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
 	assert.Empty(t, dispatcher.dispatched)
-	key := "repo:42:comment:123:command:plan"
+	key := "repo:42:comment:123:command:review"
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
 	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
-	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","raw":"@herd-os plan"}`, string(st.commandRecords[0].Metadata))
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
 func TestHandlerDispatchCompletionFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
@@ -614,7 +656,7 @@ func TestHandlerStoreAndGitHubFailures(t *testing.T) {
 		},
 		{
 			name:    "complete",
-			body:    "@herd-os plan",
+			body:    "@herd-os dispatch",
 			store:   func() *fakeStore { s := newFakeStore(); s.completeErr = errors.New("down"); return s }(),
 			github:  &fakeGitHub{},
 			wantErr: "record acknowledgement intent",

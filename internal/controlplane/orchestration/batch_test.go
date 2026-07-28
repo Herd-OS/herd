@@ -433,6 +433,29 @@ func (s *fakeStore) CompleteGitHubMutationAttempt(_ context.Context, key string,
 	return nil
 }
 
+func (s *fakeStore) TryStartGitHubMutationAttempt(_ context.Context, key string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error) {
+	attempt, ok := s.mutations[key]
+	if !ok {
+		return store.GitHubMutationStartResult{}, store.ErrNotFound
+	}
+	allowed := false
+	for _, status := range allowedStatuses {
+		if attempt.Status == status {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return store.GitHubMutationStartResult{Attempt: attempt}, nil
+	}
+	attempt.Status = "call_started"
+	attempt.Response = json.RawMessage(`{}`)
+	attempt.Error = ""
+	attempt.CompletedAt = &completedAt
+	s.mutations[key] = attempt
+	return store.GitHubMutationStartResult{Started: true, Attempt: attempt}, nil
+}
+
 func (s *fakeStore) RecordJobResult(_ context.Context, r store.JobResult) (bool, error) {
 	key := r.JobID + "/" + r.IdempotencyKey
 	if _, ok := s.results[key]; ok {

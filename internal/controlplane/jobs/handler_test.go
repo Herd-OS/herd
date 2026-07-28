@@ -29,7 +29,7 @@ func TestHandlerAcceptsAndStoresResult(t *testing.T) {
 	st := newResultStore()
 	patch := []byte{}
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837", Metadata: json.RawMessage(`{"ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345"}`)}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837", Metadata: validJobMetadata()}
 	handler := NewHandler(HandlerOptions{
 		Store:          st,
 		Validator:      fixedOIDCValidator(validClaims(now)),
@@ -55,12 +55,20 @@ func TestHandlerAcceptsAndStoresResult(t *testing.T) {
 	assert.Equal(t, ResultPayloadHash([]byte(validWorkerPayload("job-1", "head"))), result.ResultRef)
 }
 
+func validJobMetadata() json.RawMessage {
+	return json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345"}`)
+}
+
+func validReviewJobMetadata() json.RawMessage {
+	return json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345","workflow_run_url":"https://example.test/run"}`)
+}
+
 func TestHandlerDuplicateCallbacksAreIdempotent(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
 	patch := []byte{}
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
-	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837", Metadata: validJobMetadata()}
 	handler := NewHandler(HandlerOptions{
 		Store:          st,
 		Validator:      fixedOIDCValidator(validClaims(now)),
@@ -88,7 +96,7 @@ func TestHandlerDuplicateWorkerCallbackUsesStableIdentityAcrossJSONFormatting(t 
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
 	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837", Metadata: validJobMetadata()}
 	handler := NewHandler(HandlerOptions{
 		Store:          st,
 		Validator:      fixedOIDCValidator(validClaims(now)),
@@ -134,7 +142,7 @@ func TestHandlerProcessesReviewCompletedResult(t *testing.T) {
 		InstallationID: 9,
 		PRNumber:       42,
 		HeadSHA:        "head",
-		Metadata:       json.RawMessage(`{"workflow_run_url":"https://example.test/run"}`),
+		Metadata:       validReviewJobMetadata(),
 	}
 	processor := &capturingReviewProcessor{}
 	handler := NewHandler(HandlerOptions{
@@ -161,7 +169,7 @@ func TestHandlerProcessesReviewCompletedResult(t *testing.T) {
 func TestHandlerDuplicateReviewCallbackUsesStableIdentityAcrossJSONFormatting(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head", Metadata: validJobMetadata()}
 	processor := &capturingReviewProcessor{}
 	handler := NewHandler(HandlerOptions{
 		Store:           st,
@@ -197,7 +205,7 @@ func TestHandlerDuplicateReviewCallbackUsesStableIdentityAcrossJSONFormatting(t 
 func TestHandlerStartedCallbackDoesNotProcessAgain(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
-	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head", Metadata: validJobMetadata()}
 	payload := validReviewPayload()
 	resultKey := ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload))
 	st.idem["job_result:"+resultKey] = store.IdempotencyKey{
@@ -1309,6 +1317,47 @@ func (s *resultStore) CompleteGitHubMutationAttempt(_ context.Context, key strin
 		completedAt:  completedAt,
 	})
 	return nil
+}
+
+func (s *resultStore) TryStartGitHubMutationAttempt(_ context.Context, key string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i, attempt := range s.mutationAttempts {
+		if attempt.IdempotencyKey == key {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return store.GitHubMutationStartResult{}, store.ErrNotFound
+	}
+	attempt := s.mutationAttempts[idx]
+	allowed := false
+	for _, status := range allowedStatuses {
+		if attempt.Status == status {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return store.GitHubMutationStartResult{Attempt: attempt}, nil
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	attempt.Status = "call_started"
+	attempt.Response = json.RawMessage(`{}`)
+	attempt.Error = ""
+	attempt.CompletedAt = &completedAt
+	s.mutationAttempts[idx] = attempt
+	s.mutationCompletions = append(s.mutationCompletions, mutationCompletion{
+		key:         key,
+		status:      "call_started",
+		response:    json.RawMessage(`{}`),
+		completedAt: completedAt,
+	})
+	return store.GitHubMutationStartResult{Started: true, Attempt: attempt}, nil
 }
 
 func (s *resultStore) GetGitHubMutationAttempt(_ context.Context, key string) (store.GitHubMutationAttempt, error) {
