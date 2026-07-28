@@ -478,8 +478,8 @@ func TestMapPullRequest(t *testing.T) {
 		Title:     gh.Ptr("Test"),
 		Body:      gh.Ptr("Body"),
 		State:     gh.Ptr("open"),
-		Head:      &gh.PullRequestBranch{Ref: gh.Ptr("feature")},
-		Base:      &gh.PullRequestBranch{Ref: gh.Ptr("main")},
+		Head:      &gh.PullRequestBranch{Ref: gh.Ptr("feature"), SHA: gh.Ptr("abc123")},
+		Base:      &gh.PullRequestBranch{Ref: gh.Ptr("main"), SHA: gh.Ptr("def456")},
 		Mergeable: gh.Ptr(true),
 		HTMLURL:   gh.Ptr("https://github.com/org/repo/pull/42"),
 		CreatedAt: &ts,
@@ -491,6 +491,8 @@ func TestMapPullRequest(t *testing.T) {
 	assert.Equal(t, "open", pr.State)
 	assert.Equal(t, "feature", pr.Head)
 	assert.Equal(t, "main", pr.Base)
+	assert.Equal(t, "abc123", pr.HeadSHA)
+	assert.Equal(t, "def456", pr.BaseSHA)
 	assert.True(t, pr.Mergeable)
 	assert.Equal(t, "https://github.com/org/repo/pull/42", pr.URL)
 	assert.Equal(t, time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC), pr.CreatedAt)
