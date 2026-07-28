@@ -41,6 +41,10 @@ func (a *chunkCaptureAgent) Review(_ context.Context, diff string, opts agent.Re
 	return a.results[idx], nil
 }
 
+func (a *chunkCaptureAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
+}
+
 func (a *chunkCaptureAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil
 }

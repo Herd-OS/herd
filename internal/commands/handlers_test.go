@@ -357,6 +357,9 @@ func (m *testAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecOpt
 func (m *testAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return m.reviewResult, m.reviewErr
 }
+func (m *testAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
+}
 func (m *testAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil
 }
@@ -1878,6 +1881,9 @@ func (m *capturingTestAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agen
 func (m *capturingTestAgent) Review(_ context.Context, _ string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
 	*m.capturedOpts = opts
 	return m.result, nil
+}
+func (m *capturingTestAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
 }
 func (m *capturingTestAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil

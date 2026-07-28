@@ -176,3 +176,76 @@ func TestReview_FailingCommand(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "agent review exited with error")
 }
+
+func TestSynthesizeReviewNonConvergence_StructuredOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	argvDump := dir + "/argv.bin"
+	stdinDump := dir + "/stdin.txt"
+	schemaCopy := dir + "/schema.json"
+	script := dir + "/codex.sh"
+	content := fmt.Sprintf(`#!/bin/sh
+printf '%%s\0' "$@" > '%s'
+cat > '%s'
+out=''
+schema=''
+prev=''
+for a in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$a"; fi
+  if [ "$prev" = "--output-schema" ]; then schema="$a"; fi
+  prev="$a"
+done
+if [ -n "$schema" ]; then cp "$schema" '%s'; fi
+if [ -n "$out" ]; then printf '%%s' '{"should_escalate":true,"confidence":0.93,"root_cause_title":"Shared review state","recurring_symptoms":[{"description":"same stale finding","cycles":[2,3],"affected_files":["internal/review.go"]}]}' > "$out"; fi
+`, argvDump, stdinDump, schemaCopy)
+	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+
+	a := NewAgent(script, "", "", "")
+	result, err := a.SynthesizeReviewNonConvergence(context.Background(), agent.ReviewSynthesisInput{
+		PRNumber:          31,
+		BatchNumber:       116,
+		HeadSHA:           "sha-31",
+		CurrentPRMetadata: "metadata marker",
+	}, agent.ReviewSynthesisOptions{RepoRoot: dir})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.ShouldEscalate)
+	assert.Equal(t, 0.93, result.Confidence)
+	assert.Equal(t, "Shared review state", result.RootCauseTitle)
+	assert.Len(t, result.RecurringSymptoms, 1)
+
+	argv := readArgvDump(t, argvDump)
+	require.NotEmpty(t, argv)
+	assert.Equal(t, "exec", argv[0])
+	assert.Contains(t, argv, "--output-schema")
+	assert.Contains(t, argv, "--output-last-message")
+
+	stdinBytes, err := os.ReadFile(stdinDump)
+	require.NoError(t, err)
+	stdinContent := string(stdinBytes)
+	assert.True(t, strings.HasPrefix(stdinContent, prompt.ReviewSynthesisSystemPrompt))
+	assert.Contains(t, stdinContent, "sha-31")
+	assert.Contains(t, stdinContent, "metadata marker")
+
+	schemaBytes, err := os.ReadFile(schemaCopy)
+	require.NoError(t, err)
+	assert.Contains(t, string(schemaBytes), `"should_escalate"`)
+	assert.Contains(t, string(schemaBytes), `"root_cause_title"`)
+}
+
+func TestSynthesizeReviewNonConvergence_UnparseableOutputReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+
+	binary, _, _ := writeFakeCodex(t, "this output is definitely not valid json", "", 0)
+
+	a := NewAgent(binary, "", "", "")
+	result, err := a.SynthesizeReviewNonConvergence(context.Background(), agent.ReviewSynthesisInput{}, agent.ReviewSynthesisOptions{RepoRoot: t.TempDir()})
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "parsing review synthesis output")
+}

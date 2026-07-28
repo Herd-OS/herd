@@ -490,6 +490,9 @@ func (m *mockReviewAgent) Review(_ context.Context, diff string, opts agent.Revi
 	m.calls++
 	return m.reviewResult, m.reviewErr
 }
+func (m *mockReviewAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
+}
 func (m *mockReviewAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil
 }
@@ -4513,6 +4516,9 @@ func (m *capturingMockAgent) Review(_ context.Context, diff string, opts agent.R
 	*m.capturedOpts = opts
 	return m.result, nil
 }
+func (m *capturingMockAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
+}
 func (m *capturingMockAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil
 }
@@ -6883,6 +6889,9 @@ func (b *blockingMockReviewAgent) Execute(_ context.Context, _ agent.TaskSpec, _
 }
 func (b *blockingMockReviewAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil
+}
+func (b *blockingMockReviewAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
 }
 func (b *blockingMockReviewAgent) Review(ctx context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	b.calls++

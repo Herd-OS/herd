@@ -40,6 +40,9 @@ func (m *mockAgent) Execute(_ context.Context, _ agent.TaskSpec, opts agent.Exec
 func (m *mockAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return nil, nil
 }
+func (m *mockAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
+}
 func (m *mockAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil
 }
@@ -635,6 +638,9 @@ func (h *hangingAgent) Execute(ctx context.Context, _ agent.TaskSpec, _ agent.Ex
 	return nil, ctx.Err()
 }
 func (h *hangingAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	return nil, nil
+}
+func (h *hangingAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
 	return nil, nil
 }
 func (h *hangingAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error { return nil }
@@ -2078,6 +2084,9 @@ func (c *commitAgent) Execute(_ context.Context, _ agent.TaskSpec, _ agent.ExecO
 func (c *commitAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
 	return nil, nil
 }
+func (c *commitAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
+}
 func (c *commitAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error { return nil }
 
 // initTestRepoWithTargetBranch creates a test repo and pushes targetBranch to
@@ -2672,6 +2681,9 @@ func (s *scriptedAgent) Execute(ctx context.Context, spec agent.TaskSpec, opts a
 	return &agent.ExecResult{Summary: "done"}, nil
 }
 func (s *scriptedAgent) Review(_ context.Context, _ string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	return nil, nil
+}
+func (s *scriptedAgent) SynthesizeReviewNonConvergence(_ context.Context, _ agent.ReviewSynthesisInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
 	return nil, nil
 }
 func (s *scriptedAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error { return nil }
