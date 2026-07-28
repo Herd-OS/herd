@@ -202,37 +202,44 @@ func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd co
 	}
 	reviewPrompt := ""
 	manualReview := false
+	manualDispatchKey := ""
 	if kind == cpdispatch.JobKindReview {
 		reviewPrompt = parsedCommandPrompt(cmd.Command)
 		manualReview = true
+		manualDispatchKey = commandManualDispatchKey(cmd)
 	}
 	_, err = d.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
-		RepoID:          cmd.RepositoryID,
-		Owner:           cmd.Owner,
-		Repo:            cmd.Repo,
-		InstallationID:  cmd.InstallationID,
-		Kind:            kind,
-		WorkflowFile:    commandWorkflowFile(kind),
-		Ref:             target.Ref,
-		BatchNumber:     target.BatchNumber,
-		IssueNumber:     target.IssueNumber,
-		PRNumber:        cmd.PRNumber,
-		BatchBranch:     target.BatchBranch,
-		BaseSHA:         target.BaseSHA,
-		HeadSHA:         target.HeadSHA,
-		ExpectedHeadSHA: target.HeadSHA,
-		Mode:            target.Mode,
-		RunnerLabel:     d.DefaultRunner,
-		TimeoutMinutes:  d.TimeoutMinutes,
-		ControlPlaneURL: d.ControlPlaneURL,
-		Reason:          fmt.Sprintf("@herd-os %s comment %d by %s", cmd.Command.Kind, cmd.CommentID, cmd.Actor),
-		ReviewPrompt:    reviewPrompt,
-		ManualReview:    manualReview,
+		RepoID:            cmd.RepositoryID,
+		Owner:             cmd.Owner,
+		Repo:              cmd.Repo,
+		InstallationID:    cmd.InstallationID,
+		Kind:              kind,
+		WorkflowFile:      commandWorkflowFile(kind),
+		Ref:               target.Ref,
+		BatchNumber:       target.BatchNumber,
+		IssueNumber:       target.IssueNumber,
+		PRNumber:          cmd.PRNumber,
+		BatchBranch:       target.BatchBranch,
+		BaseSHA:           target.BaseSHA,
+		HeadSHA:           target.HeadSHA,
+		ExpectedHeadSHA:   target.HeadSHA,
+		Mode:              target.Mode,
+		RunnerLabel:       d.DefaultRunner,
+		TimeoutMinutes:    d.TimeoutMinutes,
+		ControlPlaneURL:   d.ControlPlaneURL,
+		Reason:            fmt.Sprintf("@herd-os %s comment %d by %s", cmd.Command.Kind, cmd.CommentID, cmd.Actor),
+		ReviewPrompt:      reviewPrompt,
+		ManualReview:      manualReview,
+		ManualDispatchKey: manualDispatchKey,
 	})
 	if err != nil {
 		return fmt.Errorf("dispatch %s command for PR #%d: %w", kind, cmd.PRNumber, err)
 	}
 	return nil
+}
+
+func commandManualDispatchKey(cmd commands.DispatchCommand) string {
+	return fmt.Sprintf("comment:%d:command:%s", cmd.CommentID, cmd.Command.Kind)
 }
 
 func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context.Context, cmd commands.DispatchCommand) error {

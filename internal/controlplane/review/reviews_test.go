@@ -334,6 +334,7 @@ func TestDispatchReviewSetsPendingAndSuppressesDuplicateWithLock(t *testing.T) {
 	assert.Equal(t, cpdispatch.JobKindReview, dispatcher.requests[0].Kind)
 	assert.Equal(t, "head", dispatcher.requests[0].ExpectedHeadSHA)
 	assert.False(t, dispatcher.requests[0].ManualReview)
+	assert.Empty(t, dispatcher.requests[0].ManualDispatchKey)
 	require.Len(t, statusGH.statuses, 1)
 	assert.Equal(t, "pending", statusGH.statuses[0].status.State)
 }

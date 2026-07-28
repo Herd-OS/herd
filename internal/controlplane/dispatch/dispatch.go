@@ -35,27 +35,28 @@ const (
 )
 
 type DispatchRequest struct {
-	RepoID          int64
-	Owner           string
-	Repo            string
-	InstallationID  int64
-	Kind            JobKind
-	WorkflowFile    string
-	Ref             string
-	BatchNumber     int
-	IssueNumber     int
-	PRNumber        int
-	BatchBranch     string
-	BaseSHA         string
-	HeadSHA         string
-	ExpectedHeadSHA string
-	Mode            string
-	RunnerLabel     string
-	TimeoutMinutes  int
-	ControlPlaneURL string
-	Reason          string
-	ReviewPrompt    string
-	ManualReview    bool
+	RepoID            int64
+	Owner             string
+	Repo              string
+	InstallationID    int64
+	Kind              JobKind
+	WorkflowFile      string
+	Ref               string
+	BatchNumber       int
+	IssueNumber       int
+	PRNumber          int
+	BatchBranch       string
+	BaseSHA           string
+	HeadSHA           string
+	ExpectedHeadSHA   string
+	Mode              string
+	RunnerLabel       string
+	TimeoutMinutes    int
+	ControlPlaneURL   string
+	Reason            string
+	ReviewPrompt      string
+	ManualReview      bool
+	ManualDispatchKey string
 }
 
 type DispatchResult struct {
@@ -128,6 +129,9 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 	if req.ReviewPrompt != "" {
 		keyMetadataValues["review_prompt"] = req.ReviewPrompt
 	}
+	if req.ManualDispatchKey != "" {
+		keyMetadataValues["manual_dispatch_key"] = req.ManualDispatchKey
+	}
 	keyMetadata, err := json.Marshal(keyMetadataValues)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("marshal idempotency metadata: %w", err)
@@ -182,6 +186,9 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 	}
 	if req.ReviewPrompt != "" {
 		jobMetadataValues["review_prompt"] = req.ReviewPrompt
+	}
+	if req.ManualDispatchKey != "" {
+		jobMetadataValues["manual_dispatch_key"] = req.ManualDispatchKey
 	}
 	jobMetadata, err := json.Marshal(jobMetadataValues)
 	if err != nil {
@@ -610,6 +617,9 @@ func IdempotencyKey(req DispatchRequest) string {
 		"batch", strconv.Itoa(req.BatchNumber),
 		"target", strconv.Itoa(issueOrPR),
 		"head", req.HeadSHA,
+	}
+	if req.ManualDispatchKey != "" {
+		parts = append(parts, "manual", req.ManualDispatchKey)
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, ":")))
 	return "workflow_dispatch:" + hex.EncodeToString(sum[:])

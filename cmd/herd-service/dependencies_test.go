@@ -214,8 +214,9 @@ func TestProductionReviewCommandDispatchesReviewPrompt(t *testing.T) {
 		BaseSHA: "base-sha",
 	}})
 	workflow := &recordingWorkflowClient{}
+	st := store.NewMemoryStore()
 	d := productionCommandDispatcher{
-		Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: workflow},
+		Dispatcher:      cpdispatch.Dispatcher{Store: st, GitHub: workflow},
 		ControlPlaneURL: "https://control.example.test",
 		DefaultRunner:   "herd-worker",
 		TimeoutMinutes:  30,
@@ -224,7 +225,8 @@ func TestProductionReviewCommandDispatchesReviewPrompt(t *testing.T) {
 		},
 	}
 
-	err := d.DispatchCommand(context.Background(), commands.DispatchCommand{
+	ctx := context.Background()
+	cmd := commands.DispatchCommand{
 		RepositoryID:   42,
 		InstallationID: 77,
 		Owner:          "octo",
@@ -238,7 +240,9 @@ func TestProductionReviewCommandDispatchesReviewPrompt(t *testing.T) {
 			Args:   []string{"focus", "on", "auth", "and", "retries"},
 			Prompt: "focus on auth and retries",
 		},
-	})
+	}
+
+	err := d.DispatchCommand(ctx, cmd)
 
 	require.NoError(t, err)
 	require.Len(t, workflow.dispatches, 1)
@@ -246,6 +250,17 @@ func TestProductionReviewCommandDispatchesReviewPrompt(t *testing.T) {
 	assert.Equal(t, "focus on auth and retries", workflow.dispatches[0].inputs["review_prompt"])
 	assert.Equal(t, "true", workflow.dispatches[0].inputs["manual_review"])
 	assert.Equal(t, "849", workflow.dispatches[0].inputs["pr_number"])
+	dispatchKey := cpdispatch.IdempotencyKey(cpdispatch.DispatchRequest{
+		RepoID:            42,
+		Kind:              cpdispatch.JobKindReview,
+		BatchNumber:       106,
+		PRNumber:          849,
+		HeadSHA:           "head-sha",
+		ManualDispatchKey: commandManualDispatchKey(cmd),
+	})
+	record, err := st.GetIdempotencyKey(ctx, dispatchKey)
+	require.NoError(t, err)
+	assert.Contains(t, string(record.Metadata), `"manual_dispatch_key":"comment:123:command:review"`)
 }
 
 func TestProductionResolveConflictsCommand(t *testing.T) {

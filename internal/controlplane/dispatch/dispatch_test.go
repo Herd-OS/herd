@@ -63,6 +63,42 @@ func TestDispatcherDispatchIncludesReviewPrompt(t *testing.T) {
 	assert.Equal(t, "focus on auth and retries", metadata["review_prompt"])
 }
 
+func TestIdempotencyKeyKeepsAutomaticReviewDispatchStable(t *testing.T) {
+	first := validRequest()
+	first.Kind = JobKindReview
+	first.WorkflowFile = "herd-review.yml"
+	first.IssueNumber = 0
+	first.PRNumber = 42
+	first.BatchNumber = 106
+	first.HeadSHA = "head-sha"
+	first.ExpectedHeadSHA = "head-sha"
+
+	second := first
+
+	assert.Equal(t, IdempotencyKey(first), IdempotencyKey(second))
+}
+
+func TestIdempotencyKeySeparatesManualReviewCommands(t *testing.T) {
+	base := validRequest()
+	base.Kind = JobKindReview
+	base.WorkflowFile = "herd-review.yml"
+	base.IssueNumber = 0
+	base.PRNumber = 42
+	base.BatchNumber = 106
+	base.HeadSHA = "head-sha"
+	base.ExpectedHeadSHA = "head-sha"
+	base.ManualReview = true
+
+	first := base
+	first.ManualDispatchKey = "comment:100:command:review"
+	first.ReviewPrompt = "focus on auth"
+	second := base
+	second.ManualDispatchKey = "comment:101:command:review"
+	second.ReviewPrompt = "focus on auth"
+
+	assert.NotEqual(t, IdempotencyKey(first), IdempotencyKey(second))
+}
+
 func TestDispatcherDuplicateDispatchIsIdempotent(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeWorkflowClient{}
@@ -80,6 +116,60 @@ func TestDispatcherDuplicateDispatchIsIdempotent(t *testing.T) {
 	assert.Len(t, gh.calls, 1)
 	assert.Len(t, st.jobs, 1)
 	assert.Len(t, st.idempotencyKeys, 1)
+}
+
+func TestDispatcherAutomaticReviewDispatchDedupeUnchanged(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeWorkflowClient{}
+	req := validRequest()
+	req.Kind = JobKindReview
+	req.WorkflowFile = "herd-review.yml"
+	req.IssueNumber = 0
+	req.PRNumber = 42
+	req.BatchNumber = 106
+	req.HeadSHA = "head-sha"
+	req.ExpectedHeadSHA = "head-sha"
+
+	first, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.NoError(t, err)
+	second, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.True(t, first.Created)
+	assert.False(t, second.Created)
+	assert.Equal(t, first.JobID, second.JobID)
+	assert.Len(t, gh.calls, 1)
+	assert.Len(t, st.idempotencyKeys, 1)
+}
+
+func TestDispatcherManualReviewCommandsCanBothDispatch(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeWorkflowClient{}
+	req := validRequest()
+	req.Kind = JobKindReview
+	req.WorkflowFile = "herd-review.yml"
+	req.IssueNumber = 0
+	req.PRNumber = 42
+	req.BatchNumber = 106
+	req.HeadSHA = "head-sha"
+	req.ExpectedHeadSHA = "head-sha"
+	req.ManualReview = true
+	req.ManualDispatchKey = "comment:100:command:review"
+	req.ReviewPrompt = "focus on auth"
+	other := req
+	other.ManualDispatchKey = "comment:101:command:review"
+	other.ReviewPrompt = "focus on retries"
+
+	first, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+	require.NoError(t, err)
+	second, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), other)
+
+	require.NoError(t, err)
+	assert.True(t, first.Created)
+	assert.True(t, second.Created)
+	assert.NotEqual(t, first.JobID, second.JobID)
+	assert.Len(t, gh.calls, 2)
+	assert.Len(t, st.idempotencyKeys, 2)
 }
 
 func TestDispatcherDuplicateStartedWithoutCompletedMutationDoesNotRedispatch(t *testing.T) {
