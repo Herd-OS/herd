@@ -7217,12 +7217,20 @@ func TestReview_NonConvergenceEscalatesToStrategyFixIssue(t *testing.T) {
 	assert.Equal(t, 39, result.FixCycle)
 	assert.Equal(t, 1, result.FindingsCount)
 	require.Len(t, fx.createdIssues, 1)
-	assert.True(t, strings.HasPrefix(fx.createdIssues[0].title, "Review strategy fix"), "must create strategy issue, not normal review fixes")
+	assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
 	assert.NotContains(t, fx.createdIssues[0].title, "Review fixes")
 	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
 	assert.Contains(t, fx.createdIssues[0].labels, issues.TypeFix)
 	assert.Contains(t, fx.createdIssues[0].labels, issues.StatusInProgress)
 	assert.Contains(t, fx.createdIssues[0].body, "Solve the shared architecture/design problem")
+	assert.Contains(t, fx.createdIssues[0].body, "### ## Repeated Pattern")
+	assert.Contains(t, fx.createdIssues[0].body, "### ## Representative Findings")
+	assert.Contains(t, fx.createdIssues[0].body, "### ## Prior Fix Attempts")
+	assert.Contains(t, fx.createdIssues[0].body, "### ## Strategy Guidance")
+	assert.Contains(t, fx.createdIssues[0].body, "durable GitHub-visible mutation boundaries")
+	assert.Contains(t, fx.createdIssues[0].body, "pre-call, call-started, post-call-unknown, completed, failed-pre-call, and repair-required states")
+	assert.Contains(t, fx.createdIssues[0].body, "internal/controlplane/dispatch")
+	assert.NotContains(t, fx.createdIssues[0].body, "Chunk 1/9")
 	assert.NotContains(t, fx.createdIssues[0].body, "/herd fix")
 	require.Len(t, fx.wf.dispatched, 1)
 	assert.Equal(t, "herd-worker.yml", fx.wf.dispatchedWorkflows[0])
@@ -7248,6 +7256,87 @@ func TestReview_NonConvergenceEscalatesToStrategyFixIssue(t *testing.T) {
 	assert.Equal(t, platform.ReviewRequestChanges, fx.prSvc.reviews[0].event)
 	assert.Contains(t, fx.prSvc.reviews[0].body, "Strategy-level fix worker dispatched")
 	assert.Contains(t, fx.prSvc.reviews[0].body, "#9601")
+}
+
+func TestReview_NonConvergenceEscalatesWithPersistentRootCauseDespiteTemporaryDecrease(t *testing.T) {
+	currentFindings := []agent.ReviewFinding{
+		{Severity: "HIGH", Description: "internal/controlplane/dispatch/retry.go: GitHub-visible side effect dispatches before durable idempotency mutation is recorded"},
+		{Severity: "HIGH", Description: "internal/controlplane/dispatch/repair.go: post-call unknown repair can repeat workflow dispatch without idempotency state"},
+		{Severity: "HIGH", Description: "internal/controlplane/dispatch/review.go: pre-call mutation guard is missing before visible issue/comment side effect"},
+		{Severity: "HIGH", Description: "internal/controlplane/dispatch/start.go: started workflow retry ignores durable mutation state"},
+		{Severity: "HIGH", Description: "internal/controlplane/dispatch/state.go: repair-required transition lacks durable idempotency before GitHub-visible mutation"},
+		{Severity: "HIGH", Description: "internal/controlplane/dispatch/worker.go: retry path repeats side effect when post-call status is unknown"},
+		{Severity: "HIGH", Description: "internal/controlplane/dispatch/comments.go: comments are created before durable pre-call idempotency decision"},
+		{Severity: "HIGH", Description: "internal/controlplane/dispatch/issues.go: issue creation is not behind shared mutation idempotency boundary"},
+		{Severity: "HIGH", Description: "internal/controlplane/dispatch/workflows.go: workflow dispatch can run twice after repair of unknown call result"},
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/retry_queue.go: durable retry marker is written after GitHub-visible side effect"},
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/result.go: completed state is not checked before retry dispatch side effect"},
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/redelivery.go: redelivery misses idempotency record before mutation"},
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/scheduler.go: started dispatch state is repaired after duplicate workflow side effect"},
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/labels.go: label mutation happens before durable pre-call state is known"},
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/terminal.go: failed-pre-call and repair-required states do not converge before dispatch"},
+	}
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false
+	fx.setHistory(t, []int{13, 1, 1, 9, 7})
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
+	assert.NotContains(t, fx.createdIssues[0].title, "1/9")
+	assert.NotContains(t, fx.createdIssues[0].title, "Chunk")
+	body := fx.createdIssues[0].body
+	assert.Contains(t, body, "### ## Repeated Pattern")
+	assert.Contains(t, body, "durable GitHub-visible mutation boundaries")
+	assert.Contains(t, body, "pre-call, call-started, post-call-unknown, completed, failed-pre-call, and repair-required states")
+	assert.Contains(t, body, "### ## Representative Findings")
+	assert.Contains(t, body, "GitHub-visible side effect dispatches before durable idempotency mutation")
+	assert.Contains(t, body, "### ## Prior Fix Attempts")
+	assert.Contains(t, body, "### ## Strategy Guidance")
+	assert.Contains(t, body, "internal/controlplane/dispatch")
+	assert.NotContains(t, body, "Chunk 1/9")
+	assert.NotContains(t, body, "1/9")
+	require.Len(t, fx.wf.dispatched, 1)
+	comment := requireCommentContaining(t, fx.prSvc.comments, "Herd review is not converging")
+	assert.Contains(t, comment, "Finding count trend: 13, 1, 1, 9, 7, 15")
+	assert.Contains(t, comment, "temporary finding-count decrease")
+	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/dispatch")
+	assert.Contains(t, comment, "durable")
+	assert.Contains(t, comment, "idempotency")
+	assert.NotContains(t, comment, "Chunk")
+	assert.NotContains(t, comment, "1/9")
+}
+
+func TestReview_NonConvergenceDiffCoverageDoesNotPolluteClusters(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+	fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false
+	for _, comment := range fx.issueSvc.listCommentsResult {
+		comment.Body += "\n\n## Diff Coverage\n- Chunk 1/9\n- Chunk 2/9\n- Chunks reviewed: 9/9\n- Files reviewed: internal/controlplane/dispatch/review.go\n- Source: local-git\n"
+	}
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
+	body := fx.createdIssues[0].body
+	comment := requireCommentContaining(t, fx.prSvc.comments, "Herd review is not converging")
+	for _, noisy := range []string{"1/9", "Chunk 1/9", "Chunk 2/9", "Diff Coverage", "Chunks reviewed", "Files reviewed", "Source: local-git"} {
+		assert.NotContains(t, fx.createdIssues[0].title, noisy)
+		assert.NotContains(t, body, noisy)
+		assert.NotContains(t, comment, noisy)
+	}
+	assert.Contains(t, body, "internal/controlplane/dispatch")
+	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/dispatch")
+	assert.Contains(t, comment, "Dominant root-cause terms:")
+	assert.Contains(t, comment, "durable")
+	assert.Contains(t, comment, "idempotency")
 }
 
 func TestReview_NonConvergenceSynthesisDisabledPreservesDeterministicBehavior(t *testing.T) {
@@ -7381,6 +7470,22 @@ func TestReview_NonConvergenceSynthesisFallbacks(t *testing.T) {
 			},
 		},
 		{
+			name: "unsafe chunk title",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				result := highConfidenceReviewSynthesisResult()
+				result.RootCauseTitle = "Chunk 1/9"
+				fx.ag.synthesisResult = result
+			},
+		},
+		{
+			name: "unsafe diff coverage title",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				result := highConfidenceReviewSynthesisResult()
+				result.RootCauseTitle = "Diff Coverage"
+				fx.ag.synthesisResult = result
+			},
+		},
+		{
 			name: "timeout",
 			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
 				previous := reviewSynthesisTimeout
@@ -7407,12 +7512,18 @@ func TestReview_NonConvergenceSynthesisFallbacks(t *testing.T) {
 			require.NotNil(t, result)
 			assert.Equal(t, 1, fx.ag.synthesisCalls)
 			require.Len(t, fx.createdIssues, 1)
+			assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
 			assert.Contains(t, fx.createdIssues[0].body, "Solve the shared architecture/design problem")
 			assert.NotContains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
 			require.Len(t, fx.wf.dispatched, 1)
 			comments := strings.Join(fx.prSvc.comments, "\n")
 			assert.Contains(t, comments, "Dominant package clusters")
 			assert.NotContains(t, comments, "Synthesized root cause")
+			for _, noisy := range []string{"1/9", "Chunk 1/9", "Diff Coverage"} {
+				assert.NotContains(t, fx.createdIssues[0].title, noisy)
+				assert.NotContains(t, fx.createdIssues[0].body, noisy)
+				assert.NotContains(t, comments, noisy)
+			}
 		})
 	}
 }
@@ -7579,11 +7690,20 @@ func TestReview_NonConvergenceContinueCreatesNormalReviewFixIssue(t *testing.T) 
 		wantStrategy    bool
 	}{
 		{
-			name:            "decreasing trend",
-			historyCounts:   []int{28, 24, 21, 20, 14},
-			minCompleted:    3,
-			currentFindings: reviewNonConvergenceCurrentFindings(9),
-			wantStrategy:    true,
+			name:          "decreasing trend",
+			historyCounts: []int{28, 24, 21, 20, 14},
+			minCompleted:  3,
+			currentFindings: []agent.ReviewFinding{
+				{Severity: "HIGH", Description: "internal/controlplane/current/a.go: formatting mismatch in response body"},
+				{Severity: "HIGH", Description: "internal/controlplane/current/b.go: missing empty state copy"},
+				{Severity: "HIGH", Description: "internal/controlplane/current/c.go: helper name does not match behavior"},
+				{Severity: "HIGH", Description: "internal/controlplane/current/d.go: table ordering is inconsistent"},
+				{Severity: "HIGH", Description: "internal/controlplane/current/e.go: validation message omits field name"},
+				{Severity: "HIGH", Description: "internal/controlplane/current/f.go: stale fixture setup remains in test"},
+				{Severity: "HIGH", Description: "internal/controlplane/current/g.go: branch name is repeated in assertion"},
+				{Severity: "HIGH", Description: "internal/controlplane/current/h.go: nil result summary is unclear"},
+				{Severity: "HIGH", Description: "internal/controlplane/current/i.go: mock setup omits default milestone"},
+			},
 		},
 		{
 			name:            "insufficient completed cycles",
@@ -7597,6 +7717,15 @@ func TestReview_NonConvergenceContinueCreatesNormalReviewFixIssue(t *testing.T) 
 			fx := newReviewNonConvergenceIntegrationFixture(t, tt.currentFindings)
 			fx.cfg.Integrator.ReviewNonConvergence.MinCompletedCycles = tt.minCompleted
 			fx.setHistory(t, tt.historyCounts)
+			if tt.name == "decreasing trend" {
+				fx.setHistoryWithFindings(t, tt.historyCounts, []string{
+					"internal/controlplane/alpha/a.go: formatting mismatch in response body",
+					"internal/controlplane/beta/b.go: missing empty state copy",
+					"internal/controlplane/gamma/c.go: helper name does not match behavior",
+					"internal/controlplane/delta/d.go: table ordering is inconsistent",
+					"internal/controlplane/epsilon/e.go: validation message omits field name",
+				})
+			}
 
 			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
 
@@ -7684,7 +7813,7 @@ func TestReview_NonConvergenceDuplicateStrategyIssueDoesNotCreateOrDispatch(t *t
 	assert.Contains(t, fx.prSvc.reviews[0].body, "already in progress")
 }
 
-func TestReview_NonConvergenceCompletedPriorStrategyIssueCreatesNewIssue(t *testing.T) {
+func TestReview_NonConvergenceCompletedPriorStrategyIssueAllowsNewIssue(t *testing.T) {
 	currentFindings := reviewNonConvergenceCurrentFindings(28)
 	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
 	fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false
@@ -7709,6 +7838,7 @@ func TestReview_NonConvergenceCompletedPriorStrategyIssueCreatesNewIssue(t *test
 	assert.Equal(t, []int{9601}, result.FixIssues)
 	assert.Equal(t, 39, result.FixCycle)
 	require.Len(t, fx.createdIssues, 1)
+	assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
 	assert.Contains(t, fx.createdIssues[0].body, "Previous strategy fix #9700 was completed but the same root-cause cluster reappeared, so that fix was incomplete.")
 	assert.Contains(t, fx.createdIssues[0].body, "head prior-head")
 	require.Len(t, fx.wf.dispatched, 1)
@@ -8049,6 +8179,27 @@ func (fx *reviewNonConvergenceIntegrationFixture) setHistory(t *testing.T, count
 func (fx *reviewNonConvergenceIntegrationFixture) setHistoryWithHeadSHAs(t *testing.T, counts []int, headSHAs []string) {
 	t.Helper()
 	require.Len(t, headSHAs, len(counts))
+	findings := make([]string, len(counts))
+	for i := range counts {
+		cycle := 34 + i
+		findings[i] = fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go: durable mutation lacks idempotency before started workflow retry", cycle)
+	}
+	fx.setHistoryWithFindingsAndHeadSHAs(t, counts, findings, headSHAs)
+}
+
+func (fx *reviewNonConvergenceIntegrationFixture) setHistoryWithFindings(t *testing.T, counts []int, findings []string) {
+	t.Helper()
+	headSHAs := make([]string, len(counts))
+	for i := range counts {
+		headSHAs[i] = fx.headSHA
+	}
+	fx.setHistoryWithFindingsAndHeadSHAs(t, counts, findings, headSHAs)
+}
+
+func (fx *reviewNonConvergenceIntegrationFixture) setHistoryWithFindingsAndHeadSHAs(t *testing.T, counts []int, findings []string, headSHAs []string) {
+	t.Helper()
+	require.Len(t, findings, len(counts))
+	require.Len(t, headSHAs, len(counts))
 	fx.issueSvc.listCommentsResult = nil
 	fx.issueSvc.listResult = []*platform.Issue{
 		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
@@ -8056,8 +8207,7 @@ func (fx *reviewNonConvergenceIntegrationFixture) setHistoryWithHeadSHAs(t *test
 	for i, count := range counts {
 		cycle := 34 + i
 		fixIssue := 951 + i
-		finding := fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go: durable mutation lacks idempotency before started workflow retry", cycle)
-		fx.issueSvc.listCommentsResult = append(fx.issueSvc.listCommentsResult, reviewHistoryComment(t, headSHAs[i], cycle, count, finding, fixIssue))
+		fx.issueSvc.listCommentsResult = append(fx.issueSvc.listCommentsResult, reviewHistoryComment(t, headSHAs[i], cycle, count, findings[i], fixIssue))
 		fx.issueSvc.listResult = append(fx.issueSvc.listResult, reviewFixIssue(fixIssue, cycle, issues.StatusDone, []string{fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go", cycle)}, "Validation success"))
 	}
 }
