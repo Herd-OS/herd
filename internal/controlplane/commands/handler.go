@@ -127,6 +127,7 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 
 	metadataBody := map[string]any{
 		"args":               cmd.Args,
+		"prompt":             cmd.Prompt,
 		"raw":                cmd.Raw,
 		"author_association": event.AuthorAssociation,
 		"action":             event.Action,
@@ -246,6 +247,7 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 	}
 	metadataBody := map[string]any{
 		"args":               cmd.Args,
+		"prompt":             cmd.Prompt,
 		"raw":                cmd.Raw,
 		"author_association": event.AuthorAssociation,
 		"action":             event.Action,

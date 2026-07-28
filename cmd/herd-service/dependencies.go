@@ -280,7 +280,7 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 		BaseSHA:        pr.BaseSHA,
 		TriggerAuthor:  cmd.Actor,
 		TriggerComment: commandTriggerComment(cmd),
-		UserContext:    strings.TrimSpace(strings.Join(cmd.Command.Args, " ")),
+		UserContext:    parsedCommandPrompt(cmd.Command),
 	}
 	body := integrator.BuildConflictResolutionIssueBody(params)
 	truncatedBody, overflow := issues.TruncateIssueBody(body)
@@ -435,7 +435,7 @@ func dispatchIssueNumber(cmd commands.DispatchCommand) (int, error) {
 
 func commandTriggerComment(cmd commands.DispatchCommand) string {
 	triggerComment := "@herd-os resolve-conflicts"
-	if prompt := strings.TrimSpace(strings.Join(cmd.Command.Args, " ")); prompt != "" {
+	if prompt := parsedCommandPrompt(cmd.Command); prompt != "" {
 		triggerComment += "\n\n" + prompt
 	}
 	return triggerComment
@@ -669,7 +669,7 @@ func (d productionCommandDispatcher) createCommandFixIssue(ctx context.Context, 
 }
 
 func (d productionCommandDispatcher) commandFixIssueRequest(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget) (string, string, []string, *int, error) {
-	prompt := strings.TrimSpace(strings.Join(cmd.Command.Args, " "))
+	prompt := parsedCommandPrompt(cmd.Command)
 	if prompt == "" && cmd.Command.Kind == commands.CommandFix {
 		return "", "", nil, nil, fmt.Errorf("@herd-os fix requires a description")
 	}
@@ -749,6 +749,13 @@ func (d productionCommandDispatcher) standaloneCommandFixIssueRequest(ctx contex
 		Context: fmt.Sprintf("Requested by @%s via `@herd-os fix` on PR #%d.", cmd.Actor, pr.Number),
 	})
 	return body, "Standalone fix: " + truncateCommandRunes(firstCommandLine(prompt), 70), []string{issues.TypeStandaloneFix, issues.StatusInProgress}, nil, nil
+}
+
+func parsedCommandPrompt(cmd commands.ParsedCommand) string {
+	if prompt := strings.TrimSpace(cmd.Prompt); prompt != "" {
+		return prompt
+	}
+	return strings.TrimSpace(strings.Join(cmd.Args, " "))
 }
 
 func (d productionCommandDispatcher) recoverCommandFixIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget, key string) (int, bool, error) {

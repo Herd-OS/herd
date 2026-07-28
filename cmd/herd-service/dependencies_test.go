@@ -347,6 +347,7 @@ func TestProductionFixCommandsCreateTrackingIssueAndDispatchCreatedIssue(t *test
 		name          string
 		kind          commands.CommandKind
 		args          []string
+		prompt        string
 		wantBody      []string
 		wantCIFix     bool
 		wantFixCycle  bool
@@ -365,6 +366,22 @@ func TestProductionFixCommandsCreateTrackingIssueAndDispatchCreatedIssue(t *test
 			kind:          commands.CommandFixCI,
 			args:          []string{"failing", "tests", "mention", "missing", "env", "var"},
 			wantBody:      []string{"failing tests mention missing env var", "via `@herd-os fix-ci`", "batch_pr: 849", "ci_fix_cycle: 1"},
+			wantCIFix:     true,
+			wantIssueType: issues.TypeFix,
+		},
+		{
+			name:          "fix multiline prompt",
+			kind:          commands.CommandFix,
+			prompt:        "please update auth handling\ninclude regression tests",
+			wantBody:      []string{"please update auth handling\ninclude regression tests", "via `@herd-os fix`", "batch_pr: 849", "fix_cycle: 1"},
+			wantFixCycle:  true,
+			wantIssueType: issues.TypeFix,
+		},
+		{
+			name:          "fix-ci multiline hint",
+			kind:          commands.CommandFixCI,
+			prompt:        "failing tests mention missing env var\ncheck setup step",
+			wantBody:      []string{"failing tests mention missing env var\ncheck setup step", "via `@herd-os fix-ci`", "batch_pr: 849", "ci_fix_cycle: 1"},
 			wantCIFix:     true,
 			wantIssueType: issues.TypeFix,
 		},
@@ -399,7 +416,7 @@ func TestProductionFixCommandsCreateTrackingIssueAndDispatchCreatedIssue(t *test
 				PRNumber:       849,
 				CommentID:      123,
 				Actor:          "maintainer",
-				Command:        commands.ParsedCommand{Kind: tt.kind, Args: tt.args},
+				Command:        commands.ParsedCommand{Kind: tt.kind, Args: tt.args, Prompt: tt.prompt},
 			})
 
 			require.NoError(t, err)
@@ -599,8 +616,9 @@ func resolveConflictsCommand() commands.DispatchCommand {
 		CommentID:      123,
 		Actor:          "maintainer",
 		Command: commands.ParsedCommand{
-			Kind: commands.CommandResolveConflicts,
-			Args: []string{"keep", "generated", "files"},
+			Kind:   commands.CommandResolveConflicts,
+			Args:   []string{"keep", "generated", "files"},
+			Prompt: "keep generated files",
 		},
 	}
 }

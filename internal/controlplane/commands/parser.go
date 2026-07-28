@@ -20,9 +20,10 @@ const (
 var ErrUnknownCommand = errors.New("unknown herd-os command")
 
 type ParsedCommand struct {
-	Kind CommandKind
-	Args []string
-	Raw  string
+	Kind   CommandKind
+	Args   []string
+	Prompt string
+	Raw    string
 }
 
 func ParseMentionCommand(appLogin, body string) (ParsedCommand, bool, error) {
@@ -31,7 +32,7 @@ func ParseMentionCommand(appLogin, body string) (ParsedCommand, bool, error) {
 		return ParsedCommand{}, false, fmt.Errorf("app login is required")
 	}
 
-	line := firstNonEmptyLine(body)
+	line, remainingBody := firstNonEmptyLineWithRest(body)
 	if line == "" || strings.HasPrefix(line, "/herd") {
 		return ParsedCommand{}, false, nil
 	}
@@ -53,15 +54,44 @@ func ParseMentionCommand(appLogin, body string) (ParsedCommand, bool, error) {
 		return ParsedCommand{}, true, fmt.Errorf("%w: %s", ErrUnknownCommand, fields[1])
 	}
 
-	args := []string(nil)
-	if len(fields) > 2 {
-		args = append(args, fields[2:]...)
+	afterMention := strings.TrimSpace(line[len(fields[0]):])
+	afterCommand := strings.TrimSpace(afterMention[len(fields[1]):])
+	if strings.HasPrefix(afterCommand, "\"") {
+		rest := afterCommand[1:]
+		if end := strings.Index(rest, "\""); end >= 0 {
+			return ParsedCommand{
+				Kind:   kind,
+				Prompt: rest[:end],
+				Raw:    line,
+			}, true, nil
+		}
+		return ParsedCommand{}, true, fmt.Errorf("unterminated quote in command")
 	}
+
+	args := []string(nil)
+	if afterCommand != "" {
+		args = strings.Fields(afterCommand)
+	}
+	prompt := commandPrompt(afterCommand, remainingBody)
 	return ParsedCommand{
-		Kind: kind,
-		Args: args,
-		Raw:  line,
+		Kind:   kind,
+		Args:   args,
+		Prompt: prompt,
+		Raw:    line,
 	}, true, nil
+}
+
+func commandPrompt(afterCommand, remainingBody string) string {
+	var promptParts []string
+	if afterCommand != "" {
+		promptParts = append(promptParts, afterCommand)
+	}
+	if trimmed := strings.TrimRightFunc(remainingBody, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}); trimmed != "" {
+		promptParts = append(promptParts, trimmed)
+	}
+	return strings.Join(promptParts, "\n")
 }
 
 func isSupportedCommand(kind CommandKind) bool {
@@ -74,11 +104,20 @@ func isSupportedCommand(kind CommandKind) bool {
 }
 
 func firstNonEmptyLine(body string) string {
-	for _, line := range strings.Split(body, "\n") {
+	line, _ := firstNonEmptyLineWithRest(body)
+	return line
+}
+
+func firstNonEmptyLineWithRest(body string) (string, string) {
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" {
-			return line
+			if i+1 < len(lines) {
+				return line, strings.Join(lines[i+1:], "\n")
+			}
+			return line, ""
 		}
 	}
-	return ""
+	return "", ""
 }

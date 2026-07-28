@@ -343,7 +343,7 @@ func TestHandlerNonDispatchableAcknowledgementRecordFailureRedeliveryDoesNotAckA
 	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
 	assert.Equal(t, StatusAcknowledged, st.commandRecords[0].Status)
-	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","raw":"@herd-os plan"}`, string(st.commandRecords[0].Metadata))
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","raw":"@herd-os plan"}`, string(st.commandRecords[0].Metadata))
 }
 
 func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
@@ -389,7 +389,7 @@ func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(
 	key := "repo:42:comment:123:command:review"
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
 	require.Len(t, st.commandRecords, 1)
-	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
 func TestHandlerAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing.T) {
@@ -413,7 +413,7 @@ func TestHandlerAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing
 	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
 	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
-	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
 func TestHandlerAcknowledgementRecordAndFallbackCompletionFailureDoesNotAckAgain(t *testing.T) {
@@ -458,7 +458,7 @@ func TestHandlerAcknowledgementCompletionFailureRedeliveryDoesNotAckAgain(t *tes
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
 	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
-	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"author_association":"OWNER","raw":"@herd-os plan"}`, string(st.commandRecords[0].Metadata))
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","raw":"@herd-os plan"}`, string(st.commandRecords[0].Metadata))
 }
 
 func TestHandlerDispatchCompletionFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
