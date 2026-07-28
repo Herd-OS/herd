@@ -61,6 +61,8 @@ integrator:
     enabled: true
     window: 5
     min_completed_cycles: 3
+    synthesis_enabled: true
+    synthesis_min_confidence: 0.75
   ci_max_fix_cycles: 0           # max CI-failure fix cycles (0 = unlimited)
 
 monitor:
@@ -292,6 +294,8 @@ Review-lock metadata is not merge approval. Merge approval uses the batch PR met
 
 HerdOS watches recent review result comments and completed review-fix issues before creating another review-fix issue. By default it looks back across the last 5 review cycles, requires at least 3 completed fix cycles, requires the latest deduped finding count to meet an internal threshold, and requires repeated package/root-cause clusters before escalating. The feature is enabled by default.
 
+This trigger remains deterministic. HerdOS first uses review-cycle trends, finding counts, and repeated package/root-cause clusters to decide whether the fix loop is no longer converging. Only after those preconditions are met can HerdOS optionally ask the configured review agent to synthesize the recent findings into a dominant architectural or root-cause cluster for the strategy issue.
+
 When non-convergence is detected, HerdOS creates one strategy-level fix issue instead of another large endpoint-level review-fix issue. This escalation is internal: HerdOS creates the issue and dispatches the worker directly, without asking humans to post `/herd fix`.
 
 ```yaml
@@ -300,6 +304,8 @@ integrator:
     enabled: true
     window: 5
     min_completed_cycles: 3
+    synthesis_enabled: true
+    synthesis_min_confidence: 0.75
 ```
 
 | Field | Default | Notes |
@@ -307,6 +313,10 @@ integrator:
 | `integrator.review_non_convergence.enabled` | `true` | Enables deterministic review-cycle non-convergence detection and strategy-level fix escalation. |
 | `integrator.review_non_convergence.window` | `5` | Number of recent review cycles considered when analyzing repeated findings. |
 | `integrator.review_non_convergence.min_completed_cycles` | `3` | Minimum completed review-fix cycles required before escalation can occur. |
+| `integrator.review_non_convergence.synthesis_enabled` | `true` | Enables bounded agent synthesis after deterministic non-convergence preconditions are met. Only matters when `integrator.review_non_convergence.enabled` is `true`. |
+| `integrator.review_non_convergence.synthesis_min_confidence` | `0.75` | Minimum synthesis confidence required to use the agent-synthesized strategy issue. Must be between `0` and `1`. |
+
+If synthesis is disabled, times out, errors, returns invalid output, fails safety gates, or reports confidence below `synthesis_min_confidence`, HerdOS falls back to the deterministic strategy issue behavior without routine PR-comment noise. The synthesis timeout is a conservative internal implementation detail in this batch, not public configuration.
 
 Other thresholds, including the latest deduped finding-count floor and repeated cluster requirements, are conservative internal constants for now.
 
