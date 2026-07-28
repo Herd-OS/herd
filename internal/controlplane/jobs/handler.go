@@ -286,7 +286,7 @@ func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, 
 	created, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       callbackKey,
 		Scope:     "job_result_callback",
-		Status:    "started",
+		Status:    mutationspkg.PhaseIntentRecorded,
 		ResultRef: resultKey,
 		Metadata:  json.RawMessage(fmt.Sprintf(`{"job_id":%q}`, jobID)),
 		CreatedAt: h.now(),
@@ -301,11 +301,16 @@ func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, 
 	if err != nil {
 		return false, err
 	}
-	switch record.Status {
-	case "completed", "started":
+	status := mutationspkg.Normalize(record.Status)
+	switch {
+	case status == mutationspkg.PhaseCompleted:
 		return false, nil
-	case "failed":
+	case mutationspkg.IsPreCallRetryable(status):
 		return true, nil
+	case record.Status == "failed":
+		return true, nil
+	case mutationspkg.IsPostCallUnknown(status):
+		return false, nil
 	default:
 		return false, fmt.Errorf("job result callback %q has unknown status %q", callbackKey, record.Status)
 	}
@@ -319,9 +324,20 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 	if h.reviewProcessor == nil {
 		return fmt.Errorf("review result processor is not configured")
 	}
+	mutationKey := reviewResultMutationKey(result, job)
+	shouldSubmit, err := h.acquireReviewResultMutation(ctx, mutationKey, job, reviewResult)
+	if err != nil {
+		return err
+	}
+	if !shouldSubmit {
+		return nil
+	}
 	repo := reviewRepositoryFromJob(job, reviewResult.Repository)
 	targetURL := firstMetadataString(metadataMap(job.Metadata), "workflow_run_url", "run_url", "target_url", "pr_url")
-	return h.reviewProcessor.SubmitReviewResult(ctx, repo, review.ReviewCompletedResult{
+	if err := h.markReviewResultMutationCallStarted(ctx, mutationKey); err != nil {
+		return err
+	}
+	err = h.reviewProcessor.SubmitReviewResult(ctx, repo, review.ReviewCompletedResult{
 		Repository:  reviewResult.Repository,
 		JobID:       reviewResult.JobID,
 		BatchNumber: reviewResult.BatchNumber,
@@ -334,6 +350,111 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		FixCycle:    reviewResult.FixCycle,
 		Findings:    reviewFindings(reviewResult.Findings),
 	})
+	status := mutationspkg.PhaseCompleted
+	if err != nil {
+		status = mutationspkg.PhaseRepairRequired
+	}
+	response, _ := json.Marshal(map[string]any{
+		"job_id":        reviewResult.JobID,
+		"repository":    reviewResult.Repository,
+		"batch_number":  reviewResult.BatchNumber,
+		"pr_number":     reviewResult.PRNumber,
+		"head_sha":      reviewResult.HeadSHA,
+		"status":        reviewResult.Status,
+		"finding_count": len(reviewResult.Findings),
+	})
+	if completeErr := h.completeReviewResultMutation(ctx, mutationKey, status, response, err); completeErr != nil {
+		if err != nil {
+			return fmt.Errorf("%w; record review result mutation outcome: %v", err, completeErr)
+		}
+		return completeErr
+	}
+	return err
+}
+
+func reviewResultMutationKey(result Result, job store.Job) string {
+	parts := []string{
+		job.JobID,
+		fmt.Sprint(job.RepositoryID),
+		fmt.Sprint(job.PRNumber),
+		job.HeadSHA,
+		result.StatusValue(),
+	}
+	if reviewResult, ok := result.(ReviewCompletedResult); ok {
+		parts = append(parts, reviewResult.Repository, fmt.Sprint(reviewResult.BatchNumber), fmt.Sprint(reviewResult.PRNumber), reviewResult.HeadSHA, fmt.Sprint(reviewResult.FixCycle))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "review_result:" + hex.EncodeToString(sum[:])
+}
+
+func (h Handler) acquireReviewResultMutation(ctx context.Context, key string, job store.Job, result ReviewCompletedResult) (bool, error) {
+	recorder, ok := h.store.(MutationRecorder)
+	if !ok {
+		return false, fmt.Errorf("review result mutation recorder is not configured")
+	}
+	request, _ := json.Marshal(map[string]any{
+		"job_id":       result.JobID,
+		"repository":   result.Repository,
+		"batch_number": result.BatchNumber,
+		"pr_number":    result.PRNumber,
+		"head_sha":     result.HeadSHA,
+		"status":       result.Status,
+		"fix_cycle":    result.FixCycle,
+	})
+	if err := recorder.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		RepositoryID:   job.RepositoryID,
+		MutationType:   "review_result_process",
+		Status:         mutationspkg.PhaseIntentRecorded,
+		Request:        request,
+		CreatedAt:      h.now(),
+	}); err != nil {
+		if !errors.Is(err, store.ErrAlreadyExists) {
+			return false, fmt.Errorf("record review result mutation attempt: %w", err)
+		}
+		reader, ok := h.store.(MutationReader)
+		if !ok {
+			return false, fmt.Errorf("review result mutation reader is not configured")
+		}
+		attempt, readErr := reader.GetGitHubMutationAttempt(ctx, key)
+		if readErr != nil {
+			return false, fmt.Errorf("get review result mutation attempt: %w", readErr)
+		}
+		if mutationspkg.IsCompleted(attempt.Status) {
+			return false, nil
+		}
+		if mutationspkg.IsPostCallUnknown(attempt.Status) {
+			return false, fmt.Errorf("review result mutation %q has unknown outcome after call started; reconciliation required", key)
+		}
+	}
+	return true, nil
+}
+
+func (h Handler) markReviewResultMutationCallStarted(ctx context.Context, key string) error {
+	recorder, ok := h.store.(MutationRecorder)
+	if !ok {
+		return fmt.Errorf("review result mutation recorder is not configured")
+	}
+	if err := recorder.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCallStarted, nil, "", h.now()); err != nil {
+		_ = recorder.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseFailedPreCall, nil, err.Error(), h.now())
+		return fmt.Errorf("mark review result mutation call started: %w", err)
+	}
+	return nil
+}
+
+func (h Handler) completeReviewResultMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error) error {
+	recorder, ok := h.store.(MutationRecorder)
+	if !ok {
+		return nil
+	}
+	errorMessage := ""
+	if resultErr != nil {
+		errorMessage = resultErr.Error()
+	}
+	if err := recorder.CompleteGitHubMutationAttempt(ctx, key, status, response, errorMessage, h.now()); err != nil {
+		return fmt.Errorf("complete review result mutation attempt: %w", err)
+	}
+	return nil
 }
 
 func reviewRepositoryFromJob(job store.Job, fullName string) review.Repository {

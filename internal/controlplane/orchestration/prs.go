@@ -224,19 +224,33 @@ func (s Service) CleanupClosedBatchPR(ctx context.Context, prNumber int, merged 
 	for _, iss := range openIssues {
 		if !merged && !issues.HasLabel(iss.Labels, issues.StatusDone) {
 			if status := issues.StatusLabel(iss.Labels); status != "" {
-				if err := s.Platform.Issues().RemoveLabels(ctx, iss.Number, []string{status}); err != nil {
+				key := idempotencyKey("batch-cleanup", "repo", s.Repo.ID, "batch", msNumber, "issue", iss.Number, "label", status, "remove")
+				if err := s.mutate(ctx, key, "batch_cleanup_issue_label_remove", func() (string, error) {
+					return "", s.Platform.Issues().RemoveLabels(ctx, iss.Number, []string{status})
+				}); err != nil {
 					cleanupErrs = append(cleanupErrs, fmt.Errorf("remove issue %d status label: %w", iss.Number, err))
 				}
 			}
-			if err := s.Platform.Issues().AddLabels(ctx, iss.Number, []string{issues.StatusCancelled}); err != nil {
+			key := idempotencyKey("batch-cleanup", "repo", s.Repo.ID, "batch", msNumber, "issue", iss.Number, "label", issues.StatusCancelled, "add")
+			if err := s.mutate(ctx, key, "batch_cleanup_issue_label_add", func() (string, error) {
+				return "", s.Platform.Issues().AddLabels(ctx, iss.Number, []string{issues.StatusCancelled})
+			}); err != nil {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("add issue %d cancelled label: %w", iss.Number, err))
 			}
 		}
-		if _, err := s.Platform.Issues().Update(ctx, iss.Number, platform.IssueUpdate{State: &closed}); err != nil {
+		key := idempotencyKey("batch-cleanup", "repo", s.Repo.ID, "batch", msNumber, "issue", iss.Number, "close")
+		if err := s.mutate(ctx, key, "batch_cleanup_issue_close", func() (string, error) {
+			_, err := s.Platform.Issues().Update(ctx, iss.Number, platform.IssueUpdate{State: &closed})
+			return "", err
+		}); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("close issue %d: %w", iss.Number, err))
 		}
 	}
-	if _, err := s.Platform.Milestones().Update(ctx, msNumber, platform.MilestoneUpdate{State: &closed}); err != nil {
+	key := idempotencyKey("batch-cleanup", "repo", s.Repo.ID, "batch", msNumber, "milestone", "close")
+	if err := s.mutate(ctx, key, "batch_cleanup_milestone_close", func() (string, error) {
+		_, err := s.Platform.Milestones().Update(ctx, msNumber, platform.MilestoneUpdate{State: &closed})
+		return "", err
+	}); err != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("close milestone %d: %w", msNumber, err))
 	}
 	if strings.TrimSpace(pr.HeadSHA) == "" {

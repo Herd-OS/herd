@@ -297,17 +297,9 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 		TriggerComment: commandTriggerComment(cmd),
 		UserContext:    parsedCommandPrompt(cmd.Command),
 	}
-	body := integrator.BuildConflictResolutionIssueBody(params)
-	truncatedBody, overflow := issues.TruncateIssueBody(body)
-	milestoneNumber := ms.Number
-	fixIssue, err := p.Issues().Create(ctx, integratorConflictResolutionTitle(params), truncatedBody, []string{issues.TypeFix, issues.StatusInProgress}, &milestoneNumber)
+	fixIssueNumber, err := d.ensureConflictResolutionIssue(ctx, p, cmd, params)
 	if err != nil {
-		return fmt.Errorf("creating conflict-resolution issue: %w", err)
-	}
-	for _, comment := range issues.SplitOverflowComments(overflow) {
-		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
-			return fmt.Errorf("adding conflict-resolution overflow comment: %w", cerr)
-		}
+		return err
 	}
 	headSHA := pr.HeadSHA
 	if strings.TrimSpace(headSHA) == "" {
@@ -322,7 +314,7 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 		WorkflowFile:    "herd-worker.yml",
 		Ref:             pr.Head,
 		BatchNumber:     ms.Number,
-		IssueNumber:     fixIssue.Number,
+		IssueNumber:     fixIssueNumber,
 		PRNumber:        pr.Number,
 		BatchBranch:     pr.Head,
 		BaseSHA:         headSHA,
@@ -334,12 +326,100 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 		Reason:          fmt.Sprintf("@herd-os resolve-conflicts comment %d by %s", cmd.CommentID, cmd.Actor),
 	})
 	if err != nil {
-		_ = p.Issues().RemoveLabels(ctx, fixIssue.Number, []string{issues.StatusInProgress, issues.StatusReady})
-		_ = p.Issues().AddLabels(ctx, fixIssue.Number, []string{issues.StatusFailed})
-		_ = p.Issues().AddComment(ctx, fixIssue.Number, fmt.Sprintf("Failed to dispatch conflict-resolution worker: %v", err))
-		return fmt.Errorf("dispatching conflict-resolution worker for issue #%d: %w", fixIssue.Number, err)
+		_ = p.Issues().RemoveLabels(ctx, fixIssueNumber, []string{issues.StatusInProgress, issues.StatusReady})
+		_ = p.Issues().AddLabels(ctx, fixIssueNumber, []string{issues.StatusFailed})
+		_ = p.Issues().AddComment(ctx, fixIssueNumber, fmt.Sprintf("Failed to dispatch conflict-resolution worker: %v", err))
+		return fmt.Errorf("dispatching conflict-resolution worker for issue #%d: %w", fixIssueNumber, err)
 	}
-	return addPRCommandResult(ctx, p, cmd.PRNumber, fmt.Sprintf("🔧 Created conflict-resolution issue #%d and dispatched worker.", fixIssue.Number))
+	return addPRCommandResult(ctx, p, cmd.PRNumber, fmt.Sprintf("🔧 Created conflict-resolution issue #%d and dispatched worker.", fixIssueNumber))
+}
+
+func (d productionCommandDispatcher) ensureConflictResolutionIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams) (int, error) {
+	key := conflictResolutionIssueKey(cmd, params)
+	created, err := d.Dispatcher.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "conflict_resolution_issue_create",
+		Status:    mutations.PhaseIntentRecorded,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("acquire conflict-resolution issue idempotency key: %w", err)
+	}
+	if !created {
+		issueNumber, recovered, recoverErr := d.recoverConflictResolutionIssue(ctx, p, cmd, params, key)
+		if recovered || recoverErr != nil {
+			return issueNumber, recoverErr
+		}
+		record, err := d.Dispatcher.Store.GetIdempotencyKey(ctx, key)
+		if err != nil {
+			return 0, fmt.Errorf("get conflict-resolution issue idempotency key: %w", err)
+		}
+		if record.Status == "completed" && strings.TrimSpace(record.ResultRef) != "" {
+			issueNumber, ok := parseIssueResultRef(record.ResultRef)
+			if !ok {
+				return 0, fmt.Errorf("invalid conflict-resolution issue result ref %q", record.ResultRef)
+			}
+			return issueNumber, nil
+		}
+		if !mutations.IsPreCallRetryable(record.Status) && record.Status != "failed" {
+			status := strings.TrimSpace(record.Status)
+			if status == "" {
+				status = "unknown"
+			}
+			return 0, fmt.Errorf("conflict-resolution issue idempotency key %q is %s without a completed issue result; retry after reconciliation", key, status)
+		}
+	}
+	return d.createConflictResolutionIssue(ctx, p, cmd, params, key)
+}
+
+func (d productionCommandDispatcher) createConflictResolutionIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams, key string) (int, error) {
+	body := injectConflictResolutionIssueMarker(integrator.BuildConflictResolutionIssueBody(params), cmd, params)
+	truncatedBody, overflow := issues.TruncateIssueBody(body)
+	milestoneNumber := params.Milestone.Number
+	fixIssue, err := p.Issues().Create(ctx, integratorConflictResolutionTitle(params), truncatedBody, []string{issues.TypeFix, issues.StatusInProgress}, &milestoneNumber)
+	if err != nil {
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, err.Error())
+		return 0, fmt.Errorf("creating conflict-resolution issue: %w", err)
+	}
+	for _, comment := range issues.SplitOverflowComments(overflow) {
+		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
+			_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, cerr.Error())
+			return 0, fmt.Errorf("adding conflict-resolution overflow comment: %w", cerr)
+		}
+	}
+	resultRef := fmt.Sprintf("issue:%d", fixIssue.Number)
+	if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+		return 0, fmt.Errorf("complete conflict-resolution issue idempotency key: %w", err)
+	}
+	return fixIssue.Number, nil
+}
+
+func (d productionCommandDispatcher) recoverConflictResolutionIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams, key string) (int, bool, error) {
+	if existing, err := integrator.FindActivePRConflictResolutionIssue(ctx, p, params.Milestone.Number, params.BatchPR, params.PRHeadSHA, params.BaseSHA); err != nil {
+		return 0, false, err
+	} else if existing != nil {
+		resultRef := fmt.Sprintf("issue:%d", existing.Number)
+		if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+			return 0, false, fmt.Errorf("complete recovered conflict-resolution issue idempotency key: %w", err)
+		}
+		return existing.Number, true, nil
+	}
+	found, err := p.Issues().List(ctx, platform.IssueFilters{State: "all", Milestone: &params.Milestone.Number})
+	if err != nil {
+		return 0, false, fmt.Errorf("list conflict-resolution issues for recovery: %w", err)
+	}
+	marker := strings.TrimSpace(conflictResolutionIssueMarker(cmd, params))
+	for _, issue := range found {
+		if issue == nil || !strings.Contains(issue.Body, marker) {
+			continue
+		}
+		resultRef := fmt.Sprintf("issue:%d", issue.Number)
+		if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+			return 0, false, fmt.Errorf("complete recovered conflict-resolution issue idempotency key: %w", err)
+		}
+		return issue.Number, true, nil
+	}
+	return 0, false, nil
 }
 
 func (d productionCommandDispatcher) dispatchIssueCommand(ctx context.Context, cmd commands.DispatchCommand) error {
@@ -504,6 +584,25 @@ func latestPRWithKnownMergeabilityFrom(ctx context.Context, prs platform.PullReq
 
 func integratorConflictResolutionTitle(params integrator.ConflictResolutionIssueParams) string {
 	return fmt.Sprintf("Resolve PR conflict: #%d (%s onto %s)", params.BatchPR, params.PRHeadBranch, params.BaseBranch)
+}
+
+func conflictResolutionIssueKey(cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams) string {
+	return commandStableKey("conflict-resolution-issue", cmd.RepositoryID, params.BatchPR, cmd.CommentID, cmd.Command.Kind, params.PRHeadSHA, params.BaseSHA)
+}
+
+func conflictResolutionIssueMarker(cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams) string {
+	return fmt.Sprintf("\n\n<!-- herd:conflict-resolution {\"version\":1,\"repo_id\":%d,\"pr_number\":%d,\"comment_id\":%d,\"command\":\"%s\",\"head_sha\":\"%s\",\"base_sha\":\"%s\"} -->\n", cmd.RepositoryID, params.BatchPR, cmd.CommentID, cmd.Command.Kind, params.PRHeadSHA, params.BaseSHA)
+}
+
+func injectConflictResolutionIssueMarker(body string, cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams) string {
+	marker := strings.TrimSpace(conflictResolutionIssueMarker(cmd, params))
+	const frontMatterEnd = "---\n\n"
+	idx := strings.Index(body, frontMatterEnd)
+	if idx < 0 {
+		return marker + "\n\n" + body
+	}
+	insertAt := idx + len(frontMatterEnd)
+	return body[:insertAt] + marker + "\n\n" + body[insertAt:]
 }
 
 func prReportsNonConflictBlocker(pr *platform.PullRequest) bool {

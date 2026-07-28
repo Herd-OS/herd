@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -136,7 +137,6 @@ func validateBundle(data []byte, req ValidationRequest) (ValidatedArtifact, bool
 			return ValidatedArtifact{}, true, fmt.Errorf("patch artifact bundle exceeds maximum size")
 		}
 		files[name] = body
-		files[filepath.Base(name)] = body
 	}
 	metadataBytes, ok := files[bundledMetadataFile]
 	if !ok {
@@ -152,10 +152,10 @@ func validateBundle(data []byte, req ValidationRequest) (ValidatedArtifact, bool
 		return ValidatedArtifact{}, true, err
 	}
 	patchName := strings.TrimPrefix(filepath.ToSlash(metadata.ArtifactName), "./")
-	patch, ok := files[patchName]
-	if !ok {
-		patch, ok = files[filepath.Base(patchName)]
+	if patchName == "" || path.IsAbs(patchName) || strings.HasPrefix(patchName, "../") || strings.Contains(patchName, "/../") {
+		return ValidatedArtifact{}, true, fmt.Errorf("patch artifact %q is not a safe relative path", metadata.ArtifactName)
 	}
+	patch, ok := files[patchName]
 	if !ok {
 		return ValidatedArtifact{}, true, fmt.Errorf("patch artifact %q missing from artifact bundle", metadata.ArtifactName)
 	}

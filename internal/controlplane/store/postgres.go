@@ -408,6 +408,14 @@ func (s *PostgresStore) FailIdempotencyKey(ctx context.Context, key string, erro
 	return ErrNotFound
 }
 
+func (s *PostgresStore) TransitionIdempotencyKey(ctx context.Context, key string, fromStatus string, toStatus string, resultRef string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE idempotency_keys
+		SET status = $3, result_ref = $4
+		WHERE key = $1 AND status = $2`, key, fromStatus, toStatus, resultRef)
+	return createdFromResult(result, err)
+}
+
 func (s *PostgresStore) ListStartedIdempotencyKeys(ctx context.Context, scope string, createdBefore time.Time, limit int) ([]IdempotencyKey, error) {
 	if limit <= 0 {
 		limit = 100

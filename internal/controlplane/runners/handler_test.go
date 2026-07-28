@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -195,6 +196,40 @@ func TestRegistrationTokenHandlerDuplicateNonceReplaysWithNormalizedMetadata(t *
 	require.NotNil(t, st.tokens[token.ID].UsedAt)
 }
 
+func TestRegistrationTokenHandlerConcurrentDuplicateNonceMintsOnce(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, _ := newHandlerTestStore(t, now)
+	minter := &blockingMinter{
+		release:  make(chan struct{}),
+		response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)},
+	}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", RunnerLabels: []string{"herd"}, BootstrapToken: plain, RequestNonce: "nonce-concurrent"}
+
+	var wg sync.WaitGroup
+	records := make([]*httptest.ResponseRecorder, 2)
+	wg.Add(len(records))
+	for i := range records {
+		go func(i int) {
+			defer wg.Done()
+			records[i] = serveRegistrationRequest(t, handler, req)
+		}(i)
+	}
+	require.Eventually(t, func() bool {
+		minter.mu.Lock()
+		defer minter.mu.Unlock()
+		return minter.calls == 1
+	}, time.Second, 10*time.Millisecond)
+	close(minter.release)
+	wg.Wait()
+
+	statuses := []int{records[0].Code, records[1].Code}
+	assert.ElementsMatch(t, []int{http.StatusOK, http.StatusConflict}, statuses)
+	minter.mu.Lock()
+	assert.Equal(t, 1, minter.calls)
+	minter.mu.Unlock()
+}
+
 func TestRegistrationTokenHandlerReplayRepairsMissingTokenUse(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, token := newHandlerTestStore(t, now)
@@ -283,7 +318,7 @@ func TestRegistrationTokenHandlerMinterFailures(t *testing.T) {
 	}
 }
 
-func TestRegistrationTokenHandlerRetriesAfterMinterFailure(t *testing.T) {
+func TestRegistrationTokenHandlerDoesNotRetryAfterMinterFailure(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, token := newHandlerTestStore(t, now)
 	minter := &fakeMinter{
@@ -297,16 +332,14 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailure(t *testing.T) {
 	second := serveRegistrationRequest(t, handler, req)
 
 	require.Equal(t, http.StatusBadGateway, first.Code)
-	require.Equal(t, http.StatusOK, second.Code)
-	assert.Contains(t, second.Body.String(), "github-runner-token")
-	assert.Equal(t, 2, minter.calls)
-	require.NotNil(t, st.tokens[token.ID].UsedAt)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Equal(t, 1, minter.calls)
+	assert.Nil(t, st.tokens[token.ID].UsedAt)
 }
 
-func TestRegistrationTokenHandlerRetriesAfterMinterFailureWhenFailIdempotencyFails(t *testing.T) {
+func TestRegistrationTokenHandlerMintsWhenFirstCallStartedTransitionFails(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, token := newHandlerTestStore(t, now)
-	st.failErrs = []error{errors.New("database down")}
 	minter := &fakeMinter{
 		responses: []RegistrationTokenResponse{{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}},
 	}
@@ -316,9 +349,9 @@ func TestRegistrationTokenHandlerRetriesAfterMinterFailureWhenFailIdempotencyFai
 	first := serveRegistrationRequest(t, handler, req)
 	second := serveRegistrationRequest(t, handler, req)
 
-	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusOK, first.Code)
 	require.Equal(t, http.StatusOK, second.Code)
-	assert.Contains(t, second.Body.String(), "github-runner-token")
+	assert.Contains(t, first.Body.String(), "github-runner-token")
 	assert.Equal(t, 1, minter.calls)
 	require.NotNil(t, st.tokens[token.ID].UsedAt)
 }
@@ -475,6 +508,7 @@ func newHandlerTestStore(t *testing.T, now time.Time) (*handlerFakeStore, string
 }
 
 type handlerFakeStore struct {
+	mu                sync.Mutex
 	repository        store.Repository
 	tokens            map[int64]store.RunnerBootstrapToken
 	tokensByHash      map[string]store.RunnerBootstrapToken
@@ -486,6 +520,8 @@ type handlerFakeStore struct {
 }
 
 func (s *handlerFakeStore) GetRepository(_ context.Context, owner string, name string) (store.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.repository.Owner == owner && s.repository.Name == name {
 		return s.repository, nil
 	}
@@ -493,6 +529,8 @@ func (s *handlerFakeStore) GetRepository(_ context.Context, owner string, name s
 }
 
 func (s *handlerFakeStore) GetRunnerBootstrapTokenByHash(_ context.Context, tokenHash string) (store.RunnerBootstrapToken, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	token, ok := s.tokensByHash[tokenHash]
 	if !ok {
 		return store.RunnerBootstrapToken{}, store.ErrNotFound
@@ -501,6 +539,8 @@ func (s *handlerFakeStore) GetRunnerBootstrapTokenByHash(_ context.Context, toke
 }
 
 func (s *handlerFakeStore) MarkRunnerBootstrapTokenUsed(_ context.Context, tokenID int64, usedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(s.markUsedErrs) > 0 {
 		err := s.markUsedErrs[0]
 		s.markUsedErrs = s.markUsedErrs[1:]
@@ -520,6 +560,8 @@ func (s *handlerFakeStore) MarkRunnerBootstrapTokenUsed(_ context.Context, token
 }
 
 func (s *handlerFakeStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.idempotency[key.Key]; ok {
 		return false, nil
 	}
@@ -528,6 +570,8 @@ func (s *handlerFakeStore) AcquireIdempotencyKey(_ context.Context, key store.Id
 }
 
 func (s *handlerFakeStore) GetIdempotencyKey(_ context.Context, key string) (store.IdempotencyKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, ok := s.idempotency[key]
 	if !ok {
 		return store.IdempotencyKey{}, store.ErrNotFound
@@ -536,6 +580,8 @@ func (s *handlerFakeStore) GetIdempotencyKey(_ context.Context, key string) (sto
 }
 
 func (s *handlerFakeStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(s.completeErrs) > 0 {
 		err := s.completeErrs[0]
 		s.completeErrs = s.completeErrs[1:]
@@ -556,6 +602,8 @@ func (s *handlerFakeStore) CompleteIdempotencyKey(_ context.Context, key string,
 }
 
 func (s *handlerFakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(s.failErrs) > 0 {
 		err := s.failErrs[0]
 		s.failErrs = s.failErrs[1:]
@@ -573,6 +621,22 @@ func (s *handlerFakeStore) FailIdempotencyKey(_ context.Context, key string, err
 	record.CompletedAt = &now
 	s.idempotency[key] = record
 	return nil
+}
+
+func (s *handlerFakeStore) TransitionIdempotencyKey(_ context.Context, key string, fromStatus string, toStatus string, resultRef string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idempotency[key]
+	if !ok {
+		return false, store.ErrNotFound
+	}
+	if record.Status != fromStatus {
+		return false, nil
+	}
+	record.Status = toStatus
+	record.ResultRef = resultRef
+	s.idempotency[key] = record
+	return true, nil
 }
 
 type fakeMinter struct {
@@ -604,6 +668,25 @@ func (m *fakeMinter) CreateRegistrationToken(_ context.Context, installationID i
 		return response, nil
 	}
 	return m.response, m.err
+}
+
+type blockingMinter struct {
+	mu       sync.Mutex
+	release  chan struct{}
+	response RegistrationTokenResponse
+	calls    int
+}
+
+func (m *blockingMinter) CreateRegistrationToken(ctx context.Context, _ int64, _ string, _ string) (RegistrationTokenResponse, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
+	select {
+	case <-m.release:
+	case <-ctx.Done():
+		return RegistrationTokenResponse{}, ctx.Err()
+	}
+	return m.response, nil
 }
 
 type fakeTokenSource struct {

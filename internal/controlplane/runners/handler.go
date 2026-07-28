@@ -49,6 +49,10 @@ type Store interface {
 	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 }
 
+type idempotencyTransitionStore interface {
+	TransitionIdempotencyKey(ctx context.Context, key string, fromStatus string, toStatus string, resultRef string) (bool, error)
+}
+
 type TokenMinter interface {
 	CreateRegistrationToken(ctx context.Context, installationID int64, owner string, repo string) (RegistrationTokenResponse, error)
 }
@@ -116,14 +120,24 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, result)
 		return
 	}
-	if err := h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseCallStarted); err != nil {
+	transitioner, ok := h.store.(idempotencyTransitionStore)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "runner registration storage does not support atomic mutation phases"})
+		return
+	}
+	acquired, err := transitioner.TransitionIdempotencyKey(r.Context(), idempotencyKey, idempotencyStatusStarted, "failed", mutationspkg.PhaseCallStarted)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark runner registration token mint started"})
 		return
 	}
+	if !acquired {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
+		return
+	}
 
-	result, err := h.minter.CreateRegistrationToken(r.Context(), repo.InstallationID, repo.Owner, repo.Name)
+	result, err = h.minter.CreateRegistrationToken(r.Context(), repo.InstallationID, repo.Owner, repo.Name)
 	if err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
+		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseRepairRequired+":"+err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create GitHub runner registration token"})
 		return
 	}

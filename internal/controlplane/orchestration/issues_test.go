@@ -208,12 +208,30 @@ func TestEnsureReviewFixIssueAndDispatchAreIdempotentByFingerprint(t *testing.T)
 	assert.Equal(t, "head", dispatcher.requests[0].ExpectedHeadSHA)
 }
 
-func TestEnsureReviewFixIssueStartedOrFailedIdempotencyIsRepairable(t *testing.T) {
+func TestEnsureReviewFixIssuePreCallIdempotencyIsRetryable(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, nil)
+	repo := review.Repository{ID: 123, InstallationID: 456, Owner: "owner", Name: "repo", DefaultBranch: "main"}
+	result := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 42, BatchBranch: "herd/batch/9-demo", HeadSHA: "head", FixCycle: 1}
+	finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
+	key := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "review_fix_issue_create", Status: mutationStatusStarted}
+
+	issueNumber, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, issueNumber)
+	assert.True(t, created)
+	assert.Len(t, fake.issues.created, 1)
+}
+
+func TestEnsureReviewFixIssuePostCallUnknownRequiresRepair(t *testing.T) {
 	tests := []struct {
 		name   string
 		status string
 	}{
-		{name: "started", status: mutationStatusStarted},
 		{name: "failed", status: mutationStatusFailed},
 	}
 	for _, tt := range tests {
@@ -252,7 +270,7 @@ func TestEnsureReviewFixIssueRecoversAfterOuterCompletionFailure(t *testing.T) {
 
 	firstIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "complete idempotency key")
+	assert.Contains(t, err.Error(), "complete review fix issue idempotency key")
 	assert.Zero(t, firstIssue)
 	assert.False(t, created)
 

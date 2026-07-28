@@ -143,6 +143,35 @@ func TestValidateBundledPatchArtifact(t *testing.T) {
 			},
 			wantError: "missing from artifact bundle",
 		},
+		{
+			name: "metadata artifact path does not fall back to basename",
+			mutate: func(metadata *PatchMetadata, files map[string][]byte) {
+				patch := files[metadata.ArtifactName]
+				delete(files, metadata.ArtifactName)
+				metadata.ArtifactName = "patches/herd-worker.patch"
+				metadata.SHA256 = SHA256(patch)
+				files["other/herd-worker.patch"] = patch
+			},
+			wantError: "missing from artifact bundle",
+		},
+		{
+			name: "duplicate basenames do not satisfy exact artifact path",
+			mutate: func(metadata *PatchMetadata, files map[string][]byte) {
+				patch := files[metadata.ArtifactName]
+				delete(files, metadata.ArtifactName)
+				metadata.ArtifactName = "metadata/herd-worker.patch"
+				metadata.SHA256 = SHA256(patch)
+				files["other/herd-worker.patch"] = patch
+			},
+			wantError: "missing from artifact bundle",
+		},
+		{
+			name: "unsafe artifact path",
+			mutate: func(metadata *PatchMetadata, _ map[string][]byte) {
+				metadata.ArtifactName = "../herd-worker.patch"
+			},
+			wantError: "safe relative path",
+		},
 	}
 
 	for _, tt := range tests {

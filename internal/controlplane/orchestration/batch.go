@@ -434,7 +434,7 @@ func (s Service) repairIdempotencyFromCompletedMutation(ctx context.Context, key
 
 func isVoidMutationType(mutationType string) bool {
 	switch mutationType {
-	case "issue_label_add", "issue_label_remove":
+	case "issue_label_add", "issue_label_remove", "batch_cleanup_issue_label_remove", "batch_cleanup_issue_label_add", "batch_cleanup_issue_close", "batch_cleanup_milestone_close":
 		return true
 	default:
 		return false

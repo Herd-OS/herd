@@ -223,6 +223,16 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 	}
 
 	if err := d.GitHub.DispatchWorkflow(ctx, req.InstallationID, req.Owner, req.Repo, req.WorkflowFile, req.Ref, inputs); err != nil {
+		var preCallErr PreCallError
+		if errors.As(err, &preCallErr) {
+			d.recordMutationResult(ctx, idempotencyKey, GitHubMutationResult{
+				Status:      mutations.PhaseFailedPreCall,
+				Error:       err.Error(),
+				CompletedAt: time.Now().UTC(),
+			})
+			_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseFailedPreCall+":"+err.Error())
+			return DispatchResult{}, fmt.Errorf("prepare workflow dispatch: %w", err)
+		}
 		d.recordMutationResult(ctx, idempotencyKey, GitHubMutationResult{
 			Status:      mutationStatusUnknown,
 			Error:       err.Error(),
@@ -261,6 +271,22 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		return DispatchResult{}, err
 	}
 	return result, nil
+}
+
+type PreCallError struct {
+	Op  string
+	Err error
+}
+
+func (e PreCallError) Error() string {
+	if e.Op == "" {
+		return e.Err.Error()
+	}
+	return e.Op + ": " + e.Err.Error()
+}
+
+func (e PreCallError) Unwrap() error {
+	return e.Err
 }
 
 func (d Dispatcher) markMutationDispatching(ctx context.Context, idempotencyKey string) error {
@@ -650,7 +676,7 @@ func (c AppWorkflowClient) DispatchWorkflow(ctx context.Context, installationID 
 	}
 	client, err := c.NewClient(ctx, installationID)
 	if err != nil {
-		return err
+		return PreCallError{Op: "create installation GitHub client", Err: err}
 	}
 	return dispatchWithClient(ctx, client, owner, repo, workflowFile, ref, inputs)
 }

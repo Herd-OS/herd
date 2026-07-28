@@ -2,10 +2,13 @@ package orchestration
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/issues"
@@ -59,6 +62,9 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 			if issueNumber, recovered, recoverErr := s.recoverReviewFixIssue(ctx, req, key); recovered || recoverErr != nil {
 				return issueNumber, false, recoverErr
 			}
+			if mutations.IsPreCallRetryable(record.Status) {
+				return s.createReviewFixIssueFromIntent(ctx, key, req)
+			}
 			status := strings.TrimSpace(record.Status)
 			if status == "" {
 				status = "unknown"
@@ -71,15 +77,36 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 		}
 		return issueNumber, false, nil
 	}
-	resultRef, err := s.withAcquiredIdempotency(ctx, key, "review_fix_issue_create", func() (string, error) {
-		issue, err := s.EnsureTaskIssue(ctx, req)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("issue:%d", issue.Number), nil
-	})
+	return s.createReviewFixIssueFromIntent(ctx, key, req)
+}
+
+func (s Service) createReviewFixIssueFromIntent(ctx context.Context, key string, req TaskIssueRequest) (int, bool, error) {
+	if err := s.Store.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		RepositoryID:   s.Repo.ID,
+		MutationType:   "review_fix_issue_create",
+		Status:         mutationStatusIntentRecorded,
+		CreatedAt:      s.now(),
+	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
+		return 0, false, fmt.Errorf("record review fix issue mutation attempt: %w", err)
+	}
+	issue, err := s.EnsureTaskIssue(ctx, req)
 	if err != nil {
+		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailedPreCall, nil, err.Error(), s.now())
+		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
 		return 0, false, err
+	}
+	resultRef := fmt.Sprintf("issue:%d", issue.Number)
+	response, _ := json.Marshal(map[string]string{"result_ref": resultRef})
+	if err := s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusCompleted, response, "", s.now()); err != nil {
+		if idemErr := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); idemErr != nil {
+			return 0, false, fmt.Errorf("complete review fix issue mutation attempt: %w; complete idempotency key after mutation attempt failure: %v", err, idemErr)
+		}
+		return 0, false, fmt.Errorf("complete review fix issue mutation attempt: %w", err)
+	}
+	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+		return 0, false, fmt.Errorf("complete review fix issue idempotency key: %w", err)
 	}
 	issueNumber, ok := parseIssueResult(resultRef)
 	if !ok {

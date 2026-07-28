@@ -75,6 +75,9 @@ Mention commands use the App login:
 @herd-os resolve-conflicts <context>
 @herd-os dispatch
 @herd-os dispatch <issue-number>
+@herd-os retry
+@herd-os retry <issue-number>
+@herd-os integrate
 ```
 
 Legacy slash-comment commands are no longer supported and should not be used in

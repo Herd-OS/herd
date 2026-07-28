@@ -336,6 +336,22 @@ func (s *MemoryStore) FailIdempotencyKey(_ context.Context, key string, errorMes
 	return nil
 }
 
+func (s *MemoryStore) TransitionIdempotencyKey(_ context.Context, key string, fromStatus string, toStatus string, resultRef string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if record.Status != fromStatus {
+		return false, nil
+	}
+	record.Status = toStatus
+	record.ResultRef = resultRef
+	s.idempotencyKeys[key] = record
+	return true, nil
+}
+
 func (s *MemoryStore) ListStartedIdempotencyKeys(_ context.Context, scope string, createdBefore time.Time, limit int) ([]IdempotencyKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

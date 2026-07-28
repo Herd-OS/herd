@@ -336,6 +336,9 @@ status update.
 | `@herd-os resolve-conflicts <context>` | Batch PR | Same as above, with extra context included in the focused resolver issue. |
 | `@herd-os dispatch` | Issue | Dispatches the current ready or failed issue |
 | `@herd-os dispatch <issue-number>` | Any issue/PR | Dispatches ready or failed issue number |
+| `@herd-os retry` | Issue | Retries the current failed worker issue through the hosted App command path |
+| `@herd-os retry <issue-number>` | Any issue/PR | Retries the specified failed worker issue through the hosted App command path |
+| `@herd-os integrate` | Batch PR | Runs the Integrator for the batch PR through the hosted App command path |
 
 **Image support:** When you attach screenshots to `@herd-os fix` comments, workers automatically download GitHub-hosted attachment images and can view them directly. This is useful for UI bug fixes -- paste a screenshot of the problem or the desired result, and the worker will see it. Only GitHub attachment URLs are downloaded; external image URLs are left as-is for the agent to handle.
 
@@ -347,9 +350,9 @@ status update.
 @herd-os fix add missing error check in auth.go line 42
 @herd-os resolve-conflicts keep generated files intact
 @herd-os dispatch 42
+@herd-os retry 42
+@herd-os integrate
 ```
-
-Worker retry and manual integrator recovery remain local CLI operations until they are wired through the hosted App/control-plane command path.
 
 Quotes around the prompt text are optional. You can paste error logs, JSON snippets, or any text directly after the command — everything after the command name (including subsequent lines) is treated as the prompt. The quoted format (`@herd-os fix "description"`) is also supported.
 
