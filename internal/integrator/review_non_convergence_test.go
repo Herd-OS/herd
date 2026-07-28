@@ -278,6 +278,42 @@ func TestAnalyzeReviewConvergence_EscalatesForIncreasingPR849StyleTrend(t *testi
 	assert.Contains(t, analysis.Rationale, "increasing or flat")
 }
 
+func TestAnalyzeReviewConvergence_EscalatesForPersistentRootCauseDespiteTemporaryDecrease(t *testing.T) {
+	counts := []int{13, 1, 1, 9, 7, 15}
+	paths := []string{
+		"internal/controlplane/jobs/run.go",
+		"internal/controlplane/review/comment.go",
+		"internal/controlplane/orchestration/dispatch.go",
+		"internal/git/mutation.go",
+		"internal/controlplane/jobs/run.go",
+		"internal/controlplane/review/comment.go",
+	}
+
+	cycles := make([]reviewHistoryCycle, 0, len(counts))
+	for i, count := range counts {
+		finding := fmt.Sprintf("%s: durable mutation idempotency pre-call post-call unknown repair retry workflow dispatch still recurs after completed fixes", paths[i])
+		cycle := reviewHistoryCycleWithFinding(i+1, count, finding)
+		cycle.FixIssues = []reviewHistoryFixIssue{{
+			Number:           950 + i,
+			StatusLabel:      issues.StatusDone,
+			WorkerReport:     true,
+			ValidationStatus: "success",
+		}}
+		cycles = append(cycles, cycle)
+	}
+
+	analysis := analyzeReviewConvergence(cycles, 3)
+	assert.Equal(t, reviewDecisionEscalateToArchitectureFix, analysis.Decision)
+	assert.Equal(t, counts, analysis.TrendCounts)
+	assert.Equal(t, 15, analysis.LatestFindingCount)
+	assert.Equal(t, 13, analysis.EarliestFindingCount)
+	assert.Contains(t, analysis.Cluster.RootCauseTerms, "idempotency")
+	assert.Contains(t, analysis.Cluster.RootCauseTerms, "durable")
+	assert.Contains(t, analysis.Cluster.RootCauseTerms, "repair")
+	assert.Contains(t, analysis.Rationale, "persistent root-cause cluster")
+	assert.Contains(t, analysis.Rationale, "temporary finding-count decrease")
+}
+
 func TestAnalyzeReviewConvergence_ContinuesForDecreasingTrend(t *testing.T) {
 	counts := []int{20, 12, 5, 1}
 	var cycles []reviewHistoryCycle
@@ -291,6 +327,57 @@ func TestAnalyzeReviewConvergence_ContinuesForDecreasingTrend(t *testing.T) {
 	assert.Equal(t, reviewDecisionContinueFixLoop, analysis.Decision)
 	assert.Equal(t, counts, analysis.TrendCounts)
 	assert.Contains(t, analysis.Rationale, "below non-convergence threshold")
+}
+
+func TestAnalyzeReviewConvergence_ContinuesForDecreasingTrendWithoutRepeatedRootCause(t *testing.T) {
+	counts := []int{20, 16, 12, 9}
+	findings := []string{
+		"cmd/herd-service/main.go: command exits before printing usage for empty args",
+		"internal/controlplane/commands/list.go: list output sorts names inconsistently",
+		"internal/agent/parser/options.go: option parser accepts whitespace-only values",
+		"docs/review-history.md: stale example references removed status text",
+	}
+
+	cycles := make([]reviewHistoryCycle, 0, len(counts))
+	for i, count := range counts {
+		cycle := reviewHistoryCycleWithFinding(i+1, count, findings[i])
+		cycle.FixIssues = []reviewHistoryFixIssue{{
+			Number:           900 + i,
+			StatusLabel:      issues.StatusDone,
+			WorkerReport:     true,
+			ValidationStatus: "success",
+		}}
+		cycles = append(cycles, cycle)
+	}
+
+	analysis := analyzeReviewConvergence(cycles, 2)
+	assert.Equal(t, reviewDecisionContinueFixLoop, analysis.Decision)
+	assert.Equal(t, counts, analysis.TrendCounts)
+	assert.Equal(t, 9, analysis.LatestFindingCount)
+	assert.Equal(t, 20, analysis.EarliestFindingCount)
+	assert.Empty(t, analysis.Cluster.RootCauseTerms)
+	assert.Contains(t, analysis.Rationale, "finding trend is decreasing")
+	assert.Contains(t, analysis.Rationale, "no persistent root-cause cluster")
+}
+
+func TestFindingTrendTemporarilyDecreased(t *testing.T) {
+	tests := []struct {
+		name   string
+		counts []int
+		want   bool
+	}{
+		{name: "empty", counts: nil},
+		{name: "single count", counts: []int{13}},
+		{name: "increasing", counts: []int{13, 15, 20}},
+		{name: "flat", counts: []int{13, 13, 13}},
+		{name: "temporary decrease", counts: []int{13, 1, 15}, want: true},
+		{name: "strict decrease", counts: []int{20, 16, 9}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, findingTrendTemporarilyDecreased(tt.counts))
+		})
+	}
 }
 
 func TestAnalyzeReviewConvergence_MinCompletedCyclesAndLatestInProgress(t *testing.T) {

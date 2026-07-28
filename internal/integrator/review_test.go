@@ -7575,12 +7575,14 @@ func TestReview_NonConvergenceContinueCreatesNormalReviewFixIssue(t *testing.T) 
 		historyCounts   []int
 		minCompleted    int
 		currentFindings []agent.ReviewFinding
+		wantStrategy    bool
 	}{
 		{
 			name:            "decreasing trend",
 			historyCounts:   []int{28, 24, 21, 20, 14},
 			minCompleted:    3,
 			currentFindings: reviewNonConvergenceCurrentFindings(9),
+			wantStrategy:    true,
 		},
 		{
 			name:            "insufficient completed cycles",
@@ -7601,10 +7603,18 @@ func TestReview_NonConvergenceContinueCreatesNormalReviewFixIssue(t *testing.T) 
 			require.NotNil(t, result)
 			assert.Equal(t, []int{9601}, result.FixIssues)
 			require.Len(t, fx.createdIssues, 1)
-			assert.Equal(t, fmt.Sprintf("Review fixes (cycle %d)", 34+len(tt.historyCounts)), fx.createdIssues[0].title)
-			assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
 			require.Len(t, fx.wf.dispatched, 1)
 			assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+			if tt.wantStrategy {
+				assert.True(t, strings.HasPrefix(fx.createdIssues[0].title, "Review strategy fix"))
+				assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+				comment := requireCommentContaining(t, fx.prSvc.comments, "Herd review is not converging")
+				assert.Contains(t, comment, "Finding count trend: 28, 24, 21, 20, 14, 9")
+				assert.Contains(t, comment, "temporary finding-count decrease")
+				return
+			}
+			assert.Equal(t, fmt.Sprintf("Review fixes (cycle %d)", 34+len(tt.historyCounts)), fx.createdIssues[0].title)
+			assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
 			assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
 		})
 	}

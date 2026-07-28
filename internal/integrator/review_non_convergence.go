@@ -310,21 +310,34 @@ func analyzeReviewConvergence(cycles []reviewHistoryCycle, minCompletedCycles in
 	}
 
 	trendIncreasingOrFlat := analysis.LatestFindingCount >= analysis.EarliestFindingCount && completedCycles > 0
-	if reviewNonConvergenceRequireIncreasingOrFlat && !trendIncreasingOrFlat {
-		analysis.Rationale = "finding trend is decreasing after completed fix cycles"
+	repeatedSubsystem := len(analysis.Cluster.PackageClusters) > 0
+	repeatedRootCause := len(analysis.Cluster.RootCauseTerms) > 0
+	if reviewNonConvergenceRequireIncreasingOrFlat && !trendIncreasingOrFlat && !repeatedRootCause {
+		analysis.Rationale = "finding trend is decreasing and no persistent root-cause cluster met deterministic thresholds"
 		return analysis
 	}
 
-	repeatedSubsystem := len(analysis.Cluster.PackageClusters) > 0
-	repeatedRootCause := len(analysis.Cluster.RootCauseTerms) > 0
 	if repeatedSubsystem || repeatedRootCause {
 		analysis.Decision = reviewDecisionEscalateToArchitectureFix
 		analysis.Confidence = 0.86
+		if repeatedRootCause && findingTrendTemporarilyDecreased(analysis.TrendCounts) {
+			analysis.Rationale = "persistent root-cause cluster survived completed fix cycles despite a temporary finding-count decrease"
+			return analysis
+		}
 		analysis.Rationale = "finding trend is increasing or flat after completed fix cycles and repeated subsystem/root-cause clusters were detected"
 		return analysis
 	}
 	analysis.Rationale = "no repeated subsystem or root-cause cluster met deterministic thresholds"
 	return analysis
+}
+
+func findingTrendTemporarilyDecreased(counts []int) bool {
+	for i := 1; i < len(counts); i++ {
+		if counts[i] < counts[i-1] {
+			return true
+		}
+	}
+	return false
 }
 
 func latestFixBearingReviewCycle(cycles []reviewHistoryCycle) (int, bool) {
