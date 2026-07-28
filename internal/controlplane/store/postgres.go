@@ -416,6 +416,37 @@ func (s *PostgresStore) TransitionIdempotencyKey(ctx context.Context, key string
 	return createdFromResult(result, err)
 }
 
+func (s *PostgresStore) TryStartIdempotencyKey(ctx context.Context, key string, toStatus string, resultRef string, retryableFailedPrefix string) (IdempotencyStartResult, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		UPDATE idempotency_keys
+		SET status = $2, result_ref = $3
+		WHERE key = $1
+		  AND (status = 'intent_recorded' OR (status = 'failed' AND result_ref LIKE $4))
+		RETURNING key, scope, status, result_ref, expires_at, metadata, created_at, completed_at`,
+		key, toStatus, resultRef, retryableFailedPrefix+"%")
+	if err != nil {
+		return IdempotencyStartResult{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		var record IdempotencyKey
+		var metadata []byte
+		if err := rows.Scan(&record.Key, &record.Scope, &record.Status, &record.ResultRef, &record.ExpiresAt, &metadata, &record.CreatedAt, &record.CompletedAt); err != nil {
+			return IdempotencyStartResult{}, err
+		}
+		record.Metadata = json.RawMessage(metadata)
+		return IdempotencyStartResult{Started: true, Record: record}, nil
+	}
+	if err := rows.Err(); err != nil {
+		return IdempotencyStartResult{}, err
+	}
+	record, err := s.GetIdempotencyKey(ctx, key)
+	if err != nil {
+		return IdempotencyStartResult{}, err
+	}
+	return IdempotencyStartResult{Started: false, Record: record}, nil
+}
+
 func (s *PostgresStore) ListStartedIdempotencyKeys(ctx context.Context, scope string, createdBefore time.Time, limit int) ([]IdempotencyKey, error) {
 	if limit <= 0 {
 		limit = 100

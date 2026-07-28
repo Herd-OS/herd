@@ -2,6 +2,8 @@ package orchestration
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -71,9 +73,24 @@ func (s Service) OpenBatchPR(ctx context.Context, req OpenBatchPRRequest) (*plat
 	if pr.Title != req.Title || pr.Body != req.Body {
 		title := req.Title
 		body := req.Body
-		return s.Platform.PullRequests().Update(ctx, pr.Number, &title, &body)
+		updateKey := idempotencyKey("batch-pr-update", "repo", s.Repo.ID, "batch", req.BatchNumber, "pr", pr.Number, batchPRContentFingerprint(req.Title, req.Body))
+		if err := s.mutate(ctx, updateKey, "pull_request_update", func() (string, error) {
+			updated, err := s.Platform.PullRequests().Update(ctx, pr.Number, &title, &body)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("pr:%d", updated.Number), nil
+		}); err != nil {
+			return nil, err
+		}
+		return s.Platform.PullRequests().Get(ctx, pr.Number)
 	}
 	return pr, nil
+}
+
+func batchPRContentFingerprint(title, body string) string {
+	sum := sha256.Sum256([]byte(title + "\x00" + body))
+	return hex.EncodeToString(sum[:])
 }
 
 // BranchOperationRequest describes an idempotent branch mutation.

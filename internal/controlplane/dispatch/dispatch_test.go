@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -116,6 +117,37 @@ func TestDispatcherDuplicateDispatchIsIdempotent(t *testing.T) {
 	assert.Len(t, gh.calls, 1)
 	assert.Len(t, st.jobs, 1)
 	assert.Len(t, st.idempotencyKeys, 1)
+}
+
+func TestDispatcherConcurrentDuplicateDispatchesWorkflowOnce(t *testing.T) {
+	st := store.NewMemoryStore()
+	gh := &blockingWorkflowClient{entered: make(chan struct{}), release: make(chan struct{})}
+	req := validRequest()
+	dispatcher := Dispatcher{Store: st, GitHub: gh}
+
+	errs := make(chan error, 2)
+	go func() {
+		_, err := dispatcher.Dispatch(context.Background(), req)
+		errs <- err
+	}()
+	<-gh.entered
+	go func() {
+		_, err := dispatcher.Dispatch(context.Background(), req)
+		errs <- err
+	}()
+	close(gh.release)
+
+	firstErr := <-errs
+	secondErr := <-errs
+	if firstErr != nil {
+		assert.Contains(t, firstErr.Error(), "already in progress")
+	}
+	if secondErr != nil {
+		assert.Contains(t, secondErr.Error(), "already in progress")
+	}
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	assert.Len(t, gh.calls, 1)
 }
 
 func TestDispatcherAutomaticReviewDispatchDedupeUnchanged(t *testing.T) {
@@ -311,7 +343,7 @@ func TestDispatcherRetryAfterCompleteMutationFailureDoesNotRedispatch(t *testing
 	gh := &fakeWorkflowClient{}
 	req := validRequest()
 	key := IdempotencyKey(req)
-	st.completeMutationErrs[key] = []error{nil, errors.New("database down"), nil}
+	st.completeMutationErrs[key] = []error{errors.New("database down"), nil}
 
 	first, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 	require.Error(t, err)
@@ -334,7 +366,7 @@ func TestDispatcherRetryAfterAcceptedDispatchPersistenceFailuresDoesNotRedispatc
 	req := validRequest()
 	key := IdempotencyKey(req)
 	st.completeIdemErrs[key] = []error{errors.New("idempotency down")}
-	st.completeMutationErrs[key] = []error{nil, errors.New("mutation down"), nil}
+	st.completeMutationErrs[key] = []error{errors.New("mutation down"), nil}
 
 	_, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
 	require.Error(t, err)
@@ -702,6 +734,25 @@ func (s *fakeStore) CompleteGitHubMutationAttempt(_ context.Context, idempotency
 	return store.ErrNotFound
 }
 
+func (s *fakeStore) TryStartGitHubMutationAttempt(_ context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error) {
+	for i := range s.mutationAttempts {
+		if s.mutationAttempts[i].IdempotencyKey != idempotencyKey {
+			continue
+		}
+		for _, status := range allowedStatuses {
+			if s.mutationAttempts[i].Status == status {
+				s.mutationAttempts[i].Status = mutationStatusDispatching
+				s.mutationAttempts[i].Response = json.RawMessage(`{}`)
+				s.mutationAttempts[i].Error = ""
+				s.mutationAttempts[i].CompletedAt = &completedAt
+				return store.GitHubMutationStartResult{Started: true, Attempt: s.mutationAttempts[i]}, nil
+			}
+		}
+		return store.GitHubMutationStartResult{Started: false, Attempt: s.mutationAttempts[i]}, nil
+	}
+	return store.GitHubMutationStartResult{}, store.ErrNotFound
+}
+
 func (s *fakeStore) GetGitHubMutationAttempt(_ context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error) {
 	for _, attempt := range s.mutationAttempts {
 		if attempt.IdempotencyKey == idempotencyKey {
@@ -813,6 +864,34 @@ func (c *fakeWorkflowClient) DispatchWorkflow(_ context.Context, installationID 
 		inputs:         copied,
 	})
 	return nil
+}
+
+type blockingWorkflowClient struct {
+	mu      sync.Mutex
+	entered chan struct{}
+	release chan struct{}
+	calls   []workflowCall
+	once    sync.Once
+}
+
+func (c *blockingWorkflowClient) DispatchWorkflow(ctx context.Context, installationID int64, owner, repo, workflowFile, ref string, inputs map[string]string) error {
+	c.mu.Lock()
+	c.calls = append(c.calls, workflowCall{
+		installationID: installationID,
+		owner:          owner,
+		repo:           repo,
+		workflowFile:   workflowFile,
+		ref:            ref,
+		inputs:         inputs,
+	})
+	c.mu.Unlock()
+	c.once.Do(func() { close(c.entered) })
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.release:
+		return nil
+	}
 }
 
 type fakeTokenSource struct {

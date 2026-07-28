@@ -62,7 +62,7 @@ type Store interface {
 }
 
 type idempotencyTransitionStore interface {
-	TransitionIdempotencyKey(ctx context.Context, key string, fromStatus string, toStatus string, resultRef string) (bool, error)
+	TryStartIdempotencyKey(ctx context.Context, key string, toStatus string, resultRef string, retryableFailedPrefix string) (store.IdempotencyStartResult, error)
 }
 
 type TokenMinter interface {
@@ -137,12 +137,12 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "runner registration storage does not support atomic mutation phases"})
 		return
 	}
-	acquired, err := transitioner.TransitionIdempotencyKey(r.Context(), idempotencyKey, idempotencyStatusStarted, "failed", mutationspkg.PhaseCallStarted)
+	start, err := transitioner.TryStartIdempotencyKey(r.Context(), idempotencyKey, "failed", mutationspkg.PhaseCallStarted, mutationspkg.PhaseFailedPreCall+":")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark runner registration token mint started"})
 		return
 	}
-	if !acquired {
+	if !start.Started {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
 		return
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -350,6 +351,23 @@ func (s *MemoryStore) TransitionIdempotencyKey(_ context.Context, key string, fr
 	record.ResultRef = resultRef
 	s.idempotencyKeys[key] = record
 	return true, nil
+}
+
+func (s *MemoryStore) TryStartIdempotencyKey(_ context.Context, key string, toStatus string, resultRef string, retryableFailedPrefix string) (IdempotencyStartResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idempotencyKeys[key]
+	if !ok {
+		return IdempotencyStartResult{}, ErrNotFound
+	}
+	retryableFailed := record.Status == "failed" && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
+	if record.Status != mutations.PhaseIntentRecorded && !retryableFailed {
+		return IdempotencyStartResult{Started: false, Record: record}, nil
+	}
+	record.Status = toStatus
+	record.ResultRef = resultRef
+	s.idempotencyKeys[key] = record
+	return IdempotencyStartResult{Started: true, Record: record}, nil
 }
 
 func (s *MemoryStore) ListStartedIdempotencyKeys(_ context.Context, scope string, createdBefore time.Time, limit int) ([]IdempotencyKey, error) {

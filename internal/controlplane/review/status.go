@@ -50,6 +50,7 @@ type StatusMutationStore interface {
 	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
+	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
 }
 
 type StatusClient interface {
@@ -116,9 +117,9 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 			if repaired, err := s.repairStartedStatusMutation(ctx, idem, statusKey, repo, prNumber, headSHA, status, state, description, targetURL, now); repaired || err != nil {
 				return err
 			}
-			if reopened, err := s.reopenPreCallStatusMutation(ctx, statusKey, now); err != nil {
+			if preCall, err := s.statusMutationPreCallRetryable(ctx, statusKey); err != nil {
 				return err
-			} else if !reopened {
+			} else if !preCall {
 				return fmt.Errorf("herd review status %q is already in progress", statusKey)
 			}
 		}
@@ -147,17 +148,20 @@ func (s StatusService) SetHerdReviewStatus(ctx context.Context, repo Repository,
 	return s.recordReviewState(ctx, repo, prNumber, headSHA, state, description, targetURL, now)
 }
 
-func (s StatusService) reopenPreCallStatusMutation(ctx context.Context, key string, now time.Time) (bool, error) {
+func (s StatusService) statusMutationPreCallRetryable(ctx context.Context, key string) (bool, error) {
 	mutationStore, ok := s.Store.(StatusMutationStore)
 	if !ok {
 		return false, nil
 	}
 	attempt, err := mutationStore.GetGitHubMutationAttempt(ctx, key)
-	if err != nil || !mutationspkg.IsPreCallRetryable(attempt.Status) {
-		return false, nil
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get Herd Review status mutation attempt: %w", err)
 	}
-	if err := mutationStore.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseIntentRecorded, nil, "", now); err != nil {
-		return true, fmt.Errorf("reopen Herd Review status mutation attempt: %w", err)
+	if !mutationspkg.IsPreCallRetryable(attempt.Status) {
+		return false, nil
 	}
 	return true, nil
 }
@@ -201,9 +205,6 @@ func (s StatusService) ensureStatusMutationAttempt(ctx context.Context, key stri
 		case mutationspkg.PhaseCompleted:
 			return nil
 		case mutationspkg.PhaseFailedPreCall:
-			if err := mutationStore.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseIntentRecorded, nil, "", now); err != nil {
-				return fmt.Errorf("reopen Herd Review status mutation attempt: %w", err)
-			}
 			return nil
 		case mutationspkg.PhaseIntentRecorded:
 			return nil
@@ -239,9 +240,13 @@ func (s StatusService) markStatusMutationCallStarted(ctx context.Context, key st
 	if !ok {
 		return fmt.Errorf("review status mutation store is required")
 	}
-	if err := mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCallStarted, nil, "", now); err != nil {
+	start, err := mutations.TryStartGitHubMutationAttempt(ctx, key, []string{mutationspkg.PhaseIntentRecorded, mutationspkg.PhaseFailedPreCall}, now)
+	if err != nil {
 		_ = mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseFailedPreCall, nil, err.Error(), now)
 		return fmt.Errorf("mark Herd Review status mutation call started: %w", err)
+	}
+	if !start.Started {
+		return fmt.Errorf("herd review status mutation attempt %q is %s; repair required before retry", key, start.Attempt.Status)
 	}
 	return nil
 }

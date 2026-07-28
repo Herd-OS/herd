@@ -439,9 +439,17 @@ func (h Handler) markReviewResultMutationCallStarted(ctx context.Context, key st
 	if !ok {
 		return fmt.Errorf("review result mutation recorder is not configured")
 	}
-	if err := recorder.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCallStarted, nil, "", h.now()); err != nil {
+	starter, ok := h.store.(MutationStarter)
+	if !ok {
+		return fmt.Errorf("review result mutation starter is not configured")
+	}
+	start, err := starter.TryStartGitHubMutationAttempt(ctx, key, []string{mutationspkg.PhaseIntentRecorded, mutationspkg.PhaseFailedPreCall}, h.now())
+	if err != nil {
 		_ = recorder.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseFailedPreCall, nil, err.Error(), h.now())
 		return fmt.Errorf("mark review result mutation call started: %w", err)
+	}
+	if !start.Started {
+		return fmt.Errorf("review result mutation %q is %s; repair required before retry", key, start.Attempt.Status)
 	}
 	return nil
 }

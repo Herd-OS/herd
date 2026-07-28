@@ -226,7 +226,7 @@ func TestHandlerMarksMalformedAcceptedDeliveryFailed(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Len(t, st.deliveries, 1)
-	assert.Equal(t, "failed", st.deliveries[0].Status)
+	assert.Equal(t, "failed_pre_processor", st.deliveries[0].Status)
 	assert.NotEmpty(t, st.deliveries[0].Error)
 }
 
@@ -291,6 +291,49 @@ func TestHandlerIssueCommentCommandSink(t *testing.T) {
 	assert.Equal(t, "mona", command.Actor)
 }
 
+func TestHandlerIssueCommentMarkProcessedFailureDoesNotReenqueueOnRedelivery(t *testing.T) {
+	payload := []byte(`{
+		"action":"created",
+		"installation":{"id":42},
+		"repository":{"id":99,"name":"herd","owner":{"login":"octo-org"},"default_branch":"main"},
+		"issue":{"number":7,"pull_request":{"url":"https://api.github.com/repos/octo-org/herd/pulls/7"}},
+		"comment":{"id":123,"body":"@herd-os review","author_association":"OWNER","user":{"login":"mona","type":"User"}},
+		"sender":{"login":"mona","type":"User"}
+	}`)
+	store := &fakeStore{
+		failProcessedUpdate: true,
+		repositoriesByName: map[string]store.Repository{
+			"octo-org/herd": {ID: 10, Owner: "octo-org", Name: "herd", InstallationID: 42},
+		},
+	}
+	handler := NewHandler("secret", store, log.New(io.Discard, "", 0))
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-processed-fail")
+	req.Header.Set("X-GitHub-Event", EventIssueComment)
+	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Len(t, store.commands, 1)
+	require.Len(t, store.deliveries, 1)
+	assert.Equal(t, "processor_started", store.deliveries[0].Status)
+
+	store.failProcessedUpdate = false
+	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-processed-fail")
+	req.Header.Set("X-GitHub-Event", EventIssueComment)
+	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+	rec = httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Len(t, store.commands, 1)
+	assert.Equal(t, "processor_started", store.deliveries[0].Status)
+}
+
 func TestHandlerUpsertFailureReturnsServerError(t *testing.T) {
 	payload := []byte(`{
 		"action":"created",
@@ -308,10 +351,10 @@ func TestHandlerUpsertFailureReturnsServerError(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Len(t, store.deliveries, 1)
-	assert.Equal(t, "failed", store.deliveries[0].Status)
+	assert.Equal(t, "repair_required", store.deliveries[0].Status)
 }
 
-func TestHandlerRetriesFailedDeliveryOnRedelivery(t *testing.T) {
+func TestHandlerDoesNotRetryProcessorStartedDeliveryOnRedelivery(t *testing.T) {
 	payload := []byte(`{
 		"action":"created",
 		"installation":{"id":42,"account":{"login":"octo-org","id":100,"type":"Organization"}},
@@ -330,7 +373,7 @@ func TestHandlerRetriesFailedDeliveryOnRedelivery(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Len(t, store.repositories, 0)
 	require.Len(t, store.deliveries, 1)
-	assert.Equal(t, "failed", store.deliveries[0].Status)
+	assert.Equal(t, "repair_required", store.deliveries[0].Status)
 
 	store.upsertRepoErr = nil
 	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
@@ -341,9 +384,9 @@ func TestHandlerRetriesFailedDeliveryOnRedelivery(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
-	require.Len(t, store.repositories, 1)
-	require.Len(t, store.deliveries, 2)
-	assert.Equal(t, "processed", store.deliveries[0].Status)
+	require.Len(t, store.repositories, 0)
+	require.Len(t, store.deliveries, 1)
+	assert.Equal(t, "repair_required", store.deliveries[0].Status)
 }
 
 func sign(secret string, payload []byte) string {
@@ -357,10 +400,11 @@ func boolPtr(value bool) *bool {
 }
 
 type fakeStore struct {
-	recordCreated *bool
-	recordErr     error
-	upsertInstErr error
-	upsertRepoErr error
+	recordCreated       *bool
+	recordErr           error
+	upsertInstErr       error
+	upsertRepoErr       error
+	failProcessedUpdate bool
 
 	deliveries    []store.WebhookDelivery
 	installations []store.Installation
@@ -384,10 +428,6 @@ func (s *fakeStore) RecordWebhookDelivery(_ context.Context, d store.WebhookDeli
 	}
 	for _, existing := range s.deliveries {
 		if existing.DeliveryID == d.DeliveryID {
-			if existing.Status != "processed" {
-				s.deliveries = append(s.deliveries, d)
-				return true, nil
-			}
 			return false, nil
 		}
 	}
@@ -405,6 +445,9 @@ func (s *fakeStore) GetWebhookDelivery(_ context.Context, deliveryID string) (st
 }
 
 func (s *fakeStore) UpdateWebhookDeliveryStatus(_ context.Context, deliveryID string, status string, errorMessage string, processedAt *time.Time) error {
+	if status == "processed" && s.failProcessedUpdate {
+		return errors.New("processed update failed")
+	}
 	for i := range s.deliveries {
 		if s.deliveries[i].DeliveryID == deliveryID {
 			s.deliveries[i].Status = status

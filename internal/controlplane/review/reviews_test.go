@@ -11,6 +11,7 @@ import (
 	"time"
 
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -187,7 +188,7 @@ func TestSubmitPRReviewOnceFailedRecordWithoutMutationRecordsAttemptBeforeReview
 func TestSubmitPRReviewOnceFailedUnknownOutcomeDoesNotCreateDuplicateReview(t *testing.T) {
 	gh := &fakeReviewGitHub{}
 	mutations := newFakeReviewMutationStore()
-	mutations.completeMutationErrs = []error{nil, errors.New("database down")}
+	mutations.completeMutationErrs = []error{errors.New("database down")}
 	svc := ReviewService{GitHub: gh, Mutations: mutations}
 	repo := testRepo(true)
 	result := reviewResult(ResultStatusApproved, "head")
@@ -536,6 +537,26 @@ func (s *fakeReviewMutationStore) GetGitHubMutationAttempt(_ context.Context, id
 		return store.GitHubMutationAttempt{}, store.ErrNotFound
 	}
 	return attempt, nil
+}
+
+func (s *fakeReviewMutationStore) TryStartGitHubMutationAttempt(_ context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attempt, ok := s.mutations[idempotencyKey]
+	if !ok {
+		return store.GitHubMutationStartResult{}, store.ErrNotFound
+	}
+	for _, status := range allowedStatuses {
+		if attempt.Status == status {
+			attempt.Status = mutationspkg.PhaseCallStarted
+			attempt.Response = json.RawMessage(`{}`)
+			attempt.Error = ""
+			attempt.CompletedAt = &completedAt
+			s.mutations[idempotencyKey] = attempt
+			return store.GitHubMutationStartResult{Started: true, Attempt: attempt}, nil
+		}
+	}
+	return store.GitHubMutationStartResult{Started: false, Attempt: attempt}, nil
 }
 
 type fakeLockStore struct {

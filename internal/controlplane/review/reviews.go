@@ -111,6 +111,7 @@ type ReviewMutationStore interface {
 	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
+	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
 }
 
 func (s ReviewService) MarkReviewPending(ctx context.Context, repo Repository, prNumber int, headSHA string, description, targetURL string) error {
@@ -320,10 +321,14 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		}
 		return fmt.Errorf("record review submission mutation attempt: %w", err)
 	}
-	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCallStarted, nil, "", s.now()); err != nil {
+	start, err := s.Mutations.TryStartGitHubMutationAttempt(ctx, key, []string{mutationspkg.PhaseIntentRecorded, mutationspkg.PhaseFailedPreCall}, s.now())
+	if err != nil {
 		_ = s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseFailedPreCall, nil, err.Error(), s.now())
 		_ = s.Mutations.FailIdempotencyKey(ctx, key, err.Error())
 		return fmt.Errorf("mark review submission mutation call started: %w", err)
+	}
+	if !start.Started {
+		return fmt.Errorf("%w: %s mutation is %s", ErrReviewSubmissionInProgress, key, start.Attempt.Status)
 	}
 	if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA); err != nil {
 		_ = s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseRepairRequired, nil, err.Error(), s.now())

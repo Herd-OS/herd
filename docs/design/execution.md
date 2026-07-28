@@ -1309,6 +1309,9 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 | `@herd-os resolve-conflicts <context>` | App mention | PR | Same as above, with extra context included in the resolver issue |
 | `@herd-os dispatch` | App mention | Issue | Dispatch the current issue (must be ready or failed) |
 | `@herd-os dispatch <N>` | App mention | Issue or PR | Dispatch issue #N (must be ready or failed) |
+| `@herd-os retry` | App mention | Issue or PR | Retry the failed current issue or resume the batch PR's hosted integrator recovery flow |
+| `@herd-os retry <issue-number>` | App mention | Issue or PR | Retry failed issue #N through the hosted command path |
+| `@herd-os integrate` | App mention | Batch PR | Resume hosted integrator recovery: consolidate remaining worker branches, check CI, advance tiers, and run review |
 | `herd review <pr-number>` | CLI | Local terminal | Open an interactive Claude Code session pre-loaded with diff coverage, comments, CI status, and chunk 1/N of the PR diff. The agent acts as a reviewer assistant — you drive the conversation; it can read code and discuss findings, and it drafts `@herd-os fix` comments for any actionable changes (it never edits files locally). It does NOT auto-dispatch workers or create issues. |
 | `herd dashboard` | CLI | Local terminal | Live read-only TUI showing active workers, open batches, and recent failures. Refreshes on a `--refresh-seconds` timer (default 15, clamp 5–300). Keybinds: `q` quit, `r` refresh, ↑/↓ select batch, Enter to open the batch's PR or milestone. Worker rows render as OSC 8 hyperlinks where supported. Single-repo and read-only in v1. |
 
@@ -1358,10 +1361,10 @@ When integrator steps fail, the CLI posts a comment on the relevant issue or bat
 ```
 ⚠️ **Integrator failed** during <step>: <error>
 
-Retry the integrator from the local CLI after addressing the failure.
+Retry the integrator with `@herd-os integrate` on the batch PR after addressing the failure, or use `@herd-os retry` / `@herd-os retry <issue-number>` for failed issue work.
 ```
 
-Manual integrator recovery remains a local CLI operation until it is wired through the hosted App/control-plane command path. The cycle runs: consolidate any remaining worker branches → check CI → advance tiers → review.
+Manual integrator recovery is available through the hosted App/control-plane command path. The cycle runs: consolidate any remaining worker branches → check CI → advance tiers → review.
 
 Comments are posted to the issue being processed (for run-based triggers) or the batch PR (for batch-based triggers).
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -160,7 +161,7 @@ func TestSetHerdReviewStatusRetryAfterCompleteIdempotencyFailureRepairsFromMutat
 
 func TestSetHerdReviewStatusReturnsMutationCompletionFailure(t *testing.T) {
 	ctx := context.Background()
-	st := &fakeStatusStore{mutationCompleteErrs: []error{nil, errors.New("database down")}}
+	st := &fakeStatusStore{mutationCompleteErrs: []error{errors.New("database down")}}
 	gh := &fakeStatusGitHub{}
 	svc := StatusService{Store: st, GitHub: gh}
 
@@ -176,7 +177,7 @@ func TestSetHerdReviewStatusReturnsMutationCompletionFailure(t *testing.T) {
 
 func TestSetHerdReviewStatusRetryAfterMutationCompletionFailureRepairsStartedAttempt(t *testing.T) {
 	ctx := context.Background()
-	st := &fakeStatusStore{mutationCompleteErrs: []error{nil, errors.New("database down"), nil}}
+	st := &fakeStatusStore{mutationCompleteErrs: []error{errors.New("database down"), nil}}
 	gh := &fakeStatusGitHub{}
 	svc := StatusService{Store: st, GitHub: gh}
 
@@ -413,6 +414,25 @@ func (s *fakeStatusStore) GetGitHubMutationAttempt(_ context.Context, key string
 		}
 	}
 	return store.GitHubMutationAttempt{}, store.ErrNotFound
+}
+
+func (s *fakeStatusStore) TryStartGitHubMutationAttempt(_ context.Context, key string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error) {
+	for i := range s.mutationAttempts {
+		if s.mutationAttempts[i].IdempotencyKey != key {
+			continue
+		}
+		for _, status := range allowedStatuses {
+			if s.mutationAttempts[i].Status == status {
+				s.mutationAttempts[i].Status = mutationspkg.PhaseCallStarted
+				s.mutationAttempts[i].Response = json.RawMessage(`{}`)
+				s.mutationAttempts[i].Error = ""
+				s.mutationAttempts[i].CompletedAt = &completedAt
+				return store.GitHubMutationStartResult{Started: true, Attempt: s.mutationAttempts[i]}, nil
+			}
+		}
+		return store.GitHubMutationStartResult{Started: false, Attempt: s.mutationAttempts[i]}, nil
+	}
+	return store.GitHubMutationStartResult{}, store.ErrNotFound
 }
 
 func (s *fakeStatusStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
