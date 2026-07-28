@@ -306,6 +306,9 @@ type mockWorkflowService struct {
 	listResult             []*platform.Run
 	listResultByStatus     map[string][]*platform.Run // optional: keyed by RunFilters.Status
 	dispatched             []map[string]string
+	dispatchedWorkflows    []string
+	dispatchedRefs         []string
+	dispatchErr            error
 	onDispatch             func() // optional; called before recording each dispatch
 	lastListRunFilter      platform.RunFilters
 	listRunFilters         []platform.RunFilters
@@ -313,7 +316,7 @@ type mockWorkflowService struct {
 }
 
 func (m *mockWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) { return 0, nil }
-func (m *mockWorkflowService) Dispatch(ctx context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
+func (m *mockWorkflowService) Dispatch(ctx context.Context, workflow, ref string, inputs map[string]string) (*platform.Run, error) {
 	if m.respectCanceledContext {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -322,7 +325,12 @@ func (m *mockWorkflowService) Dispatch(ctx context.Context, _, _ string, inputs 
 	if m.onDispatch != nil {
 		m.onDispatch()
 	}
+	if m.dispatchErr != nil {
+		return nil, m.dispatchErr
+	}
 	m.dispatched = append(m.dispatched, inputs)
+	m.dispatchedWorkflows = append(m.dispatchedWorkflows, workflow)
+	m.dispatchedRefs = append(m.dispatchedRefs, ref)
 	return nil, nil
 }
 func (m *mockWorkflowService) GetRun(_ context.Context, id int64) (*platform.Run, error) {

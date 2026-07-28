@@ -181,6 +181,80 @@ func TestValidate_IntegratorReviewDiff(t *testing.T) {
 	}
 }
 
+func TestValidate_IntegratorReviewNonConvergence(t *testing.T) {
+	tests := []struct {
+		name      string
+		modify    func(*ReviewNonConvergence)
+		wantError string
+	}{
+		{
+			name: "defaults are valid",
+		},
+		{
+			name: "disabled with valid values is valid",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.Enabled = false
+			},
+		},
+		{
+			name: "window zero is invalid",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.Window = 0
+			},
+			wantError: "integrator.review_non_convergence.window must be > 0",
+		},
+		{
+			name: "window negative is invalid",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.Window = -1
+			},
+			wantError: "integrator.review_non_convergence.window must be > 0",
+		},
+		{
+			name: "min completed cycles zero is invalid",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.MinCompletedCycles = 0
+			},
+			wantError: "integrator.review_non_convergence.min_completed_cycles must be > 0",
+		},
+		{
+			name: "min completed cycles negative is invalid",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.MinCompletedCycles = -1
+			},
+			wantError: "integrator.review_non_convergence.min_completed_cycles must be > 0",
+		},
+		{
+			name: "disabled invalid values are still rejected",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.Enabled = false
+				rnc.Window = 0
+				rnc.MinCompletedCycles = 0
+			},
+			wantError: "integrator.review_non_convergence.window must be > 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Platform.Owner = "org"
+			cfg.Platform.Repo = "repo"
+			if tt.modify != nil {
+				tt.modify(&cfg.Integrator.ReviewNonConvergence)
+			}
+
+			ve := Validate(cfg)
+			if tt.wantError != "" {
+				require.NotNil(t, ve)
+				assert.Contains(t, ve.Error(), tt.wantError)
+			} else {
+				assert.Nil(t, ve)
+			}
+		})
+	}
+}
+
 func TestValidate_ImagePublishRunsOn(t *testing.T) {
 	tests := []struct {
 		name       string
