@@ -730,6 +730,68 @@ func TestProductionFixCommandRecoversCreatedIssueAfterCompletionFailure(t *testi
 	assert.NotEqual(t, "849", workflow.dispatches[0].inputs["issue_number"])
 }
 
+func TestProductionFixCommandRepairsUnknownCreateWithoutSecondIssue(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{{
+		Number:  849,
+		Head:    "herd/batch/106-hosted-app",
+		Base:    "main",
+		HeadSHA: "head-sha",
+		BaseSHA: "base-sha",
+	}})
+	p.ms.milestones[106] = &platform.Milestone{Number: 106, Title: "Hosted App"}
+	workflow := &recordingWorkflowClient{}
+	st := store.NewMemoryStore()
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: st, GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+	cmd := commands.DispatchCommand{
+		RepositoryID:   42,
+		InstallationID: 77,
+		Owner:          "octo",
+		Repo:           "herd",
+		PRNumber:       849,
+		CommentID:      123,
+		Actor:          "maintainer",
+		Command:        commands.ParsedCommand{Kind: commands.CommandFix, Args: []string{"update", "auth", "error", "handling"}},
+	}
+	key := commandFixIssueKey(cmd)
+	_, err := st.AcquireIdempotencyKey(context.Background(), store.IdempotencyKey{Key: key, Scope: "command_fix_issue_create", Status: mutations.PhaseIntentRecorded, CreatedAt: time.Now().UTC()})
+	require.NoError(t, err)
+	require.NoError(t, st.RecordGitHubMutationAttempt(context.Background(), store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		RepositoryID:   42,
+		MutationType:   "command_fix_issue_create",
+		Status:         mutations.PhaseRepairRequired,
+		CreatedAt:      time.Now().UTC(),
+	}))
+	created := &platform.Issue{
+		Number:    100,
+		Title:     "Fix: update auth error handling",
+		Body:      injectCommandFixIssueMarker(issues.RenderBody(issues.IssueBody{FrontMatter: issues.FrontMatter{Version: 1, Batch: 106, Type: "fix", FixCycle: 1, BatchPR: 849}, Task: "update auth error handling"}), cmd),
+		Labels:    []string{issues.TypeFix, issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 106},
+	}
+	p.issues.created = append(p.issues.created, created)
+	p.issues.byNumber[100] = created
+
+	err = d.DispatchCommand(context.Background(), cmd)
+
+	require.NoError(t, err)
+	assert.Len(t, p.issues.created, 1)
+	require.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
+	record, err := st.GetIdempotencyKey(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, mutations.PhaseCompleted, record.Status)
+	assert.Equal(t, "issue:100", record.ResultRef)
+}
+
 func validProductionServiceConfig(t *testing.T) service.Config {
 	t.Helper()
 	return service.Config{

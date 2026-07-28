@@ -22,6 +22,8 @@ func TestRunMutationBoundaryConverges(t *testing.T) {
 		wantErr    string
 		wantResult string
 		wantStatus string
+		repair     func() (string, bool, error)
+		wantReplay bool
 	}{
 		{
 			name:       "records starts and completes one visible mutation",
@@ -36,6 +38,7 @@ func TestRunMutationBoundaryConverges(t *testing.T) {
 			},
 			wantResult: "issue:1",
 			wantStatus: mutations.PhaseCompleted,
+			wantReplay: true,
 		},
 		{
 			name: "retries failed pre-call mutation",
@@ -53,6 +56,18 @@ func TestRunMutationBoundaryConverges(t *testing.T) {
 			},
 			wantErr:    "repair required before retry",
 			wantStatus: mutations.PhaseCallStarted,
+		},
+		{
+			name: "repairs unknown post-call mutation without repeating call",
+			setup: func(st *fakeBoundaryStore) {
+				st.attempts["k"] = store.GitHubMutationAttempt{IdempotencyKey: "k", Status: mutations.PhaseRepairRequired}
+			},
+			repair: func() (string, bool, error) {
+				return "issue:7", true, nil
+			},
+			wantResult: "issue:7",
+			wantStatus: mutations.PhaseCompleted,
+			wantReplay: true,
 		},
 		{
 			name:       "failed API call becomes repair required",
@@ -79,7 +94,8 @@ func TestRunMutationBoundaryConverges(t *testing.T) {
 					calls++
 					return "issue:1", tt.mutateErr
 				},
-				Now: fixedBoundaryTime,
+				Repair: tt.repair,
+				Now:    fixedBoundaryTime,
 			})
 
 			if tt.wantErr != "" {
@@ -90,6 +106,7 @@ func TestRunMutationBoundaryConverges(t *testing.T) {
 			}
 			assert.Equal(t, tt.wantCalls, calls)
 			assert.Equal(t, tt.wantResult, result.ResultRef)
+			assert.Equal(t, tt.wantReplay, result.Replayed)
 			assert.Equal(t, tt.wantStatus, st.attempts["k"].Status)
 		})
 	}

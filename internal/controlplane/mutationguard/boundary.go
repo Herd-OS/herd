@@ -35,8 +35,10 @@ type RunRequest struct {
 	Request      json.RawMessage
 	ResultRef    func(json.RawMessage) string
 	Response     func(resultRef string) json.RawMessage
+	Accepted     func(resultRef string, response json.RawMessage) string
 	Preflight    func() error
 	Mutate       func() (string, error)
+	Repair       func() (string, bool, error)
 	Now          func() time.Time
 }
 
@@ -58,8 +60,14 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 	if req.Mutate == nil {
 		return RunResult{}, fmt.Errorf("mutation function is required")
 	}
-	if err := recordIntent(ctx, st, req); err != nil {
+	replay, existing, err := recordIntent(ctx, st, req)
+	if err != nil {
 		return RunResult{}, err
+	}
+	if existing {
+		if result, handled, err := convergeExisting(ctx, st, req, replay); handled || err != nil {
+			return result, err
+		}
 	}
 	if req.Preflight != nil {
 		if err := req.Preflight(); err != nil {
@@ -84,6 +92,9 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 				return RunResult{ResultRef: resultRef, Replayed: true}, nil
 			}
 		}
+		if result, repaired, err := repairUnknown(ctx, st, req); repaired || err != nil {
+			return result, err
+		}
 		return RunResult{}, fmt.Errorf("mutation attempt %q is %s; repair required before retry", req.Key, mutations.Normalize(start.Attempt.Status))
 	}
 	resultRef, err := req.Mutate()
@@ -99,6 +110,11 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 		return RunResult{}, err
 	}
 	response := response(req, resultRef)
+	if req.Accepted != nil {
+		if acceptedRef := strings.TrimSpace(req.Accepted(resultRef, response)); acceptedRef != "" {
+			_ = st.FailIdempotencyKey(ctx, req.Key, acceptedRef)
+		}
+	}
 	if err := st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseCompleted, response, "", now(req.Now)); err != nil {
 		if idemErr := st.CompleteIdempotencyKey(ctx, req.Key, resultRef); idemErr != nil {
 			return RunResult{}, fmt.Errorf("complete mutation attempt: %w; complete idempotency key after mutation attempt failure: %v", err, idemErr)
@@ -111,7 +127,7 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 	return RunResult{ResultRef: resultRef}, nil
 }
 
-func recordIntent(ctx context.Context, st Store, req RunRequest) error {
+func recordIntent(ctx context.Context, st Store, req RunRequest) (store.GitHubMutationAttempt, bool, error) {
 	if err := st.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
 		IdempotencyKey: req.Key,
 		RepositoryID:   req.RepositoryID,
@@ -122,19 +138,60 @@ func recordIntent(ctx context.Context, st Store, req RunRequest) error {
 	}); err != nil {
 		if !errors.Is(err, store.ErrAlreadyExists) {
 			_ = st.FailIdempotencyKey(ctx, req.Key, err.Error())
-			return fmt.Errorf("record mutation attempt: %w", err)
+			return store.GitHubMutationAttempt{}, false, fmt.Errorf("record mutation attempt: %w", err)
 		}
 		attempt, readErr := st.GetGitHubMutationAttempt(ctx, req.Key)
 		if readErr != nil {
 			_ = st.FailIdempotencyKey(ctx, req.Key, readErr.Error())
-			return fmt.Errorf("get existing mutation attempt: %w", readErr)
+			return store.GitHubMutationAttempt{}, false, fmt.Errorf("get existing mutation attempt: %w", readErr)
 		}
 		if !mutations.IsPreCallRetryable(attempt.Status) && !mutations.IsCompleted(attempt.Status) {
-			_ = st.FailIdempotencyKey(ctx, req.Key, err.Error())
-			return fmt.Errorf("mutation attempt %q is %s; repair required before retry", req.Key, mutations.Normalize(attempt.Status))
+			return attempt, true, nil
+		}
+		return attempt, true, nil
+	}
+	return store.GitHubMutationAttempt{}, false, nil
+}
+
+func convergeExisting(ctx context.Context, st Store, req RunRequest, attempt store.GitHubMutationAttempt) (RunResult, bool, error) {
+	if mutations.IsCompleted(attempt.Status) {
+		resultRef := resultRef(req, attempt.Response)
+		if strings.TrimSpace(resultRef) != "" {
+			if err := st.CompleteIdempotencyKey(ctx, req.Key, resultRef); err != nil {
+				return RunResult{}, true, fmt.Errorf("repair idempotency key: %w", err)
+			}
+			return RunResult{ResultRef: resultRef, Replayed: true}, true, nil
 		}
 	}
-	return nil
+	if mutations.IsPreCallRetryable(attempt.Status) {
+		return RunResult{}, false, nil
+	}
+	if result, repaired, err := repairUnknown(ctx, st, req); repaired || err != nil {
+		return result, true, err
+	}
+	_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseRepairRequired)
+	return RunResult{}, true, fmt.Errorf("mutation attempt %q is %s; repair required before retry", req.Key, mutations.Normalize(attempt.Status))
+}
+
+func repairUnknown(ctx context.Context, st Store, req RunRequest) (RunResult, bool, error) {
+	if req.Repair == nil {
+		return RunResult{}, false, nil
+	}
+	resultRef, repaired, err := req.Repair()
+	if err != nil {
+		return RunResult{}, true, err
+	}
+	if !repaired {
+		return RunResult{}, false, nil
+	}
+	response := response(req, resultRef)
+	if err := st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseCompleted, response, "", now(req.Now)); err != nil {
+		return RunResult{}, true, fmt.Errorf("complete repaired mutation attempt: %w", err)
+	}
+	if err := st.CompleteIdempotencyKey(ctx, req.Key, resultRef); err != nil {
+		return RunResult{}, true, fmt.Errorf("complete repaired idempotency key: %w", err)
+	}
+	return RunResult{ResultRef: resultRef, Replayed: true}, true, nil
 }
 
 func resultRef(req RunRequest, response json.RawMessage) string {

@@ -14,6 +14,7 @@ import (
 	gh "github.com/google/go-github/v68/github"
 	"github.com/google/uuid"
 	"github.com/herd-os/herd/internal/appauth"
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 )
@@ -217,107 +218,64 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		}
 	}
 
-	if err := d.recordMutationAttempt(ctx, req, idempotencyKey, inputs, now); err != nil {
-		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
+	requestJSON, err := workflowDispatchRequest(req, inputs)
+	if err != nil {
+		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseFailedPreCall+":"+err.Error())
 		return DispatchResult{}, err
 	}
-	if err := d.markMutationDispatching(ctx, idempotencyKey); err != nil {
-		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
-		return DispatchResult{}, err
+	mutationStore, ok := d.Store.(mutationguard.Store)
+	if !ok {
+		return DispatchResult{}, fmt.Errorf("workflow dispatch mutation store is required")
 	}
-
-	if err := d.GitHub.DispatchWorkflow(ctx, req.InstallationID, req.Owner, req.Repo, req.WorkflowFile, req.Ref, inputs); err != nil {
-		var preCallErr PreCallError
-		if errors.As(err, &preCallErr) {
-			d.recordMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-				Status:      mutations.PhaseFailedPreCall,
-				Error:       err.Error(),
-				CompletedAt: time.Now().UTC(),
-			})
-			_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseFailedPreCall+":"+err.Error())
-			return DispatchResult{}, fmt.Errorf("prepare workflow dispatch: %w", err)
-		}
-		d.recordMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-			Status:      mutationStatusUnknown,
-			Error:       err.Error(),
-			CompletedAt: time.Now().UTC(),
-		})
-		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
-		return DispatchResult{}, fmt.Errorf("dispatch workflow outcome is unknown after GitHub call: %w", err)
-	}
-
-	result := DispatchResult{
+	expected := DispatchResult{
 		JobID:   jobID,
 		URL:     workflowURL(req.Owner, req.Repo),
 		Created: true,
 	}
-	resultJSON, err := json.Marshal(result)
+	resultJSON, err := json.Marshal(expected)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("marshal dispatch result: %w", err)
 	}
-	_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, "dispatch_accepted:"+string(resultJSON))
-	if err := d.Store.CompleteIdempotencyKey(ctx, idempotencyKey, string(resultJSON)); err != nil {
-		mutationErr := d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-			Status:      mutations.PhaseCompleted,
-			Response:    json.RawMessage(resultJSON),
-			CompletedAt: time.Now().UTC(),
-		})
-		if mutationErr != nil {
-			return DispatchResult{}, fmt.Errorf("complete dispatch idempotency key: %w; complete workflow dispatch mutation attempt after GitHub accepted dispatch: %v", err, mutationErr)
-		}
-		return DispatchResult{}, fmt.Errorf("complete dispatch idempotency key: %w", err)
+	run, err := mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
+		Key:          idempotencyKey,
+		RepositoryID: req.RepoID,
+		MutationType: "workflow_dispatch",
+		Request:      requestJSON,
+		ResultRef:    workflowDispatchResultRef,
+		Response: func(string) json.RawMessage {
+			return json.RawMessage(resultJSON)
+		},
+		Accepted: func(_ string, response json.RawMessage) string {
+			return "dispatch_accepted:" + string(response)
+		},
+		Mutate: func() (string, error) {
+			if err := d.GitHub.DispatchWorkflow(ctx, req.InstallationID, req.Owner, req.Repo, req.WorkflowFile, req.Ref, inputs); err != nil {
+				var preCallErr PreCallError
+				if errors.As(err, &preCallErr) {
+					return "", err
+				}
+				return "", fmt.Errorf("dispatch workflow outcome is unknown after GitHub call: %w", err)
+			}
+			return string(resultJSON), nil
+		},
+		Now: time.Now,
+	})
+	if err != nil {
+		return DispatchResult{}, wrapWorkflowDispatchMutationError(err)
 	}
-	if err := d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-		Status:      mutations.PhaseCompleted,
-		Response:    json.RawMessage(resultJSON),
-		CompletedAt: time.Now().UTC(),
-	}); err != nil {
-		return DispatchResult{}, err
+	var result DispatchResult
+	if err := json.Unmarshal([]byte(run.ResultRef), &result); err != nil {
+		return DispatchResult{}, fmt.Errorf("decode dispatch result: %w", err)
+	}
+	if run.Replayed {
+		result.Created = false
 	}
 	return result, nil
 }
 
-type PreCallError struct {
-	Op  string
-	Err error
-}
+type PreCallError = mutations.PreCallError
 
-func (e PreCallError) Error() string {
-	if e.Op == "" {
-		return e.Err.Error()
-	}
-	return e.Op + ": " + e.Err.Error()
-}
-
-func (e PreCallError) Unwrap() error {
-	return e.Err
-}
-
-func (d Dispatcher) markMutationDispatching(ctx context.Context, idempotencyKey string) error {
-	recorder, ok := d.Store.(MutationRecorder)
-	if !ok {
-		return fmt.Errorf("workflow dispatch mutation recorder is required")
-	}
-	starter, ok := d.Store.(MutationStarter)
-	if !ok {
-		return fmt.Errorf("workflow dispatch mutation starter is required")
-	}
-	start, err := starter.TryStartGitHubMutationAttempt(ctx, idempotencyKey, []string{mutationStatusPreDispatch, mutations.PhaseFailedPreCall}, time.Now().UTC())
-	if err != nil {
-		_ = recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutations.PhaseFailedPreCall, nil, err.Error(), time.Now().UTC())
-		return fmt.Errorf("mark workflow dispatch mutation in-flight: %w", err)
-	}
-	if !start.Started {
-		return fmt.Errorf("workflow dispatch mutation %q is %s; repair required before retry", idempotencyKey, start.Attempt.Status)
-	}
-	return nil
-}
-
-func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchRequest, idempotencyKey string, inputs map[string]string, now time.Time) error {
-	recorder, ok := d.Store.(MutationRecorder)
-	if !ok {
-		return fmt.Errorf("workflow dispatch mutation recorder is required")
-	}
+func workflowDispatchRequest(req DispatchRequest, inputs map[string]string) (json.RawMessage, error) {
 	requestJSON, marshalErr := json.Marshal(map[string]any{
 		"owner":         req.Owner,
 		"repo":          req.Repo,
@@ -326,41 +284,31 @@ func (d Dispatcher) recordMutationAttempt(ctx context.Context, req DispatchReque
 		"inputs":        inputs,
 	})
 	if marshalErr != nil {
-		return fmt.Errorf("marshal mutation request: %w", marshalErr)
+		return nil, fmt.Errorf("marshal mutation request: %w", marshalErr)
 	}
-	if err := recorder.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
-		IdempotencyKey: idempotencyKey,
-		RepositoryID:   req.RepoID,
-		MutationType:   "workflow_dispatch",
-		Status:         mutationStatusPreDispatch,
-		Request:        requestJSON,
-		CreatedAt:      now,
-	}); err != nil {
-		if errors.Is(err, store.ErrAlreadyExists) {
-			reader, ok := d.Store.(MutationReader)
-			if !ok {
-				return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
-			}
-			attempt, readErr := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
-			if readErr != nil {
-				return fmt.Errorf("get existing workflow dispatch mutation attempt: %w", readErr)
-			}
-			switch attempt.Status {
-			case mutations.PhaseFailedPreCall:
-				return nil
-			case mutationStatusPreDispatch:
-				return nil
-			case mutationStatusDispatching, mutationStatusUnknown:
-				return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
-			case mutations.PhaseCompleted:
-				return nil
-			default:
-				return fmt.Errorf("workflow dispatch mutation already in progress: %w", err)
-			}
-		}
+	return requestJSON, nil
+}
+
+func workflowDispatchResultRef(response json.RawMessage) string {
+	var result DispatchResult
+	if len(response) == 0 || json.Unmarshal(response, &result) != nil || result.JobID == "" {
+		return ""
+	}
+	return string(response)
+}
+
+func wrapWorkflowDispatchMutationError(err error) error {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "record mutation attempt:"):
 		return fmt.Errorf("record workflow dispatch mutation attempt: %w", err)
+	case strings.Contains(msg, "complete mutation attempt:") && strings.Contains(msg, "complete idempotency key after mutation attempt failure:"):
+		return fmt.Errorf("complete workflow dispatch mutation attempt after GitHub accepted dispatch: %w", err)
+	case strings.Contains(msg, "complete idempotency key:"):
+		return fmt.Errorf("complete dispatch idempotency key: %w", err)
+	default:
+		return err
 	}
-	return nil
 }
 
 func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, idempotencyKey string) (DispatchResult, error) {
@@ -534,10 +482,6 @@ func (d Dispatcher) completedDispatchMutation(ctx context.Context, idempotencyKe
 		return false, DispatchResult{}, fmt.Errorf("repair dispatch idempotency key: %w", err)
 	}
 	return true, result, nil
-}
-
-func (d Dispatcher) recordMutationResult(ctx context.Context, idempotencyKey string, result GitHubMutationResult) {
-	_ = d.completeMutationResult(ctx, idempotencyKey, result)
 }
 
 func (d Dispatcher) completeMutationResult(ctx context.Context, idempotencyKey string, result GitHubMutationResult) error {
