@@ -20,8 +20,9 @@ type PullRequest struct {
 	Body             string
 	State            string // "open", "closed", "merged"
 	Head             string // branch name
-	HeadSHA          string
 	Base             string // target branch
+	HeadSHA          string // current head commit SHA
+	BaseSHA          string // current base branch commit SHA
 	Labels           []string
 	Mergeable        bool
 	MergeableKnown   bool   // false when GitHub is still computing mergeability

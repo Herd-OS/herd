@@ -673,6 +673,37 @@ func TestParseLegacyReviewLockCommitMessage(t *testing.T) {
 	}
 }
 
+func TestReviewLockBlocksCurrentHead(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	expiredAt := now.Add(-time.Minute)
+	active := lockedReviewLockState(50, 1, 100, "current-sha", "lock", now)
+	activeOldHead := lockedReviewLockState(50, 1, 100, "old-sha", "lock", now)
+	activeLegacy := lockedReviewLockState(50, 1, 100, "", "lock", now)
+	activeWithoutExpiry := lockedReviewLockState(50, 1, 100, "old-sha", "lock", now)
+	activeWithoutExpiry.ExpiresAt = nil
+	expired := lockedReviewLockState(50, 1, 100, "current-sha", "lock", now)
+	expired.ExpiresAt = &expiredAt
+
+	tests := []struct {
+		name  string
+		state reviewLockState
+		want  bool
+	}{
+		{name: "same head active lock blocks", state: active, want: true},
+		{name: "old head active lock does not block", state: activeOldHead, want: false},
+		{name: "active legacy lock without batch branch sha blocks", state: activeLegacy, want: true},
+		{name: "active lock without expiry blocks", state: activeWithoutExpiry, want: true},
+		{name: "expired lock does not block", state: expired, want: false},
+		{name: "unlocked state does not block", state: reviewLockState{Status: "unlocked"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, reviewLockBlocksCurrentHead(tt.state, "current-sha", now))
+		})
+	}
+}
+
 func TestAcquireReviewLock_FastForwardConflictBlocksDuplicate(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	lockBranch := reviewLockBranch(50)
@@ -708,6 +739,26 @@ func TestAcquireReviewLock_FastForwardConflictBlocksDuplicate(t *testing.T) {
 	assert.True(t, repoSvc.branchExists[lockBranch])
 }
 
+func TestAcquireReviewLock_ActiveSameHeadLockStillBlocks(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	active := lockedReviewLockState(50, 1, 100, "current-sha", "active-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "active-sha"},
+		commitMessages: map[string]string{
+			"active-sha": mustReviewLockCommitMessage(t, active),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 101, "current-sha", now)
+
+	require.NoError(t, err)
+	assert.False(t, acquired)
+	assert.Nil(t, handle)
+	assert.Equal(t, "active-sha", repoSvc.branchSHAs[lockBranch])
+}
+
 func TestAcquireReviewLock_ExpiredLockIsReclaimedByAppendingCommit(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	lockBranch := reviewLockBranch(50)
@@ -740,9 +791,96 @@ func TestAcquireReviewLock_ExpiredLockIsReclaimedByAppendingCommit(t *testing.T)
 	require.True(t, ok)
 	assert.Equal(t, "locked", state.Status)
 	assert.NotEqual(t, "expired", state.LockID)
+	assert.Equal(t, "new-sha", state.BatchBranchSHA)
 }
 
-func TestAcquireReviewLock_ConcurrentStaleReclaimLoserObservesWinner(t *testing.T) {
+func TestAcquireReviewLock_ActiveOldHeadLockIsReclaimedByAppendingCommit(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 100, "old-sha", "old-head-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 101, "current-sha", now)
+
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, handle)
+	require.NotNil(t, handle.reclaimedStale)
+	assert.Equal(t, "old-head-lock", handle.reclaimedStale.LockID)
+	assert.Equal(t, "old-sha", handle.reclaimedStale.BatchBranchSHA)
+	newHead := repoSvc.branchSHAs[lockBranch]
+	assert.Equal(t, "old-lock-sha", repoSvc.commitParents[newHead])
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[newHead])
+	require.True(t, ok)
+	assert.Equal(t, "locked", state.Status)
+	assert.NotEqual(t, "old-head-lock", state.LockID)
+	assert.Equal(t, "current-sha", state.BatchBranchSHA)
+}
+
+func TestAcquireReviewLock_CancelledRunOldHeadLockDoesNotBlockCurrentHead(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	cancelledRunLock := lockedReviewLockState(50, 1, 100, "old-sha", "cancelled-run-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "cancelled-lock-sha"},
+		commitMessages: map[string]string{
+			"cancelled-lock-sha": mustReviewLockCommitMessage(t, cancelledRunLock),
+		},
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 101, "current-sha", now)
+
+	require.NoError(t, err)
+	require.True(t, acquired)
+	require.NotNil(t, handle)
+	newHead := repoSvc.branchSHAs[lockBranch]
+	assert.Equal(t, "cancelled-lock-sha", repoSvc.commitParents[newHead])
+	state, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[newHead])
+	require.True(t, ok)
+	assert.Equal(t, "current-sha", state.BatchBranchSHA)
+}
+
+func TestAcquireReviewLock_ConcurrentOldHeadReclaimLoserObservesWinner(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 100, "old-sha", "old-head-lock", now)
+	repoSvc := &mockRepoService{
+		branchExists: map[string]bool{lockBranch: true},
+		branchSHAs:   map[string]string{lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+	repoSvc.onUpdateBranch = func(name, _ string) {
+		if name != lockBranch || repoSvc.branchSHAs[lockBranch] != "old-lock-sha" {
+			return
+		}
+		winnerState := lockedReviewLockState(50, 1, 999, "current-sha", "winner-lock", now)
+		winnerSHA, createErr := repoSvc.CreateCommit(context.Background(), "old-lock-sha", mustReviewLockCommitMessage(t, winnerState))
+		require.NoError(t, createErr)
+		repoSvc.branchSHAs[lockBranch] = winnerSHA
+	}
+
+	handle, acquired, err := acquireReviewLock(context.Background(), newMockIssueService(), repoSvc, 50, 1, 101, "current-sha", now)
+
+	require.NoError(t, err)
+	require.False(t, acquired)
+	require.Nil(t, handle)
+	headState, ok := parseReviewLockCommitMessage(repoSvc.commitMessages[repoSvc.branchSHAs[lockBranch]])
+	require.True(t, ok)
+	assert.Equal(t, "winner-lock", headState.LockID)
+	assert.Equal(t, "current-sha", headState.BatchBranchSHA)
+	assert.GreaterOrEqual(t, repoSvc.markerCommitSeq, 2, "loser created a candidate before retrying after conflict")
+}
+
+func TestAcquireReviewLock_ConcurrentExpiredReclaimLoserObservesWinner(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	lockBranch := reviewLockBranch(50)
 	expiredAt := now.Add(-time.Minute)
@@ -981,7 +1119,7 @@ func TestReview_ManualActiveLockSkipCommentsWithDiagnostics(t *testing.T) {
 	issueSvc := newMockIssueService()
 	now := time.Now().UTC()
 	lockBranch := reviewLockBranch(50)
-	active := lockedReviewLockState(50, 1, 99, "sha-recorded", "active-lock", now)
+	active := lockedReviewLockState(50, 1, 99, "sha-current", "active-lock", now)
 	active.Owner = "review-owner"
 	repoSvc := &mockRepoService{
 		defaultBranch: "main",
@@ -1018,8 +1156,149 @@ func TestReview_ManualActiveLockSkipCommentsWithDiagnostics(t *testing.T) {
 	assert.Contains(t, comment, "review-owner")
 	assert.Contains(t, comment, formatReviewLockTime(active.AcquiredAt))
 	assert.Contains(t, comment, formatReviewLockTime(active.ExpiresAt))
-	assert.Contains(t, comment, "sha-recorded")
 	assert.Contains(t, comment, "sha-current")
+	assert.Contains(t, comment, "sha-current")
+}
+
+func TestReview_ManualStaleOldHeadLockReclaimsAndPostsInfoComment(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 99, "old-sha", "old-head-lock", now)
+	oldHead.Owner = "stale-owner"
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "current-sha", lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+	mock.prs = prSvc
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir, Manual: true})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	require.NotEmpty(t, prSvc.comments)
+	infoComments := commentsContaining(prSvc.comments, "Herd reclaimed a stale review lock")
+	require.Len(t, infoComments, 1)
+	infoComment := infoComments[0]
+	assert.Contains(t, infoComment, "older PR head")
+	assert.Contains(t, infoComment, "continuing review")
+	assert.Contains(t, infoComment, "- Locked head: `old-sha`")
+	assert.Contains(t, infoComment, "- Current head: `current-sha`")
+	assert.NotContains(t, strings.ToLower(infoComment), "wait for the active review")
+	assert.Empty(t, commentsContaining(prSvc.comments, "another review lock is active"))
+}
+
+func TestReview_AutomaticStaleOldHeadLockReclaimsWithoutInfoComment(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 99, "old-sha", "old-head-lock", now)
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "current-sha", lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				50: {Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+	mock.prs = prSvc
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Equal(t, 1, ag.calls)
+	assert.Empty(t, commentsContaining(prSvc.comments, "Herd reclaimed a stale review lock"))
+	assert.Empty(t, commentsContaining(prSvc.comments, "another review lock is active"))
+}
+
+func TestReview_RunBasedAutomaticStaleOldHeadLockReclaims(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[10] = &platform.Issue{
+		Number:    10,
+		Title:     "Worker task",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Body: "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo it\n"},
+	}
+	now := time.Now().UTC()
+	lockBranch := reviewLockBranch(50)
+	oldHead := lockedReviewLockState(50, 1, 99, "old-sha", "old-head-lock", now)
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
+		branchSHAs:    map[string]string{"herd/batch/1-batch": "current-sha", lockBranch: "old-lock-sha"},
+		commitMessages: map[string]string{
+			"old-lock-sha": mustReviewLockCommitMessage(t, oldHead),
+		},
+	}
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			listResult: []*platform.PullRequest{
+				{Number: 50, Title: "[herd] Batch", Head: "herd/batch/1-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Inputs: map[string]string{"issue_number": "10"}},
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	dir, g := initTestRepo(t)
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  wf,
+		repo:       repoSvc,
+		milestones: &mockMilestoneService{},
+	}
+
+	result, err := Review(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+	}, ReviewParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 50, result.BatchPRNumber)
+	assert.Equal(t, 1, ag.calls)
+	assert.Empty(t, commentsContaining(prSvc.comments, "Herd reclaimed a stale review lock"))
+	assert.Empty(t, commentsContaining(prSvc.comments, "another review lock is active"))
 }
 
 func TestReview_AutomaticActiveLockSkipOnlyLogsOrAtLeastDoesNotComment(t *testing.T) {
@@ -1037,7 +1316,7 @@ func TestReview_AutomaticActiveLockSkipOnlyLogsOrAtLeastDoesNotComment(t *testin
 			issueSvc := newMockIssueService()
 			now := time.Now().UTC()
 			lockBranch := reviewLockBranch(50)
-			active := lockedReviewLockState(50, 1, 99, "abc123", "active-lock", now)
+			active := lockedReviewLockState(50, 1, 99, "current-sha", "active-lock", now)
 			repoSvc := &mockRepoService{
 				defaultBranch: "main",
 				branchExists:  map[string]bool{"herd/batch/1-batch": true, lockBranch: true},
@@ -3895,6 +4174,16 @@ func reviewEvents(reviews []capturedReview) []platform.ReviewEvent {
 		events = append(events, review.event)
 	}
 	return events
+}
+
+func commentsContaining(comments []string, needle string) []string {
+	var matches []string
+	for _, comment := range comments {
+		if strings.Contains(comment, needle) {
+			matches = append(matches, comment)
+		}
+	}
+	return matches
 }
 
 func (m *mockCapturingPRService) AddComment(_ context.Context, _ int, body string) error {
@@ -6892,6 +7181,277 @@ func TestReview_NoStableDisagreementWhenAllNew(t *testing.T) {
 	assert.NotEmpty(t, wf.dispatched, "fix worker must be dispatched")
 }
 
+func TestReview_NonConvergenceEscalatesToStrategyFixIssue(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	assert.Equal(t, 1, result.FindingsCount)
+	require.Len(t, fx.createdIssues, 1)
+	assert.True(t, strings.HasPrefix(fx.createdIssues[0].title, "Review strategy fix"), "must create strategy issue, not normal review fixes")
+	assert.NotContains(t, fx.createdIssues[0].title, "Review fixes")
+	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	assert.Contains(t, fx.createdIssues[0].labels, issues.TypeFix)
+	assert.Contains(t, fx.createdIssues[0].labels, issues.StatusInProgress)
+	assert.Contains(t, fx.createdIssues[0].body, "Solve the shared architecture/design problem")
+	assert.NotContains(t, fx.createdIssues[0].body, "/herd fix")
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "herd-worker.yml", fx.wf.dispatchedWorkflows[0])
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	assert.Equal(t, "herd/batch/111-batch", fx.wf.dispatched[0]["batch_branch"])
+
+	comment := requireCommentContaining(t, fx.prSvc.comments, "Herd review is not converging")
+	assert.Contains(t, comment, "Cycles analyzed: 34, 35, 36, 37, 38, 39")
+	assert.Contains(t, comment, "Finding count trend: 14, 20, 21, 24, 28, 28")
+	assert.Contains(t, comment, "Fix issues considered: #951, #952, #953, #954, #955")
+	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/dispatch")
+	assert.Contains(t, comment, "Dominant root-cause terms:")
+	assert.Contains(t, comment, "idempotency")
+	assert.Contains(t, comment, "Escalation reason:")
+	assert.Contains(t, comment, "Strategy fix issue: #9601")
+	assert.NotContains(t, strings.Join(fx.prSvc.comments, "\n"), "/herd fix")
+	marker, ok := parseReviewResultMarker(comment)
+	require.True(t, ok)
+	assert.Equal(t, reviewResultStatusChangesRequested, marker.Status)
+	assert.Equal(t, 39, marker.Cycle)
+	assert.Equal(t, 1, marker.FindingsCount)
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Equal(t, platform.ReviewRequestChanges, fx.prSvc.reviews[0].event)
+	assert.Contains(t, fx.prSvc.reviews[0].body, "Strategy-level fix worker dispatched")
+	assert.Contains(t, fx.prSvc.reviews[0].body, "#9601")
+}
+
+func TestReview_NonConvergenceEscalatesWithOlderHistoricalHeadSHAs(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+	fx.setHistoryWithHeadSHAs(t, []int{14, 20, 21, 24, 28}, []string{
+		"older-head-34",
+		"older-head-35",
+		"older-head-36",
+		"older-head-37",
+		"older-head-38",
+	})
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	assert.Equal(t, 1, result.FindingsCount)
+	require.Len(t, fx.createdIssues, 1)
+	assert.True(t, strings.HasPrefix(fx.createdIssues[0].title, "Review strategy fix"))
+	assert.NotContains(t, fx.createdIssues[0].title, "Review fixes")
+	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+
+	comment := requireCommentContaining(t, fx.prSvc.comments, "Herd review is not converging")
+	assert.Contains(t, comment, "Cycles analyzed: 34, 35, 36, 37, 38, 39")
+	assert.Contains(t, comment, "Finding count trend: 14, 20, 21, 24, 28, 28")
+	marker, ok := parseReviewResultMarker(comment)
+	require.True(t, ok)
+	assert.Equal(t, fx.headSHA, marker.HeadSHA)
+	assert.Equal(t, 39, marker.Cycle)
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Found 28 actionable issues"))
+}
+
+func TestReview_NonConvergenceDefersWhenLatestHistoricalFixIsActive(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{
+			name:   "ready",
+			status: issues.StatusReady,
+		},
+		{
+			name:   "in-progress",
+			status: issues.StatusInProgress,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+			fx.ag.onReview = func() {
+				for _, issue := range fx.issueSvc.listResult {
+					if issue.Number == 955 {
+						issue.Labels = []string{tt.status}
+					}
+				}
+			}
+
+			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, []int{9601}, result.FixIssues)
+			assert.Equal(t, 39, result.FixCycle)
+			require.Len(t, fx.createdIssues, 1)
+			assert.Equal(t, "Review fixes (cycle 39)", fx.createdIssues[0].title)
+			assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+			require.Len(t, fx.wf.dispatched, 1)
+			assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+			assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+			assert.Empty(t, commentsContaining(fx.prSvc.comments, "Strategy fix issue"))
+			require.Len(t, fx.prSvc.reviews, 1)
+			assert.Contains(t, fx.prSvc.reviews[0].body, "Found 28 actionable issues")
+			assert.NotContains(t, fx.prSvc.reviews[0].body, "Strategy-level fix worker dispatched")
+		})
+	}
+}
+
+func TestReview_NonConvergenceContinueCreatesNormalReviewFixIssue(t *testing.T) {
+	tests := []struct {
+		name            string
+		historyCounts   []int
+		minCompleted    int
+		currentFindings []agent.ReviewFinding
+	}{
+		{
+			name:            "decreasing trend",
+			historyCounts:   []int{28, 24, 21, 20, 14},
+			minCompleted:    3,
+			currentFindings: reviewNonConvergenceCurrentFindings(9),
+		},
+		{
+			name:            "insufficient completed cycles",
+			historyCounts:   []int{14, 20},
+			minCompleted:    3,
+			currentFindings: reviewNonConvergenceCurrentFindings(28),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newReviewNonConvergenceIntegrationFixture(t, tt.currentFindings)
+			fx.cfg.Integrator.ReviewNonConvergence.MinCompletedCycles = tt.minCompleted
+			fx.setHistory(t, tt.historyCounts)
+
+			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, []int{9601}, result.FixIssues)
+			require.Len(t, fx.createdIssues, 1)
+			assert.Equal(t, fmt.Sprintf("Review fixes (cycle %d)", 34+len(tt.historyCounts)), fx.createdIssues[0].title)
+			assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+			require.Len(t, fx.wf.dispatched, 1)
+			assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+			assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+		})
+	}
+}
+
+func TestReview_NonConvergenceUsesDedupedCurrentFindingCount(t *testing.T) {
+	uniqueFindings := reviewNonConvergenceCurrentFindings(7)
+	currentFindings := make([]agent.ReviewFinding, 0, 28)
+	for _, finding := range uniqueFindings {
+		for range 4 {
+			currentFindings = append(currentFindings, finding)
+		}
+	}
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Equal(t, "Review fixes (cycle 39)", fx.createdIssues[0].title)
+	assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Contains(t, fx.prSvc.reviews[0].body, "Found 7 actionable issues")
+	assert.NotContains(t, fx.prSvc.reviews[0].body, "Strategy-level fix worker dispatched")
+}
+
+func TestReview_NonConvergenceDuplicateStrategyIssueDoesNotCreateOrDispatch(t *testing.T) {
+	currentFindings := reviewNonConvergenceCurrentFindings(28)
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	analysis := fx.analysisForCurrent(t, currentFindings)
+	duplicateBody := appendReviewNonConvergenceFingerprint(issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: 849},
+		Task:        "Existing strategy fix.",
+	}), analysis.Cluster.Fingerprint)
+	fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
+		Number: 9700,
+		State:  "open",
+		Title:  buildStrategyFixIssueTitle(39, analysis.Cluster),
+		Labels: []string{issues.ReviewNonConverging},
+		Body:   duplicateBody,
+	})
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9700}, result.FixIssues)
+	assert.Equal(t, 39, result.FixCycle)
+	assert.Equal(t, 1, result.FindingsCount)
+	assert.Empty(t, fx.createdIssues)
+	assert.Empty(t, fx.wf.dispatched)
+	comment := requireCommentContaining(t, fx.prSvc.comments, "already being addressed by strategy issue #9700")
+	assert.Contains(t, comment, "Strategy fix issue: #9700")
+	assert.NotContains(t, strings.Join(fx.prSvc.comments, "\n"), "/herd fix")
+	marker, ok := parseReviewResultMarker(comment)
+	require.True(t, ok)
+	assert.Equal(t, reviewResultStatusChangesRequested, marker.Status)
+	assert.Equal(t, 1, marker.FindingsCount)
+	require.Len(t, fx.prSvc.reviews, 1)
+	assert.Contains(t, fx.prSvc.reviews[0].body, "already in progress")
+}
+
+func TestReview_NonConvergenceStrategyDispatchFailureMarksIssueFailed(t *testing.T) {
+	currentFindings := reviewNonConvergenceCurrentFindings(28)
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	fx.wf.dispatchErr = errors.New("workflow unavailable")
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.AllCreatesFailed)
+	assert.Equal(t, 1, result.FindingsCount)
+	assert.Empty(t, result.FixIssues)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Contains(t, fx.createdIssues[0].title, "Review strategy fix (cycle 39)")
+	assert.Contains(t, fx.createdIssues[0].labels, issues.StatusInProgress)
+	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	assert.Empty(t, fx.wf.dispatched)
+	assert.Contains(t, fx.issueSvc.removedLabels[9601], issues.StatusInProgress)
+	assert.Contains(t, fx.issueSvc.addedLabels[9601], issues.StatusFailed)
+	require.Len(t, fx.issueSvc.comments[9601], 1)
+	assert.Contains(t, fx.issueSvc.comments[9601][0], "Failed to dispatch strategy-level fix worker")
+	assert.Contains(t, fx.issueSvc.comments[9601][0], "workflow unavailable")
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Strategy fix issue"))
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+	assert.Empty(t, fx.prSvc.reviews)
+	assert.NotContains(t, strings.Join(fx.prSvc.comments, "\n"), "/herd fix")
+}
+
+func TestReview_NonConvergenceDisabledUsesNormalReviewFixIssue(t *testing.T) {
+	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+	fx.cfg.Integrator.ReviewNonConvergence.Enabled = false
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []int{9601}, result.FixIssues)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Equal(t, "Review fixes (cycle 39)", fx.createdIssues[0].title)
+	assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Herd review is not converging"))
+}
+
 func TestReview_BlockedByStableDisagreementLabel(t *testing.T) {
 	// PR has the StableDisagreement label and params.Manual is false —
 	// Review must early-return without calling the agent.
@@ -7053,4 +7613,136 @@ func TestBuildStableDisagreementComment(t *testing.T) {
 	assert.Contains(t, got, "1. ")
 	assert.Contains(t, got, "2. ")
 	assert.Contains(t, got, "3. ")
+}
+
+type reviewNonConvergenceIntegrationFixture struct {
+	dir           string
+	g             *git.Git
+	cfg           *config.Config
+	mock          *mockPlatform
+	issueSvc      *mockIssueService
+	prSvc         *mockCapturingPRService
+	wf            *mockWorkflowService
+	ag            *mockReviewAgent
+	headSHA       string
+	createdIssues []createdReviewIssue
+}
+
+type createdReviewIssue struct {
+	title  string
+	body   string
+	labels []string
+}
+
+func newReviewNonConvergenceIntegrationFixture(t *testing.T, currentFindings []agent.ReviewFinding) *reviewNonConvergenceIntegrationFixture {
+	t.Helper()
+	dir, g := initTestRepo(t)
+	runReviewTestGit(t, dir, "checkout", "-b", "herd/batch/111-batch")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal", "controlplane", "dispatch"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "internal", "controlplane", "dispatch", "review.go"), []byte("package dispatch\n\nfunc Review() {}\n"), 0644))
+	runReviewTestGit(t, dir, "add", "internal/controlplane/dispatch/review.go")
+	runReviewTestGit(t, dir, "commit", "-m", "batch review change")
+	headSHA := reviewTestGitOutput(t, dir, "rev-parse", "HEAD")
+
+	issueSvc := newMockIssueService()
+	fx := &reviewNonConvergenceIntegrationFixture{
+		dir:      dir,
+		g:        g,
+		issueSvc: issueSvc,
+		headSHA:  headSHA,
+	}
+	fx.setHistory(t, []int{14, 20, 21, 24, 28})
+
+	prSvc := &mockCapturingPRService{
+		mockPRService: &mockPRService{
+			getResult: map[int]*platform.PullRequest{
+				849: {Number: 849, Title: "[herd] Batch 111", Head: "herd/batch/111-batch", Base: "main"},
+			},
+		},
+	}
+	wf := &mockWorkflowService{}
+	mockCreate := &mockIssueServiceWithCreate{
+		mockIssueService: issueSvc,
+		onCreate: func(title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+			fx.createdIssues = append(fx.createdIssues, createdReviewIssue{
+				title:  title,
+				body:   body,
+				labels: append([]string(nil), labels...),
+			})
+			return &platform.Issue{Number: 9601, Title: title, Body: body, Labels: labels}, nil
+		},
+	}
+	mock := newReviewLockTestPlatform(mockCreate)
+	mock.prs = prSvc
+	mock.workflows = wf
+	mock.repo = &mockRepoService{
+		defaultBranch: "main",
+		branchExists:  map[string]bool{"herd/batch/111-batch": true},
+		branchSHAs:    map[string]string{"herd/batch/111-batch": headSHA},
+	}
+	mock.milestones = &mockMilestoneService{getResult: map[int]*platform.Milestone{
+		111: {Number: 111, Title: "Batch"},
+	}}
+	cfg := config.Default()
+	cfg.Integrator.ReviewMaxFixCycles = 100
+	cfg.Integrator.ReviewFixSeverity = "low"
+
+	fx.cfg = cfg
+	fx.mock = mock
+	fx.prSvc = prSvc
+	fx.wf = wf
+	fx.ag = &mockReviewAgent{reviewResult: &agent.ReviewResult{
+		Approved: false,
+		Summary:  "review findings",
+		Findings: currentFindings,
+	}}
+	return fx
+}
+
+func (fx *reviewNonConvergenceIntegrationFixture) setHistory(t *testing.T, counts []int) {
+	t.Helper()
+	headSHAs := make([]string, len(counts))
+	for i := range counts {
+		headSHAs[i] = fx.headSHA
+	}
+	fx.setHistoryWithHeadSHAs(t, counts, headSHAs)
+}
+
+func (fx *reviewNonConvergenceIntegrationFixture) setHistoryWithHeadSHAs(t *testing.T, counts []int, headSHAs []string) {
+	t.Helper()
+	require.Len(t, headSHAs, len(counts))
+	fx.issueSvc.listCommentsResult = nil
+	fx.issueSvc.listResult = []*platform.Issue{
+		{Number: 42, Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n"},
+	}
+	for i, count := range counts {
+		cycle := 34 + i
+		fixIssue := 951 + i
+		finding := fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go: durable mutation lacks idempotency before started workflow retry", cycle)
+		fx.issueSvc.listCommentsResult = append(fx.issueSvc.listCommentsResult, reviewHistoryComment(t, headSHAs[i], cycle, count, finding, fixIssue))
+		fx.issueSvc.listResult = append(fx.issueSvc.listResult, reviewFixIssue(fixIssue, cycle, issues.StatusDone, []string{fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go", cycle)}, "Validation success"))
+	}
+}
+
+func (fx *reviewNonConvergenceIntegrationFixture) analysisForCurrent(t *testing.T, currentFindings []agent.ReviewFinding) reviewConvergenceAnalysis {
+	t.Helper()
+	high, medium, low, criteria := filterFindingsBySeverity(currentFindings)
+	history := collectReviewHistoryFromComments(fx.issueSvc.listCommentsResult, fx.issueSvc.listResult, 849, 111, fx.headSHA, fx.cfg.Integrator.ReviewNonConvergence.Window)
+	history = appendCurrentReviewHistoryCycleIfMissing(history, 39, fx.headSHA, currentFindings, currentFindings, high, medium, low, criteria)
+	return analyzeReviewConvergence(history, fx.cfg.Integrator.ReviewNonConvergence.MinCompletedCycles)
+}
+
+func reviewNonConvergenceCurrentFindings(count int) []agent.ReviewFinding {
+	findings := make([]agent.ReviewFinding, 0, count)
+	for i := 1; i <= count; i++ {
+		severity := "MEDIUM"
+		if i <= 9 {
+			severity = "HIGH"
+		}
+		findings = append(findings, agent.ReviewFinding{
+			Severity:    severity,
+			Description: fmt.Sprintf("internal/controlplane/dispatch/current_%02d.go: durable mutation lacks idempotency before started workflow retry", i),
+		})
+	}
+	return findings
 }

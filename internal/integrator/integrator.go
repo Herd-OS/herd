@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/herd-os/herd/internal/batchmeta"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/git"
@@ -1201,63 +1203,32 @@ func handleConflictResolution(ctx context.Context, p platform.Platform, cfg *con
 		}, nil
 	}
 
-	// Create conflict-resolution issue
-	body := issues.RenderBody(issues.IssueBody{
-		FrontMatter: issues.FrontMatter{
-			Version:             1,
-			Batch:               ms.Number,
-			Type:                "fix",
-			ConflictResolution:  true,
-			ConflictingBranches: []string{workerBranch, batchBranch},
-		},
-		Task: fmt.Sprintf("Resolve merge conflict between `%s` and `%s`.\n\n"+
-			"**IMPORTANT:** You are already on your own worker branch (`herd/worker/<this-issue>-<slug>`). Do NOT checkout `%s` or any other branch — your commits must land on your worker branch so the worker framework can push them. The integrator will then merge your worker branch into `%s`.\n\n"+
-			"Follow these steps exactly:\n"+
-			"1. `git fetch origin`\n"+
-			"2. Stay on your current worker branch — do NOT run `git checkout %s`.\n"+
-			"3. `git merge origin/%s`\n"+
-			"4. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch — only fix the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) produced by git.\n"+
-			"5. `git add <resolved files>`\n"+
-			"6. `git commit` (accept the default merge commit message).\n"+
-			"7. Do NOT push — the worker framework handles pushing your worker branch.",
-			workerBranch, batchBranch, batchBranch, batchBranch, batchBranch, workerBranch),
-		Context: fmt.Sprintf("Worker branch `%s` (from issue #%d) conflicts with the batch branch `%s`.", workerBranch, issue.Number, batchBranch),
-	})
-
-	truncatedBody, overflow := issues.TruncateIssueBody(body)
-	fixIssue, err := p.Issues().Create(ctx,
-		fmt.Sprintf("Resolve conflict: #%d (%s)", issue.Number, truncate(issue.Title, 40)),
-		truncatedBody,
-		[]string{issues.TypeFix, issues.StatusInProgress},
-		&ms.Number,
-	)
+	dispatch, err := DispatchConflictResolutionIssue(ctx, p, cfg, ConflictResolutionIssueParams{
+		Kind:              ConflictResolutionKindWorkerMerge,
+		Milestone:         ms,
+		SourceIssueNumber: issue.Number,
+		SourceIssueTitle:  issue.Title,
+		WorkerBranch:      workerBranch,
+		BatchBranch:       batchBranch,
+	}, []string{issues.TypeFix, issues.StatusInProgress}, batchBranch)
 	if err != nil {
-		return nil, fmt.Errorf("creating conflict-resolution issue: %w", err)
-	}
-	for _, comment := range issues.SplitOverflowComments(overflow) {
-		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
-			fmt.Printf("Warning: failed to post overflow comment on conflict-resolution issue #%d: %v\n", fixIssue.Number, cerr)
+		var dispatchErr *conflictResolutionDispatchError
+		if errors.As(err, &dispatchErr) && dispatchErr.issueNumber > 0 {
+			_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
+			_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
 		}
+		return nil, err
 	}
 
 	// Relabel original issue from done → failed to block tier advancement
 	_ = p.Issues().RemoveLabels(ctx, issue.Number, []string{issues.StatusDone})
 	_ = p.Issues().AddLabels(ctx, issue.Number, []string{issues.StatusFailed})
 
-	// Dispatch resolver worker
-	defaultBranch, _ := p.Repository().GetDefaultBranch(ctx)
-	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", defaultBranch, map[string]string{
-		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
-		"batch_branch":    batchBranch,
-		"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
-		"runner_label":    cfg.Workers.RunnerLabel,
-	})
-
 	return &ConsolidateResult{
 		IssueNumber:      issue.Number,
 		WorkerBranch:     workerBranch,
 		ConflictDetected: true,
-		ConflictIssue:    fixIssue.Number,
+		ConflictIssue:    dispatch.IssueNumber,
 	}, nil
 }
 
@@ -1326,7 +1297,8 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers [][]int) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "## Summary\n\nBatch **%s** — %d tasks across %d tiers.\n\n", ms.Title, len(allIssues), len(tiers))
+	b.WriteString(renderReviewerSummary(ms, allIssues, tiers))
+	b.WriteString("\n\n")
 
 	// Tasks table
 	b.WriteString("## Tasks\n\n")
@@ -1353,6 +1325,132 @@ func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers
 	}
 
 	return b.String()
+}
+
+func renderReviewerSummary(ms *platform.Milestone, allIssues []*platform.Issue, tiers [][]int) string {
+	_ = tiers
+
+	paragraph := batchmeta.MilestonePRSummary(ms)
+	if paragraph == "" {
+		paragraph = fallbackPRSummaryParagraph(ms, allIssues)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Summary\n\n%s\n\n", paragraph)
+	b.WriteString("Major changes:\n")
+	for _, change := range fallbackMajorChanges(allIssues) {
+		fmt.Fprintf(&b, "- %s\n", change)
+	}
+	b.WriteString("\n## Validation\n\n")
+	for _, validation := range fallbackValidation(allIssues) {
+		fmt.Fprintf(&b, "- %s\n", validation)
+	}
+
+	return b.String()
+}
+
+func fallbackPRSummaryParagraph(ms *platform.Milestone, allIssues []*platform.Issue) string {
+	title := ""
+	if ms != nil {
+		title = strings.TrimSpace(ms.Title)
+	}
+	if title == "" {
+		title = "this batch"
+	}
+
+	taskWord := "tasks"
+	if len(allIssues) == 1 {
+		taskWord = "task"
+	}
+
+	return fmt.Sprintf("This batch implements %s across %d %s.", title, len(allIssues), taskWord)
+}
+
+func fallbackMajorChanges(allIssues []*platform.Issue) []string {
+	var titles []string
+	for _, issue := range allIssues {
+		if issue == nil {
+			continue
+		}
+		titles = append(titles, issue.Title)
+	}
+
+	changes := firstNonEmptyLines(titles, 5)
+	if len(changes) == 0 {
+		return []string{"See the task table below for the changed areas."}
+	}
+	if len(changes) == 5 {
+		nonEmptyCount := 0
+		for _, issue := range allIssues {
+			if issue != nil && strings.TrimSpace(issue.Title) != "" {
+				nonEmptyCount++
+			}
+		}
+		if nonEmptyCount > 5 {
+			changes = append(changes, "Additional task coverage is listed in the task table below.")
+		}
+	}
+
+	return changes
+}
+
+func fallbackValidation(allIssues []*platform.Issue) []string {
+	var validation []string
+	for _, issue := range allIssues {
+		if issue == nil {
+			continue
+		}
+		parsed, parseErr := issues.ParseBody(issue.Body)
+		if parseErr != nil {
+			continue
+		}
+		criteria := firstNonEmptyLines(parsed.Criteria, 1)
+		if len(criteria) == 0 {
+			continue
+		}
+		validation = append(validation, fmt.Sprintf("#%d: %s", issue.Number, trimCriterionMarker(criteria[0])))
+		if len(validation) == 5 {
+			return validation
+		}
+	}
+
+	if len(validation) == 0 {
+		return []string{"Review each task's acceptance criteria and the final CI results before merging."}
+	}
+
+	return validation
+}
+
+func firstNonEmptyLines(values []string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+
+	var lines []string
+	for _, value := range values {
+		for _, line := range strings.Split(value, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			lines = append(lines, line)
+			if len(lines) == limit {
+				return lines
+			}
+		}
+	}
+
+	return lines
+}
+
+func trimCriterionMarker(value string) string {
+	value = strings.TrimSpace(value)
+	for _, marker := range []string{"[ ]", "[x]", "[X]"} {
+		if strings.HasPrefix(value, marker) {
+			return strings.TrimSpace(strings.TrimPrefix(value, marker))
+		}
+	}
+	return value
 }
 
 // DispatchRebaseConflictWorker creates a conflict-resolution issue and dispatches
@@ -1406,55 +1504,17 @@ func DispatchRebaseConflictWorker(ctx context.Context, p platform.Platform, cfg 
 		return 0, nil // At cap
 	}
 
-	// Create conflict-resolution issue
-	body := issues.RenderBody(issues.IssueBody{
-		FrontMatter: issues.FrontMatter{
-			Version:             1,
-			Batch:               ms.Number,
-			Type:                "fix",
-			ConflictResolution:  true,
-			ConflictingBranches: []string{batchBranch, defaultBranch},
-		},
-		Task: fmt.Sprintf("Resolve the conflict between batch branch `%s` and the latest `%s`.\n\n"+
-			"**IMPORTANT:** You are already on your own worker branch (`herd/worker/<this-issue>-<slug>`). Do NOT checkout `%s` or `%s` — your commits must land on your worker branch so the worker framework can push them. The integrator will then merge your worker branch into `%s`.\n\n"+
-			"Follow these steps exactly:\n"+
-			"1. `git fetch origin`\n"+
-			"2. Stay on your current worker branch — do NOT run `git checkout %s` or `git checkout %s`.\n"+
-			"3. `git merge origin/%s` (this brings the latest default-branch commits into your worker branch).\n"+
-			"4. Resolve conflict markers in the affected files. Do NOT rewrite files from scratch — only fix the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) produced by git.\n"+
-			"5. `git add <resolved files>`\n"+
-			"6. `git commit` (accept the default merge commit message).\n"+
-			"7. Do NOT push — the worker framework handles pushing your worker branch.",
-			batchBranch, defaultBranch, batchBranch, defaultBranch, batchBranch, batchBranch, defaultBranch, defaultBranch),
-		Context: fmt.Sprintf("Automatic rebase of batch branch `%s` onto `%s` failed due to conflicts.", batchBranch, defaultBranch),
-	})
-
-	truncatedBody, overflow := issues.TruncateIssueBody(body)
-	fixIssue, err := p.Issues().Create(ctx,
-		fmt.Sprintf("Resolve rebase conflict: %s onto %s", batchBranch, defaultBranch),
-		truncatedBody,
-		[]string{issues.TypeFix, issues.StatusInProgress},
-		&ms.Number,
-	)
+	dispatch, err := DispatchConflictResolutionIssue(ctx, p, cfg, ConflictResolutionIssueParams{
+		Kind:        ConflictResolutionKindBatchRebase,
+		Milestone:   ms,
+		BatchBranch: batchBranch,
+		BaseBranch:  defaultBranch,
+	}, []string{issues.TypeFix, issues.StatusInProgress}, defaultBranch)
 	if err != nil {
-		return 0, fmt.Errorf("creating rebase conflict-resolution issue: %w", err)
-	}
-	for _, comment := range issues.SplitOverflowComments(overflow) {
-		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
-			fmt.Printf("Warning: failed to post overflow comment on rebase conflict-resolution issue #%d: %v\n", fixIssue.Number, cerr)
-		}
+		return 0, err
 	}
 
-	// Dispatch resolver worker
-	refBranch, _ := p.Repository().GetDefaultBranch(ctx)
-	_, _ = p.Workflows().Dispatch(ctx, "herd-worker.yml", refBranch, map[string]string{
-		"issue_number":    fmt.Sprintf("%d", fixIssue.Number),
-		"batch_branch":    defaultBranch,
-		"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes),
-		"runner_label":    cfg.Workers.RunnerLabel,
-	})
-
-	return fixIssue.Number, nil
+	return dispatch.IssueNumber, nil
 }
 
 func handleRebaseConflictResolution(ctx context.Context, p platform.Platform, cfg *config.Config, ms *platform.Milestone, batchBranch, defaultBranch string) error {

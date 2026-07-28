@@ -2,9 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["batch_name", "tasks"],
+  "required": ["batch_name", "pr_summary", "tasks"],
   "properties": {
     "batch_name": {
+      "type": "string"
+    },
+    "pr_summary": {
       "type": "string"
     },
     "tasks": {

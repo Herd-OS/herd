@@ -2,13 +2,16 @@ package integrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/batchmeta"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/issues"
@@ -58,6 +61,8 @@ type mockIssueService struct {
 	removeLabelsErr        error
 	createdTitle           string
 	createdBody            string
+	createdLabels          []string
+	createdMilestone       *int
 	respectCanceledContext bool
 }
 
@@ -73,7 +78,7 @@ func newMockIssueService() *mockIssueService {
 	}
 }
 
-func (m *mockIssueService) Create(ctx context.Context, title, body string, _ []string, _ *int) (*platform.Issue, error) {
+func (m *mockIssueService) Create(ctx context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
 	if m.respectCanceledContext {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -81,6 +86,13 @@ func (m *mockIssueService) Create(ctx context.Context, title, body string, _ []s
 	}
 	m.createdTitle = title
 	m.createdBody = body
+	m.createdLabels = append([]string(nil), labels...)
+	if milestone != nil {
+		milestoneCopy := *milestone
+		m.createdMilestone = &milestoneCopy
+	} else {
+		m.createdMilestone = nil
+	}
 	if m.createErr != nil {
 		return nil, m.createErr
 	}
@@ -306,6 +318,9 @@ type mockWorkflowService struct {
 	listResult             []*platform.Run
 	listResultByStatus     map[string][]*platform.Run // optional: keyed by RunFilters.Status
 	dispatched             []map[string]string
+	dispatchedWorkflows    []string
+	dispatchedRefs         []string
+	dispatchErr            error
 	onDispatch             func() // optional; called before recording each dispatch
 	lastListRunFilter      platform.RunFilters
 	listRunFilters         []platform.RunFilters
@@ -313,7 +328,7 @@ type mockWorkflowService struct {
 }
 
 func (m *mockWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) { return 0, nil }
-func (m *mockWorkflowService) Dispatch(ctx context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
+func (m *mockWorkflowService) Dispatch(ctx context.Context, workflow, ref string, inputs map[string]string) (*platform.Run, error) {
 	if m.respectCanceledContext {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -322,7 +337,12 @@ func (m *mockWorkflowService) Dispatch(ctx context.Context, _, _ string, inputs 
 	if m.onDispatch != nil {
 		m.onDispatch()
 	}
+	if m.dispatchErr != nil {
+		return nil, m.dispatchErr
+	}
 	m.dispatched = append(m.dispatched, inputs)
+	m.dispatchedWorkflows = append(m.dispatchedWorkflows, workflow)
+	m.dispatchedRefs = append(m.dispatchedRefs, ref)
 	return nil, nil
 }
 func (m *mockWorkflowService) GetRun(_ context.Context, id int64) (*platform.Run, error) {
@@ -346,6 +366,7 @@ func (m *mockWorkflowService) GetRunDiagnostics(_ context.Context, _ int64) (*pl
 
 type mockRepoService struct {
 	defaultBranch          string
+	defaultBranchErr       error
 	branchExists           map[string]bool
 	branchSHAs             map[string]string
 	commitMessages         map[string]string
@@ -365,6 +386,9 @@ func (m *mockRepoService) GetDefaultBranch(ctx context.Context) (string, error) 
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
+	}
+	if m.defaultBranchErr != nil {
+		return "", m.defaultBranchErr
 	}
 	return m.defaultBranch, nil
 }
@@ -1003,7 +1027,10 @@ func TestAdvance_DoubleDispatchPrevention(t *testing.T) {
 }
 
 func TestBuildBatchPRBody(t *testing.T) {
-	ms := &platform.Milestone{Number: 5, Title: "Add auth"}
+	description, err := batchmeta.Append("", batchmeta.Metadata{PRSummary: "Reviewer summary from Task 0."})
+	require.NoError(t, err)
+
+	ms := &platform.Milestone{Number: 5, Title: "Add auth", Description: description}
 	allIssues := []*platform.Issue{
 		{Number: 42, Title: "Add model", Labels: []string{issues.StatusDone}},
 		{Number: 43, Title: "Add routes", Labels: []string{issues.StatusDone}},
@@ -1012,13 +1039,453 @@ func TestBuildBatchPRBody(t *testing.T) {
 
 	body := buildBatchPRBody(ms, allIssues, tiers)
 
-	assert.Contains(t, body, "**Add auth**")
-	assert.Contains(t, body, "2 tasks across 2 tiers")
+	assert.True(t, strings.HasPrefix(body, "## Summary\n\n"))
+	assert.Contains(t, body, "Reviewer summary from Task 0.")
+	assert.Contains(t, body, "Major changes:")
+	assert.Contains(t, body, "## Validation")
+	assert.NotContains(t, body, "herd:batch-metadata")
+	assert.NotContains(t, body, "<!--")
+	assert.Less(t, strings.Index(body, "Reviewer summary from Task 0."), strings.Index(body, "## Tasks"))
+	assert.Less(t, strings.Index(body, "## Validation"), strings.Index(body, "## Tasks"))
+	assert.Contains(t, body, "| Issue | Title | Tier | Status |")
 	assert.Contains(t, body, "#42")
 	assert.Contains(t, body, "#43")
 	assert.Contains(t, body, "Add model")
 	assert.Contains(t, body, "Add routes")
+	assert.Contains(t, body, "## Worker branches")
 	assert.Contains(t, body, "herd/worker/42-add-model")
+}
+
+func TestRenderReviewerSummaryFallbacks(t *testing.T) {
+	structuredDescription, err := batchmeta.Append("", batchmeta.Metadata{PRSummary: "Structured reviewer summary."})
+	require.NoError(t, err)
+	plainWithStructuredDescription, err := batchmeta.Append("Plain prose should not win.", batchmeta.Metadata{PRSummary: "Structured wins."})
+	require.NoError(t, err)
+	blankSummaryDescription := `<!-- herd:batch-metadata {"version":1,"pr_summary":" \n\t "} -->`
+
+	criteriaBody := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1},
+		Task:        "Implement auth",
+		Criteria:    []string{"Login works", "Tests pass"},
+		Context:     "worker progress log text should stay out",
+	})
+
+	tests := []struct {
+		name            string
+		ms              *platform.Milestone
+		allIssues       []*platform.Issue
+		wantContains    []string
+		wantNotContains []string
+	}{
+		{
+			name: "structured metadata summary is used",
+			ms:   &platform.Milestone{Title: "Structured batch", Description: structuredDescription},
+			allIssues: []*platform.Issue{
+				{Number: 1, Title: "Add model"},
+			},
+			wantContains: []string{
+				"Structured reviewer summary.",
+				"Major changes:",
+				"## Validation",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"<!--",
+				"pr_summary",
+			},
+		},
+		{
+			name: "legacy plain milestone description is summary",
+			ms:   &platform.Milestone{Title: "Legacy batch", Description: "Legacy reviewer prose."},
+			allIssues: []*platform.Issue{
+				{Number: 2, Title: "Add route"},
+			},
+			wantContains: []string{
+				"Legacy reviewer prose.",
+			},
+			wantNotContains: []string{
+				"This batch implements Legacy batch across 1 task.",
+			},
+		},
+		{
+			name: "structured metadata wins over surrounding prose",
+			ms:   &platform.Milestone{Title: "Mixed batch", Description: plainWithStructuredDescription},
+			allIssues: []*platform.Issue{
+				{Number: 3, Title: "Add store"},
+			},
+			wantContains: []string{
+				"Structured wins.",
+			},
+			wantNotContains: []string{
+				"Plain prose should not win.",
+				"herd:batch-metadata",
+				"<!--",
+			},
+		},
+		{
+			name: "structured metadata wins after invalid closed markers",
+			ms: &platform.Milestone{Title: "Mixed duplicate markers", Description: `Plain prose should not win.
+
+<!-- herd:batch-metadata {bad} -->
+
+<!-- herd:batch-metadata {"version":1,"pr_summary":" "} -->
+
+<!-- herd:batch-metadata {"version":1,"pr_summary":"Valid structured summary."} -->`},
+			allIssues: []*platform.Issue{
+				{Number: 17, Title: "Add marker scan"},
+			},
+			wantContains: []string{
+				"Valid structured summary.",
+			},
+			wantNotContains: []string{
+				"Plain prose should not win.",
+				"herd:batch-metadata",
+				"<!--",
+				"pr_summary",
+			},
+		},
+		{
+			name: "malformed metadata with surrounding prose falls back to prose",
+			ms: &platform.Milestone{Title: "Malformed with prose", Description: `Plain prose survives.
+
+<!-- herd:batch-metadata {"version":1,"pr_summary": -->`},
+			allIssues: []*platform.Issue{
+				{Number: 4, Title: "Add config"},
+			},
+			wantContains: []string{
+				"Plain prose survives.",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"pr_summary",
+			},
+		},
+		{
+			name: "malformed marker only falls back deterministically",
+			ms:   &platform.Milestone{Title: "Malformed marker only", Description: `<!-- herd:batch-metadata {"version":1,"pr_summary": -->`},
+			allIssues: []*platform.Issue{
+				{Number: 5, Title: "Add fallback path"},
+				{Number: 6, Title: "Add coverage"},
+			},
+			wantContains: []string{
+				"This batch implements Malformed marker only across 2 tasks.",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"pr_summary",
+			},
+		},
+		{
+			name: "multiple invalid closed markers are stripped from fallback prose",
+			ms: &platform.Milestone{Title: "Duplicate invalid markers", Description: `Plain fallback survives.
+
+<!-- herd:batch-metadata {bad} -->
+
+<!-- herd:batch-metadata {"version":1,"pr_summary":" "} -->`},
+			allIssues: []*platform.Issue{
+				{Number: 18, Title: "Strip invalid metadata"},
+			},
+			wantContains: []string{
+				"Plain fallback survives.",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"pr_summary",
+				"<!--",
+			},
+		},
+		{
+			name: "empty milestone description",
+			ms:   &platform.Milestone{Title: "Add auth"},
+			allIssues: []*platform.Issue{
+				{Number: 1, Title: "Add model"},
+				{Number: 2, Title: "Add routes"},
+			},
+			wantContains: []string{
+				"This batch implements Add auth across 2 tasks.",
+				"- Add model",
+				"- Add routes",
+				"- Review each task's acceptance criteria and the final CI results before merging.",
+			},
+		},
+		{
+			name: "marker-only blank summary falls back deterministically",
+			ms:   &platform.Milestone{Title: "Blank summary marker", Description: blankSummaryDescription},
+			allIssues: []*platform.Issue{
+				{Number: 16, Title: "Add blank fallback"},
+			},
+			wantContains: []string{
+				"This batch implements Blank summary marker across 1 task.",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"pr_summary",
+			},
+		},
+		{
+			name: "whitespace-only milestone description",
+			ms:   &platform.Milestone{Title: "  Ship reporting  ", Description: " \n\t "},
+			allIssues: []*platform.Issue{
+				{Number: 3, Title: "Add report page"},
+				{Number: 4, Title: "Add export"},
+			},
+			wantContains: []string{
+				"This batch implements Ship reporting across 2 tasks.",
+				"- Add report page",
+				"- Add export",
+			},
+		},
+		{
+			name: "singular one task",
+			ms:   &platform.Milestone{Title: "Fix login"},
+			allIssues: []*platform.Issue{
+				{Number: 5, Title: "Fix session refresh"},
+			},
+			wantContains: []string{
+				"This batch implements Fix login across 1 task.",
+				"- Fix session refresh",
+			},
+		},
+		{
+			name: "empty issue titles",
+			ms:   &platform.Milestone{Title: "Untitled coverage"},
+			allIssues: []*platform.Issue{
+				{Number: 6, Title: " "},
+				{Number: 7, Title: ""},
+			},
+			wantContains: []string{
+				"This batch implements Untitled coverage across 2 tasks.",
+				"- See the task table below for the changed areas.",
+			},
+		},
+		{
+			name: "more than five issues",
+			ms:   &platform.Milestone{Title: "Large batch"},
+			allIssues: []*platform.Issue{
+				{Number: 8, Title: "Change one"},
+				{Number: 9, Title: "Change two"},
+				{Number: 10, Title: "Change three"},
+				{Number: 11, Title: "Change four"},
+				{Number: 12, Title: "Change five"},
+				{Number: 13, Title: "Change six"},
+			},
+			wantContains: []string{
+				"- Change one",
+				"- Change five",
+				"- Additional task coverage is listed in the task table below.",
+			},
+			wantNotContains: []string{"- Change six"},
+		},
+		{
+			name: "criteria parsing from issue bodies ignores logs",
+			ms:   &platform.Milestone{Title: "Validated batch"},
+			allIssues: []*platform.Issue{
+				{Number: 14, Title: "Validated task", Body: criteriaBody},
+			},
+			wantContains: []string{
+				"- #14: Login works",
+			},
+			wantNotContains: []string{
+				"Tests pass",
+				"worker progress log text should stay out",
+			},
+		},
+		{
+			name: "empty milestone title",
+			ms:   &platform.Milestone{Title: "  "},
+			allIssues: []*platform.Issue{
+				{Number: 15, Title: "Add fallback"},
+			},
+			wantContains: []string{
+				"This batch implements this batch across 1 task.",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := renderReviewerSummary(tt.ms, tt.allIssues, nil)
+
+			assert.True(t, strings.HasPrefix(body, "## Summary\n\n"))
+			assert.Contains(t, body, "Major changes:")
+			assert.Contains(t, body, "## Validation")
+			for _, want := range tt.wantContains {
+				assert.Contains(t, body, want)
+			}
+			for _, notWant := range tt.wantNotContains {
+				assert.NotContains(t, body, notWant)
+			}
+		})
+	}
+}
+
+func TestRenderReviewerSummaryEscapesMetadataSummary(t *testing.T) {
+	summary := "Reviewer summary with \"quotes\"\n\n- **Markdown** stays visible."
+	description, err := batchmeta.Append("", batchmeta.Metadata{PRSummary: summary})
+	require.NoError(t, err)
+
+	body := renderReviewerSummary(
+		&platform.Milestone{Title: "Escaping batch", Description: description},
+		[]*platform.Issue{{Number: 1, Title: "Add metadata summary"}},
+		nil,
+	)
+
+	assert.Contains(t, body, summary)
+	assert.NotContains(t, body, `\"quotes\"`)
+	assert.NotContains(t, body, `\n`)
+	assert.NotContains(t, body, "herd:batch-metadata")
+	assert.NotContains(t, body, "pr_summary")
+	assert.NotContains(t, body, "<!--")
+}
+
+func TestFallbackPRSummaryParagraph(t *testing.T) {
+	tests := []struct {
+		name      string
+		ms        *platform.Milestone
+		allIssues []*platform.Issue
+		want      string
+	}{
+		{
+			name:      "plural tasks",
+			ms:        &platform.Milestone{Title: "Add auth"},
+			allIssues: []*platform.Issue{{Number: 1}, {Number: 2}},
+			want:      "This batch implements Add auth across 2 tasks.",
+		},
+		{
+			name:      "singular task",
+			ms:        &platform.Milestone{Title: "Add auth"},
+			allIssues: []*platform.Issue{{Number: 1}},
+			want:      "This batch implements Add auth across 1 task.",
+		},
+		{
+			name:      "empty title",
+			ms:        &platform.Milestone{Title: " "},
+			allIssues: nil,
+			want:      "This batch implements this batch across 0 tasks.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, fallbackPRSummaryParagraph(tt.ms, tt.allIssues))
+		})
+	}
+}
+
+func TestFallbackMajorChanges(t *testing.T) {
+	tests := []struct {
+		name      string
+		allIssues []*platform.Issue
+		want      []string
+	}{
+		{
+			name: "stable non-empty titles",
+			allIssues: []*platform.Issue{
+				{Title: " First "},
+				{Title: ""},
+				{Title: "Second"},
+			},
+			want: []string{"First", "Second"},
+		},
+		{
+			name:      "no titles",
+			allIssues: []*platform.Issue{{Title: " "}, nil},
+			want:      []string{"See the task table below for the changed areas."},
+		},
+		{
+			name: "truncates after five and appends coverage bullet",
+			allIssues: []*platform.Issue{
+				{Title: "One"},
+				{Title: "Two"},
+				{Title: "Three"},
+				{Title: "Four"},
+				{Title: "Five"},
+				{Title: "Six"},
+			},
+			want: []string{
+				"One",
+				"Two",
+				"Three",
+				"Four",
+				"Five",
+				"Additional task coverage is listed in the task table below.",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, fallbackMajorChanges(tt.allIssues))
+		})
+	}
+}
+
+func TestFallbackValidation(t *testing.T) {
+	bodyWithCriteria := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1},
+		Task:        "Task",
+		Criteria:    []string{"[X] Defensive marker stripped", "Second criterion ignored"},
+		Context:     "Do not include worker progress comments",
+	})
+	malformedBody := "---\nherd:\n  version: [\n---\n\n## Acceptance Criteria\n\n- [ ] Ignored\n"
+
+	tests := []struct {
+		name      string
+		allIssues []*platform.Issue
+		want      []string
+	}{
+		{
+			name: "first criterion per issue",
+			allIssues: []*platform.Issue{
+				{Number: 21, Body: bodyWithCriteria},
+				{Number: 22, Body: issues.RenderBody(issues.IssueBody{
+					FrontMatter: issues.FrontMatter{Version: 1},
+					Task:        "Task",
+					Criteria:    []string{"Another criterion"},
+				})},
+			},
+			want: []string{"#21: Defensive marker stripped", "#22: Another criterion"},
+		},
+		{
+			name: "fallback when no criteria parse",
+			allIssues: []*platform.Issue{
+				{Number: 23, Body: malformedBody},
+				{Number: 24, Body: "## Task\n\nNo criteria\n"},
+			},
+			want: []string{"Review each task's acceptance criteria and the final CI results before merging."},
+		},
+		{
+			name: "limits to five criteria",
+			allIssues: []*platform.Issue{
+				{Number: 1, Body: issues.RenderBody(issues.IssueBody{FrontMatter: issues.FrontMatter{Version: 1}, Task: "A", Criteria: []string{"A"}})},
+				{Number: 2, Body: issues.RenderBody(issues.IssueBody{FrontMatter: issues.FrontMatter{Version: 1}, Task: "B", Criteria: []string{"B"}})},
+				{Number: 3, Body: issues.RenderBody(issues.IssueBody{FrontMatter: issues.FrontMatter{Version: 1}, Task: "C", Criteria: []string{"C"}})},
+				{Number: 4, Body: issues.RenderBody(issues.IssueBody{FrontMatter: issues.FrontMatter{Version: 1}, Task: "D", Criteria: []string{"D"}})},
+				{Number: 5, Body: issues.RenderBody(issues.IssueBody{FrontMatter: issues.FrontMatter{Version: 1}, Task: "E", Criteria: []string{"E"}})},
+				{Number: 6, Body: issues.RenderBody(issues.IssueBody{FrontMatter: issues.FrontMatter{Version: 1}, Task: "F", Criteria: []string{"F"}})},
+			},
+			want: []string{"#1: A", "#2: B", "#3: C", "#4: D", "#5: E"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, fallbackValidation(tt.allIssues))
+		})
+	}
+}
+
+func TestFirstNonEmptyLines(t *testing.T) {
+	assert.Equal(t, []string{"one", "two"}, firstNonEmptyLines([]string{" \n one \n", "two", "three"}, 2))
+	assert.Nil(t, firstNonEmptyLines([]string{"one"}, 0))
+	assert.Empty(t, firstNonEmptyLines([]string{" ", "\n\t"}, 3))
+}
+
+func TestTrimCriterionMarker(t *testing.T) {
+	assert.Equal(t, "Done", trimCriterionMarker(" [ ] Done "))
+	assert.Equal(t, "Done", trimCriterionMarker("[x] Done"))
+	assert.Equal(t, "Done", trimCriterionMarker("[X] Done"))
+	assert.Equal(t, "Done", trimCriterionMarker("Done"))
 }
 
 func TestBuildTiersFromIssues(t *testing.T) {
@@ -3648,6 +4115,12 @@ func TestHandleConflictResolution_TaskBodyKeepsAgentOnWorkerBranch(t *testing.T)
 	require.NoError(t, err)
 
 	body := issueSvc.createdBody
+	parsed, parseErr := issues.ParseBody(body)
+	require.NoError(t, parseErr)
+	assert.Equal(t, "fix", parsed.FrontMatter.Type)
+	assert.True(t, parsed.FrontMatter.ConflictResolution)
+	assert.Equal(t, []string{workerBranch, batchBranch}, parsed.FrontMatter.ConflictingBranches)
+	assert.Len(t, wf.dispatched, 1)
 	// The new body tells the agent to stay on its own worker branch and merge
 	// origin/<workerBranch>. The negation warning ("do NOT run `git checkout
 	// <batch>`") must be present, but no positive checkout/push step.
@@ -3664,6 +4137,65 @@ func TestHandleConflictResolution_TaskBodyKeepsAgentOnWorkerBranch(t *testing.T)
 		"3. `git checkout",
 		"git push origin " + batchBranch,
 	})
+}
+
+func TestHandleConflictResolution_RelabelsSourceWhenResolverDispatchFails(t *testing.T) {
+	tests := []struct {
+		name       string
+		repo       *mockRepoService
+		workflows  *mockWorkflowService
+		wantErrMsg string
+	}{
+		{
+			name:       "default branch lookup fails",
+			repo:       &mockRepoService{defaultBranchErr: errors.New("default branch unavailable")},
+			workflows:  &mockWorkflowService{},
+			wantErrMsg: "getting default branch for conflict-resolution dispatch",
+		},
+		{
+			name:       "workflow dispatch fails",
+			repo:       &mockRepoService{defaultBranch: "main"},
+			workflows:  &mockWorkflowService{dispatchErr: errors.New("workflow unavailable")},
+			wantErrMsg: "dispatching conflict-resolution worker for issue #777",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issueSvc := newMockIssueService()
+			issueSvc.createResult = &platform.Issue{Number: 777}
+			mock := &mockPlatform{
+				issues:    issueSvc,
+				prs:       &mockPRService{},
+				workflows: tc.workflows,
+				repo:      tc.repo,
+			}
+			cfg := &config.Config{
+				Integrator: config.Integrator{MaxConflictResolutionAttempts: 3},
+				Workers:    config.Workers{TimeoutMinutes: 30, RunnerLabel: "herd-worker"},
+			}
+			ms := &platform.Milestone{Number: 1, Title: "Batch 1"}
+			issue := &platform.Issue{
+				Number:    42,
+				Title:     "Some task",
+				Labels:    []string{issues.StatusDone},
+				Milestone: ms,
+			}
+
+			result, err := handleConflictResolution(context.Background(), mock, cfg, issue, ms, "herd/worker/42-some-task", "herd/batch/1-batch")
+
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), tc.wantErrMsg)
+			assert.Contains(t, issueSvc.removedLabels[42], issues.StatusDone)
+			assert.Contains(t, issueSvc.addedLabels[42], issues.StatusFailed)
+			assert.Contains(t, issueSvc.removedLabels[777], issues.StatusInProgress)
+			assert.Contains(t, issueSvc.addedLabels[777], issues.StatusFailed)
+			require.NotEmpty(t, issueSvc.comments[777])
+			assert.Contains(t, issueSvc.comments[777][0], "Failed to dispatch conflict-resolution worker")
+			assert.Empty(t, tc.workflows.dispatched, "no successful workflow dispatch should be recorded")
+		})
+	}
 }
 
 func TestDispatchReadyIssues_SkipsAlreadyInProgress(t *testing.T) {

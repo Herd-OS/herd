@@ -365,6 +365,15 @@ graph TD
 
 Opening the batch PR is idempotent: if concurrent advance-on-close triggers race, the second call detects the existing PR (via listing or by handling a 422 "already exists" error) and returns its number instead of failing.
 
+The generated batch PR body starts with a reviewer-facing `## Summary` section,
+then `Major changes:` bullets and `## Validation`, followed by the existing
+Herd operational sections: `## Tasks` and `## Worker branches`. PR creation
+remains deterministic and does not invoke an agent. New batches read the
+reviewer summary from structured milestone batch metadata; older batches
+without structured metadata can still use plain milestone descriptions as a
+legacy summary. Batches with neither use fallback text derived from the
+milestone title, issue titles, and parsed acceptance criteria.
+
 Before opening the batch PR, the Integrator sanity-checks that the milestone's issue list returned by the GitHub API is complete (the count of fetched issues is at least `OpenIssues + ClosedIssues`). If the list is short — typically a transient partial API response — it logs `Warning: milestone #N has X expected issues (Y open + Z closed) but only K were returned by the API; skipping batch PR to avoid premature open` and skips PR creation; the PR opens on a subsequent advance once the API returns complete data. Likewise, if the issue triggering an advance is not found in any tier (another partial-response symptom), the Integrator logs `Warning: issue #N not found in any tier of milestone #M (possibly partial API response); skipping advance` and treats the trigger as a no-op rather than returning an error.
 
 ### Run-to-Milestone Resolution
@@ -404,7 +413,7 @@ This matters whenever an integrator run is interrupted mid-loop —
 GitHub Actions failures can all leave one or more `herd/status:done` issues
 whose worker branches were never merged. No manual cleanup is needed: the
 next workflow run that triggers consolidate (the next worker completion,
-manual `@herd-os integrate`, or any other event that fires the integrator)
+manual `/herd integrate`, or any other event that fires the integrator)
 re-scans the milestone, finds the stranded branches still on the remote, and
 merges them in.
 
@@ -474,7 +483,7 @@ issues, and style violations. When an acceptance
 criterion restricts which files may be modified, the reviewer allows supporting
 changes to configuration files, test helpers, test fixtures, and infrastructure
 files if they are clearly required for the primary task to work. Before reviewing, the
-reviewer collects any `@herd-os fix` comments from the batch PR and appends them
+reviewer collects any `/herd fix` comments from the batch PR and appends them
 to the acceptance criteria list as `"User requested: <description>"`. This
 ensures the reviewer checks user-requested changes equally alongside original
 acceptance criteria, rather than treating them as a separate prompt section.
@@ -524,7 +533,7 @@ authoritative:
 HerdOS bot comments (review findings, integrator messages, worker progress) are
 filtered out of user feedback collection so they don't feed back into the
 reviewer's prompt. This applies to both batch PR reviews and standalone
-`@herd-os review` runs on non-batch PRs.
+`/herd review` runs on non-batch PRs.
 
 ### Severity-Based Filtering
 
@@ -567,6 +576,27 @@ Fix issues are labeled `herd/type:fix`, have no dependencies (run in parallel),
 and track which review cycle spawned them via a `fix_cycle` field and a
 `batch_pr` reference back to the PR.
 
+#### Review non-convergence
+
+Before creating another review-fix issue, the Integrator parses recent HerdOS
+review result comments and completed review-fix issues for the batch PR. The
+first implementation is deterministic-only: it compares review-cycle trends,
+deduped finding counts, and repeated package/root-cause clusters to decide
+whether the fix loop is still making progress or needs a different strategy.
+
+When the deterministic heuristics detect non-convergence, the Integrator creates
+one strategy-level fix issue instead of another broad endpoint-level review-fix
+issue. The strategy issue carries the recurring finding clusters and a duplicate
+fingerprint. Before creating one, HerdOS checks for an existing strategy fix by
+label, title, and fingerprint so repeated review triggers do not dispatch
+duplicate strategy workers.
+
+Strategy fixes use the existing worker workflow. The Integrator creates the
+issue internally and dispatches the worker directly, so no human `/herd fix`
+comment is required. Future implementations can add optional agent synthesis for
+the strategy text, but this version intentionally keeps the decision and issue
+construction deterministic.
+
 #### Review fix-issue dedup
 
 New review findings are deduplicated only against fix issues whose herd status
@@ -586,7 +616,7 @@ concern entirely. If the fix worker genuinely believes the reviewer is wrong
 after careful analysis, it explains its reasoning in detail rather than
 silently doing nothing.
 
-When `@herd-os fix` creates a fix issue, all comments from the batch PR are
+When `/herd fix` creates a fix issue, all comments from the batch PR are
 included as a `## Conversation History` section in the issue body. Each comment
 is formatted as `**@author:**` followed by the comment body, separated by `---`.
 This gives the fix worker full context of prior fix requests and review feedback.
@@ -597,7 +627,7 @@ comments, and posts the remainder as one or more "Part N of M" comments on the
 same issue. The same handling applies to Review fix-issues, CI fix-issues, and
 conflict-resolution issues — see [github-integration.md → Body Size Limit](github-integration.md#body-size-limit).
 
-`@herd-os fix` also detects conflict-related keywords in the description (e.g.,
+`/herd fix` also detects conflict-related keywords in the description (e.g.,
 "merge conflict", "rebase conflict", "conflict with main"). When detected, the
 handler automatically appends explicit git merge/rebase instructions to the fix
 issue body so the dispatched worker knows to follow the step-by-step conflict
@@ -648,17 +678,17 @@ the Integrator halts the cycle.
   verdicts, and the resolution options.
 
 While the `herd/stable-disagreement` label is present, automatic review is
-suspended. Manual `@herd-os review` and `@herd-os integrate` mention commands
-still execute — they bypass the label.
+suspended. Manual `/herd review` and `/herd integrate` slash commands still
+execute — they bypass the label.
 
 **Recovery.** The user has three options:
 
-1. **The workers were right** — post `@herd-os fix` with explicit acceptance
-   criteria that close out the findings, or `@herd-os integrate` to merge as-is.
-2. **The reviewer was right** — post `@herd-os fix` with concrete `file:line`
+1. **The workers were right** — post `/herd fix` with explicit acceptance
+   criteria that close out the findings, or `/herd integrate` to merge as-is.
+2. **The reviewer was right** — post `/herd fix` with concrete `file:line`
    evidence that contradicts the worker verdicts.
 3. **Resume automatic review** — remove the `herd/stable-disagreement` label
-   and post `@herd-os integrate`.
+   and post `/herd integrate`.
 
 ---
 
@@ -700,15 +730,58 @@ which path is taken. The resolver is capped at `max_conflict_resolution_attempts
 (default 2); when that budget is exhausted, the batch enters cascade-failed
 state — see [When cascades fail](#when-cascades-fail).
 
-### Monitor-Detected Batch-vs-Main Conflicts
+### Open Batch PR Conflicts
+
+Once the batch PR is open, its base branch may advance and make the PR
+unmergeable. This is distinct from Integrator consolidation conflicts: automatic
+resolver issues still handle worker branches conflicting while they are merged
+into the batch branch, controlled by `integrator.on_conflict`; open batch PR
+conflict handling resolves the batch PR head against its base branch.
+
+Live GitHub PR metadata is authoritative for current mergeability, conflict
+state, head SHA, and base SHA. HerdOS always checks the single-PR
+`PullRequests().Get()` endpoint before dispatching because the list endpoint
+does not populate the `Mergeable` field.
+
+#### Manual `/herd resolve-conflicts`
+
+Post `/herd resolve-conflicts` on an open batch PR when GitHub reports that it
+conflicts with its base branch. You can add optional context after the command:
+`/herd resolve-conflicts <context>`.
+
+The handler checks live PR mergeability before creating work:
+
+1. If GitHub reports a clean or mergeable state, the command no-ops because the
+   PR is not currently conflicting with its base.
+2. If GitHub reports mergeability as unknown, HerdOS waits briefly and retries.
+   If it is still unknown after the bounded retry, the command no-ops with a
+   retry-later warning.
+3. If GitHub reports an explicit conflict state, such as `DIRTY` or
+   `CONFLICTING`, HerdOS creates and dispatches a focused conflict-resolution
+   issue for the current PR head and base.
+
+Known non-conflict blockers, such as branch protection, required reviews,
+failing checks, or `BLOCKED` states, no-op as "not currently conflicting with
+base" rather than dispatching a resolver.
+
+Duplicate active resolver issues are keyed by batch PR, head SHA, and base SHA,
+so repeated comments do not dispatch duplicate workers for the same conflict
+state. Generated resolver issue bodies include only the triggering comment,
+current PR metadata, optional context, and concise merge/rebase instructions;
+they deliberately avoid the full PR conversation history.
+
+Generic `/herd fix` remains available for normal code fixes and keeps its
+existing behavior: batch fix issues include PR conversation history to give the
+worker review and discussion context.
+
+#### Monitor-Detected Batch-vs-Main Conflicts
 
 Previously, batch branch conflicts with main were only detected at PR creation
 time (during the final rebase). The Monitor now detects these proactively during
 patrol:
 
-1. For each open batch PR with a `herd/batch/` head branch, the Monitor calls
-   the single-PR `PullRequests().Get()` endpoint (the List endpoint does not
-   populate the `Mergeable` field)
+1. For each open batch PR with a `herd/batch/` head branch, the Monitor uses
+   live single-PR metadata
 2. If `Mergeable == false`, the batch PR has conflicts with its base branch
 3. The Monitor checks for the `herd/rebase-pending` label to prevent duplicate
    dispatches (same dedup pattern as `herd/ci-fix-pending` for CI fixes)
@@ -792,13 +865,13 @@ The batch PR comment lists three options in priority order:
    git fetch origin && git checkout <worker-branch>
    ```
 2. **Rebase and resolve** locally, force-push the worker branch, then
-   post `@herd-os integrate` on the batch PR to resume consolidation.
+   post `/herd integrate` on the batch PR to resume consolidation.
 3. **Or close** the original failing issue if the work is no longer
-   needed, then post `@herd-os integrate` to advance past it.
+   needed, then post `/herd integrate` to advance past it.
 
 Once the underlying problem is handled, remove the `herd/cascade-failed`
 label from the batch PR, or let the next integrator pass remove it when GitHub
-reports the PR clean and mergeable. The next `@herd-os integrate` (or workflow_run
+reports the PR clean and mergeable. The next `/herd integrate` (or workflow_run
 trigger) will resume conflict resolution normally.
 
 #### Why we intentionally stop retrying
@@ -851,7 +924,7 @@ graph TD
     E1 -->|Yes| E1a["Comment asking for review/merge"]
     E --> E2{"CI failing?"}
     E2 -->|fix-ci comment present| E2a["Skip (dedup)"]
-    E2 -->|fix-ci comment absent| E2b["Post @herd-os fix-ci comment"]
+    E2 -->|fix-ci comment absent| E2b["Post /herd fix-ci comment"]
 
     E --> E3{"Mergeable == false?"}
     E3 -->|rebase-pending label present| E3a["Skip (dedup)"]
@@ -1101,7 +1174,7 @@ This prevents the system from marking issues as done when the agent didn't actua
 The integrator also guards the review path. The review agent runs under a strict output contract: no tool calls, no `gh`/`git`/`bash` invocations, no issue or file mutations — its only output is a JSON object. If the agent returns unparseable output, the integrator retries once after a 5-second delay within the same invocation. If both attempts still fail, it posts the comment
 
 ```
-⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `@herd-os review` manually to retry.
+⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry.
 ```
 
 on the batch PR and returns `ManualInterventionNeeded=true`, leaving the review surfaced for the operator rather than silently dropped.
@@ -1199,17 +1272,16 @@ The user can then dispatch with `herd dispatch --batch <N>`.
 
 ## 12. Commands
 
-HerdOS supports `@herd-os` mention commands posted as comments on issues and
+HerdOS supports `/herd` slash-comment commands posted as comments on issues and
 PRs. This provides a unified entry point for both human and automated
-interactions through the installed GitHub App. `/herd` slash-comment commands
-are no longer supported and are not a compatibility alias.
+interactions through the installed GitHub App.
 
 ### Architecture
 
 The comment command system is handled by the control plane after receiving
 GitHub App `issue_comment` webhooks at `/webhooks/github`. The command parser
-looks for the configured App login (`@herd-os` for the hosted service), validates
-the human commenter, and dispatches to the registered handler.
+looks for a `/herd` command, validates the human commenter, and dispatches to the
+registered handler.
 
 ### Permission Model
 
@@ -1217,7 +1289,7 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 
 ### Acknowledgment Flow
 
-1. User posts `@herd-os <command>` as a comment
+1. User posts `/herd <command>` as a comment
 2. The GitHub App webhook reaches the control plane
 3. Handler executes the command
 4. Result is posted as a reply comment, review, or status update
@@ -1228,32 +1300,34 @@ Commands are accepted from users with `OWNER`, `MEMBER`, or `COLLABORATOR` assoc
 
 | Command | Kind | Context | Description |
 |---------|------|---------|-------------|
-| `@herd-os fix-ci` | Mention | Issue or PR | Check CI status and dispatch a fix worker if CI failed |
-| `@herd-os retry` | Mention | Issue | Re-dispatch the current failed issue's worker |
-| `@herd-os retry <N>` | Mention | Issue or PR | Re-dispatch failed issue #N's worker |
-| `@herd-os review` | Mention | PR | Trigger a chunked agent review of the PR and post one deduplicated aggregate result |
-| `@herd-os fix <description>` | Mention | PR | Create a fix issue from the description and dispatch a worker |
-| `@herd-os integrate` | Mention | Issue or PR | Run the full integrator cycle: consolidate -> check CI -> advance -> review |
-| `@herd-os dispatch` | Mention | Issue | Dispatch the current issue (must be ready or blocked) |
-| `@herd-os dispatch <N>` | Mention | Issue or PR | Dispatch issue #N (must be ready or blocked) |
-| `herd review <pr-number>` | CLI | Local terminal | Open an interactive Claude Code session pre-loaded with diff coverage, comments, CI status, and chunk 1/N of the PR diff. The agent acts as a reviewer assistant — you drive the conversation; it can read code and discuss findings, and it drafts `@herd-os fix` comments for any actionable changes (it never edits files locally). It does NOT auto-dispatch workers or create issues. |
+| `/herd fix-ci` | Slash | Issue or PR | Check CI status and dispatch a fix worker if CI failed |
+| `/herd resolve-conflicts` | Slash | PR | On a batch PR, check live mergeability and dispatch a focused conflict-resolution worker only when the PR currently conflicts with its base |
+| `/herd resolve-conflicts <context>` | Slash | PR | Same as above, with extra context included in the resolver issue |
+| `/herd retry` | Slash | Issue | Re-dispatch the current failed issue's worker |
+| `/herd retry <N>` | Slash | Issue or PR | Re-dispatch failed issue #N's worker |
+| `/herd review` | Slash | PR | Trigger an agent review of the PR and post one deduplicated aggregate result |
+| `/herd fix <description>` | Slash | PR | Create a fix issue from the description and dispatch a worker |
+| `/herd integrate` | Slash | Issue or PR | Run the full integrator cycle: consolidate → check CI → advance → review |
+| `/herd dispatch` | Slash | Issue | Dispatch the current issue (must be ready or blocked) |
+| `/herd dispatch <N>` | Slash | Issue or PR | Dispatch issue #N (must be ready or blocked) |
+| `herd review <pr-number>` | CLI | Local terminal | Open an interactive Claude Code session pre-loaded with diff coverage, comments, CI status, and chunk 1/N of the PR diff. The agent acts as a reviewer assistant — you drive the conversation; it can read code and discuss findings, and it drafts `/herd fix` comments for any actionable changes (it never edits files locally). It does NOT auto-dispatch workers or create issues. |
 | `herd dashboard` | CLI | Local terminal | Live read-only TUI showing active workers, open batches, and recent failures. Refreshes on a `--refresh-seconds` timer (default 15, clamp 5–300). Keybinds: `q` quit, `r` refresh, ↑/↓ select batch, Enter to open the batch's PR or milestone. Worker rows render as OSC 8 hyperlinks where supported. Single-repo and read-only in v1. |
 
-Note on `herd review <pr-number>` vs `@herd-os review`: the CLI command opens an interactive local agent session for discussing a PR — the session is read-only on the working tree, and the only way it enacts changes is by drafting a `@herd-os fix` comment that you approve and post via `gh pr comment`; herd's batch workers then handle the actual edits. For large PRs, the initial interactive prompt includes the coverage summary plus only chunk 1/N so humans can see the limitation before making full-PR conclusions. The mention command runs an automated chunked agent review on the PR and posts deduplicated aggregated findings as a comment. Use the CLI when you want a back-and-forth; use the mention command when you want a one-shot pre-screen.
+Note on `herd review <pr-number>` vs `/herd review`: the CLI command opens an interactive local agent session for discussing a PR — the session is read-only on the working tree, and the only way it enacts changes is by drafting a `/herd fix` comment that you approve and post via `gh pr comment`; herd's batch workers then handle the actual edits. For large PRs, the initial interactive prompt includes the coverage summary plus only chunk 1/N so humans can see the limitation before making full-PR conclusions. The slash command runs an automated chunked agent review on the PR and posts deduplicated aggregated findings as a comment. Use the CLI when you want a back-and-forth; use the slash command when you want a one-shot pre-screen.
 
-The review session is intentionally read-only on the working tree. Local edits during a review would create phantom commits that the integrator does not track and would conflict with any in-flight fix workers in the batch. All changes flow through `@herd-os fix` comments, which are dispatched to workers like any other batch task.
+The review session is intentionally read-only on the working tree. Local edits during a review would create phantom commits that the integrator does not track and would conflict with any in-flight fix workers in the batch. All changes flow through `/herd fix` comments, which are dispatched to workers like any other batch task.
 
-#### Draft-and-confirm @herd-os fix comments
+#### Draft-and-confirm /herd fix comments
 
-When the interactive `herd review <pr-number>` session reaches a concrete actionable conclusion — for example, "this finding is wrong, but we should still fix X" or "yes, let's add a test for Y" — the agent proactively drafts a `@herd-os fix` comment scoped to a single, focused task with specific files/functions and acceptance criteria. The agent shows the draft to the user and asks for approval; it never auto-posts. On approval, the agent posts the comment using `gh pr comment <pr-number> --repo <owner>/<repo> --body "..."`. Once posted, the herd workers (via the existing [`@herd-os fix` comment-command pipeline](#available-commands)) take over. If the conversation is purely informational, the agent does not propose a `@herd-os fix` comment.
+When the interactive `herd review <pr-number>` session reaches a concrete actionable conclusion — for example, "this finding is wrong, but we should still fix X" or "yes, let's add a test for Y" — the agent proactively drafts a `/herd fix` comment scoped to a single, focused task with specific files/functions and acceptance criteria. The agent shows the draft to the user and asks for approval; it never auto-posts. On approval, the agent posts the comment using `gh pr comment <pr-number> --repo <owner>/<repo> --body "..."`. Once posted, the herd workers (via the existing [`/herd fix` comment-command pipeline](#available-commands)) take over. If the conversation is purely informational, the agent does not propose a `/herd fix` comment.
 
 #### Non-Batch PR Reviews
 
-`@herd-os review` works on any PR, not just batch PRs. When used on a non-batch PR, it runs the same chunked agent review and posts one deduplicated aggregated severity-classified findings comment, but skips all batch-specific logic: no fix issues are created, no workers are dispatched, and no fix cycles are tracked. This is useful for getting an AI review on regular PRs without the full Herd orchestration.
+`/herd review` works on any PR, not just batch PRs. When used on a non-batch PR, it runs the same chunked agent review and posts one deduplicated aggregated severity-classified findings comment, but skips all batch-specific logic: no fix issues are created, no workers are dispatched, and no fix cycles are tracked. This is useful for getting an AI review on regular PRs without the full Herd orchestration.
 
-#### Standalone @herd-os fix
+#### Standalone /herd fix
 
-`@herd-os fix` works on any PR, not just batch PRs. The [comment-command handler](#available-commands) selects a flow based on the PR's head branch:
+`/herd fix` works on any PR, not just batch PRs. The [comment-command handler](#available-commands) selects a flow based on the PR's head branch:
 
 - If the head branch starts with `herd/batch/`, the existing batch flow runs: a fix issue is created in the batch's milestone and consolidated through the integrator like any other fix worker.
 - Otherwise, the standalone flow runs.
@@ -1268,14 +1342,14 @@ When the interactive `herd review <pr-number>` session reaches a concrete action
 - No automated CI-fix loop.
 - No conflict-resolution agent for push failures.
 
-**Conflict on push.** If the target branch advanced on the remote between dispatch and push, the push is rejected. The tracking issue is labeled `herd/status:failed` and receives a comment asking the user to rebase the PR and re-run `@herd-os fix`.
+**Conflict on push.** If the target branch advanced on the remote between dispatch and push, the push is rejected. The tracking issue is labeled `herd/status:failed` and receives a comment asking the user to rebase the PR and re-run `/herd fix`.
 
-**Concurrency.** At most one in-progress standalone fix is allowed per PR. A second `@herd-os fix` posted while one is still in progress is refused with a comment naming the in-progress tracking issue.
+**Concurrency.** At most one in-progress standalone fix is allowed per PR. A second `/herd fix` posted while one is still in progress is refused with a comment naming the in-progress tracking issue.
 
 ### Monitor Integration
 
 The Monitor requests retries and CI fixes through the same command handlers as
-human `@herd-os` comments, maintaining single responsibility for command
+human `/herd` comments, maintaining single responsibility for command
 authorization and dispatch.
 
 ### Failure Recovery
@@ -1285,10 +1359,10 @@ When integrator steps fail, the CLI posts a comment on the relevant issue or bat
 ```
 ⚠️ **Integrator failed** during <step>: <error>
 
-You can retry with `@herd-os integrate` on this issue or the batch PR.
+You can retry with `/herd integrate` on this issue or the batch PR.
 ```
 
-The `@herd-os integrate` command manually triggers the full integrator cycle for a batch. It can be posted on:
+The `/herd integrate` command manually triggers the full integrator cycle for a batch. It can be posted on:
 - **Any issue belonging to a batch** — extracts the batch number from the issue's YAML frontmatter
 - **A batch PR** — extracts the batch number from the `herd/batch/<N>-<slug>` branch name
 

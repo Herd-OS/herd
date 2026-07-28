@@ -39,8 +39,9 @@ type reviewLockState struct {
 }
 
 type reviewLockHandle struct {
-	branch string
-	state  reviewLockState
+	branch         string
+	state          reviewLockState
+	reclaimedStale *reviewLockState
 }
 
 type reviewLockRepository interface {
@@ -68,12 +69,10 @@ func acquireReviewLock(ctx context.Context, _ platform.IssueService, repoSvc pla
 		if !stateOK || state.PRNumber != prNumber {
 			return nil, false, nil
 		}
-		if state.Status == "locked" && state.ExpiresAt != nil && state.ExpiresAt.After(now) {
+		if reviewLockBlocksCurrentHead(state, lockFromSHA, now) {
 			return nil, false, nil
 		}
-		if state.Status == "locked" && state.ExpiresAt == nil {
-			return nil, false, nil
-		}
+		reclaimedStale := reclaimedStaleReviewLockState(state, prNumber, lockFromSHA)
 
 		lockID, err := newReviewLockToken()
 		if err != nil {
@@ -94,9 +93,33 @@ func acquireReviewLock(ctx context.Context, _ platform.IssueService, repoSvc pla
 			}
 			return nil, false, fmt.Errorf("updating review lock branch %s: %w", lockBranch, err)
 		}
-		return &reviewLockHandle{branch: lockBranch, state: lockedState}, true, nil
+		return &reviewLockHandle{branch: lockBranch, state: lockedState, reclaimedStale: reclaimedStale}, true, nil
 	}
 	return nil, false, nil
+}
+
+func reclaimedStaleReviewLockState(state reviewLockState, prNumber int, currentHeadSHA string) *reviewLockState {
+	if state.Status != "locked" || state.PRNumber != prNumber || state.BatchBranchSHA == "" || state.BatchBranchSHA == currentHeadSHA {
+		return nil
+	}
+	reclaimed := state
+	return &reclaimed
+}
+
+func reviewLockBlocksCurrentHead(state reviewLockState, currentHeadSHA string, now time.Time) bool {
+	if state.Status != "locked" {
+		return false
+	}
+	if state.ExpiresAt != nil && !state.ExpiresAt.After(now) {
+		return false
+	}
+	if state.ExpiresAt == nil {
+		return true
+	}
+	if state.BatchBranchSHA == "" {
+		return true
+	}
+	return state.BatchBranchSHA == currentHeadSHA
 }
 
 func releaseReviewLock(ctx context.Context, _ platform.IssueService, repoSvc platform.RepositoryService, h *reviewLockHandle) error {

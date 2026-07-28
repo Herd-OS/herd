@@ -42,3 +42,15 @@ func TestRegistry_Has(t *testing.T) {
 	reg.Register("foo", func(ctx *HandlerContext, cmd Command) Result { return Result{} })
 	assert.True(t, reg.Has("foo"))
 }
+
+func TestDefaultRegistry_HasBuiltins(t *testing.T) {
+	reg := DefaultRegistry()
+
+	assert.True(t, reg.Has("fix-ci"))
+	assert.True(t, reg.Has("retry"))
+	assert.True(t, reg.Has("review"))
+	assert.True(t, reg.Has("fix"))
+	assert.True(t, reg.Has("integrate"))
+	assert.True(t, reg.Has("dispatch"))
+	assert.True(t, reg.Has("resolve-conflicts"))
+}

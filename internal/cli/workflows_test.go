@@ -16,10 +16,21 @@ import (
 )
 
 type githubActionsWorkflow struct {
+	On   githubActionsTriggers       `yaml:"on"`
 	Jobs map[string]githubActionsJob `yaml:"jobs"`
 }
 
+type githubActionsTriggers struct {
+	WorkflowRun githubActionsWorkflowRun `yaml:"workflow_run"`
+}
+
+type githubActionsWorkflowRun struct {
+	Workflows []string `yaml:"workflows"`
+	Types     []string `yaml:"types"`
+}
+
 type githubActionsJob struct {
+	If          string                    `yaml:"if"`
 	Concurrency *githubActionsConcurrency `yaml:"concurrency"`
 	Steps       []githubActionsStep       `yaml:"steps"`
 }
@@ -492,6 +503,37 @@ func TestIntegratorWorkflow_RendersConfiguredCIWorkflows(t *testing.T) {
 	assert.Contains(t, s, "/api/v1/workflow-events")
 	assert.NotContains(t, s, "herd integrator check-ci")
 	assert.NotContains(t, s, "herd integrator review")
+}
+
+func TestIntegratorWorkflow_DefaultWorkerCompletionRequestsHostedIntegration(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+
+	assert.Equal(t, []string{"HerdOS Worker"}, workflow.On.WorkflowRun.Workflows)
+	assert.Equal(t, []string{"completed"}, workflow.On.WorkflowRun.Types)
+	assert.NotContains(t, workflow.Jobs, "check-ci-workflow-completion",
+		"default workflow should not add a separate CI workflow_run review trigger")
+
+	integrate, ok := workflow.Jobs["integrate"]
+	require.True(t, ok, "integrate job should render")
+	assert.Contains(t, integrate.If, "github.event_name == 'workflow_run'")
+	assert.Contains(t, integrate.If, "github.event.workflow_run.conclusion != 'skipped'")
+
+	step := namedStep(t, integrate, "Request hosted integration")
+	require.NotEmpty(t, step.Run, "integrate job should submit a hosted workflow event")
+	assert.Contains(t, step.Run, "/api/v1/workflow-events")
+	assert.Contains(t, step.Run, `--arg action "worker_completed"`)
+	assert.Contains(t, step.Run, `--arg run_id "$RUN_ID"`)
+	assert.Contains(t, step.Run, `--arg head_branch "$RUN_HEAD_BRANCH"`)
+	assert.Contains(t, step.Run, `--arg head_sha "$RUN_HEAD_SHA"`)
+	assert.Contains(t, step.Run, `workflow_run: {`)
+	assert.NotContains(t, step.Run, "herd integrator ")
 }
 
 func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T) {

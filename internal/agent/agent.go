@@ -55,6 +55,7 @@ type ExecOptions struct {
 
 type Plan struct {
 	BatchName string        `json:"batch_name" yaml:"batch_name"`
+	PRSummary string        `json:"pr_summary,omitempty" yaml:"pr_summary,omitempty"`
 	Tasks     []PlannedTask `json:"tasks" yaml:"tasks"`
 }
 

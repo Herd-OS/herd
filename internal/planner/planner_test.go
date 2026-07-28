@@ -2,10 +2,12 @@ package planner
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/batchmeta"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
@@ -69,6 +71,7 @@ func TestBuildLabels(t *testing.T) {
 func TestCreateFromPlan(t *testing.T) {
 	plan := &agent.Plan{
 		BatchName: "Test Feature",
+		PRSummary: "Adds the test feature with dependent task validation.",
 		Tasks: []agent.PlannedTask{
 			{
 				Title:              "Task A",
@@ -103,6 +106,7 @@ func TestCreateFromPlan(t *testing.T) {
 
 	// Verify milestone was created
 	assert.Equal(t, "Test Feature", mock.milestones.created[0].title)
+	assertMilestoneMetadataDescription(t, mock.milestones.created[0].description, "Adds the test feature with dependent task validation.")
 
 	// Verify issues were created with correct labels
 	assert.Contains(t, mock.issues.created[0].labels, issues.StatusReady)
@@ -114,6 +118,67 @@ func TestCreateFromPlan(t *testing.T) {
 
 	// Verify branch was created
 	assert.Equal(t, "herd/batch/1-test-feature", mock.repo.branchesCreated[0].name)
+}
+
+func TestCreateFromPlan_EmptyPRSummaryCreatesEmptyMilestoneDescription(t *testing.T) {
+	tests := []struct {
+		name     string
+		plan     *agent.Plan
+		wantDesc string
+	}{
+		{
+			name: "omitted",
+			plan: &agent.Plan{
+				BatchName: "No Summary",
+				Tasks: []agent.PlannedTask{
+					{Title: "Task A"},
+				},
+			},
+			wantDesc: "",
+		},
+		{
+			name: "whitespace only",
+			plan: &agent.Plan{
+				BatchName: "Blank Summary",
+				PRSummary: " \n\t ",
+				Tasks: []agent.PlannedTask{
+					{Title: "Task A"},
+				},
+			},
+			wantDesc: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := newMockPlatform()
+
+			result, err := CreateFromPlan(context.Background(), mock, tt.plan, nil)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Len(t, mock.milestones.created, 1)
+			assert.Equal(t, tt.wantDesc, mock.milestones.created[0].description)
+		})
+	}
+}
+
+func TestCreateFromPlan_PRSummaryMetadataEscapesStructuredContent(t *testing.T) {
+	summary := "Adds \"quoted\" metadata.\n\n- Preserves markdown\n- Escapes JSON safely"
+	plan := &agent.Plan{
+		BatchName: "Structured Summary",
+		PRSummary: summary,
+		Tasks: []agent.PlannedTask{
+			{Title: "Task A"},
+		},
+	}
+
+	mock := newMockPlatform()
+	result, err := CreateFromPlan(context.Background(), mock, plan, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, mock.milestones.created, 1)
+
+	assertMilestoneMetadataDescription(t, mock.milestones.created[0].description, summary)
 }
 
 func TestCreateFromPlan_CycleError(t *testing.T) {
@@ -164,8 +229,8 @@ func TestBuildIssueBody(t *testing.T) {
 
 func TestRenderBodyWithNewFields(t *testing.T) {
 	body := issues.IssueBody{
-		FrontMatter: issues.FrontMatter{Version: 1},
-		Task:        "Do something",
+		FrontMatter:           issues.FrontMatter{Version: 1},
+		Task:                  "Do something",
 		ImplementationDetails: "Step 1, Step 2",
 		Conventions:           []string{"Pattern A", "Pattern B"},
 		ContextFromDeps:       []string{"Dep 1 provides X"},
@@ -257,6 +322,39 @@ func TestBuildMentions(t *testing.T) {
 	assert.Equal(t, "@solo", buildMentions([]string{"solo"}))
 }
 
+func assertMilestoneMetadataDescription(t *testing.T, description, summary string) {
+	t.Helper()
+
+	assert.NotEqual(t, summary, description)
+	assert.Contains(t, description, "<!-- herd:batch-metadata ")
+	assert.Empty(t, visibleMilestoneDescription(description))
+
+	metadata, ok := batchmeta.Parse(description)
+	require.True(t, ok)
+	assert.Equal(t, batchmeta.Metadata{Version: batchmeta.CurrentVersion, PRSummary: strings.TrimSpace(summary)}, metadata)
+}
+
+func visibleMilestoneDescription(description string) string {
+	const (
+		markerPrefix = "<!-- herd:batch-metadata "
+		markerSuffix = " -->"
+	)
+
+	start := strings.Index(description, markerPrefix)
+	if start < 0 {
+		return strings.TrimSpace(description)
+	}
+
+	payloadStart := start + len(markerPrefix)
+	endOffset := strings.Index(description[payloadStart:], markerSuffix)
+	if endOffset < 0 {
+		return strings.TrimSpace(description[:start])
+	}
+
+	end := payloadStart + endOffset + len(markerSuffix)
+	return strings.TrimSpace(description[:start] + description[end:])
+}
+
 // --- Mock Platform ---
 
 type mockPlatform struct {
@@ -274,12 +372,12 @@ func newMockPlatform() *mockPlatform {
 }
 
 func (m *mockPlatform) Issues() platform.IssueService             { return m.issues }
-func (m *mockPlatform) PullRequests() platform.PullRequestService  { return nil }
-func (m *mockPlatform) Workflows() platform.WorkflowService        { return nil }
-func (m *mockPlatform) Labels() platform.LabelService              { return nil }
-func (m *mockPlatform) Milestones() platform.MilestoneService      { return m.milestones }
-func (m *mockPlatform) Runners() platform.RunnerService            { return nil }
-func (m *mockPlatform) Repository() platform.RepositoryService     { return m.repo }
+func (m *mockPlatform) PullRequests() platform.PullRequestService { return nil }
+func (m *mockPlatform) Workflows() platform.WorkflowService       { return nil }
+func (m *mockPlatform) Labels() platform.LabelService             { return nil }
+func (m *mockPlatform) Milestones() platform.MilestoneService     { return m.milestones }
+func (m *mockPlatform) Runners() platform.RunnerService           { return nil }
+func (m *mockPlatform) Repository() platform.RepositoryService    { return m.repo }
 func (m *mockPlatform) Checks() platform.CheckService             { return nil }
 
 // mockIssueService

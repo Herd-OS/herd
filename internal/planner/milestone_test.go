@@ -10,6 +10,7 @@ import (
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/batchmeta"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,6 +32,7 @@ func alreadyExistsErr() error {
 func basicPlan() *agent.Plan {
 	return &agent.Plan{
 		BatchName: "Foo",
+		PRSummary: "Creates Foo with a concise reviewer summary.",
 		Tasks: []agent.PlannedTask{
 			{
 				Title:              "Task A",
@@ -53,6 +55,7 @@ func TestCreateFromPlan_MilestoneFirstTryUnique(t *testing.T) {
 
 	require.Len(t, mock.milestones.created, 1)
 	assert.Equal(t, "Foo", mock.milestones.created[0].title)
+	assertMilestoneMetadataDescription(t, mock.milestones.created[0].description, "Creates Foo with a concise reviewer summary.")
 	assert.Equal(t, 1, result.MilestoneNumber)
 	assert.Equal(t, "Foo", plan.BatchName)
 	assert.Equal(t, "herd/batch/1-foo", result.BatchBranch)
@@ -63,8 +66,9 @@ func TestCreateFromPlan_MilestoneRetryWithSuffix(t *testing.T) {
 	mock := newMockPlatform()
 
 	callCount := 0
-	mock.milestones.CreateFunc = func(_ context.Context, title, _ string, _ *time.Time) (*platform.Milestone, error) {
+	mock.milestones.CreateFunc = func(_ context.Context, title, description string, _ *time.Time) (*platform.Milestone, error) {
 		callCount++
+		assertMilestoneMetadataDescription(t, description, plan.PRSummary)
 		if callCount == 1 {
 			assert.Equal(t, "Foo", title)
 			return nil, alreadyExistsErr()
@@ -81,6 +85,12 @@ func TestCreateFromPlan_MilestoneRetryWithSuffix(t *testing.T) {
 	require.Len(t, mock.milestones.created, 2)
 	assert.Equal(t, "Foo", mock.milestones.created[0].title)
 	assert.Equal(t, "Foo (2)", mock.milestones.created[1].title)
+	assert.Equal(t, mock.milestones.created[0].description, mock.milestones.created[1].description)
+	for _, created := range mock.milestones.created {
+		metadata, ok := batchmeta.Parse(created.description)
+		require.True(t, ok)
+		assert.Equal(t, batchmeta.Metadata{Version: batchmeta.CurrentVersion, PRSummary: plan.PRSummary}, metadata)
+	}
 	assert.Equal(t, "Foo (2)", plan.BatchName)
 	assert.Equal(t, 7, result.MilestoneNumber)
 	assert.Equal(t, "herd/batch/7-foo-2", result.BatchBranch)

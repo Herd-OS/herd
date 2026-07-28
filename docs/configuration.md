@@ -57,6 +57,10 @@ integrator:
     max_file_bytes: 40000
     max_files_per_chunk: 80
     max_chunks: 8
+  review_non_convergence:
+    enabled: true
+    window: 5
+    min_completed_cycles: 3
   ci_max_fix_cycles: 0           # max CI-failure fix cycles (0 = unlimited)
 
 monitor:
@@ -287,20 +291,44 @@ Normal approval is blocked when material source files are not reviewed or when t
 If the agent returns unparseable output (e.g., the JSON cannot be decoded, or the output is empty/error-like), the integrator retries once after a 5-second delay within the same invocation. If both attempts fail, the integrator posts the following comment on the batch PR and sets the review aside without creating fix workers:
 
 ```
-⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `@herd-os review` manually to retry.
+⚠️ **HerdOS Integrator** — Agent review failed to produce valid output after 2 attempts. Run `/herd review` manually to retry.
 ```
 
-When you see that comment, comment `@herd-os review` (optionally with a focus area) on the batch PR to trigger a fresh review. The integrator does not silently drop the review or auto-approve the PR.
+When you see that comment, comment `/herd review` (optionally with a focus area) on the batch PR to trigger a fresh review. The integrator does not silently drop the review or auto-approve the PR.
 
-Review retries and manual `@herd-os review` commands are serialized per batch PR by an application-level GitHub-backed review lock. If another review is already running, the duplicate trigger is skipped instead of launching another agent. Manual review still bypasses stable-disagreement suspension, but it respects the active-review lock. Existing active-fix guards still prevent duplicate fix cycles after review findings have already created fix issues.
+Review retries and manual `/herd review` commands are serialized per batch PR by an application-level GitHub-backed review lock. If another review is already running, the duplicate trigger is skipped instead of launching another agent. Manual review still bypasses stable-disagreement suspension, but it respects the active-review lock. Existing active-fix guards still prevent duplicate fix cycles after review findings have already created fix issues.
 
-Approved review results are also idempotent per PR head SHA for automatic triggers. Once a batch PR has a Herd review-result marker with `status: approved` for the current head, later automatic review triggers skip the agent and log a no-op instead of posting another PR comment. Manual `@herd-os review` is the force override: it asks for a fresh review of the current head even when an approved marker already exists. A new commit changes the head SHA and allows automatic review again; non-approved markers such as `changes_requested` and `max_cycles_hit` do not count as approved-head suppression. Live GitHub PR metadata wins over stale review comments or labels when HerdOS decides whether the current PR is mergeable.
+Approved review results are also idempotent per PR head SHA for automatic triggers. Once a batch PR has a Herd review-result marker with `status: approved` for the current head, later automatic review triggers skip the agent and log a no-op instead of posting another PR comment. Manual `/herd review` is the force override: it asks for a fresh review of the current head even when an approved marker already exists. A new commit changes the head SHA and allows automatic review again; non-approved markers such as `changes_requested` and `max_cycles_hit` do not count as approved-head suppression. Live GitHub PR metadata wins over stale review comments or labels when HerdOS decides whether the current PR is mergeable.
 
-When a batch review starts, HerdOS records the batch PR head SHA, then checks the current PR head again before applying the agent result. If the head changed while the agent was running, HerdOS discards that result, posts a comment on the batch PR, and leaves the updated diff for the next automatic trigger or manual `@herd-os review`.
+When a batch review starts, HerdOS records the batch PR head SHA, then checks the current PR head again before applying the agent result. If the head changed while the agent was running, HerdOS discards that result, posts a comment on the batch PR, and leaves the updated diff for the next automatic trigger or manual `/herd review`.
 
-If a manual `@herd-os review` is skipped because another review is active, HerdOS posts diagnostic lock metadata when available: owner, acquired time, expiry time, recorded head SHA, and current head SHA. A recorded head SHA that differs from the current PR head on an unexpired lock is diagnostic only; it does not allow a second concurrent review. Review lock expiry or release controls recovery.
+Active review locks block duplicate reviews only for the current PR head. If the active lock has a valid recorded `batch_branch_sha` equal to the current PR head, HerdOS skips the duplicate trigger. If the active lock has a valid recorded `batch_branch_sha` that differs from the current PR head, HerdOS treats that lock as stale for the current head, appends a replacement lock commit, and continues reviewing the updated diff. Malformed locks still fail closed, and legacy locks without a recorded head SHA preserve existing blocking behavior until release or expiry rather than assuming they are safe to reclaim.
+
+When a manual `/herd review` successfully reclaims a stale old-head lock, HerdOS posts a concise informational comment. Automatic review paths only log the reclaim so routine worker-completion and CI events do not add PR noise.
 
 Review-lock metadata is not merge approval. Merge approval uses the batch PR metadata and does not merge, approve, or consult `herd/review-lock/pr-N` branches.
+
+### Review Non-Convergence
+
+HerdOS watches recent review result comments and completed review-fix issues before creating another review-fix issue. By default it looks back across the last 5 review cycles, requires at least 3 completed fix cycles, requires the latest deduped finding count to meet an internal threshold, and requires repeated package/root-cause clusters before escalating. The feature is enabled by default.
+
+When non-convergence is detected, HerdOS creates one strategy-level fix issue instead of another large endpoint-level review-fix issue. This escalation is internal: HerdOS creates the issue and dispatches the worker directly, without asking humans to post `/herd fix`.
+
+```yaml
+integrator:
+  review_non_convergence:
+    enabled: true
+    window: 5
+    min_completed_cycles: 3
+```
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `integrator.review_non_convergence.enabled` | `true` | Enables deterministic review-cycle non-convergence detection and strategy-level fix escalation. |
+| `integrator.review_non_convergence.window` | `5` | Number of recent review cycles considered when analyzing repeated findings. |
+| `integrator.review_non_convergence.min_completed_cycles` | `3` | Minimum completed review-fix cycles required before escalation can occur. |
+
+Other thresholds, including the latest deduped finding-count floor and repeated cluster requirements, are conservative internal constants for now.
 
 ## CI Fix Loop
 
@@ -308,7 +336,7 @@ Review-lock metadata is not merge approval. Merge approval uses the batch PR met
 
 `integrator.ci_workflows` defaults to an empty list. When non-empty, `herd init` renders `workflow_run` triggers for those exact GitHub Actions workflow names, and failed completed runs on `herd/batch/` branches can self-heal without waiting for the Monitor. The strings are matched exactly and preserved as configured, including punctuation and Unicode dashes.
 
-GitHub Actions CI uses `workflow_run` because `check_run` events are unreliable for some Actions-created check suites. The existing `check_run` path remains as a fallback for third-party check providers. The scheduled Monitor also remains a fallback for batch PR CI failures, and `@herd-os fix-ci` remains a manual override that can force a CI fix cycle.
+GitHub Actions CI uses `workflow_run` because `check_run` events are unreliable for some Actions-created check suites. The existing `check_run` path remains as a fallback for third-party check providers. The scheduled Monitor also remains a fallback for batch PR CI failures, and `/herd fix-ci` remains a manual override that can force a CI fix cycle.
 
 CI fix issues include the workflow/run URL, failed job URLs, head branch, head SHA, annotations when available, and either a short log excerpt or a logs-unavailable note. Obvious runner/log infrastructure failures are classified separately: Herd comments on the batch PR and does not dispatch code-fix workers for those by default.
 
