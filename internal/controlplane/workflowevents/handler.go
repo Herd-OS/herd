@@ -36,6 +36,7 @@ type Store interface {
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
+	TryStartIdempotencyKey(ctx context.Context, key string, toStatus string, resultRef string, retryableFailedPrefix string) (store.IdempotencyStartResult, error)
 }
 
 type Processor interface {
@@ -185,6 +186,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if idem, idemErr := h.store.GetIdempotencyKey(r.Context(), processKey); idemErr == nil && mutationspkg.IsPostCallUnknown(idem.Status) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
+			return
+		}
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"status":  "accepted",
 			"created": false,
@@ -230,13 +235,27 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
 		return
 	}
-	if err := h.markWorkflowEventProcessing(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing"})
+	start, err := h.store.TryStartIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseCallStarted, mutationspkg.PhaseCallStarted, mutationspkg.PhaseFailedPreCall+":")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing started"})
 		return
 	}
-	if err := h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseCallStarted); err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), processKey, err.Error())
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing started"})
+	if !start.Started {
+		if start.Record.Status == mutationspkg.PhaseCompleted {
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"status":  "accepted",
+				"created": false,
+				"kind":    event.Kind,
+				"action":  event.Action,
+			})
+			return
+		}
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
+		return
+	}
+	if err := h.markWorkflowEventProcessing(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing"})
 		return
 	}
 	if h.processor != nil {

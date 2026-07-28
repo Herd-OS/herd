@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -336,11 +338,12 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 
 func (d productionCommandDispatcher) ensureConflictResolutionIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams) (int, error) {
 	key := conflictResolutionIssueKey(cmd, params)
+	now := time.Now().UTC()
 	created, err := d.Dispatcher.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       key,
 		Scope:     "conflict_resolution_issue_create",
 		Status:    mutations.PhaseIntentRecorded,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: now,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("acquire conflict-resolution issue idempotency key: %w", err)
@@ -369,6 +372,17 @@ func (d productionCommandDispatcher) ensureConflictResolutionIssue(ctx context.C
 			return 0, fmt.Errorf("conflict-resolution issue idempotency key %q is %s without a completed issue result; retry after reconciliation", key, status)
 		}
 	}
+	if err := d.recordIssueCreateMutationAttempt(ctx, key, cmd.RepositoryID, "conflict_resolution_issue_create", now); err != nil {
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseFailedPreCall+":"+err.Error())
+		return 0, err
+	}
+	started, err := d.tryStartIssueCreateMutation(ctx, key, "conflict-resolution issue")
+	if err != nil || !started {
+		if err != nil {
+			return 0, err
+		}
+		return d.waitForConflictResolutionIssue(ctx, p, cmd, params, key)
+	}
 	return d.createConflictResolutionIssue(ctx, p, cmd, params, key)
 }
 
@@ -378,16 +392,19 @@ func (d productionCommandDispatcher) createConflictResolutionIssue(ctx context.C
 	milestoneNumber := params.Milestone.Number
 	fixIssue, err := p.Issues().Create(ctx, integratorConflictResolutionTitle(params), truncatedBody, []string{issues.TypeFix, issues.StatusInProgress}, &milestoneNumber)
 	if err != nil {
-		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, err.Error())
+		_ = d.completeIssueCreateMutation(ctx, key, mutations.PhaseRepairRequired, nil, err)
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseRepairRequired+":"+err.Error())
 		return 0, fmt.Errorf("creating conflict-resolution issue: %w", err)
 	}
 	for _, comment := range issues.SplitOverflowComments(overflow) {
 		if cerr := p.Issues().AddComment(ctx, fixIssue.Number, comment); cerr != nil {
-			_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, cerr.Error())
+			_ = d.completeIssueCreateMutation(ctx, key, mutations.PhaseRepairRequired, nil, cerr)
+			_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseRepairRequired+":"+cerr.Error())
 			return 0, fmt.Errorf("adding conflict-resolution overflow comment: %w", cerr)
 		}
 	}
 	resultRef := fmt.Sprintf("issue:%d", fixIssue.Number)
+	_ = d.completeIssueCreateMutation(ctx, key, mutations.PhaseCompleted, json.RawMessage(fmt.Sprintf(`{"issue_number":%d}`, fixIssue.Number)), nil)
 	if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
 		return 0, fmt.Errorf("complete conflict-resolution issue idempotency key: %w", err)
 	}
@@ -728,11 +745,12 @@ func validateCommandTarget(cmd commands.DispatchCommand, target commandTarget) e
 
 func (d productionCommandDispatcher) ensureCommandFixIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget) (int, error) {
 	key := commandFixIssueKey(cmd)
+	now := time.Now().UTC()
 	created, err := d.Dispatcher.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       key,
 		Scope:     "command_fix_issue_create",
 		Status:    mutations.PhaseIntentRecorded,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: now,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("acquire command fix issue idempotency key: %w", err)
@@ -753,14 +771,22 @@ func (d productionCommandDispatcher) ensureCommandFixIssue(ctx context.Context, 
 			}
 			return issueNumber, nil
 		}
-		if mutations.IsPreCallRetryable(record.Status) || record.Status == "failed" {
-			return d.createCommandFixIssue(ctx, p, cmd, pr, target, key)
-		}
 		status := strings.TrimSpace(record.Status)
 		if status == "" {
 			status = "unknown"
 		}
 		return 0, fmt.Errorf("command fix issue idempotency key %q is %s without a completed issue result; retry after reconciliation", key, status)
+	}
+	if err := d.recordIssueCreateMutationAttempt(ctx, key, cmd.RepositoryID, "command_fix_issue_create", now); err != nil {
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseFailedPreCall+":"+err.Error())
+		return 0, err
+	}
+	started, err := d.tryStartIssueCreateMutation(ctx, key, "command fix issue")
+	if err != nil || !started {
+		if err != nil {
+			return 0, err
+		}
+		return d.waitForCommandFixIssue(ctx, p, cmd, pr, target, key)
 	}
 	return d.createCommandFixIssue(ctx, p, cmd, pr, target, key)
 }
@@ -768,23 +794,27 @@ func (d productionCommandDispatcher) ensureCommandFixIssue(ctx context.Context, 
 func (d productionCommandDispatcher) createCommandFixIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget, key string) (int, error) {
 	body, title, labels, milestone, err := d.commandFixIssueRequest(ctx, p, cmd, pr, target)
 	if err != nil {
-		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, err.Error())
+		_ = d.completeIssueCreateMutation(ctx, key, mutations.PhaseFailedPreCall, nil, err)
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseFailedPreCall+":"+err.Error())
 		return 0, err
 	}
 	body = injectCommandFixIssueMarker(body, cmd)
 	truncatedBody, overflow := issues.TruncateIssueBody(body)
 	issue, err := p.Issues().Create(ctx, title, truncatedBody, labels, milestone)
 	if err != nil {
-		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, err.Error())
+		_ = d.completeIssueCreateMutation(ctx, key, mutations.PhaseRepairRequired, nil, err)
+		_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseRepairRequired+":"+err.Error())
 		return 0, fmt.Errorf("creating command fix issue: %w", err)
 	}
 	for _, comment := range issues.SplitOverflowComments(overflow) {
 		if cerr := p.Issues().AddComment(ctx, issue.Number, comment); cerr != nil {
-			_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, cerr.Error())
+			_ = d.completeIssueCreateMutation(ctx, key, mutations.PhaseRepairRequired, nil, cerr)
+			_ = d.Dispatcher.Store.FailIdempotencyKey(ctx, key, mutations.PhaseRepairRequired+":"+cerr.Error())
 			return 0, fmt.Errorf("adding command fix issue overflow comment: %w", cerr)
 		}
 	}
 	resultRef := fmt.Sprintf("issue:%d", issue.Number)
+	_ = d.completeIssueCreateMutation(ctx, key, mutations.PhaseCompleted, json.RawMessage(fmt.Sprintf(`{"issue_number":%d}`, issue.Number)), nil)
 	if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
 		return 0, fmt.Errorf("complete command fix issue idempotency key: %w", err)
 	}
@@ -1098,6 +1128,137 @@ func parseIssueResultRef(ref string) (int, bool) {
 		return 0, false
 	}
 	return number, true
+}
+
+type issueCreateMutationStore interface {
+	cpdispatch.MutationRecorder
+	cpdispatch.MutationStarter
+	cpdispatch.MutationReader
+}
+
+func (d productionCommandDispatcher) issueCreateMutationStore() (issueCreateMutationStore, error) {
+	mutationsStore, ok := d.Dispatcher.Store.(issueCreateMutationStore)
+	if !ok {
+		return nil, fmt.Errorf("dispatcher store does not support guarded GitHub mutation attempts")
+	}
+	return mutationsStore, nil
+}
+
+func (d productionCommandDispatcher) recordIssueCreateMutationAttempt(ctx context.Context, key string, repoID int64, mutationType string, now time.Time) error {
+	mutationsStore, err := d.issueCreateMutationStore()
+	if err != nil {
+		return err
+	}
+	err = mutationsStore.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		RepositoryID:   repoID,
+		MutationType:   mutationType,
+		Status:         mutations.PhaseIntentRecorded,
+		CreatedAt:      now,
+	})
+	if err == nil || errors.Is(err, store.ErrAlreadyExists) {
+		return nil
+	}
+	return fmt.Errorf("record %s mutation attempt: %w", mutationType, err)
+}
+
+func (d productionCommandDispatcher) tryStartIssueCreateMutation(ctx context.Context, key, label string) (bool, error) {
+	mutationsStore, err := d.issueCreateMutationStore()
+	if err != nil {
+		return false, err
+	}
+	start, err := mutationsStore.TryStartGitHubMutationAttempt(ctx, key, []string{mutations.PhaseIntentRecorded, mutations.PhaseFailedPreCall}, time.Now().UTC())
+	if err != nil {
+		return false, fmt.Errorf("start %s mutation attempt: %w", label, err)
+	}
+	if start.Started {
+		return true, nil
+	}
+	switch mutations.Normalize(start.Attempt.Status) {
+	case mutations.PhaseCompleted:
+		return false, nil
+	case mutations.PhaseCallStarted, mutations.PhaseRepairRequired:
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s mutation attempt for %q is %s; retry after reconciliation", label, key, start.Attempt.Status)
+	}
+}
+
+func (d productionCommandDispatcher) completeIssueCreateMutation(ctx context.Context, key, status string, response json.RawMessage, mutationErr error) error {
+	mutationsStore, err := d.issueCreateMutationStore()
+	if err != nil {
+		return err
+	}
+	errMsg := ""
+	if mutationErr != nil {
+		errMsg = mutationErr.Error()
+	}
+	return mutationsStore.CompleteGitHubMutationAttempt(ctx, key, status, response, errMsg, time.Now().UTC())
+}
+
+func (d productionCommandDispatcher) waitForCommandFixIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget, key string) (int, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		issueNumber, recovered, err := d.recoverCommandFixIssue(ctx, p, cmd, pr, target, key)
+		if recovered || err != nil {
+			return issueNumber, err
+		}
+		record, err := d.Dispatcher.Store.GetIdempotencyKey(ctx, key)
+		if err != nil {
+			return 0, fmt.Errorf("get command fix issue idempotency key: %w", err)
+		}
+		if record.Status == mutations.PhaseCompleted && strings.TrimSpace(record.ResultRef) != "" {
+			issueNumber, ok := parseIssueResultRef(record.ResultRef)
+			if !ok {
+				return 0, fmt.Errorf("invalid command fix issue result ref %q", record.ResultRef)
+			}
+			return issueNumber, nil
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("command fix issue creation for %q is in progress; retry after current attempt completes", key)
+		}
+		if err := sleepContext(ctx, 25*time.Millisecond); err != nil {
+			return 0, err
+		}
+	}
+}
+
+func (d productionCommandDispatcher) waitForConflictResolutionIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams, key string) (int, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		issueNumber, recovered, err := d.recoverConflictResolutionIssue(ctx, p, cmd, params, key)
+		if recovered || err != nil {
+			return issueNumber, err
+		}
+		record, err := d.Dispatcher.Store.GetIdempotencyKey(ctx, key)
+		if err != nil {
+			return 0, fmt.Errorf("get conflict-resolution issue idempotency key: %w", err)
+		}
+		if record.Status == mutations.PhaseCompleted && strings.TrimSpace(record.ResultRef) != "" {
+			issueNumber, ok := parseIssueResultRef(record.ResultRef)
+			if !ok {
+				return 0, fmt.Errorf("invalid conflict-resolution issue result ref %q", record.ResultRef)
+			}
+			return issueNumber, nil
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("conflict-resolution issue creation for %q is in progress; retry after current attempt completes", key)
+		}
+		if err := sleepContext(ctx, 25*time.Millisecond); err != nil {
+			return 0, err
+		}
+	}
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func commandJobKind(kind commands.CommandKind) (cpdispatch.JobKind, error) {

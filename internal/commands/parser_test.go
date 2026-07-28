@@ -38,6 +38,7 @@ func TestParse(t *testing.T) {
 		{"unquoted fix-ci", "/herd fix-ci the Node version is wrong, check .nvmrc", &Command{Name: "fix-ci", Args: []string{"the", "Node", "version", "is", "wrong,", "check", ".nvmrc"}, Prompt: "the Node version is wrong, check .nvmrc"}, false},
 		{"unquoted review", "/herd review focus on error handling in auth", &Command{Name: "review", Args: []string{"focus", "on", "error", "handling", "in", "auth"}, Prompt: "focus on error handling in auth"}, false},
 		{"quoted prompt still works", `/herd fix "old style prompt"`, &Command{Name: "fix", Prompt: "old style prompt"}, false},
+		{"quoted prompt preserves remaining lines", "/herd fix \"old style prompt\"\ninclude regression tests", &Command{Name: "fix", Prompt: "old style prompt\ninclude regression tests"}, false},
 		{"retry with arg still works", "/herd retry 42", &Command{Name: "retry", Args: []string{"42"}, Prompt: "42"}, false},
 		{"bare command no trailing text", "/herd fix-ci", &Command{Name: "fix-ci"}, false},
 		{"resolve-conflicts no prompt", "/herd resolve-conflicts", &Command{Name: "resolve-conflicts"}, false},

@@ -61,7 +61,7 @@ func ParseMentionCommand(appLogin, body string) (ParsedCommand, bool, error) {
 		if end := strings.Index(rest, "\""); end >= 0 {
 			return ParsedCommand{
 				Kind:   kind,
-				Prompt: rest[:end],
+				Prompt: commandPrompt(rest[:end], remainingBody),
 				Raw:    line,
 			}, true, nil
 		}

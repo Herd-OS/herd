@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/jobs"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -301,6 +302,42 @@ func TestHandlerProcessingMarkerRedeliveryBlocksDuplicateProcessing(t *testing.T
 	require.Len(t, st.commands, 1)
 	assert.Equal(t, "processing", st.commands[0].Status)
 	assert.Equal(t, "started", st.idem[processKey].Status)
+}
+
+func TestHandlerConcurrentDuplicateWorkflowEventProcessesOnce(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newEventStore()
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	processor := &capturingProcessor{
+		blockStarted: make(chan struct{}),
+		unblock:      make(chan struct{}),
+	}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(validEventClaims(now)),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+		Processor: processor,
+	})
+
+	var wg sync.WaitGroup
+	firstResult := make(chan int, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, eventRequest(validEventPayload()))
+		firstResult <- rec.Code
+	}()
+	<-processor.blockStarted
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, eventRequest(validEventPayload()))
+	close(processor.unblock)
+	wg.Wait()
+
+	assert.Equal(t, http.StatusAccepted, <-firstResult)
+	assert.Equal(t, http.StatusConflict, second.Code)
+	assert.Len(t, processor.snapshotCalls(), 1)
 }
 
 func TestHandlerProcessorFailureWithResetFailureRetriesOnRedelivery(t *testing.T) {
@@ -608,9 +645,29 @@ func (s *eventStore) FailIdempotencyKey(_ context.Context, key string, errorMess
 	return nil
 }
 
+func (s *eventStore) TryStartIdempotencyKey(_ context.Context, key string, toStatus string, resultRef string, retryableFailedPrefix string) (store.IdempotencyStartResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idem[key]
+	if !ok {
+		return store.IdempotencyStartResult{}, store.ErrNotFound
+	}
+	retryableFailed := record.Status == "failed" && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
+	if record.Status != mutationspkg.PhaseIntentRecorded && !retryableFailed {
+		return store.IdempotencyStartResult{Started: false, Record: record}, nil
+	}
+	record.Status = toStatus
+	record.ResultRef = resultRef
+	s.idem[key] = record
+	return store.IdempotencyStartResult{Started: true, Record: record}, nil
+}
+
 type capturingProcessor struct {
-	calls []processorCall
-	errs  []error
+	mu           sync.Mutex
+	calls        []processorCall
+	errs         []error
+	blockStarted chan struct{}
+	unblock      chan struct{}
 }
 
 type processorCall struct {
@@ -619,13 +676,30 @@ type processorCall struct {
 }
 
 func (p *capturingProcessor) ProcessWorkflowEvent(_ context.Context, repo store.Repository, event Event) error {
+	p.mu.Lock()
 	p.calls = append(p.calls, processorCall{repo: repo, event: event})
+	if p.blockStarted != nil {
+		close(p.blockStarted)
+		p.blockStarted = nil
+	}
 	if len(p.errs) > 0 {
 		err := p.errs[0]
 		p.errs = p.errs[1:]
+		p.mu.Unlock()
 		return err
 	}
+	unblock := p.unblock
+	p.mu.Unlock()
+	if unblock != nil {
+		<-unblock
+	}
 	return nil
+}
+
+func (p *capturingProcessor) snapshotCalls() []processorCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]processorCall(nil), p.calls...)
 }
 
 type fixedValidator jobs.OIDCClaims

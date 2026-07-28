@@ -5,13 +5,8 @@ import (
 	"os"
 )
 
-const localGitHubAuthOverrideEnv = "HERD_LOCAL_GITHUB_AUTH"
-
 func ensureProductionControlPlaneAuth(command string) error {
 	if os.Getenv("HERD_RUNNER") != "true" {
-		return nil
-	}
-	if os.Getenv(localGitHubAuthOverrideEnv) == "true" {
 		return nil
 	}
 	if os.Getenv("GITHUB_TOKEN") != "" || os.Getenv("GH_TOKEN") != "" || os.Getenv("HERD_GITHUB_TOKEN") != "" {

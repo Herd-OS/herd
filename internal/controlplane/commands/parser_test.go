@@ -127,6 +127,17 @@ func TestParseMentionCommand(t *testing.T) {
 			},
 		},
 		{
+			name:     "fix quoted prompt preserves remaining lines",
+			appLogin: "herd-os",
+			body:     "@herd-os fix \"update auth handling\"\ninclude regression tests",
+			wantOK:   true,
+			want: ParsedCommand{
+				Kind:   CommandFix,
+				Prompt: "update auth handling\ninclude regression tests",
+				Raw:    "@herd-os fix \"update auth handling\"",
+			},
+		},
+		{
 			name:       "unterminated quoted prompt",
 			appLogin:   "herd-os",
 			body:       "@herd-os fix \"update auth handling",

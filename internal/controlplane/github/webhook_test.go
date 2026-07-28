@@ -318,7 +318,7 @@ func TestHandlerIssueCommentMarkProcessedFailureDoesNotReenqueueOnRedelivery(t *
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Len(t, store.commands, 1)
 	require.Len(t, store.deliveries, 1)
-	assert.Equal(t, "processor_started", store.deliveries[0].Status)
+	assert.Equal(t, "repair_required", store.deliveries[0].Status)
 
 	store.failProcessedUpdate = false
 	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
@@ -329,9 +329,9 @@ func TestHandlerIssueCommentMarkProcessedFailureDoesNotReenqueueOnRedelivery(t *
 
 	handler.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Equal(t, http.StatusConflict, rec.Code)
 	assert.Len(t, store.commands, 1)
-	assert.Equal(t, "processor_started", store.deliveries[0].Status)
+	assert.Equal(t, "repair_required", store.deliveries[0].Status)
 }
 
 func TestHandlerUpsertFailureReturnsServerError(t *testing.T) {
@@ -383,7 +383,7 @@ func TestHandlerDoesNotRetryProcessorStartedDeliveryOnRedelivery(t *testing.T) {
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Equal(t, http.StatusConflict, rec.Code)
 	require.Len(t, store.repositories, 0)
 	require.Len(t, store.deliveries, 1)
 	assert.Equal(t, "repair_required", store.deliveries[0].Status)

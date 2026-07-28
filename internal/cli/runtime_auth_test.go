@@ -37,14 +37,15 @@ func TestEnsureProductionControlPlaneAuth(t *testing.T) {
 			env:  map[string]string{"HERD_RUNNER": "true"},
 		},
 		{
-			name: "explicit local override allows",
-			env:  map[string]string{"HERD_RUNNER": "true", localGitHubAuthOverrideEnv: "true", "GITHUB_TOKEN": "ghp_local"},
+			name:    "runner rejects legacy token even with removed local override",
+			env:     map[string]string{"HERD_RUNNER": "true", "HERD_LOCAL_GITHUB_AUTH": "true", "GITHUB_TOKEN": "ghp_local"},
+			wantErr: "cannot use GITHUB_TOKEN, GH_TOKEN, or HERD_GITHUB_TOKEN",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, key := range []string{"HERD_RUNNER", "GITHUB_TOKEN", "GH_TOKEN", "HERD_GITHUB_TOKEN", localGitHubAuthOverrideEnv} {
+			for _, key := range []string{"HERD_RUNNER", "GITHUB_TOKEN", "GH_TOKEN", "HERD_GITHUB_TOKEN", "HERD_LOCAL_GITHUB_AUTH"} {
 				t.Setenv(key, "")
 			}
 			for key, value := range tt.env {

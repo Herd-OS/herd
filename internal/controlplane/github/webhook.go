@@ -185,7 +185,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch existing.Status {
 		case "intent_recorded", "failed_pre_processor", "failed":
 		case "processor_started", "repair_required":
-			writeJSON(w, http.StatusAccepted, map[string]string{"status": "duplicate"})
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "webhook delivery outcome is unknown; repair required"})
 			return
 		default:
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "webhook delivery outcome is unknown; repair required"})
@@ -229,6 +229,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.markDeliveryProcessed(r.Context(), deliveryID); err != nil {
+		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "repair_required", err.Error(), nil)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "update webhook delivery: storage unavailable",
 		})

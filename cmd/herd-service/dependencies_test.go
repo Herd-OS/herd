@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -363,6 +364,45 @@ func TestProductionResolveConflictsCommand(t *testing.T) {
 	}
 }
 
+func TestProductionResolveConflictsCommandConcurrentDuplicateCreatesOneIssue(t *testing.T) {
+	originalSleep := resolveConflictsSleep
+	resolveConflictsSleep = func(context.Context, time.Duration) error { return nil }
+	t.Cleanup(func() { resolveConflictsSleep = originalSleep })
+
+	p := newFakeCommandPlatform([]*platform.PullRequest{batchPR("DIRTY", false, false)})
+	p.issues.blockCreateStarted = make(chan struct{})
+	p.issues.releaseBlockedCreate = make(chan struct{})
+	workflow := &recordingWorkflowClient{}
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+	cmd := resolveConflictsCommand()
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- d.DispatchCommand(context.Background(), cmd)
+	}()
+	<-p.issues.blockCreateStarted
+
+	secondErr := make(chan error, 1)
+	go func() {
+		secondErr <- d.DispatchCommand(context.Background(), cmd)
+	}()
+	close(p.issues.releaseBlockedCreate)
+
+	require.NoError(t, <-firstErr)
+	require.NoError(t, <-secondErr)
+	assert.Len(t, p.issues.created, 1)
+	assert.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
+}
+
 func TestProductionDispatchCommandDispatchesReadyIssue(t *testing.T) {
 	p := newFakeCommandPlatform([]*platform.PullRequest{})
 	p.issues.byNumber[42] = &platform.Issue{
@@ -543,6 +583,57 @@ func TestProductionFixCommandDuplicateDoesNotCreateSecondIssueOrDispatch(t *test
 	assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
 }
 
+func TestProductionFixCommandConcurrentDuplicateCreatesOneIssue(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{{
+		Number:  849,
+		Head:    "herd/batch/106-hosted-app",
+		Base:    "main",
+		HeadSHA: "head-sha",
+		BaseSHA: "base-sha",
+	}})
+	p.ms.milestones[106] = &platform.Milestone{Number: 106, Title: "Hosted App"}
+	p.issues.blockCreateStarted = make(chan struct{})
+	p.issues.releaseBlockedCreate = make(chan struct{})
+	workflow := &recordingWorkflowClient{}
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+	cmd := commands.DispatchCommand{
+		RepositoryID:   42,
+		InstallationID: 77,
+		Owner:          "octo",
+		Repo:           "herd",
+		PRNumber:       849,
+		CommentID:      123,
+		Actor:          "maintainer",
+		Command:        commands.ParsedCommand{Kind: commands.CommandFix, Args: []string{"update", "auth", "error", "handling"}},
+	}
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- d.DispatchCommand(context.Background(), cmd)
+	}()
+	<-p.issues.blockCreateStarted
+
+	secondErr := make(chan error, 1)
+	go func() {
+		secondErr <- d.DispatchCommand(context.Background(), cmd)
+	}()
+	close(p.issues.releaseBlockedCreate)
+
+	require.NoError(t, <-firstErr)
+	require.NoError(t, <-secondErr)
+	assert.Len(t, p.issues.created, 1)
+	assert.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
+}
+
 func TestProductionFixCommandRecoversCreatedIssueAfterCompletionFailure(t *testing.T) {
 	p := newFakeCommandPlatform([]*platform.PullRequest{{
 		Number:  849,
@@ -682,6 +773,7 @@ func resolveConflictsCommand() commands.DispatchCommand {
 }
 
 type recordingWorkflowClient struct {
+	mu         sync.Mutex
 	dispatches []recordedWorkflowDispatch
 }
 
@@ -695,6 +787,8 @@ type recordedWorkflowDispatch struct {
 }
 
 func (c *recordingWorkflowClient) DispatchWorkflow(_ context.Context, installationID int64, owner, repo, workflowFile, ref string, inputs map[string]string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	copied := map[string]string{}
 	for k, v := range inputs {
 		copied[k] = v
@@ -741,12 +835,15 @@ func (p *fakeCommandPlatform) Repository() platform.RepositoryService    { retur
 func (p *fakeCommandPlatform) Checks() platform.CheckService             { return nil }
 
 type fakeCommandPRService struct {
+	mu       sync.Mutex
 	prs      []*platform.PullRequest
 	gets     int
 	comments []string
 }
 
 func (s *fakeCommandPRService) Get(context.Context, int) (*platform.PullRequest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(s.prs) == 0 {
 		return nil, store.ErrNotFound
 	}
@@ -758,6 +855,8 @@ func (s *fakeCommandPRService) Get(context.Context, int) (*platform.PullRequest,
 	return s.prs[idx], nil
 }
 func (s *fakeCommandPRService) AddComment(_ context.Context, _ int, body string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.comments = append(s.comments, body)
 	return nil
 }
@@ -787,13 +886,29 @@ func (s *fakeCommandPRService) GetDiff(context.Context, int) (string, error) { r
 func (s *fakeCommandPRService) Close(context.Context, int) error             { return nil }
 
 type fakeCommandIssueService struct {
-	byNumber map[int]*platform.Issue
-	listed   []*platform.Issue
-	created  []*platform.Issue
-	comments map[int][]string
+	mu                   sync.Mutex
+	byNumber             map[int]*platform.Issue
+	listed               []*platform.Issue
+	created              []*platform.Issue
+	comments             map[int][]string
+	blockCreateStarted   chan struct{}
+	releaseBlockedCreate chan struct{}
+	createStarted        bool
 }
 
 func (s *fakeCommandIssueService) Create(_ context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
+	s.mu.Lock()
+	if s.blockCreateStarted != nil && !s.createStarted {
+		s.createStarted = true
+		close(s.blockCreateStarted)
+		release := s.releaseBlockedCreate
+		s.mu.Unlock()
+		if release != nil {
+			<-release
+		}
+		s.mu.Lock()
+	}
+	defer s.mu.Unlock()
 	issue := &platform.Issue{Number: 100 + len(s.created), Title: title, Body: body, Labels: append([]string(nil), labels...)}
 	if milestone != nil {
 		issue.Milestone = &platform.Milestone{Number: *milestone}
@@ -806,6 +921,8 @@ func (s *fakeCommandIssueService) Create(_ context.Context, title, body string, 
 	return issue, nil
 }
 func (s *fakeCommandIssueService) Get(_ context.Context, number int) (*platform.Issue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	issue, ok := s.byNumber[number]
 	if !ok {
 		return nil, store.ErrNotFound
@@ -813,6 +930,8 @@ func (s *fakeCommandIssueService) Get(_ context.Context, number int) (*platform.
 	return issue, nil
 }
 func (s *fakeCommandIssueService) List(context.Context, platform.IssueFilters) ([]*platform.Issue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := append([]*platform.Issue(nil), s.listed...)
 	out = append(out, s.created...)
 	return out, nil
