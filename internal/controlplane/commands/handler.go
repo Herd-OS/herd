@@ -136,6 +136,10 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 	if dispatchable && commandRequiresPR(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
 		dispatchable = false
 	}
+	targetIssueNumber, err := resolveCommandIssueNumber(cmd, event)
+	if err != nil {
+		return Result{}, err
+	}
 	if dispatchable {
 		if strings.TrimSpace(event.PullRequestURL) != "" {
 			metadataBody["pr_number"] = event.IssueNumber
@@ -144,6 +148,9 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 			}
 		} else {
 			metadataBody["issue_number"] = event.IssueNumber
+		}
+		if cmd.Kind == CommandDispatch {
+			metadataBody["issue_number"] = targetIssueNumber
 		}
 	}
 	metadata, err := json.Marshal(metadataBody)
@@ -165,7 +172,7 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 	if strings.TrimSpace(event.PullRequestURL) != "" {
 		prNumber = event.IssueNumber
 	}
-	issueNumber := event.IssueNumber
+	issueNumber := targetIssueNumber
 	if prNumber > 0 && commandCreatesDurableFixIssue(cmd.Kind) {
 		issueNumber = 0
 	}
@@ -201,6 +208,20 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		}
 	}
 	return Result{Status: StatusAcknowledged, Command: cmd}, nil
+}
+
+func resolveCommandIssueNumber(cmd ParsedCommand, event IssueComment) (int, error) {
+	if cmd.Kind != CommandDispatch {
+		return event.IssueNumber, nil
+	}
+	if len(cmd.Args) == 0 {
+		return event.IssueNumber, nil
+	}
+	n, err := strconv.Atoi(cmd.Args[0])
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("@herd-os dispatch requires a positive numeric issue number")
+	}
+	return n, nil
 }
 
 func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin string, event IssueComment) error {
@@ -245,6 +266,10 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 	if dispatchable && commandRequiresPR(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
 		return nil
 	}
+	targetIssueNumber, err := resolveCommandIssueNumber(cmd, event)
+	if err != nil {
+		return err
+	}
 	metadataBody := map[string]any{
 		"args":               cmd.Args,
 		"prompt":             cmd.Prompt,
@@ -260,6 +285,9 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 			}
 		} else {
 			metadataBody["issue_number"] = event.IssueNumber
+		}
+		if cmd.Kind == CommandDispatch {
+			metadataBody["issue_number"] = targetIssueNumber
 		}
 	}
 	metadata, err := json.Marshal(metadataBody)

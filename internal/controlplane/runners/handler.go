@@ -39,6 +39,18 @@ type RegistrationTokenResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type PreCallError struct {
+	Err error
+}
+
+func (e PreCallError) Error() string {
+	return e.Err.Error()
+}
+
+func (e PreCallError) Unwrap() error {
+	return e.Err
+}
+
 type Store interface {
 	GetRepository(ctx context.Context, owner string, name string) (store.Repository, error)
 	GetRunnerBootstrapTokenByHash(ctx context.Context, tokenHash string) (store.RunnerBootstrapToken, error)
@@ -137,6 +149,12 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 
 	result, err = h.minter.CreateRegistrationToken(r.Context(), repo.InstallationID, repo.Owner, repo.Name)
 	if err != nil {
+		var preCall PreCallError
+		if errors.As(err, &preCall) {
+			_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create GitHub runner registration token"})
+			return
+		}
 		_ = h.store.FailIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseRepairRequired+":"+err.Error())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create GitHub runner registration token"})
 		return
@@ -400,7 +418,7 @@ type AppInstallationMinter struct {
 func (m AppInstallationMinter) CreateRegistrationToken(ctx context.Context, installationID int64, owner string, repo string) (RegistrationTokenResponse, error) {
 	client, _, err := appauth.NewInstallationClient(ctx, m.Source, installationID)
 	if err != nil {
-		return RegistrationTokenResponse{}, err
+		return RegistrationTokenResponse{}, PreCallError{Err: err}
 	}
 	token, err := ghplatform.CreateRunnerRegistrationToken(ctx, client, owner, repo)
 	if err != nil {

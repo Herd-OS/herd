@@ -96,7 +96,7 @@ func commandPrompt(afterCommand, remainingBody string) string {
 
 func isSupportedCommand(kind CommandKind) bool {
 	switch kind {
-	case CommandPlan, CommandFix, CommandReview, CommandFixCI, CommandResolveConflicts, CommandDispatch:
+	case CommandFix, CommandReview, CommandFixCI, CommandResolveConflicts, CommandDispatch:
 		return true
 	default:
 		return false

@@ -189,6 +189,13 @@ type GitHubMutationAttempt struct {
 	CompletedAt    *time.Time
 }
 
+// GitHubMutationStartResult reports the outcome of a guarded transition to the
+// call-started phase.
+type GitHubMutationStartResult struct {
+	Started bool
+	Attempt GitHubMutationAttempt
+}
+
 // ReviewState stores the latest review state for a repo, PR, and head SHA.
 type ReviewState struct {
 	ID           int64

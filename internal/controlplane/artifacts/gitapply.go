@@ -47,22 +47,41 @@ type ApplyResult struct {
 	CommitSHA string `json:"commit_sha"`
 }
 
+type PreCallError struct {
+	Err error
+}
+
+func (e PreCallError) Error() string {
+	return e.Err.Error()
+}
+
+func (e PreCallError) Unwrap() error {
+	return e.Err
+}
+
+func preCallError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return PreCallError{Err: err}
+}
+
 func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 	if err := validateApplyRequest(req); err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, preCallError(err)
 	}
 	root := req.TempDir
 	if root == "" {
 		var err error
 		root, err = os.MkdirTemp("", "herd-artifact-apply-*")
 		if err != nil {
-			return ApplyResult{}, err
+			return ApplyResult{}, preCallError(err)
 		}
 		defer func() {
 			_ = os.RemoveAll(root)
 		}()
 	} else if err := os.MkdirAll(root, 0755); err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, preCallError(err)
 	}
 
 	cloneURL := req.CloneURL
@@ -72,15 +91,15 @@ func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 	if req.TokenSource != nil {
 		token, err := req.TokenSource.InstallationToken(ctx, req.InstallationID)
 		if err != nil {
-			return ApplyResult{}, fmt.Errorf("get installation token: %w", err)
+			return ApplyResult{}, preCallError(fmt.Errorf("get installation token: %w", err))
 		}
 		if strings.TrimSpace(token.Token) == "" {
-			return ApplyResult{}, fmt.Errorf("empty installation token")
+			return ApplyResult{}, preCallError(fmt.Errorf("empty installation token"))
 		}
 		tokenValue = token.Token
 		authEnv, cleanup, err := gitAuthEnv(root, req.CloneURL, token.Token)
 		if err != nil {
-			return ApplyResult{}, err
+			return ApplyResult{}, preCallError(err)
 		}
 		defer cleanup()
 		gitEnv = authEnv
@@ -88,48 +107,48 @@ func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
 
 	repoDir := filepath.Join(root, "repo")
 	if err := herdgit.CloneWithConfigAndEnv(cloneURL, repoDir, gitConfig, gitEnv); err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
+		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
 	}
 	g := herdgit.NewWithConfigAndEnv(repoDir, gitConfig, gitEnv)
 	if err := g.Fetch("origin"); err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
+		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
 	}
 	current, err := g.RemoteBranchSHA("origin", req.TargetBranch)
 	if err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
+		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
 	}
 	if current != req.ExpectedHeadSHA {
-		return ApplyResult{}, fmt.Errorf("target branch advanced: expected %s, got %s", req.ExpectedHeadSHA, current)
+		return ApplyResult{}, preCallError(fmt.Errorf("target branch advanced: expected %s, got %s", req.ExpectedHeadSHA, current))
 	}
 	if err := g.CheckoutDetached(req.BaseSHA); err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
+		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
 	}
 	if req.Artifact.Metadata.BaseSHA != req.BaseSHA {
-		return ApplyResult{}, fmt.Errorf("stale patch base SHA: expected %s, got %s", req.BaseSHA, req.Artifact.Metadata.BaseSHA)
+		return ApplyResult{}, preCallError(fmt.Errorf("stale patch base SHA: expected %s, got %s", req.BaseSHA, req.Artifact.Metadata.BaseSHA))
 	}
 	patchFile := filepath.Join(root, "artifact.patch")
 	if err := os.WriteFile(patchFile, req.Artifact.Data, 0600); err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, preCallError(err)
 	}
 	if err := g.ApplyBinaryPatch(patchFile); err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
+		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
 	}
 	if err := g.ConfigureIdentity(req.Identity.Name, req.Identity.Email); err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
+		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
 	}
 	dirty, err := g.IsDirty()
 	if err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
+		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
 	}
 	if !dirty {
-		return ApplyResult{}, fmt.Errorf("patch artifact produced no changes")
+		return ApplyResult{}, preCallError(fmt.Errorf("patch artifact produced no changes"))
 	}
 	if err := g.Commit(commitMessage(req)); err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
+		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
 	}
 	commitSHA, err := g.HeadSHA()
 	if err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
+		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
 	}
 	if err := g.PushHEAD("origin", req.TargetBranch, req.ExpectedHeadSHA); err != nil {
 		return ApplyResult{}, redactToken(err, tokenValue)

@@ -395,9 +395,15 @@ func (d productionCommandDispatcher) createConflictResolutionIssue(ctx context.C
 }
 
 func (d productionCommandDispatcher) recoverConflictResolutionIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, params integrator.ConflictResolutionIssueParams, key string) (int, bool, error) {
+	body := injectConflictResolutionIssueMarker(integrator.BuildConflictResolutionIssueBody(params), cmd, params)
+	_, overflow := issues.TruncateIssueBody(body)
+	overflowComments := issues.SplitOverflowComments(overflow)
 	if existing, err := integrator.FindActivePRConflictResolutionIssue(ctx, p, params.Milestone.Number, params.BatchPR, params.PRHeadSHA, params.BaseSHA); err != nil {
 		return 0, false, err
 	} else if existing != nil {
+		if err := ensureIssueOverflowComments(ctx, p, existing.Number, overflowComments); err != nil {
+			return 0, false, err
+		}
 		resultRef := fmt.Sprintf("issue:%d", existing.Number)
 		if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
 			return 0, false, fmt.Errorf("complete recovered conflict-resolution issue idempotency key: %w", err)
@@ -412,6 +418,9 @@ func (d productionCommandDispatcher) recoverConflictResolutionIssue(ctx context.
 	for _, issue := range found {
 		if issue == nil || !strings.Contains(issue.Body, marker) {
 			continue
+		}
+		if err := ensureIssueOverflowComments(ctx, p, issue.Number, overflowComments); err != nil {
+			return 0, false, err
 		}
 		resultRef := fmt.Sprintf("issue:%d", issue.Number)
 		if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
@@ -873,6 +882,13 @@ func parsedCommandPrompt(cmd commands.ParsedCommand) string {
 }
 
 func (d productionCommandDispatcher) recoverCommandFixIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, pr *platform.PullRequest, target commandTarget, key string) (int, bool, error) {
+	body, _, _, _, err := d.commandFixIssueRequest(ctx, p, cmd, pr, target)
+	if err != nil {
+		return 0, false, err
+	}
+	body = injectCommandFixIssueMarker(body, cmd)
+	_, overflow := issues.TruncateIssueBody(body)
+	overflowComments := issues.SplitOverflowComments(overflow)
 	filters := platform.IssueFilters{State: "all"}
 	if strings.HasPrefix(pr.Head, "herd/batch/") {
 		milestone := target.BatchNumber
@@ -892,6 +908,9 @@ func (d productionCommandDispatcher) recoverCommandFixIssue(ctx context.Context,
 		if issue == nil || !strings.Contains(issue.Body, marker) {
 			continue
 		}
+		if err := ensureIssueOverflowComments(ctx, p, issue.Number, overflowComments); err != nil {
+			return 0, false, err
+		}
 		resultRef := fmt.Sprintf("issue:%d", issue.Number)
 		if err := d.Dispatcher.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
 			return 0, false, fmt.Errorf("complete recovered command fix issue idempotency key: %w", err)
@@ -899,6 +918,34 @@ func (d productionCommandDispatcher) recoverCommandFixIssue(ctx context.Context,
 		return issue.Number, true, nil
 	}
 	return 0, false, nil
+}
+
+func ensureIssueOverflowComments(ctx context.Context, p platform.Platform, issueNumber int, expected []string) error {
+	if len(expected) == 0 {
+		return nil
+	}
+	existing, err := p.Issues().ListComments(ctx, issueNumber)
+	if err != nil {
+		return fmt.Errorf("list issue overflow comments: %w", err)
+	}
+	remaining := append([]string(nil), expected...)
+	for _, comment := range existing {
+		if comment == nil {
+			continue
+		}
+		for i, want := range remaining {
+			if comment.Body == want {
+				remaining = append(remaining[:i], remaining[i+1:]...)
+				break
+			}
+		}
+	}
+	for _, comment := range remaining {
+		if err := p.Issues().AddComment(ctx, issueNumber, comment); err != nil {
+			return fmt.Errorf("add recovered issue overflow comment: %w", err)
+		}
+	}
+	return nil
 }
 
 func commandFixIssueKey(cmd commands.DispatchCommand) string {

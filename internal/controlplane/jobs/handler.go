@@ -36,6 +36,10 @@ type MutationRecorder interface {
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 }
 
+type MutationStarter interface {
+	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
+}
+
 type MutationReader interface {
 	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
 }
@@ -664,6 +668,12 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		Now:             h.now,
 	})
 	if err != nil {
+		var preCall artifacts.PreCallError
+		if errors.As(err, &preCall) {
+			_ = h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall, nil, err)
+			_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
+			return err
+		}
 		_ = h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseRepairRequired, nil, err)
 		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 		return err
@@ -834,9 +844,17 @@ func (h Handler) markPatchMutationCallStarted(ctx context.Context, idempotencyKe
 	if !ok {
 		return fmt.Errorf("patch mutation recorder is not configured")
 	}
-	if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutationspkg.PhaseCallStarted, nil, "", h.now()); err != nil {
+	starter, ok := h.store.(MutationStarter)
+	if !ok {
+		return fmt.Errorf("patch mutation starter is not configured")
+	}
+	start, err := starter.TryStartGitHubMutationAttempt(ctx, idempotencyKey, []string{mutationspkg.PhaseIntentRecorded, mutationspkg.PhaseFailedPreCall}, h.now())
+	if err != nil {
 		_ = recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall, nil, err.Error(), h.now())
 		return fmt.Errorf("mark patch mutation call started: %w", err)
+	}
+	if !start.Started {
+		return fmt.Errorf("patch mutation %q is %s; repair required before retry", idempotencyKey, start.Attempt.Status)
 	}
 	return nil
 }

@@ -33,11 +33,12 @@ func (s Service) OpenBatchPR(ctx context.Context, req OpenBatchPRRequest) (*plat
 		return nil, fmt.Errorf("head and base branches are required")
 	}
 	key := idempotencyKey("batch-pr", "repo", s.Repo.ID, "batch", req.BatchNumber)
-	resultRef, err := s.withIdempotency(ctx, key, "pull_request_create", func() (string, error) {
-		existing, err := s.Platform.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: req.Head})
-		if err != nil {
-			return "", err
-		}
+	var existing []*platform.PullRequest
+	resultRef, err := s.withIdempotencyPhased(ctx, key, "pull_request_create", func() error {
+		var err error
+		existing, err = s.Platform.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: req.Head})
+		return err
+	}, func() (string, error) {
 		if len(existing) > 0 {
 			title := req.Title
 			body := req.Body
@@ -105,16 +106,19 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 		return fmt.Errorf("expected head SHA is required for branch %s", req.OperationKind)
 	}
 	key := idempotencyKey("branch", "repo", s.Repo.ID, req.BranchName, req.ExpectedHeadSHA, req.OperationKind)
-	return s.mutate(ctx, key, "branch_"+req.OperationKind, func() (string, error) {
+	preflight := func() error {
 		if req.ExpectedHeadSHA != "" {
 			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)
 			if err != nil && req.OperationKind != "create" {
-				return "", err
+				return err
 			}
 			if err == nil && current != req.ExpectedHeadSHA {
-				return "", fmt.Errorf("branch %s head mismatch: expected %s, got %s", req.BranchName, req.ExpectedHeadSHA, current)
+				return fmt.Errorf("branch %s head mismatch: expected %s, got %s", req.BranchName, req.ExpectedHeadSHA, current)
 			}
 		}
+		return nil
+	}
+	_, err := s.withIdempotencyPhased(ctx, key, "branch_"+req.OperationKind, preflight, func() (string, error) {
 		switch req.OperationKind {
 		case "create":
 			if req.FromSHA == "" {
@@ -136,6 +140,7 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 			return "", fmt.Errorf("unsupported branch operation %q", req.OperationKind)
 		}
 	})
+	return err
 }
 
 // MergePRRequest describes a guarded merge.
@@ -158,34 +163,37 @@ func (s Service) MergePR(ctx context.Context, req MergePRRequest) (*platform.Mer
 		return nil, fmt.Errorf("expected head SHA is required")
 	}
 	key := idempotencyKey("merge", "repo", s.Repo.ID, "pr", req.PRNumber, "head", req.ExpectedHeadSHA)
-	resultRef, err := s.withIdempotency(ctx, key, "pull_request_merge", func() (string, error) {
+	var method platform.MergeMethod
+	resultRef, err := s.withIdempotencyPhased(ctx, key, "pull_request_merge", func() error {
 		pr, err := s.Platform.PullRequests().Get(ctx, req.PRNumber)
 		if err != nil {
-			return "", err
+			return err
 		}
 		if pr.State != "open" {
-			return "", fmt.Errorf("PR #%d is %s", req.PRNumber, pr.State)
+			return fmt.Errorf("PR #%d is %s", req.PRNumber, pr.State)
 		}
 		current, err := s.Platform.Repository().GetBranchSHA(ctx, pr.Head)
 		if err != nil {
-			return "", err
+			return err
 		}
 		if current != req.ExpectedHeadSHA {
-			return "", fmt.Errorf("PR #%d head mismatch: expected %s, got %s", req.PRNumber, req.ExpectedHeadSHA, current)
+			return fmt.Errorf("PR #%d head mismatch: expected %s, got %s", req.PRNumber, req.ExpectedHeadSHA, current)
 		}
 		if req.RequireCI {
 			status, err := s.Platform.Checks().GetCombinedStatus(ctx, req.ExpectedHeadSHA)
 			if err != nil {
-				return "", err
+				return err
 			}
 			if status != "success" {
-				return "", fmt.Errorf("PR #%d CI status is %s", req.PRNumber, status)
+				return fmt.Errorf("PR #%d CI status is %s", req.PRNumber, status)
 			}
 		}
-		method := req.Method
+		method = req.Method
 		if method == "" {
 			method = platform.MergeMethodMerge
 		}
+		return nil
+	}, func() (string, error) {
 		merged, err := s.Platform.PullRequests().Merge(ctx, req.PRNumber, method)
 		if err != nil {
 			return "", err

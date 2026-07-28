@@ -474,6 +474,40 @@ func (s *PostgresStore) CompleteGitHubMutationAttempt(ctx context.Context, idemp
 	return requireAffected(result)
 }
 
+func (s *PostgresStore) TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (GitHubMutationStartResult, error) {
+	if len(allowedStatuses) == 0 {
+		return GitHubMutationStartResult{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		UPDATE github_mutation_attempts
+		SET status = 'call_started', response = '{}', error = '', completed_at = $3
+		WHERE idempotency_key = $1 AND status = ANY($2)
+		RETURNING id, idempotency_key, COALESCE(repository_id, 0), mutation_type, status, request, response, error, created_at, completed_at`,
+		idempotencyKey, pq.Array(allowedStatuses), timeOrNow(completedAt))
+	if err != nil {
+		return GitHubMutationStartResult{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		var attempt GitHubMutationAttempt
+		var request, response []byte
+		if err := rows.Scan(&attempt.ID, &attempt.IdempotencyKey, &attempt.RepositoryID, &attempt.MutationType, &attempt.Status, &request, &response, &attempt.Error, &attempt.CreatedAt, &attempt.CompletedAt); err != nil {
+			return GitHubMutationStartResult{}, err
+		}
+		attempt.Request = metadataOrEmpty(request)
+		attempt.Response = metadataOrEmpty(response)
+		return GitHubMutationStartResult{Started: true, Attempt: attempt}, nil
+	}
+	if err := rows.Err(); err != nil {
+		return GitHubMutationStartResult{}, err
+	}
+	attempt, err := s.GetGitHubMutationAttempt(ctx, idempotencyKey)
+	if err != nil {
+		return GitHubMutationStartResult{}, err
+	}
+	return GitHubMutationStartResult{Started: false, Attempt: attempt}, nil
+}
+
 func (s *PostgresStore) GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (GitHubMutationAttempt, error) {
 	var attempt GitHubMutationAttempt
 	var request, response []byte

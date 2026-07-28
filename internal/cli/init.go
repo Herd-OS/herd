@@ -103,20 +103,33 @@ func runInitWithOptions(opts initOptions) error {
 	if err != nil {
 		return fmt.Errorf("could not detect repository: %w — make sure a GitHub remote is configured", err)
 	}
-	opts.ControlPlaneURL, err = validatedEffectiveControlPlaneURL(opts.ControlPlaneURL)
+	opts.AppLogin = effectiveAppLogin(opts.AppLogin)
+
+	configPath := filepath.Join(dir, config.ConfigFile)
+	existingConfig := config.Config{}
+	configExists := true
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		configExists = false
+	} else if err != nil {
+		return fmt.Errorf("checking config: %w", err)
+	} else {
+		loadedConfig, err := config.Load(dir)
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+		existingConfig = *loadedConfig
+	}
+	opts.ControlPlaneURL, err = resolvedInitControlPlaneURL(opts.ControlPlaneURL, existingConfig.ControlPlaneURL)
 	if err != nil {
 		return err
 	}
-	opts.AppLogin = effectiveAppLogin(opts.AppLogin)
-
 	registration, err := registerRepositoryForInit(context.Background(), owner, repo, opts)
 	if err != nil {
 		return err
 	}
 
 	// 2. Create config
-	configPath := filepath.Join(dir, config.ConfigFile)
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+	if !configExists {
 		cfg := config.Default()
 		cfg.Platform.Owner = owner
 		cfg.Platform.Repo = repo
@@ -288,6 +301,16 @@ func validatedEffectiveControlPlaneURL(value string) (string, error) {
 		return "", fmt.Errorf("control-plane URL must not contain double quotes")
 	}
 	return strings.TrimRight(effective, "/"), nil
+}
+
+func resolvedInitControlPlaneURL(explicit, existing string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return validatedEffectiveControlPlaneURL(explicit)
+	}
+	if strings.TrimSpace(existing) != "" {
+		return validatedEffectiveControlPlaneURL(existing)
+	}
+	return validatedEffectiveControlPlaneURL(config.DefaultControlPlaneURL)
 }
 
 func effectiveAppLogin(value string) string {

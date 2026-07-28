@@ -74,6 +74,13 @@ func TestParseMentionCommand(t *testing.T) {
 			wantErrIs: ErrUnknownCommand,
 		},
 		{
+			name:      "plan unsupported by hosted app",
+			appLogin:  "herd-os",
+			body:      "@herd-os plan",
+			wantOK:    true,
+			wantErrIs: ErrUnknownCommand,
+		},
+		{
 			name:     "argument preservation",
 			appLogin: "herd-os",
 			body:     "@herd-os fix-ci retry failed tests",
