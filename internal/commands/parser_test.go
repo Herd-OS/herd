@@ -9,9 +9,9 @@ import (
 
 func TestParse(t *testing.T) {
 	tests := []struct {
-		name        string
-		body        string
-		want        *Command
+		name         string
+		body         string
+		want         *Command
 		wantParseErr bool
 	}{
 		{"simple command", "/herd fix-ci", &Command{Name: "fix-ci"}, false},
@@ -40,6 +40,9 @@ func TestParse(t *testing.T) {
 		{"quoted prompt still works", `/herd fix "old style prompt"`, &Command{Name: "fix", Prompt: "old style prompt"}, false},
 		{"retry with arg still works", "/herd retry 42", &Command{Name: "retry", Args: []string{"42"}, Prompt: "42"}, false},
 		{"bare command no trailing text", "/herd fix-ci", &Command{Name: "fix-ci"}, false},
+		{"resolve-conflicts no prompt", "/herd resolve-conflicts", &Command{Name: "resolve-conflicts"}, false},
+		{"resolve-conflicts unquoted prompt", "/herd resolve-conflicts keep generated files intact", &Command{Name: "resolve-conflicts", Args: []string{"keep", "generated", "files", "intact"}, Prompt: "keep generated files intact"}, false},
+		{"resolve-conflicts multiline prompt", "/herd resolve-conflicts\nprefer merge over rebase\navoid lockfile churn", &Command{Name: "resolve-conflicts", Prompt: "prefer merge over rebase\navoid lockfile churn"}, false},
 		{"prompt with json blob", `/herd fix {"error": "timeout", "code": 504}`, &Command{Name: "fix", Args: []string{"{\"error\":", "\"timeout\",", "\"code\":", "504}"}, Prompt: "{\"error\": \"timeout\", \"code\": 504}"}, false},
 	}
 	for _, tt := range tests {
