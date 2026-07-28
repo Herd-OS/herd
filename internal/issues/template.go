@@ -19,6 +19,8 @@ type FrontMatter struct {
 	TargetPR            int      `yaml:"target_pr,omitempty"`
 	TargetBranch        string   `yaml:"target_branch,omitempty"`
 	BatchPR             int      `yaml:"batch_pr,omitempty"`
+	PRHeadSHA           string   `yaml:"pr_head_sha,omitempty"`
+	PRBaseSHA           string   `yaml:"pr_base_sha,omitempty"`
 	CIFixCycle          int      `yaml:"ci_fix_cycle,omitempty"`
 	ConflictResolution  bool     `yaml:"conflict_resolution,omitempty"`
 	ConflictingBranches []string `yaml:"conflicting_branches,omitempty"`
@@ -76,6 +78,12 @@ func RenderBody(body IssueBody) string {
 	}
 	if body.FrontMatter.BatchPR > 0 {
 		b.WriteString(fmt.Sprintf("  batch_pr: %d\n", body.FrontMatter.BatchPR))
+	}
+	if body.FrontMatter.PRHeadSHA != "" {
+		b.WriteString(fmt.Sprintf("  pr_head_sha: %s\n", body.FrontMatter.PRHeadSHA))
+	}
+	if body.FrontMatter.PRBaseSHA != "" {
+		b.WriteString(fmt.Sprintf("  pr_base_sha: %s\n", body.FrontMatter.PRBaseSHA))
 	}
 	if body.FrontMatter.CIFixCycle > 0 {
 		b.WriteString(fmt.Sprintf("  ci_fix_cycle: %d\n", body.FrontMatter.CIFixCycle))

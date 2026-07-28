@@ -202,17 +202,21 @@ func (m *testPRService) Close(_ context.Context, _ int) error {
 // --- Mock WorkflowService ---
 
 type testWorkflowService struct {
-	dispatched  []map[string]string
-	dispatchErr error
+	dispatched          []map[string]string
+	dispatchedWorkflows []string
+	dispatchedRefs      []string
+	dispatchErr         error
 }
 
 func (m *testWorkflowService) GetWorkflow(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
-func (m *testWorkflowService) Dispatch(_ context.Context, _, _ string, inputs map[string]string) (*platform.Run, error) {
+func (m *testWorkflowService) Dispatch(_ context.Context, workflowFile, ref string, inputs map[string]string) (*platform.Run, error) {
 	if m.dispatchErr != nil {
 		return nil, m.dispatchErr
 	}
+	m.dispatchedWorkflows = append(m.dispatchedWorkflows, workflowFile)
+	m.dispatchedRefs = append(m.dispatchedRefs, ref)
 	m.dispatched = append(m.dispatched, inputs)
 	return &platform.Run{ID: 999}, nil
 }
@@ -1595,7 +1599,7 @@ func TestHandleResolveConflicts_UnknownMergeabilityRetriesAndNoops(t *testing.T)
 
 	require.NoError(t, result.Error)
 	assert.Contains(t, result.Message, "could not determine whether this PR is currently conflicting")
-	assert.Equal(t, resolveConflictsMergeabilityAttempts+1, prSvc.getCalls[10])
+	assert.Equal(t, resolveConflictsMergeabilityAttempts, prSvc.getCalls[10])
 	assert.Equal(t, resolveConflictsMergeabilityAttempts-1, sleepCalls)
 	assert.Empty(t, issueSvc.createdIssues)
 	assert.Empty(t, wf.dispatched)

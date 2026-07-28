@@ -54,6 +54,8 @@ func BuildConflictResolutionIssueBody(params ConflictResolutionIssueParams) stri
 	}
 	if params.Kind == ConflictResolutionKindPRBase {
 		fm.BatchPR = params.BatchPR
+		fm.PRHeadSHA = params.PRHeadSHA
+		fm.PRBaseSHA = params.BaseSHA
 	}
 
 	body := issues.IssueBody{
@@ -180,13 +182,13 @@ func conflictResolutionTask(params ConflictResolutionIssueParams) string {
 		return fmt.Sprintf("Follow these steps exactly:\n"+
 			"1. `git fetch origin`\n"+
 			"2. Stay on your current worker branch. Do not checkout `%s` or `%s`.\n"+
-			"3. Merge or rebase your current worker branch against `origin/%s`.\n"+
+			"3. Run either `git merge origin/%s` or `git rebase origin/%s` on your current worker branch.\n"+
 			"4. Resolve conflict markers in the affected files. Do not rewrite files from scratch; only fix the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) produced by git.\n"+
 			"5. `git add <resolved files>`\n"+
 			"6. `git commit` (or continue the rebase, if you chose rebase).\n"+
 			"7. Do not push. The worker framework will push your worker branch.\n\n"+
 			"Do not search for conflict markers before attempting the merge or rebase; first produce the conflict state with git. Do not review stale historical findings unless the user explicitly requested an additional code fix.",
-			params.PRHeadBranch, params.BaseBranch, params.BaseBranch)
+			params.PRHeadBranch, params.BaseBranch, params.BaseBranch, params.BaseBranch)
 	default:
 		return ""
 	}

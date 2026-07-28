@@ -68,6 +68,10 @@ func TestBuildConflictResolutionIssueBody_FrontMatter(t *testing.T) {
 			assert.True(t, parsed.FrontMatter.ConflictResolution)
 			assert.Equal(t, tt.wantBranches, parsed.FrontMatter.ConflictingBranches)
 			assert.Equal(t, tt.wantBatchPR, parsed.FrontMatter.BatchPR)
+			if tt.params.Kind == ConflictResolutionKindPRBase {
+				assert.Equal(t, tt.params.PRHeadSHA, parsed.FrontMatter.PRHeadSHA)
+				assert.Equal(t, tt.params.BaseSHA, parsed.FrontMatter.PRBaseSHA)
+			}
 		})
 	}
 }
@@ -129,7 +133,7 @@ func TestBuildConflictResolutionIssueBody_PRBaseInstructionsAndContext(t *testin
 	require.NoError(t, err)
 
 	assert.Less(t, strings.Index(body, "1. `git fetch origin`"), strings.Index(body, "## Context"))
-	assert.Contains(t, parsed.Task, "3. Merge or rebase your current worker branch against `origin/main`.")
+	assert.Contains(t, parsed.Task, "3. Run either `git merge origin/main` or `git rebase origin/main` on your current worker branch.")
 	assert.Contains(t, parsed.Task, "Do not search for conflict markers before attempting the merge or rebase")
 	assert.Contains(t, parsed.Task, "Do not review stale historical findings unless the user explicitly requested an additional code fix")
 	assert.Contains(t, parsed.Context, "PR #123")

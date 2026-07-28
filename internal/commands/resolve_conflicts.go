@@ -49,7 +49,7 @@ func handleResolveConflicts(hctx *HandlerContext, cmd Command) Result {
 		return Result{Error: fmt.Errorf("getting milestone #%d: %w", batchNum, err)}
 	}
 
-	pr, known, err := latestPRWithKnownMergeability(hctx.Ctx, hctx.Platform.PullRequests(), hctx.IssueNumber)
+	pr, known, err := latestPRWithKnownMergeabilityFrom(hctx.Ctx, hctx.Platform.PullRequests(), hctx.IssueNumber, pr)
 	if err != nil {
 		return Result{Error: fmt.Errorf("getting PR #%d mergeability: %w", hctx.IssueNumber, err)}
 	}
@@ -104,12 +104,21 @@ func handleResolveConflicts(hctx *HandlerContext, cmd Command) Result {
 }
 
 func latestPRWithKnownMergeability(ctx context.Context, prs platform.PullRequestService, prNumber int) (*platform.PullRequest, bool, error) {
+	return latestPRWithKnownMergeabilityFrom(ctx, prs, prNumber, nil)
+}
+
+func latestPRWithKnownMergeabilityFrom(ctx context.Context, prs platform.PullRequestService, prNumber int, initial *platform.PullRequest) (*platform.PullRequest, bool, error) {
 	var latest *platform.PullRequest
 	for attempt := 0; attempt < resolveConflictsMergeabilityAttempts; attempt++ {
-		pr, err := prs.Get(ctx, prNumber)
-		if err != nil {
-			return nil, false, err
+		pr := initial
+		if attempt > 0 || pr == nil {
+			var err error
+			pr, err = prs.Get(ctx, prNumber)
+			if err != nil {
+				return nil, false, err
+			}
 		}
+		initial = nil
 		latest = pr
 		if prMergeabilityKnown(pr) {
 			return pr, true, nil
