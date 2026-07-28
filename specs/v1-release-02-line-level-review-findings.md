@@ -6,7 +6,7 @@ Let HerdOS agent review submit GitHub review comments on specific changed lines 
 
 ## Why This Matters Before v1
 
-PR-level review summaries are useful for broad findings, but concrete code issues should appear where developers expect them: on the changed line. Line-level comments also give fix workers better location context and reduce the need for users to manually translate findings into `/herd fix` prompts.
+PR-level review summaries are useful for broad findings, but concrete code issues should appear where developers expect them: on the changed line. Line-level comments also give fix workers better location context and reduce the need for users to manually translate findings into `@herd-os fix` prompts.
 
 ## Initial Scope
 

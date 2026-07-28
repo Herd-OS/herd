@@ -66,7 +66,7 @@ make build
 The binary is built to `bin/herd`. Add it to your `PATH` or move it to a directory already in your `PATH`:
 
 ```bash
-sudo cp bin/herd /usr/local/bin/
+sudo install -m 0755 -t /usr/local/bin bin/herd
 ```
 
 ## Updating
@@ -97,7 +97,7 @@ yay -Syu herd-bin
 # Binary download — same as installation, replace the existing binary
 
 # From source
-git pull && make build && sudo cp bin/herd /usr/local/bin/
+git pull && make build && sudo install -m 0755 -t /usr/local/bin bin/herd
 ```
 
 ### Update project workflows
@@ -190,7 +190,7 @@ The job:
 
 1. Checks out `main` with `fetch-depth: 0` (full history needed for the PR push).
 2. Downloads the just-built `herd-linux-amd64` artifact (avoiding a race against GitHub Release publication).
-3. Sets `HERD_VERSION=${{ github.ref_name }}` and runs `./herd init --skip-labels` against the herd repo itself.
+3. Sets `HERD_VERSION=${{ github.ref_name }}` and runs the local herd binary with `init --skip-labels` against the herd repo itself.
 4. `herd init` regenerates the workflow files, entrypoint, `docker-compose.herd.yml`, and `.env.herd.example` (the user-owned `Dockerfile.herd_runner` is created once and never overwritten). If anything changed, it commits to branch `herd/init-<tag>`, pushes, and opens a PR titled **`Update HerdOS to <tag>`**.
 5. If no herd-managed files changed in this release, no commit, no branch, and no PR are produced. The workflow logs:
 

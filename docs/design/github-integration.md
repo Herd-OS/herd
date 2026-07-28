@@ -52,7 +52,7 @@ Workers parse the front matter for metadata and pass the human-readable sections
 
 #### Body Size Limit
 
-GitHub caps issue and comment bodies at 65,536 characters. When herd creates an issue whose body would exceed a 65,000-char safety margin (e.g. an `/herd fix` issue with a long conversation history, a Review fix-issue with many findings, a CI fix-issue with a large log excerpt, or a conflict-resolution issue), the body is truncated at the last clean newline boundary and ends with the marker:
+GitHub caps issue and comment bodies at 65,536 characters. When herd creates an issue whose body would exceed a 65,000-char safety margin (e.g. an `@herd-os fix` issue with a long conversation history, a Review fix-issue with many findings, a CI fix-issue with a large log excerpt, or a conflict-resolution issue), the body is truncated at the last clean newline boundary and ends with the marker:
 
 > ⚠️ Body truncated to fit GitHub's 65536-char limit. See follow-up comment on this issue for the rest.
 
@@ -148,7 +148,7 @@ Batch PR closed    -> pull_request.closed     -> Issues closed, cleanup
                                                       |
 Cron fires         -> schedule                -> Monitor patrols
 Worker fails       -> workflow_dispatch       -> Monitor patrols (immediate)
-Comment posted     -> issue_comment.created   -> control plane parses /herd command
+Comment posted     -> issue_comment.created   -> control plane parses App mention command
 ```
 
 ### Event Types
@@ -160,7 +160,7 @@ Comment posted     -> issue_comment.created   -> control plane parses /herd comm
 - **pull_request_review** -- triggers the Integrator to merge batch PRs after human approval + CI pass.
 - **pull_request** -- triggers cleanup when a batch PR is closed (merged or not). On merge: issues are closed, milestone is closed, branch is deleted. On close without merge: non-done issues are labelled `herd/status:cancelled` before closing, milestone is closed, and branch is deleted. Issues already `herd/status:done` are closed without relabelling in both cases.
 - **schedule** -- triggers Monitor patrol. GitHub may delay or skip scheduled runs under load; the Monitor is stateless and catches up on the next patrol.
-- **issue_comment** -- delivered to the control plane through the GitHub App webhook. Comments containing `/herd` commands are authorized against the human commenter and dispatched.
+- **issue_comment** -- delivered to the control plane through the GitHub App webhook. Comments mentioning the configured App login are authorized against the human commenter and dispatched. The hosted App login defaults to `@herd-os`; self-hosted App/control-plane deployments can configure a different login.
 
 All workflows require the `HERD_ENABLED` repository variable to be set to `true`. This prevents workflow storms when `herd init` pushes workflow files before runners are configured. All `${{ }}` expressions in `run:` blocks are passed through environment variables to prevent shell injection.
 
@@ -203,7 +203,7 @@ Additional safeguards: actions performed with `GITHUB_TOKEN` do not trigger furt
 
 Multiple workers can complete near-simultaneously, triggering concurrent Integrator runs.
 
-**Concurrent consolidation:** A single `herd integrator consolidate --run-id <N>` invocation is a milestone-wide operation: it enumerates every `herd/status:done` issue in the run's milestone whose worker branch is still on the remote and merges each in a deterministic, idempotent loop. If two integrator runs race, GitHub Actions concurrency groups serialize the `integrate` job per `head_branch`; if a run is cancelled mid-loop and leaves stranded worker branches, the next successful integrator run re-scans the milestone and picks them up automatically. If two pushes into the batch branch still race (e.g., a manual `/herd integrate` overlapping with a `workflow_run` trigger), the loser observes a non-fast-forward push, relabels the affected issue as `herd/status:failed` for retry, and continues with the next candidate.
+**Concurrent consolidation:** A single `herd integrator consolidate --run-id <N>` invocation is a milestone-wide operation: it enumerates every `herd/status:done` issue in the run's milestone whose worker branch is still on the remote and merges each in a deterministic, idempotent loop. If two integrator runs race, GitHub Actions concurrency groups serialize the `integrate` job per `head_branch`; if a run is cancelled mid-loop and leaves stranded worker branches, the next successful integrator run re-scans the milestone and picks them up automatically. If two pushes into the batch branch still race (e.g., a manual `@herd-os integrate` overlapping with a `workflow_run` trigger), the loser observes a non-fast-forward push, relabels the affected issue as `herd/status:failed` for retry, and continues with the next candidate.
 
 **Double-dispatch prevention:** The `advance` command uses issue labels as an atomic guard -- it sets `in-progress` before dispatching, and skips any issue already `in-progress`. Label transitions via the GitHub API are atomic, so only one advance call can transition a given issue. As a belt-and-suspenders check, `dispatchReadyIssues` also lists `in_progress` and `queued` worker runs and skips any tier issue whose number already appears in an active run's inputs (labels are left untouched and the issue does not count against `dispatched`). This catches edge cases where labels and run state diverge — for example, if a prior dispatch's HTTP call failed after GitHub queued the run.
 
@@ -213,7 +213,7 @@ Review has two separate protections: review locks serialize active review attemp
 
 #### Workflow Concurrency Groups
 
-All integrator workflow jobs use GitHub Actions [concurrency groups](https://docs.github.com/en/actions/using-jobs/using-concurrency) as defense-in-depth to reduce obvious overlap. Without these, two workers completing close together (or an `/herd integrate` comment firing at the same time as a `workflow_run` trigger) can cause duplicate fix issues, duplicate worker dispatches, and duplicate review attempts.
+All integrator workflow jobs use GitHub Actions [concurrency groups](https://docs.github.com/en/actions/using-jobs/using-concurrency) as defense-in-depth to reduce obvious overlap. Without these, two workers completing close together (or an `@herd-os integrate` comment firing at the same time as a `workflow_run` trigger) can cause duplicate fix issues, duplicate worker dispatches, and duplicate review attempts.
 
 | Job | Group Key | cancel-in-progress | Rationale |
 |-----|-----------|-------------------|----------|
@@ -223,7 +223,7 @@ All integrator workflow jobs use GitHub Actions [concurrency groups](https://doc
 | `advance-on-close` | `herd-advance-{milestone \|\| issue_number}` | false | Uses milestone number (= batch number) to serialize per-batch. Falls back to issue number for non-herd issues. |
 | `re-review` | `herd-re-review-{pr_number}` | false | Prevents concurrent reviews on the same PR. |
 | `cleanup` | `herd-cleanup-{pr_number}` | false | Prevents concurrent cleanup on the same PR. |
-| `handle-comment` | `herd-comment-{milestone \|\| issue_number}` | false | Uses milestone number to serialize all `/herd` commands for the same batch. Falls back to issue number if no milestone. |
+| `handle-comment` | `herd-comment-{milestone \|\| issue_number}` | false | Uses milestone number to serialize all App mention commands for the same batch. Falls back to issue number if no milestone. |
 
 All groups use `cancel-in-progress: false` (except `check-ci-on-completion`) so that queued runs wait rather than being cancelled. Every integrator run should complete — we want serialization, not cancellation.
 
@@ -241,7 +241,7 @@ Duplicate triggers do not launch another agent review. They log or comment:
 Review already in progress for PR #N; skipping duplicate review trigger.
 ```
 
-Stale locks expire conservatively after their recorded expiry window so a dead Actions job does not block future reviews forever. The implementation treats expiry as recovery from an abandoned review, not as permission for overlapping same-head active reviews. Manual `/herd review` still bypasses stable-disagreement suspension, but it never bypasses a same-head active-review lock.
+Stale locks expire conservatively after their recorded expiry window so a dead Actions job does not block future reviews forever. The implementation treats expiry as recovery from an abandoned review, not as permission for overlapping same-head active reviews. Manual `@herd-os review` still bypasses stable-disagreement suspension, but it never bypasses a same-head active-review lock.
 
 Malformed lock state and legacy active locks without a recorded head SHA fail closed or preserve existing blocking behavior until release or expiry rather than risking duplicate reviews. Pre-append-only lock branches from older HerdOS versions are migrated only when their old marker commit is recognizable as a Herd review lock and is stale according to its acquisition timestamp. Unknown or fresh legacy state fails closed rather than risking duplicate reviews.
 
@@ -251,7 +251,7 @@ Hidden PR comments are not authoritative for locking. If diagnostic lock comment
 
 Every batch Herd review result comment includes a hidden `herd:review-result` marker with `version`, `pr_number`, `batch_number`, `head_sha`, `status`, `cycle`, `findings_count`, and `created_at`. This marker records the review outcome for the exact PR head SHA that was reviewed; it is separate from the active-review lock and is not used to decide whether another review is currently running.
 
-Automatic review triggers skip the agent when the current PR head SHA already has an approved Herd review-result marker. The skip is logged instead of posted as another PR comment, so repeated automatic triggers do not add PR noise. Manual `/herd review` intentionally forces a fresh review for the current head SHA, even if an approved marker already exists.
+Automatic review triggers skip the agent when the current PR head SHA already has an approved Herd review-result marker. The skip is logged instead of posted as another PR comment, so repeated automatic triggers do not add PR noise. Manual `@herd-os review` intentionally forces a fresh review for the current head SHA, even if an approved marker already exists.
 
 A new commit changes the PR head SHA and invalidates prior approved-head idempotency, so the updated diff can be reviewed. `changes_requested` and `max_cycles_hit` markers do not suppress review as approved; existing fix-worker gates, max-cycle rules, stable-disagreement rules, and stale-head checks still govern those flows.
 
@@ -354,7 +354,7 @@ For maximum isolation, run each runner in a container with ephemeral mode so it 
 
 ### Comment Command Permissions
 
-Slash commands (`/herd ...`) are restricted to users with `OWNER`, `MEMBER`, or
+App mention commands are restricted to users with `OWNER`, `MEMBER`, or
 `COLLABORATOR` association on the repository, plus bot accounts. This is
 enforced by the control plane using the `author_association` field from the
 webhook payload.

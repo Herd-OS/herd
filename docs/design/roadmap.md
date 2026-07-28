@@ -44,7 +44,7 @@ A user can:
 - **Line-level review comments** -- agent review can submit GitHub review comments on specific lines when findings map cleanly to a diff hunk, instead of requiring users to translate every finding into an `@herd-os fix` comment.
 - **Issue-driven planning** -- users create an issue describing a feature, mention @herd-os, and the agent decomposes and dispatches without the CLI. Multi-turn conversation in the issue thread refines the plan.
 
-Slash commands (`/herd`) are not a compatibility path; the GitHub-native interaction model is App identity plus `@herd-os` mentions.
+Slash-comment commands are not a compatibility path; the GitHub-native interaction model is App identity plus `@herd-os` mentions.
 
 ## v2 -- Multi-Agent Expansion
 

@@ -67,8 +67,12 @@ Mention commands use the App login:
 
 ```text
 @herd-os review
+@herd-os review <focus area>
 @herd-os fix <description>
 @herd-os fix-ci
+@herd-os fix-ci <hint>
+@herd-os resolve-conflicts
+@herd-os resolve-conflicts <context>
 @herd-os retry
 @herd-os retry <issue-number>
 @herd-os integrate
@@ -76,7 +80,7 @@ Mention commands use the App login:
 @herd-os dispatch <issue-number>
 ```
 
-`/herd` slash-comment commands are no longer supported and should not be used in
+Legacy slash-comment commands are no longer supported and should not be used in
 new workflows or docs.
 
 ## Migrating From PAT-Based Installs
