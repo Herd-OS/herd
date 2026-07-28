@@ -325,7 +325,9 @@ func TestReviewWorkflow_DefaultMatchesCommittedWorkflowAndPostsReviewCallback(t 
 		"rendered review template with default config must match committed workflow.\nrendered:\n%s\non-disk:\n%s", rendered, onDisk)
 
 	s := string(rendered)
-	assert.Contains(t, s, `timeout "${HERD_REVIEW_TIMEOUT_MINUTES}m" herd review-worker --pr "${{ inputs.pr_number }}" --result-file /tmp/herd-review-command-result.json`)
+	assert.Contains(t, s, `review_prompt:`)
+	assert.Contains(t, s, `HERD_REVIEW_PROMPT: ${{ inputs.review_prompt }}`)
+	assert.Contains(t, s, `timeout "${HERD_REVIEW_TIMEOUT_MINUTES}m" herd review-worker --pr "${{ inputs.pr_number }}" --prompt "$HERD_REVIEW_PROMPT" --result-file /tmp/herd-review-command-result.json`)
 	assert.NotContains(t, s, "herd integrator review")
 	assert.Contains(t, s, `timeout-minutes: 35`)
 	assert.NotContains(t, s, `fromJSON(inputs.timeout_minutes) + 5`)

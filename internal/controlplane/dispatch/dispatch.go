@@ -54,6 +54,7 @@ type DispatchRequest struct {
 	TimeoutMinutes  int
 	ControlPlaneURL string
 	Reason          string
+	ReviewPrompt    string
 }
 
 type DispatchResult struct {
@@ -114,7 +115,7 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 	idempotencyKey := IdempotencyKey(req)
 	jobID := "job_" + uuid.NewString()
 	now := time.Now().UTC()
-	keyMetadata, err := json.Marshal(map[string]any{
+	keyMetadataValues := map[string]any{
 		"job_id":       jobID,
 		"repo_id":      req.RepoID,
 		"job_kind":     req.Kind,
@@ -122,7 +123,11 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 		"issue_number": req.IssueNumber,
 		"pr_number":    req.PRNumber,
 		"head_sha":     req.HeadSHA,
-	})
+	}
+	if req.ReviewPrompt != "" {
+		keyMetadataValues["review_prompt"] = req.ReviewPrompt
+	}
+	keyMetadata, err := json.Marshal(keyMetadataValues)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("marshal idempotency metadata: %w", err)
 	}
@@ -155,7 +160,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		result.Created = false
 		return result, err
 	}
-	jobMetadata, err := json.Marshal(map[string]any{
+	jobMetadataValues := map[string]any{
 		"kind":              req.Kind,
 		"workflow_file":     req.WorkflowFile,
 		"ref":               req.Ref,
@@ -173,7 +178,11 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		"timeout_minutes":   req.TimeoutMinutes,
 		"reason":            req.Reason,
 		"idempotency_key":   idempotencyKey,
-	})
+	}
+	if req.ReviewPrompt != "" {
+		jobMetadataValues["review_prompt"] = req.ReviewPrompt
+	}
+	jobMetadata, err := json.Marshal(jobMetadataValues)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("marshal job metadata: %w", err)
 	}

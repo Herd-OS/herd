@@ -200,6 +200,10 @@ func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd co
 	if err != nil {
 		return err
 	}
+	reviewPrompt := ""
+	if kind == cpdispatch.JobKindReview {
+		reviewPrompt = parsedCommandPrompt(cmd.Command)
+	}
 	_, err = d.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
 		RepoID:          cmd.RepositoryID,
 		Owner:           cmd.Owner,
@@ -220,6 +224,7 @@ func (d productionCommandDispatcher) DispatchCommand(ctx context.Context, cmd co
 		TimeoutMinutes:  d.TimeoutMinutes,
 		ControlPlaneURL: d.ControlPlaneURL,
 		Reason:          fmt.Sprintf("@herd-os %s comment %d by %s", cmd.Command.Kind, cmd.CommentID, cmd.Actor),
+		ReviewPrompt:    reviewPrompt,
 	})
 	if err != nil {
 		return fmt.Errorf("dispatch %s command for PR #%d: %w", kind, cmd.PRNumber, err)

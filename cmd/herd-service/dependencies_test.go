@@ -205,6 +205,48 @@ func TestCommandTargetFromPullRequest(t *testing.T) {
 	}
 }
 
+func TestProductionReviewCommandDispatchesReviewPrompt(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{{
+		Number:  849,
+		Head:    "herd/batch/106-hosted-app",
+		Base:    "main",
+		HeadSHA: "head-sha",
+		BaseSHA: "base-sha",
+	}})
+	workflow := &recordingWorkflowClient{}
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+
+	err := d.DispatchCommand(context.Background(), commands.DispatchCommand{
+		RepositoryID:   42,
+		InstallationID: 77,
+		Owner:          "octo",
+		Repo:           "herd",
+		IssueNumber:    849,
+		PRNumber:       849,
+		CommentID:      123,
+		Actor:          "maintainer",
+		Command: commands.ParsedCommand{
+			Kind:   commands.CommandReview,
+			Args:   []string{"focus", "on", "auth", "and", "retries"},
+			Prompt: "focus on auth and retries",
+		},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "herd-review.yml", workflow.dispatches[0].workflowFile)
+	assert.Equal(t, "focus on auth and retries", workflow.dispatches[0].inputs["review_prompt"])
+	assert.Equal(t, "849", workflow.dispatches[0].inputs["pr_number"])
+}
+
 func TestProductionResolveConflictsCommand(t *testing.T) {
 	originalSleep := resolveConflictsSleep
 	resolveConflictsSleep = func(context.Context, time.Duration) error { return nil }

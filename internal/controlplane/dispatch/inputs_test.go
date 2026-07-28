@@ -54,6 +54,7 @@ func TestWorkflowInputs(t *testing.T) {
 				ExpectedHeadSHA: "def456",
 				ControlPlaneURL: "https://cp.example.com",
 				Reason:          "requested",
+				ReviewPrompt:    "focus on auth and retries",
 			},
 			want: map[string]string{
 				"repository_owner":  "octo",
@@ -67,6 +68,7 @@ func TestWorkflowInputs(t *testing.T) {
 				"head_sha":          "def456",
 				"expected_head_sha": "def456",
 				"reason":            "requested",
+				"review_prompt":     "focus on auth and retries",
 			},
 		},
 		{
@@ -98,6 +100,36 @@ func TestWorkflowInputs(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestWorkflowInputsReviewPromptIsOptional(t *testing.T) {
+	tests := []struct {
+		name       string
+		prompt     string
+		wantPrompt bool
+	}{
+		{name: "empty prompt omitted"},
+		{name: "non-empty prompt included", prompt: "focus on auth and retries", wantPrompt: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := validRequest()
+			req.Kind = JobKindReview
+			req.PRNumber = 8
+			req.IssueNumber = 0
+			req.ReviewPrompt = tt.prompt
+
+			got, err := WorkflowInputs(req, "job-1")
+
+			require.NoError(t, err)
+			if tt.wantPrompt {
+				assert.Equal(t, tt.prompt, got["review_prompt"])
+			} else {
+				assert.NotContains(t, got, "review_prompt")
+			}
 		})
 	}
 }

@@ -19,6 +19,10 @@ on:
         description: 'Pull request number to review'
         required: true
         type: number
+      review_prompt:
+        description: 'Optional review focus or extra instructions'
+        required: false
+        type: string
       batch_branch:
         description: 'Resolved branch or ref to check out'
         required: true
@@ -78,9 +82,10 @@ jobs:
           HERD_EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
           HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           HERD_REVIEW_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+          HERD_REVIEW_PROMPT: ${{ inputs.review_prompt }}
         run: |
           set +e
-          timeout "${HERD_REVIEW_TIMEOUT_MINUTES}m" herd review-worker --pr "${{ inputs.pr_number }}" --result-file /tmp/herd-review-command-result.json
+          timeout "${HERD_REVIEW_TIMEOUT_MINUTES}m" herd review-worker --pr "${{ inputs.pr_number }}" --prompt "$HERD_REVIEW_PROMPT" --result-file /tmp/herd-review-command-result.json
           rc=$?
           set -e
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then

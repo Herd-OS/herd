@@ -40,6 +40,27 @@ func TestDispatcherDispatchCreatesJobAndDispatchesWorkflow(t *testing.T) {
 	assert.Empty(t, st.mutationAttempts[0].Error)
 }
 
+func TestDispatcherDispatchIncludesReviewPrompt(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeWorkflowClient{}
+	req := validRequest()
+	req.Kind = JobKindReview
+	req.WorkflowFile = "herd-review.yml"
+	req.PRNumber = 8
+	req.IssueNumber = 0
+	req.ReviewPrompt = "focus on auth and retries"
+
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	require.Len(t, gh.calls, 1)
+	assert.Equal(t, "focus on auth and retries", gh.calls[0].inputs["review_prompt"])
+	require.Contains(t, st.jobs, result.JobID)
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(st.jobs[result.JobID].Metadata, &metadata))
+	assert.Equal(t, "focus on auth and retries", metadata["review_prompt"])
+}
+
 func TestDispatcherDuplicateDispatchIsIdempotent(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeWorkflowClient{}
