@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["should_escalate", "confidence"],
+  "properties": {
+    "should_escalate": {
+      "type": "boolean"
+    },
+    "confidence": {
+      "type": "number"
+    },
+    "root_cause_title": {
+      "type": "string"
+    },
+    "root_cause_summary": {
+      "type": "string"
+    },
+    "recurring_symptoms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["description", "cycles", "affected_files"],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "cycles": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "affected_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "why_individual_fixes_are_not_converging": {
+      "type": "string"
+    },
+    "proposed_strategy": {
+      "type": "string"
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reason": {
+      "type": "string"
+    }
+  }
+}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/prompt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -134,4 +135,60 @@ echo 'this is not json at all and is long enough to pass the suspicious-output f
 	assert.False(t, result.Approved, "expected Approved=false on bad output")
 	assert.True(t, strings.HasPrefix(result.Summary, "Failed to parse"),
 		"expected Summary to start with %q, got %q", "Failed to parse", result.Summary)
+}
+
+func TestSynthesizeReviewNonConvergence_UsesPromptAndParsesOutput(t *testing.T) {
+	dir := t.TempDir()
+	stdinDump := dir + "/stdin.txt"
+	argvDump := dir + "/argv.txt"
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte(fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$@" > '%s'
+cat > '%s'
+echo '{"should_escalate":true,"confidence":0.88,"root_cause_title":"Shared invariant missing","recurring_symptoms":[{"description":"same bug","cycles":[2,3],"affected_files":["internal/foo.go"]}]}'
+`, argvDump, stdinDump)), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	result, err := a.SynthesizeReviewNonConvergence(context.Background(), agent.ReviewSynthesisInput{
+		PRNumber:          15,
+		BatchNumber:       116,
+		HeadSHA:           "head-sha",
+		HeadRef:           "worker/ref",
+		CurrentPRMetadata: "metadata marker",
+	}, agent.ReviewSynthesisOptions{RepoRoot: dir})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.ShouldEscalate)
+	assert.Equal(t, 0.88, result.Confidence)
+	assert.Equal(t, "Shared invariant missing", result.RootCauseTitle)
+
+	stdinBytes, err := os.ReadFile(stdinDump)
+	require.NoError(t, err)
+	stdinContent := string(stdinBytes)
+	assert.Contains(t, stdinContent, "## Current PR Metadata")
+	assert.Contains(t, stdinContent, "head-sha")
+	assert.Contains(t, stdinContent, "metadata marker")
+
+	argvBytes, err := os.ReadFile(argvDump)
+	require.NoError(t, err)
+	argv := string(argvBytes)
+	assert.Contains(t, argv, "--system-prompt")
+	assert.Contains(t, argv, prompt.ReviewSynthesisSystemPrompt)
+}
+
+func TestSynthesizeReviewNonConvergence_InvalidOutputReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/test-agent.sh"
+	err := os.WriteFile(script, []byte(`#!/bin/sh
+cat > /dev/null
+echo 'this is not json at all and is long enough to pass the suspicious-output filter'
+`), 0755)
+	require.NoError(t, err)
+
+	a := New(script, "")
+	result, err := a.SynthesizeReviewNonConvergence(context.Background(), agent.ReviewSynthesisInput{}, agent.ReviewSynthesisOptions{RepoRoot: dir})
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "parsing review synthesis output")
 }

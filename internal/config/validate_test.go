@@ -197,6 +197,18 @@ func TestValidate_IntegratorReviewNonConvergence(t *testing.T) {
 			},
 		},
 		{
+			name: "synthesis min confidence zero is valid",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.SynthesisMinConfidence = 0
+			},
+		},
+		{
+			name: "synthesis min confidence one is valid",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.SynthesisMinConfidence = 1
+			},
+		},
+		{
 			name: "window zero is invalid",
 			modify: func(rnc *ReviewNonConvergence) {
 				rnc.Window = 0
@@ -232,6 +244,28 @@ func TestValidate_IntegratorReviewNonConvergence(t *testing.T) {
 				rnc.MinCompletedCycles = 0
 			},
 			wantError: "integrator.review_non_convergence.window must be > 0",
+		},
+		{
+			name: "synthesis min confidence negative is invalid",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.SynthesisMinConfidence = -0.1
+			},
+			wantError: "integrator.review_non_convergence.synthesis_min_confidence must be between 0 and 1, got -0.1",
+		},
+		{
+			name: "synthesis min confidence greater than one is invalid",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.SynthesisMinConfidence = 1.1
+			},
+			wantError: "integrator.review_non_convergence.synthesis_min_confidence must be between 0 and 1, got 1.1",
+		},
+		{
+			name: "disabled invalid synthesis min confidence is still rejected",
+			modify: func(rnc *ReviewNonConvergence) {
+				rnc.Enabled = false
+				rnc.SynthesisMinConfidence = -0.1
+			},
+			wantError: "integrator.review_non_convergence.synthesis_min_confidence must be between 0 and 1, got -0.1",
 		},
 	}
 

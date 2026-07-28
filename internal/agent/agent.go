@@ -15,6 +15,8 @@ type Agent interface {
 	// Review runs a code review on a diff in headless mode (used by the Integrator).
 	Review(ctx context.Context, diff string, opts ReviewOptions) (*ReviewResult, error)
 
+	SynthesizeReviewNonConvergence(ctx context.Context, input ReviewSynthesisInput, opts ReviewSynthesisOptions) (*ReviewSynthesisResult, error)
+
 	// Discuss launches an interactive agent session with a fully rendered
 	// system prompt and an optional initial user prompt. Unlike Plan, it has
 	// no structured output — the agent is expected to converse with the user
@@ -119,4 +121,62 @@ type ReviewResult struct {
 	// this together with a Summary that begins with "Failed to parse"
 	// so callers can detect it without string matching.
 	IsUnparseable bool `json:"-"`
+}
+
+type ReviewSynthesisOptions struct {
+	RepoRoot     string
+	SystemPrompt string
+}
+
+type ReviewSynthesisInput struct {
+	PRNumber             int
+	BatchNumber          int
+	HeadSHA              string
+	HeadRef              string
+	CurrentPRMetadata    string
+	RecentReviewComments []string
+	Cycles               []ReviewSynthesisCycle
+	CompletedFixIssues   []ReviewSynthesisFixIssue
+	WorkerNoOpVerdicts   []string
+	AffectedFiles        []string
+}
+
+type ReviewSynthesisCycle struct {
+	Cycle                int
+	HeadSHA              string
+	FindingsAfterDedupe  int
+	FindingsBySeverity   map[string][]string
+	FixIssueNumbers      []int
+	Status               string
+	AffectedFiles        []string
+	ChunkCoverageSummary string
+}
+
+type ReviewSynthesisFixIssue struct {
+	Number           int
+	Title            string
+	Body             string
+	StatusLabel      string
+	FilesSummary     []string
+	ValidationStatus string
+	WorkerReport     bool
+}
+
+type ReviewSynthesisSymptom struct {
+	Description   string   `json:"description"`
+	Cycles        []int    `json:"cycles"`
+	AffectedFiles []string `json:"affected_files"`
+}
+
+type ReviewSynthesisResult struct {
+	ShouldEscalate                     bool                     `json:"should_escalate"`
+	Confidence                         float64                  `json:"confidence"`
+	RootCauseTitle                     string                   `json:"root_cause_title,omitempty"`
+	RootCauseSummary                   string                   `json:"root_cause_summary,omitempty"`
+	RecurringSymptoms                  []ReviewSynthesisSymptom `json:"recurring_symptoms,omitempty"`
+	WhyIndividualFixesAreNotConverging string                   `json:"why_individual_fixes_are_not_converging,omitempty"`
+	ProposedStrategy                   string                   `json:"proposed_strategy,omitempty"`
+	AcceptanceCriteria                 []string                 `json:"acceptance_criteria,omitempty"`
+	NonGoals                           []string                 `json:"non_goals,omitempty"`
+	Reason                             string                   `json:"reason,omitempty"`
 }
