@@ -413,9 +413,9 @@ This matters whenever an integrator run is interrupted mid-loop —
 GitHub Actions failures can all leave one or more `herd/status:done` issues
 whose worker branches were never merged. No manual cleanup is needed: the
 next workflow run that triggers consolidate (the next worker completion,
-a manual local integrator run, or any other event that fires the integrator)
-re-scans the milestone, finds the stranded branches still on the remote, and
-merges them in.
+`@herd-os integrate`, an explicitly local integrator run, or any other event
+that fires the integrator) re-scans the milestone, finds the stranded branches
+still on the remote, and merges them in.
 
 Failed issues are explicitly excluded from the candidate set, so this
 self-healing property never resurrects work that was already abandoned. Only
@@ -686,11 +686,12 @@ suspended. Manual `@herd-os review` still executes — it bypasses the label.
 **Recovery.** The user has three options:
 
 1. **The workers were right** — post `@herd-os fix` with explicit acceptance
-   criteria that close out the findings, or run the local integrator to merge as-is.
+   criteria that close out the findings, or post `@herd-os integrate` to
+   resume integrator recovery and merge as-is.
 2. **The reviewer was right** — post `@herd-os fix` with concrete `file:line`
    evidence that contradicts the worker verdicts.
 3. **Resume automatic review** — remove the `herd/stable-disagreement` label
-   and run the local integrator.
+   and post `@herd-os integrate`.
 
 ---
 
@@ -867,14 +868,14 @@ The batch PR comment lists three options in priority order:
    git fetch origin && git checkout <worker-branch>
    ```
 2. **Rebase and resolve** locally, force-push the worker branch, then
-   run the local integrator to resume consolidation.
+   post `@herd-os integrate` to resume consolidation.
 3. **Or close** the original failing issue if the work is no longer
-   needed, then run the local integrator to advance past it.
+   needed, then post `@herd-os integrate` to advance past it.
 
 Once the underlying problem is handled, remove the `herd/cascade-failed`
 label from the batch PR, or let the next integrator pass remove it when GitHub
-reports the PR clean and mergeable. The next local integrator run or workflow_run
-trigger will resume conflict resolution normally.
+reports the PR clean and mergeable. Posting `@herd-os integrate` or the next
+`workflow_run` trigger will resume conflict resolution normally.
 
 #### Why we intentionally stop retrying
 
