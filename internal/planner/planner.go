@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/batchmeta"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/issues"
@@ -40,7 +41,11 @@ func CreateFromPlan(ctx context.Context, p platform.Platform, plan *agent.Plan, 
 	}
 
 	// 2. Create milestone
-	ms, resolvedTitle, err := createMilestoneWithUniqueName(ctx, p, plan.BatchName, strings.TrimSpace(plan.PRSummary))
+	metadataDescription, err := batchmeta.Append("", batchmeta.Metadata{PRSummary: plan.PRSummary})
+	if err != nil {
+		return nil, fmt.Errorf("building milestone metadata: %w", err)
+	}
+	ms, resolvedTitle, err := createMilestoneWithUniqueName(ctx, p, plan.BatchName, metadataDescription)
 	if err != nil {
 		return nil, fmt.Errorf("creating milestone: %w", err)
 	}

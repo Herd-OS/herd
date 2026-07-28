@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/herd-os/herd/internal/batchmeta"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/dag"
 	"github.com/herd-os/herd/internal/git"
@@ -1329,10 +1330,7 @@ func buildBatchPRBody(ms *platform.Milestone, allIssues []*platform.Issue, tiers
 func renderReviewerSummary(ms *platform.Milestone, allIssues []*platform.Issue, tiers [][]int) string {
 	_ = tiers
 
-	paragraph := ""
-	if ms != nil {
-		paragraph = strings.TrimSpace(ms.Description)
-	}
+	paragraph := batchmeta.MilestonePRSummary(ms)
 	if paragraph == "" {
 		paragraph = fallbackPRSummaryParagraph(ms, allIssues)
 	}

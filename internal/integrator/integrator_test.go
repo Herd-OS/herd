@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/batchmeta"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/issues"
@@ -1026,7 +1027,10 @@ func TestAdvance_DoubleDispatchPrevention(t *testing.T) {
 }
 
 func TestBuildBatchPRBody(t *testing.T) {
-	ms := &platform.Milestone{Number: 5, Title: "Add auth", Description: "Reviewer summary from Task 0."}
+	description, err := batchmeta.Append("", batchmeta.Metadata{PRSummary: "Reviewer summary from Task 0."})
+	require.NoError(t, err)
+
+	ms := &platform.Milestone{Number: 5, Title: "Add auth", Description: description}
 	allIssues := []*platform.Issue{
 		{Number: 42, Title: "Add model", Labels: []string{issues.StatusDone}},
 		{Number: 43, Title: "Add routes", Labels: []string{issues.StatusDone}},
@@ -1039,6 +1043,8 @@ func TestBuildBatchPRBody(t *testing.T) {
 	assert.Contains(t, body, "Reviewer summary from Task 0.")
 	assert.Contains(t, body, "Major changes:")
 	assert.Contains(t, body, "## Validation")
+	assert.NotContains(t, body, "herd:batch-metadata")
+	assert.NotContains(t, body, "<!--")
 	assert.Less(t, strings.Index(body, "Reviewer summary from Task 0."), strings.Index(body, "## Tasks"))
 	assert.Less(t, strings.Index(body, "## Validation"), strings.Index(body, "## Tasks"))
 	assert.Contains(t, body, "| Issue | Title | Tier | Status |")
@@ -1051,6 +1057,12 @@ func TestBuildBatchPRBody(t *testing.T) {
 }
 
 func TestRenderReviewerSummaryFallbacks(t *testing.T) {
+	structuredDescription, err := batchmeta.Append("", batchmeta.Metadata{PRSummary: "Structured reviewer summary."})
+	require.NoError(t, err)
+	plainWithStructuredDescription, err := batchmeta.Append("Plain prose should not win.", batchmeta.Metadata{PRSummary: "Structured wins."})
+	require.NoError(t, err)
+	blankSummaryDescription := `<!-- herd:batch-metadata {"version":1,"pr_summary":" \n\t "} -->`
+
 	criteriaBody := issues.RenderBody(issues.IssueBody{
 		FrontMatter: issues.FrontMatter{Version: 1},
 		Task:        "Implement auth",
@@ -1066,6 +1078,123 @@ func TestRenderReviewerSummaryFallbacks(t *testing.T) {
 		wantNotContains []string
 	}{
 		{
+			name: "structured metadata summary is used",
+			ms:   &platform.Milestone{Title: "Structured batch", Description: structuredDescription},
+			allIssues: []*platform.Issue{
+				{Number: 1, Title: "Add model"},
+			},
+			wantContains: []string{
+				"Structured reviewer summary.",
+				"Major changes:",
+				"## Validation",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"<!--",
+				"pr_summary",
+			},
+		},
+		{
+			name: "legacy plain milestone description is summary",
+			ms:   &platform.Milestone{Title: "Legacy batch", Description: "Legacy reviewer prose."},
+			allIssues: []*platform.Issue{
+				{Number: 2, Title: "Add route"},
+			},
+			wantContains: []string{
+				"Legacy reviewer prose.",
+			},
+			wantNotContains: []string{
+				"This batch implements Legacy batch across 1 task.",
+			},
+		},
+		{
+			name: "structured metadata wins over surrounding prose",
+			ms:   &platform.Milestone{Title: "Mixed batch", Description: plainWithStructuredDescription},
+			allIssues: []*platform.Issue{
+				{Number: 3, Title: "Add store"},
+			},
+			wantContains: []string{
+				"Structured wins.",
+			},
+			wantNotContains: []string{
+				"Plain prose should not win.",
+				"herd:batch-metadata",
+				"<!--",
+			},
+		},
+		{
+			name: "structured metadata wins after invalid closed markers",
+			ms: &platform.Milestone{Title: "Mixed duplicate markers", Description: `Plain prose should not win.
+
+<!-- herd:batch-metadata {bad} -->
+
+<!-- herd:batch-metadata {"version":1,"pr_summary":" "} -->
+
+<!-- herd:batch-metadata {"version":1,"pr_summary":"Valid structured summary."} -->`},
+			allIssues: []*platform.Issue{
+				{Number: 17, Title: "Add marker scan"},
+			},
+			wantContains: []string{
+				"Valid structured summary.",
+			},
+			wantNotContains: []string{
+				"Plain prose should not win.",
+				"herd:batch-metadata",
+				"<!--",
+				"pr_summary",
+			},
+		},
+		{
+			name: "malformed metadata with surrounding prose falls back to prose",
+			ms: &platform.Milestone{Title: "Malformed with prose", Description: `Plain prose survives.
+
+<!-- herd:batch-metadata {"version":1,"pr_summary": -->`},
+			allIssues: []*platform.Issue{
+				{Number: 4, Title: "Add config"},
+			},
+			wantContains: []string{
+				"Plain prose survives.",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"pr_summary",
+			},
+		},
+		{
+			name: "malformed marker only falls back deterministically",
+			ms:   &platform.Milestone{Title: "Malformed marker only", Description: `<!-- herd:batch-metadata {"version":1,"pr_summary": -->`},
+			allIssues: []*platform.Issue{
+				{Number: 5, Title: "Add fallback path"},
+				{Number: 6, Title: "Add coverage"},
+			},
+			wantContains: []string{
+				"This batch implements Malformed marker only across 2 tasks.",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"pr_summary",
+			},
+		},
+		{
+			name: "multiple invalid closed markers are stripped from fallback prose",
+			ms: &platform.Milestone{Title: "Duplicate invalid markers", Description: `Plain fallback survives.
+
+<!-- herd:batch-metadata {bad} -->
+
+<!-- herd:batch-metadata {"version":1,"pr_summary":" "} -->`},
+			allIssues: []*platform.Issue{
+				{Number: 18, Title: "Strip invalid metadata"},
+			},
+			wantContains: []string{
+				"Plain fallback survives.",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"pr_summary",
+				"<!--",
+			},
+		},
+		{
 			name: "empty milestone description",
 			ms:   &platform.Milestone{Title: "Add auth"},
 			allIssues: []*platform.Issue{
@@ -1077,6 +1206,20 @@ func TestRenderReviewerSummaryFallbacks(t *testing.T) {
 				"- Add model",
 				"- Add routes",
 				"- Review each task's acceptance criteria and the final CI results before merging.",
+			},
+		},
+		{
+			name: "marker-only blank summary falls back deterministically",
+			ms:   &platform.Milestone{Title: "Blank summary marker", Description: blankSummaryDescription},
+			allIssues: []*platform.Issue{
+				{Number: 16, Title: "Add blank fallback"},
+			},
+			wantContains: []string{
+				"This batch implements Blank summary marker across 1 task.",
+			},
+			wantNotContains: []string{
+				"herd:batch-metadata",
+				"pr_summary",
 			},
 		},
 		{
@@ -1174,6 +1317,25 @@ func TestRenderReviewerSummaryFallbacks(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRenderReviewerSummaryEscapesMetadataSummary(t *testing.T) {
+	summary := "Reviewer summary with \"quotes\"\n\n- **Markdown** stays visible."
+	description, err := batchmeta.Append("", batchmeta.Metadata{PRSummary: summary})
+	require.NoError(t, err)
+
+	body := renderReviewerSummary(
+		&platform.Milestone{Title: "Escaping batch", Description: description},
+		[]*platform.Issue{{Number: 1, Title: "Add metadata summary"}},
+		nil,
+	)
+
+	assert.Contains(t, body, summary)
+	assert.NotContains(t, body, `\"quotes\"`)
+	assert.NotContains(t, body, `\n`)
+	assert.NotContains(t, body, "herd:batch-metadata")
+	assert.NotContains(t, body, "pr_summary")
+	assert.NotContains(t, body, "<!--")
 }
 
 func TestFallbackPRSummaryParagraph(t *testing.T) {

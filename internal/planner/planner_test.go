@@ -2,10 +2,12 @@ package planner
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/batchmeta"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
@@ -104,7 +106,7 @@ func TestCreateFromPlan(t *testing.T) {
 
 	// Verify milestone was created
 	assert.Equal(t, "Test Feature", mock.milestones.created[0].title)
-	assert.Equal(t, "Adds the test feature with dependent task validation.", mock.milestones.created[0].description)
+	assertMilestoneMetadataDescription(t, mock.milestones.created[0].description, "Adds the test feature with dependent task validation.")
 
 	// Verify issues were created with correct labels
 	assert.Contains(t, mock.issues.created[0].labels, issues.StatusReady)
@@ -158,6 +160,25 @@ func TestCreateFromPlan_EmptyPRSummaryCreatesEmptyMilestoneDescription(t *testin
 			assert.Equal(t, tt.wantDesc, mock.milestones.created[0].description)
 		})
 	}
+}
+
+func TestCreateFromPlan_PRSummaryMetadataEscapesStructuredContent(t *testing.T) {
+	summary := "Adds \"quoted\" metadata.\n\n- Preserves markdown\n- Escapes JSON safely"
+	plan := &agent.Plan{
+		BatchName: "Structured Summary",
+		PRSummary: summary,
+		Tasks: []agent.PlannedTask{
+			{Title: "Task A"},
+		},
+	}
+
+	mock := newMockPlatform()
+	result, err := CreateFromPlan(context.Background(), mock, plan, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, mock.milestones.created, 1)
+
+	assertMilestoneMetadataDescription(t, mock.milestones.created[0].description, summary)
 }
 
 func TestCreateFromPlan_CycleError(t *testing.T) {
@@ -299,6 +320,39 @@ func TestCreateFromPlan_ManualTaskNotifyUsers(t *testing.T) {
 func TestBuildMentions(t *testing.T) {
 	assert.Equal(t, "@alice @bob", buildMentions([]string{"alice", "bob"}))
 	assert.Equal(t, "@solo", buildMentions([]string{"solo"}))
+}
+
+func assertMilestoneMetadataDescription(t *testing.T, description, summary string) {
+	t.Helper()
+
+	assert.NotEqual(t, summary, description)
+	assert.Contains(t, description, "<!-- herd:batch-metadata ")
+	assert.Empty(t, visibleMilestoneDescription(description))
+
+	metadata, ok := batchmeta.Parse(description)
+	require.True(t, ok)
+	assert.Equal(t, batchmeta.Metadata{Version: batchmeta.CurrentVersion, PRSummary: strings.TrimSpace(summary)}, metadata)
+}
+
+func visibleMilestoneDescription(description string) string {
+	const (
+		markerPrefix = "<!-- herd:batch-metadata "
+		markerSuffix = " -->"
+	)
+
+	start := strings.Index(description, markerPrefix)
+	if start < 0 {
+		return strings.TrimSpace(description)
+	}
+
+	payloadStart := start + len(markerPrefix)
+	endOffset := strings.Index(description[payloadStart:], markerSuffix)
+	if endOffset < 0 {
+		return strings.TrimSpace(description[:start])
+	}
+
+	end := payloadStart + endOffset + len(markerSuffix)
+	return strings.TrimSpace(description[:start] + description[end:])
 }
 
 // --- Mock Platform ---

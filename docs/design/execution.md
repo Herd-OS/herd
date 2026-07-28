@@ -368,10 +368,11 @@ Opening the batch PR is idempotent: if concurrent advance-on-close triggers race
 The generated batch PR body starts with a reviewer-facing `## Summary` section,
 then `Major changes:` bullets and `## Validation`, followed by the existing
 Herd operational sections: `## Tasks` and `## Worker branches`. PR creation
-remains deterministic and does not invoke an agent. New batches use the
-milestone description populated from the plan's top-level `pr_summary`; older
-batches without that metadata use fallback text derived from the milestone
-title, issue titles, and parsed acceptance criteria.
+remains deterministic and does not invoke an agent. New batches read the
+reviewer summary from structured milestone batch metadata; older batches
+without structured metadata can still use plain milestone descriptions as a
+legacy summary. Batches with neither use fallback text derived from the
+milestone title, issue titles, and parsed acceptance criteria.
 
 Before opening the batch PR, the Integrator sanity-checks that the milestone's issue list returned by the GitHub API is complete (the count of fetched issues is at least `OpenIssues + ClosedIssues`). If the list is short — typically a transient partial API response — it logs `Warning: milestone #N has X expected issues (Y open + Z closed) but only K were returned by the API; skipping batch PR to avoid premature open` and skips PR creation; the PR opens on a subsequent advance once the API returns complete data. Likewise, if the issue triggering an advance is not found in any tier (another partial-response symptom), the Integrator logs `Warning: issue #N not found in any tier of milestone #M (possibly partial API response); skipping advance` and treats the trigger as a no-op rather than returning an error.
 
