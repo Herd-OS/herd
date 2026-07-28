@@ -86,6 +86,25 @@ func TestReviewSynthesisPrompt_StrictJSONExamplesAndToolBan(t *testing.T) {
 	}
 }
 
+func TestReviewSynthesisPrompt_RejectsChunkCoverageClusters(t *testing.T) {
+	for _, want := range []string{
+		"Chunk labels and coverage bookkeeping are context only",
+		"not package/root-cause clusters",
+		`"Chunk 1/9"`,
+		`"1/9"`,
+		`"Diff Coverage"`,
+		`"Review Aggregation"`,
+		`"Files reviewed"`,
+		`"Source: local-git"`,
+		"synthetic coverage text",
+		"root_cause_title",
+		"recurring_symptoms.description",
+		"affected_files",
+	} {
+		assert.Contains(t, ReviewSynthesisPromptTemplate, want)
+	}
+}
+
 func TestParseReviewSynthesisOutput(t *testing.T) {
 	tests := []struct {
 		name           string

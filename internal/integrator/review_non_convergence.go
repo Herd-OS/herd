@@ -573,8 +573,17 @@ func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence 
 	if strings.TrimSpace(result.RootCauseTitle) == "" {
 		return reviewSynthesisDecisionFallback, "synthesis root cause title is empty"
 	}
+	if sanitizedReviewSynthesisRootCauseTitle(result.RootCauseTitle) == "" {
+		return reviewSynthesisDecisionFallback, "synthesis root cause has unsafe/noisy title"
+	}
 	if len(trimBlankStrings(result.AcceptanceCriteria)) == 0 {
 		return reviewSynthesisDecisionFallback, "synthesis acceptance criteria are empty"
+	}
+	if !hasValidReviewSynthesisSymptomDescription(result.RecurringSymptoms) {
+		return reviewSynthesisDecisionFallback, "synthesis recurring symptom descriptions are unsafe/noisy metadata"
+	}
+	if !hasValidReviewSynthesisAffectedFile(result.RecurringSymptoms) {
+		return reviewSynthesisDecisionFallback, "synthesis recurring symptom affected files are empty or unsafe/noisy"
 	}
 	if synthesizedReviewStrategyFingerprint(result) == "" {
 		return reviewSynthesisDecisionFallback, "synthesis fingerprint is empty"
@@ -586,18 +595,24 @@ func synthesizedReviewStrategyFingerprint(result *agent.ReviewSynthesisResult) s
 	if result == nil {
 		return ""
 	}
-	root := normalizeReviewSynthesisFingerprintText(result.RootCauseTitle)
+	root := normalizeReviewSynthesisFingerprintText(sanitizedReviewSynthesisRootCauseTitle(result.RootCauseTitle))
 	if root == "" {
 		return ""
 	}
 	var symptomEntries []string
 	for _, symptom := range result.RecurringSymptoms {
+		if isReviewFindingMetadataNoise(symptom.Description) {
+			continue
+		}
 		description := normalizeReviewSynthesisFingerprintText(symptom.Description)
 		if description == "" {
 			continue
 		}
-		cycles := uniqueSortedInts(symptom.Cycles)
 		files := normalizeReviewSynthesisFiles(symptom.AffectedFiles)
+		if len(files) == 0 {
+			continue
+		}
+		cycles := uniqueSortedInts(symptom.Cycles)
 		symptomEntries = append(symptomEntries, fmt.Sprintf("%s|cycles:%s|files:%s", description, formatIntList(cycles), strings.Join(files, ",")))
 	}
 	sort.Strings(symptomEntries)
@@ -609,9 +624,11 @@ func synthesizedReviewStrategyFingerprint(result *agent.ReviewSynthesisResult) s
 }
 
 func buildSynthesizedStrategyFixIssueTitle(nextCycle int, result *agent.ReviewSynthesisResult) string {
-	title := "synthesized root cause"
-	if result != nil && strings.TrimSpace(result.RootCauseTitle) != "" {
-		title = strings.TrimSpace(result.RootCauseTitle)
+	title := "repeated review findings"
+	if result != nil {
+		if sanitized := sanitizedReviewSynthesisRootCauseTitle(result.RootCauseTitle); sanitized != "" {
+			title = sanitized
+		}
 	}
 	return truncateReviewStrategyTitle(fmt.Sprintf("Review strategy fix (cycle %d): %s", nextCycle, title), 120)
 }
@@ -627,7 +644,7 @@ func buildSynthesizedStrategyFixIssueBody(ms *platform.Milestone, pr *platform.P
 	}
 	scope := synthesizedReviewAffectedScope(result)
 	if len(scope) == 0 {
-		scope = append([]string(nil), input.AffectedFiles...)
+		scope = sanitizedReviewSynthesisFilePaths(input.AffectedFiles)
 	}
 
 	body := issues.RenderBody(issues.IssueBody{
@@ -1001,17 +1018,22 @@ func extractReviewValidationStatus(body string) string {
 func extractReviewFixFilesSummary(body string, parsedFiles []string) []string {
 	seen := map[string]struct{}{}
 	for _, file := range parsedFiles {
-		if file != "" && !isReviewClusterNoise(file) {
+		if isValidReviewSynthesisFilePath(file) {
 			seen[file] = struct{}{}
 		}
 	}
-	for _, match := range reviewPathRE.FindAllStringSubmatch(body, -1) {
-		if len(match) < 2 {
+	for _, line := range strings.Split(body, "\n") {
+		if isReviewFindingMetadataNoise(line) {
 			continue
 		}
-		file := strings.Trim(match[1], "`.,);:")
-		if looksLikeReviewFilePath(file) && !isReviewClusterNoise(file) {
-			seen[file] = struct{}{}
+		for _, match := range reviewPathRE.FindAllStringSubmatch(line, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			file := strings.Trim(match[1], "`.,);:")
+			if looksLikeReviewFilePath(file) && !isReviewClusterNoise(file) {
+				seen[file] = struct{}{}
+			}
 		}
 	}
 	files := make([]string, 0, len(seen))
@@ -1159,9 +1181,48 @@ func normalizeReviewSynthesisFingerprintText(value string) string {
 	}), " ")
 }
 
-func normalizeReviewSynthesisFiles(files []string) []string {
+func sanitizedReviewSynthesisRootCauseTitle(title string) string {
+	return normalizeReviewClusterTitleTerm(title)
+}
+
+func isValidReviewSynthesisFilePath(file string) bool {
+	file = strings.TrimSpace(strings.Trim(file, "`.,);:"))
+	return looksLikeReviewFilePath(file) && !isReviewClusterNoise(file)
+}
+
+func sanitizedReviewSynthesisFilePaths(files []string) []string {
 	seen := map[string]struct{}{}
 	for _, file := range files {
+		file = strings.TrimSpace(strings.Trim(file, "`.,);:"))
+		if isValidReviewSynthesisFilePath(file) {
+			seen[file] = struct{}{}
+		}
+	}
+	return sortedStringSet(seen)
+}
+
+func hasValidReviewSynthesisSymptomDescription(symptoms []agent.ReviewSynthesisSymptom) bool {
+	for _, symptom := range symptoms {
+		description := strings.TrimSpace(symptom.Description)
+		if description != "" && !isReviewFindingMetadataNoise(description) && normalizeReviewSynthesisFingerprintText(description) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasValidReviewSynthesisAffectedFile(symptoms []agent.ReviewSynthesisSymptom) bool {
+	for _, symptom := range symptoms {
+		if len(sanitizedReviewSynthesisFilePaths(symptom.AffectedFiles)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeReviewSynthesisFiles(files []string) []string {
+	seen := map[string]struct{}{}
+	for _, file := range sanitizedReviewSynthesisFilePaths(files) {
 		normalized := normalizeReviewSynthesisFingerprintText(file)
 		if normalized != "" {
 			seen[normalized] = struct{}{}
@@ -1174,11 +1235,8 @@ func synthesizedReviewAffectedScope(result *agent.ReviewSynthesisResult) []strin
 	seen := map[string]struct{}{}
 	if result != nil {
 		for _, symptom := range result.RecurringSymptoms {
-			for _, file := range symptom.AffectedFiles {
-				file = strings.TrimSpace(file)
-				if file != "" {
-					seen[file] = struct{}{}
-				}
+			for _, file := range sanitizedReviewSynthesisFilePaths(symptom.AffectedFiles) {
+				seen[file] = struct{}{}
 			}
 		}
 	}

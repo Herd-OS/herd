@@ -667,7 +667,18 @@ func TestEvaluateReviewSynthesisSafetyGates(t *testing.T) {
 			return &r
 		}, want: "do not span two cycles"},
 		{name: "missing title", result: func() *agent.ReviewSynthesisResult { r := *base; r.RootCauseTitle = " "; return &r }, want: "title is empty"},
+		{name: "fraction title", result: func() *agent.ReviewSynthesisResult { r := *base; r.RootCauseTitle = "1/9"; return &r }, want: "unsafe/noisy title"},
+		{name: "chunk title", result: func() *agent.ReviewSynthesisResult { r := *base; r.RootCauseTitle = "Chunk 1/9"; return &r }, want: "unsafe/noisy title"},
+		{name: "coverage title", result: func() *agent.ReviewSynthesisResult { r := *base; r.RootCauseTitle = "Diff Coverage"; return &r }, want: "unsafe/noisy title"},
 		{name: "missing criteria", result: func() *agent.ReviewSynthesisResult { r := *base; r.AcceptanceCriteria = []string{" ", ""}; return &r }, want: "criteria are empty"},
+		{name: "metadata-only symptoms", result: func() *agent.ReviewSynthesisResult {
+			r := *base
+			r.RecurringSymptoms = []agent.ReviewSynthesisSymptom{
+				{Description: "Chunk 1/9", Cycles: []int{38}, AffectedFiles: []string{"Chunk 1/9"}},
+				{Description: "Diff Coverage", Cycles: []int{39}, AffectedFiles: []string{"1/9", "Files reviewed"}},
+			}
+			return &r
+		}, want: "descriptions are unsafe/noisy metadata"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -685,6 +696,56 @@ func TestEvaluateReviewSynthesisSafetyGates(t *testing.T) {
 	got, reason := evaluateReviewSynthesis(base, 0.75, reviewConvergenceAnalysis{CompletedFixIssues: []int{951}})
 	assert.Equal(t, reviewSynthesisDecisionEscalate, got)
 	assert.Contains(t, reason, "passed")
+}
+
+func TestSynthesizedReviewStrategyFingerprintAndScopeIgnoreChunkCoverageFiles(t *testing.T) {
+	result := highConfidenceReviewSynthesisResult()
+	result.RecurringSymptoms[0].AffectedFiles = []string{"Chunk 1/9", "1/9", "internal/controlplane/review/repair.go"}
+	result.RecurringSymptoms[1].AffectedFiles = []string{"Diff Coverage", "Review Aggregation", "Source: local-git"}
+
+	fingerprint := synthesizedReviewStrategyFingerprint(result)
+	require.NotEmpty(t, fingerprint)
+	assert.Equal(t, fingerprint, synthesizedReviewStrategyFingerprint(result))
+	assert.ElementsMatch(t, []string{"internal/controlplane/review/repair.go"}, synthesizedReviewAffectedScope(result))
+
+	for _, noisy := range []string{"1/9", "Chunk 1/9", "Diff Coverage", "Review Aggregation", "Source: local-git"} {
+		assert.NotContains(t, synthesizedReviewAffectedScope(result), noisy)
+	}
+}
+
+func TestBuildSynthesizedStrategyFixIssueTitleUsesFallbackForNoisyTitle(t *testing.T) {
+	result := highConfidenceReviewSynthesisResult()
+	result.RootCauseTitle = "Chunk 1/9"
+
+	assert.Equal(t, "Review strategy fix (cycle 40): repeated review findings", buildSynthesizedStrategyFixIssueTitle(40, result))
+}
+
+func TestBuildReviewSynthesisInputAffectedFilesIgnoreChunkCoverageMetadata(t *testing.T) {
+	history := []reviewHistoryCycle{{
+		Cycle: 4,
+		FindingsBySeverity: map[string][]string{
+			"HIGH": {
+				"internal/controlplane/review/repair.go: repeated review state is not durable",
+				"Chunk 1/9",
+				"Diff Coverage",
+			},
+		},
+		ChunkCoverageSummary: "## Diff Coverage\n- Chunk 1/9\n- Files reviewed: internal/noise/from-coverage.go\n- Source: local-git",
+	}}
+	fix := reviewFixIssue(91, 4, issues.StatusDone, []string{"internal/controlplane/review/fix.go", "Chunk 1/9", "internal/controlplane/review"}, "Validation: success\nFiles reviewed: internal/noise/from-worker-report.go")
+
+	input := buildReviewSynthesisInput(&platform.PullRequest{Number: 849}, nil, "head", nil, history, []*platform.Issue{fix}, nil, "")
+
+	assert.Equal(t, "## Diff Coverage\n- Chunk 1/9\n- Files reviewed: internal/noise/from-coverage.go\n- Source: local-git", input.Cycles[0].ChunkCoverageSummary)
+	assert.ElementsMatch(t, []string{
+		"internal/controlplane/review/fix.go",
+		"internal/controlplane/review/repair.go",
+	}, input.AffectedFiles)
+	assert.ElementsMatch(t, []string{"internal/controlplane/review/repair.go"}, input.Cycles[0].AffectedFiles)
+	assert.ElementsMatch(t, []string{"internal/controlplane/review/fix.go"}, input.CompletedFixIssues[0].FilesSummary)
+	for _, noisy := range []string{"Chunk 1/9", "1/9", "Diff Coverage", "Review Aggregation", "Files reviewed", "Source: local-git", "internal/controlplane/review", "internal/noise/from-worker-report.go"} {
+		assert.NotContains(t, input.AffectedFiles, noisy)
+	}
 }
 
 func TestBuildSynthesizedStrategyFixIssueBody(t *testing.T) {

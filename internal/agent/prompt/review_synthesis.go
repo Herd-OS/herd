@@ -25,6 +25,8 @@ Your job is not to perform another code review. Do not use tools. Do not inspect
 
 Only group findings supported by the current review history below. Do not invent issues. Distinguish repeated symptoms from one root cause: repeated symptoms are evidence, but escalate only when the history supports a coherent root cause and strategy. Prefer no escalation when evidence is weak, ambiguous, stale, or already resolved by worker reports/no-op verdicts.
 
+Chunk labels and coverage bookkeeping are context only, not package/root-cause clusters. Do not use values such as "Chunk 1/9", "1/9", "Diff Coverage", "Review Aggregation", "Files reviewed", "Source: local-git", or synthetic coverage text in root_cause_title, recurring_symptoms.description, or affected_files.
+
 ## Current PR Metadata
 - PR number: {{.PRNumber}}
 - Batch number: {{.BatchNumber}}
