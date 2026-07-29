@@ -597,7 +597,11 @@ func (m *mockCheckCIMilestoneService) Update(_ context.Context, _ int, _ platfor
 }
 
 type mockCheckCIRepoService struct {
-	defaultBranch string
+	defaultBranch  string
+	branchSHAs     map[string]string
+	commitMessages map[string]string
+	commitParents  map[string]string
+	commitSeq      int
 }
 
 func (m *mockCheckCIRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) {
@@ -610,8 +614,59 @@ func (m *mockCheckCIRepoService) CreateBranch(_ context.Context, _, _ string) er
 	return nil
 }
 func (m *mockCheckCIRepoService) DeleteBranch(_ context.Context, _ string) error { return nil }
-func (m *mockCheckCIRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
-	return "", nil
+func (m *mockCheckCIRepoService) GetBranchSHA(_ context.Context, branch string) (string, error) {
+	if m.branchSHAs == nil {
+		m.branchSHAs = map[string]string{
+			"herd/batch/1-batch": "batch-sha",
+		}
+	}
+	if sha, ok := m.branchSHAs[branch]; ok {
+		return sha, nil
+	}
+	return "", fmt.Errorf("branch %s not found", branch)
+}
+func (m *mockCheckCIRepoService) CreateBranchWithCommit(ctx context.Context, name, parentSHA, message string) (string, error) {
+	sha, err := m.CreateCommit(ctx, parentSHA, message)
+	if err != nil {
+		return "", err
+	}
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if _, exists := m.branchSHAs[name]; exists {
+		return "", fmt.Errorf("reference already exists")
+	}
+	m.branchSHAs[name] = sha
+	return sha, nil
+}
+func (m *mockCheckCIRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	m.commitSeq++
+	sha := fmt.Sprintf("%s-lock-%d", parentSHA, m.commitSeq)
+	if m.commitMessages == nil {
+		m.commitMessages = make(map[string]string)
+	}
+	if m.commitParents == nil {
+		m.commitParents = make(map[string]string)
+	}
+	m.commitMessages[sha] = message
+	m.commitParents[sha] = parentSHA
+	return sha, nil
+}
+func (m *mockCheckCIRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if msg, ok := m.commitMessages[sha]; ok {
+		return msg, nil
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (m *mockCheckCIRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if m.branchSHAs[name] != m.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
+	m.branchSHAs[name] = sha
+	return nil
 }
 
 type mockCheckCIStatusService struct {

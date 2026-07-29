@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -24,20 +25,23 @@ type integratePlatform struct {
 	checks     *testCheckService
 }
 
-func (m *integratePlatform) Issues() platform.IssueService            { return m.issues }
+func (m *integratePlatform) Issues() platform.IssueService             { return m.issues }
 func (m *integratePlatform) PullRequests() platform.PullRequestService { return m.prs }
-func (m *integratePlatform) Workflows() platform.WorkflowService      { return m.workflows }
+func (m *integratePlatform) Workflows() platform.WorkflowService       { return m.workflows }
 func (m *integratePlatform) Labels() platform.LabelService             { return nil }
 func (m *integratePlatform) Milestones() platform.MilestoneService     { return m.milestones }
 func (m *integratePlatform) Runners() platform.RunnerService           { return nil }
 func (m *integratePlatform) Repository() platform.RepositoryService    { return m.repo }
-func (m *integratePlatform) Checks() platform.CheckService            { return m.checks }
+func (m *integratePlatform) Checks() platform.CheckService             { return m.checks }
 
 // integrateRepoService provides per-branch SHA control for integrate tests.
 type integrateRepoService struct {
-	defaultBranch string
-	branchSHAs    map[string]string // branch→SHA; missing key → error
-	deleted       []string
+	defaultBranch  string
+	branchSHAs     map[string]string // branch→SHA; missing key → error
+	deleted        []string
+	commitMessages map[string]string
+	commitParents  map[string]string
+	commitSeq      int
 }
 
 func (m *integrateRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) {
@@ -46,7 +50,16 @@ func (m *integrateRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, e
 func (m *integrateRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, nil
 }
-func (m *integrateRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
+func (m *integrateRepoService) CreateBranch(_ context.Context, name, sha string) error {
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if _, exists := m.branchSHAs[name]; exists {
+		return fmt.Errorf("reference already exists")
+	}
+	m.branchSHAs[name] = sha
+	return nil
+}
 func (m *integrateRepoService) DeleteBranch(_ context.Context, name string) error {
 	m.deleted = append(m.deleted, name)
 	return nil
@@ -55,7 +68,49 @@ func (m *integrateRepoService) GetBranchSHA(_ context.Context, name string) (str
 	if sha, ok := m.branchSHAs[name]; ok {
 		return sha, nil
 	}
+	if strings.HasPrefix(name, "herd/batch/") {
+		return "batch-sha", nil
+	}
 	return "", fmt.Errorf("branch %s not found", name)
+}
+func (m *integrateRepoService) CreateBranchWithCommit(ctx context.Context, name, parentSHA, message string) (string, error) {
+	sha, err := m.CreateCommit(ctx, parentSHA, message)
+	if err != nil {
+		return "", err
+	}
+	if err := m.CreateBranch(ctx, name, sha); err != nil {
+		return "", err
+	}
+	return sha, nil
+}
+func (m *integrateRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	m.commitSeq++
+	sha := fmt.Sprintf("%s-lock-%d", parentSHA, m.commitSeq)
+	if m.commitMessages == nil {
+		m.commitMessages = make(map[string]string)
+	}
+	if m.commitParents == nil {
+		m.commitParents = make(map[string]string)
+	}
+	m.commitMessages[sha] = message
+	m.commitParents[sha] = parentSHA
+	return sha, nil
+}
+func (m *integrateRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if msg, ok := m.commitMessages[sha]; ok {
+		return msg, nil
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (m *integrateRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if m.branchSHAs[name] != m.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
+	m.branchSHAs[name] = sha
+	return nil
 }
 
 func TestHandleIntegrate(t *testing.T) {
@@ -93,9 +148,9 @@ func TestHandleIntegrate(t *testing.T) {
 			wantMsg:   "⚠️ This issue has no batch number in its frontmatter.",
 		},
 		{
-			name:   "non-batch PR",
-			isPR:   true,
-			prHead: "feature/my-feature",
+			name:    "non-batch PR",
+			isPR:    true,
+			prHead:  "feature/my-feature",
 			wantMsg: "⚠️ `/herd integrate` can only be used on batch PRs or issues with a batch frontmatter.",
 		},
 		{

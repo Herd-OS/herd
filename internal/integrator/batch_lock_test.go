@@ -43,9 +43,9 @@ func TestAcquireBatchLock_Table(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		setup      func(*mockRepoService)
-		wantErr    bool
+		name        string
+		setup       func(*mockRepoService)
+		wantErr     bool
 		wantAcquire bool
 		wantHead    func(*testing.T, *mockRepoService)
 	}{
@@ -53,7 +53,7 @@ func TestAcquireBatchLock_Table(t *testing.T) {
 			name:        "first acquisition creates branch and locks",
 			wantAcquire: true,
 			wantHead: func(t *testing.T, repo *mockRepoService) {
-				state := requireBatchLockHead(t, repo, 1)
+				state := requireBatchOneLockHead(t, repo)
 				assert.Equal(t, "locked", state.Status)
 				assert.Equal(t, int64(101), state.RunID)
 				assert.Equal(t, batchBranch, state.BatchBranch)
@@ -80,7 +80,7 @@ func TestAcquireBatchLock_Table(t *testing.T) {
 			},
 			wantAcquire: true,
 			wantHead: func(t *testing.T, repo *mockRepoService) {
-				state := requireBatchLockHead(t, repo, 1)
+				state := requireBatchOneLockHead(t, repo)
 				assert.Equal(t, "locked", state.Status)
 				assert.NotEqual(t, "expired-lock", state.LockID)
 				assert.Equal(t, "expired-sha", repo.commitParents[repo.branchSHAs[lockBranch]])
@@ -98,7 +98,7 @@ func TestAcquireBatchLock_Table(t *testing.T) {
 			},
 			wantAcquire: true,
 			wantHead: func(t *testing.T, repo *mockRepoService) {
-				state := requireBatchLockHead(t, repo, 1)
+				state := requireBatchOneLockHead(t, repo)
 				assert.Equal(t, "locked", state.Status)
 				assert.GreaterOrEqual(t, repo.markerCommitSeq, 2)
 			},
@@ -130,7 +130,7 @@ func TestAcquireBatchLock_Table(t *testing.T) {
 			},
 			wantAcquire: true,
 			wantHead: func(t *testing.T, repo *mockRepoService) {
-				state := requireBatchLockHead(t, repo, 1)
+				state := requireBatchOneLockHead(t, repo)
 				assert.Equal(t, "locked", state.Status)
 				assert.Equal(t, "existing-sha", repo.commitParents[repo.branchSHAs[lockBranch]])
 			},
@@ -172,7 +172,7 @@ func TestReleaseBatchLock(t *testing.T) {
 	require.True(t, acquired)
 
 	require.NoError(t, ReleaseBatchLock(context.Background(), repo, handle))
-	state := requireBatchLockHead(t, repo, 1)
+	state := requireBatchOneLockHead(t, repo)
 	assert.Equal(t, "unlocked", state.Status)
 	assert.Equal(t, handle.state.LockID, state.ReleasedLockID)
 
@@ -195,7 +195,7 @@ func TestReleaseBatchLockOnlyUnlocksMatchingLockID(t *testing.T) {
 
 	oldHandle := &BatchLockHandle{branch: lockBranch, state: lockedBatchLockState(1, batchBranch, 100, "old-lock", now)}
 	require.NoError(t, ReleaseBatchLock(context.Background(), repo, oldHandle))
-	state := requireBatchLockHead(t, repo, 1)
+	state := requireBatchOneLockHead(t, repo)
 	assert.Equal(t, "locked", state.Status)
 	assert.Equal(t, "new-lock", state.LockID)
 }
@@ -245,7 +245,7 @@ func TestAcquireBatchLockFastForwardConflictSeesWinnerAndSkips(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, acquired)
 	assert.Nil(t, handle)
-	state := requireBatchLockHead(t, repo, 1)
+	state := requireBatchOneLockHead(t, repo)
 	assert.Equal(t, "winner-lock", state.LockID)
 }
 
@@ -257,9 +257,9 @@ func TestBatchLockCommitMessageIsJSONOnly(t *testing.T) {
 	assert.NotContains(t, msg, "\n")
 }
 
-func requireBatchLockHead(t *testing.T, repo *mockRepoService, batchNumber int) BatchLockState {
+func requireBatchOneLockHead(t *testing.T, repo *mockRepoService) BatchLockState {
 	t.Helper()
-	sha := repo.branchSHAs[BatchLockBranch(batchNumber)]
+	sha := repo.branchSHAs[BatchLockBranch(1)]
 	require.NotEmpty(t, sha)
 	state, ok := parseBatchLockCommitMessage(repo.commitMessages[sha])
 	require.True(t, ok, "head %s message must parse: %q", sha, repo.commitMessages[sha])

@@ -159,28 +159,6 @@ func IsBatchLockActive(state BatchLockState, now time.Time) bool {
 	return state.ExpiresAt.After(now)
 }
 
-func withBatchLock(ctx context.Context, p platform.Platform, batchNumber int, batchBranch string, runID int64, fn func() error) (bool, error) {
-	handle, acquired, err := AcquireBatchLock(ctx, p.Repository(), batchNumber, batchBranch, runID, timeNowUTC())
-	if err != nil {
-		return false, err
-	}
-	if !acquired {
-		logActiveBatchLock(ctx, p.Repository(), batchNumber, batchBranch, runID)
-		return false, nil
-	}
-	defer func() {
-		releaseCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := ReleaseBatchLock(releaseCtx, p.Repository(), handle); err != nil {
-			fmt.Printf("Warning: failed to release batch lock for batch #%d: %s\n", batchNumber, err)
-		}
-	}()
-	if err := fn(); err != nil {
-		return true, err
-	}
-	return true, nil
-}
-
 func timeNowUTC() time.Time {
 	return time.Now().UTC()
 }
