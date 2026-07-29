@@ -124,12 +124,16 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+' || true)
+          if [ -z "$BATCH" ]; then
+            echo "Skipping HerdOS check_run_completed callback for non-batch branch: $HEAD_BRANCH"
+            exit 0
+          fi
           jq -n \
             --arg repository "$REPOSITORY" \
             --arg event_name "check_run" \
             --arg action "check_run_completed" \
             --arg check_run_id "$CHECK_RUN_ID" \
-            --arg batch "$BATCH" \
+            --argjson batch_number "$BATCH" \
             --arg conclusion "$CHECK_RUN_CONCLUSION" \
             --arg head_branch "$HEAD_BRANCH" \
             --arg head_sha "$CHECK_RUN_HEAD_SHA" \
@@ -139,7 +143,7 @@ jobs:
               repository: $repository,
               event_name: $event_name,
               action: $action,
-              batch_number: (if $batch == "" then null else ($batch | tonumber) end),
+              batch_number: $batch_number,
               check_run: {
                 id: $check_run_id,
                 conclusion: $conclusion,

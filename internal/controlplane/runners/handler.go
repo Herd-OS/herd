@@ -137,7 +137,7 @@ func (h RegistrationTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "runner registration storage does not support atomic mutation phases"})
 		return
 	}
-	start, err := transitioner.TryStartIdempotencyKey(r.Context(), idempotencyKey, "failed", mutationspkg.PhaseCallStarted, mutationspkg.PhaseFailedPreCall+":")
+	start, err := transitioner.TryStartIdempotencyKey(r.Context(), idempotencyKey, mutationspkg.PhaseCallStarted, mutationspkg.PhaseCallStarted, mutationspkg.PhaseFailedPreCall+":")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark runner registration token mint started"})
 		return
@@ -278,7 +278,13 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration nonce was already used with different runner metadata"})
 		return RegistrationTokenResponse{}, false, false
 	}
-	if record.Status == "failed" {
+	switch record.Status {
+	case mutationspkg.PhaseFailedPreCall:
+		return RegistrationTokenResponse{}, false, true
+	case mutationspkg.PhaseCallStarted, mutationspkg.PhaseRepairRequired:
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
+		return RegistrationTokenResponse{}, false, false
+	case "failed":
 		if resultJSON, ok := strings.CutPrefix(record.ResultRef, failedResultPrefix); ok {
 			result, ok := h.replayRegistrationResult(w, ctx, resultJSON, token)
 			return result, ok, ok

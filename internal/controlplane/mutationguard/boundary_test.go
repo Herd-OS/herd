@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,6 +130,8 @@ func TestRunMutationBoundaryPreflightFailureIsRetryable(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Equal(t, mutations.PhaseFailedPreCall, st.attempts["k"].Status)
+	require.Equal(t, mutations.PhaseFailedPreCall, st.idem["k"].Status)
+	assert.Equal(t, "marshal inputs", st.idem["k"].ResultRef)
 
 	calls := 0
 	result, err := Run(context.Background(), st, RunRequest{
@@ -174,8 +177,7 @@ func (s *fakeBoundaryStore) CompleteIdempotencyKey(_ context.Context, key string
 
 func (s *fakeBoundaryStore) FailIdempotencyKey(_ context.Context, key string, errorMessage string) error {
 	record := s.idem[key]
-	record.Status = "failed"
-	record.ResultRef = errorMessage
+	record.Status, record.ResultRef = fakeIdempotencyFailureStatus(errorMessage)
 	s.idem[key] = record
 	return nil
 }
@@ -223,4 +225,17 @@ func (s *fakeBoundaryStore) TryStartGitHubMutationAttempt(_ context.Context, key
 		}
 	}
 	return store.GitHubMutationStartResult{Attempt: attempt}, nil
+}
+
+func fakeIdempotencyFailureStatus(errorMessage string) (string, string) {
+	for _, phase := range []string{mutations.PhaseFailedPreCall, mutations.PhaseRepairRequired} {
+		prefix := phase + ":"
+		if errorMessage == phase {
+			return phase, ""
+		}
+		if strings.HasPrefix(errorMessage, prefix) {
+			return phase, strings.TrimSpace(strings.TrimPrefix(errorMessage, prefix))
+		}
+	}
+	return mutations.LegacyFailed, errorMessage
 }

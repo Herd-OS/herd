@@ -35,6 +35,7 @@ type Store interface {
 	ListStartedIdempotencyKeys(ctx context.Context, scope string, createdBefore time.Time, limit int) ([]store.IdempotencyKey, error)
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
 	ListStartedGitHubMutationAttempts(ctx context.Context, createdBefore time.Time, limit int) ([]store.GitHubMutationAttempt, error)
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
@@ -146,6 +147,27 @@ func (r *Reconciler) runCommands(ctx context.Context, cfg Config, now time.Time,
 		if item.Command.Status == "retry_needed" {
 			r.add(report, "command", item.IdempotencyKey, ClassificationStillNeeded, "none", "command already marked for retry")
 			continue
+		}
+		if item.IdempotencySeen && item.Idempotency.Status == mutations.LegacyFailed {
+			attempt, err := r.Store.GetGitHubMutationAttempt(ctx, item.IdempotencyKey)
+			if err == nil && mutations.IsPreCallRetryable(attempt.Status) {
+				d := r.add(report, "command", item.IdempotencyKey, ClassificationSafeToRetry, "requeue", "legacy failed command has a durable failed_pre_call mutation attempt")
+				if r.Commands != nil {
+					if err := r.Commands.RequeueCommand(ctx, item); err != nil {
+						*errs = append(*errs, fmt.Errorf("requeue command %s: %w", item.IdempotencyKey, err))
+						continue
+					}
+				}
+				if err := r.Store.UpdateCommandStatus(ctx, item.Command.RepositoryID, item.Command.CommentID, item.Command.CommandKey, "retry_needed", diagnosticMetadata(d)); err != nil {
+					*errs = append(*errs, fmt.Errorf("mark command %s retry_needed: %w", item.IdempotencyKey, err))
+					continue
+				}
+				continue
+			}
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				*errs = append(*errs, fmt.Errorf("get command mutation attempt %s: %w", item.IdempotencyKey, err))
+				continue
+			}
 		}
 		if item.IdempotencySeen && !mutations.IsPreCallRetryable(item.Idempotency.Status) {
 			if mutations.IsPostCallUnknown(item.Idempotency.Status) {

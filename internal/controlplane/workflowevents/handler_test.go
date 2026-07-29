@@ -204,8 +204,8 @@ func TestHandlerProcessedMarkerFailureRedeliveryDoesNotProcessAgain(t *testing.T
 	require.Len(t, st.commands, 1)
 	assert.Equal(t, "processed_pending", st.commands[0].Status)
 	for _, record := range st.idem {
-		assert.Equal(t, "failed", record.Status)
-		assert.Contains(t, record.ResultRef, "repair_required")
+		assert.Equal(t, "repair_required", record.Status)
+		assert.Contains(t, record.ResultRef, "pending durable finalization")
 	}
 }
 
@@ -235,8 +235,8 @@ func TestHandlerProcessedMarkerAndCompletionFailureRedeliveryDoesNotProcessAgain
 	require.Len(t, st.commands, 1)
 	assert.Equal(t, "processed_pending", st.commands[0].Status)
 	for _, record := range st.idem {
-		assert.Equal(t, "failed", record.Status)
-		assert.Contains(t, record.ResultRef, "repair_required")
+		assert.Equal(t, "repair_required", record.Status)
+		assert.Contains(t, record.ResultRef, "pending durable finalization")
 	}
 }
 
@@ -265,9 +265,53 @@ func TestHandlerProcessedAndPendingMarkerFailuresDoNotCompleteIdempotency(t *tes
 	require.Len(t, st.commands, 1)
 	assert.Equal(t, "repair_required", st.commands[0].Status)
 	for _, record := range st.idem {
-		assert.Equal(t, "failed", record.Status)
-		assert.Contains(t, record.ResultRef, "repair_required")
+		assert.Equal(t, "repair_required", record.Status)
+		assert.Contains(t, record.ResultRef, "pending down")
 	}
+}
+
+func TestHandlerCallStartedRedeliveryDoesNotMarkAcknowledgedCommandProcessed(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	claims := validEventClaims(now)
+	payload := []byte(validEventPayload())
+	event, err := Parse(payload)
+	require.NoError(t, err)
+	metadata, err := eventMetadata(payload, claims)
+	require.NoError(t, err)
+	commandKey := workflowEventCommandKey(event, payload, claims)
+	commentID := workflowEventCommentID(event, payload, claims)
+	processKey := "workflow_event:" + commandKey
+	st := newEventStore()
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	st.idem[processKey] = store.IdempotencyKey{Key: processKey, Scope: "workflow_event", Status: mutationspkg.PhaseCallStarted, Metadata: metadata}
+	st.commands = append(st.commands, store.CommandRecord{
+		RepositoryID: 7,
+		CommentID:    commentID,
+		CommandKey:   commandKey,
+		CommandName:  event.Kind,
+		Actor:        "github-actions",
+		Status:       "acknowledged",
+		Metadata:     metadata,
+	})
+	processor := &capturingProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(claims),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+		Processor: processor,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, eventRequest(string(payload)))
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unknown")
+	assert.Empty(t, processor.calls)
+	require.Len(t, st.commands, 1)
+	assert.Equal(t, "repair_required", st.commands[0].Status)
+	assert.Equal(t, "repair_required", st.idem[processKey].Status)
+	assert.Contains(t, st.idem[processKey].ResultRef, "unknown before processor success marker")
 }
 
 func TestHandlerProcessingMarkerRedeliveryBlocksDuplicateProcessing(t *testing.T) {
@@ -648,8 +692,7 @@ func (s *eventStore) FailIdempotencyKey(_ context.Context, key string, errorMess
 		return store.ErrNotFound
 	}
 	now := time.Now().UTC()
-	record.Status = "failed"
-	record.ResultRef = errorMessage
+	record.Status, record.ResultRef = eventIdempotencyFailureStatus(errorMessage)
 	record.CompletedAt = &now
 	s.idem[key] = record
 	return nil
@@ -662,14 +705,28 @@ func (s *eventStore) TryStartIdempotencyKey(_ context.Context, key string, toSta
 	if !ok {
 		return store.IdempotencyStartResult{}, store.ErrNotFound
 	}
-	retryableFailed := record.Status == "failed" && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
-	if record.Status != mutationspkg.PhaseIntentRecorded && !retryableFailed {
+	retryableFailed := record.Status == mutationspkg.LegacyFailed && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
+	if record.Status != mutationspkg.PhaseIntentRecorded && record.Status != mutationspkg.PhaseFailedPreCall && !retryableFailed {
 		return store.IdempotencyStartResult{Started: false, Record: record}, nil
 	}
 	record.Status = toStatus
 	record.ResultRef = resultRef
 	s.idem[key] = record
 	return store.IdempotencyStartResult{Started: true, Record: record}, nil
+}
+
+func eventIdempotencyFailureStatus(errorMessage string) (string, string) {
+	message := strings.TrimSpace(errorMessage)
+	for _, phase := range []string{mutationspkg.PhaseFailedPreCall, mutationspkg.PhaseRepairRequired} {
+		prefix := phase + ":"
+		if message == phase {
+			return phase, ""
+		}
+		if strings.HasPrefix(message, prefix) {
+			return phase, strings.TrimSpace(strings.TrimPrefix(message, prefix))
+		}
+	}
+	return mutationspkg.LegacyFailed, errorMessage
 }
 
 type capturingProcessor struct {

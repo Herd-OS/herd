@@ -370,8 +370,7 @@ func (s *MemoryStore) FailIdempotencyKey(_ context.Context, key string, errorMes
 		return nil
 	}
 	now := time.Now().UTC()
-	record.Status = "failed"
-	record.ResultRef = errorMessage
+	record.Status, record.ResultRef = idempotencyFailureStatus(errorMessage)
 	record.CompletedAt = &now
 	s.idempotencyKeys[key] = record
 	return nil
@@ -400,8 +399,8 @@ func (s *MemoryStore) TryStartIdempotencyKey(_ context.Context, key string, toSt
 	if !ok {
 		return IdempotencyStartResult{}, ErrNotFound
 	}
-	retryableFailed := record.Status == "failed" && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
-	if record.Status != mutations.PhaseIntentRecorded && !retryableFailed {
+	retryableFailed := record.Status == mutations.LegacyFailed && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
+	if record.Status != mutations.PhaseIntentRecorded && record.Status != mutations.PhaseFailedPreCall && !retryableFailed {
 		return IdempotencyStartResult{Started: false, Record: record}, nil
 	}
 	record.Status = toStatus

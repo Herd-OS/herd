@@ -433,10 +433,11 @@ func (s *PostgresStore) CompleteIdempotencyKey(ctx context.Context, key string, 
 }
 
 func (s *PostgresStore) FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error {
+	status, resultRef := idempotencyFailureStatus(errorMessage)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE idempotency_keys
-		SET status = 'failed', result_ref = $2, completed_at = now()
-		WHERE key = $1 AND status <> 'completed'`, key, errorMessage)
+		SET status = $2, result_ref = $3, completed_at = now()
+		WHERE key = $1 AND status <> 'completed'`, key, status, resultRef)
 	if err != nil {
 		return err
 	}
@@ -473,7 +474,7 @@ func (s *PostgresStore) TryStartIdempotencyKey(ctx context.Context, key string, 
 		UPDATE idempotency_keys
 		SET status = $2, result_ref = $3
 		WHERE key = $1
-		  AND (status = 'intent_recorded' OR (status = 'failed' AND result_ref LIKE $4))
+		  AND (status = 'intent_recorded' OR status = 'failed_pre_call' OR (status = 'failed' AND result_ref LIKE $4))
 		RETURNING key, scope, status, result_ref, expires_at, metadata, created_at, completed_at`,
 		key, toStatus, resultRef, retryableFailedPrefix+"%")
 	if err != nil {

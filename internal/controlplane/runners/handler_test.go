@@ -302,11 +302,12 @@ func TestRegistrationTokenHandlerMinterFailures(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name   string
-		minter TokenMinter
+		name       string
+		minter     TokenMinter
+		wantStatus string
 	}{
-		{name: "app token mint failure", minter: AppInstallationMinter{Source: fakeTokenSource{err: errors.New("mint failed")}}},
-		{name: "github registration token API failure", minter: &fakeMinter{err: errors.New("github failed")}},
+		{name: "app token mint failure", minter: AppInstallationMinter{Source: fakeTokenSource{err: errors.New("mint failed")}}, wantStatus: mutationspkg.PhaseFailedPreCall},
+		{name: "github registration token API failure", minter: &fakeMinter{err: errors.New("github failed")}, wantStatus: mutationspkg.PhaseRepairRequired},
 	}
 
 	for _, tt := range tests {
@@ -319,7 +320,7 @@ func TestRegistrationTokenHandlerMinterFailures(t *testing.T) {
 			assert.Equal(t, http.StatusBadGateway, rec.Code)
 			assert.Nil(t, st.tokens[token.ID].UsedAt)
 			for _, record := range st.idempotency {
-				assert.Equal(t, "failed", record.Status)
+				assert.Equal(t, tt.wantStatus, record.Status)
 			}
 		})
 	}
@@ -395,8 +396,8 @@ func TestRegistrationTokenHandlerRejectsExpiredMinterResponse(t *testing.T) {
 	assert.Equal(t, 1, minter.calls)
 	assert.Nil(t, st.tokens[token.ID].UsedAt)
 	for _, record := range st.idempotency {
-		assert.Equal(t, "failed", record.Status)
-		assert.Contains(t, record.ResultRef, mutationspkg.PhaseRepairRequired)
+		assert.Equal(t, "repair_required", record.Status)
+		assert.Contains(t, record.ResultRef, "empty registration token response")
 	}
 }
 
@@ -642,8 +643,7 @@ func (s *handlerFakeStore) FailIdempotencyKey(_ context.Context, key string, err
 		return store.ErrNotFound
 	}
 	now := time.Now().UTC()
-	record.Status = "failed"
-	record.ResultRef = errorMessage
+	record.Status, record.ResultRef = runnerIdempotencyFailureStatus(errorMessage)
 	record.CompletedAt = &now
 	s.idempotency[key] = record
 	return nil
@@ -672,14 +672,28 @@ func (s *handlerFakeStore) TryStartIdempotencyKey(_ context.Context, key string,
 	if !ok {
 		return store.IdempotencyStartResult{}, store.ErrNotFound
 	}
-	retryableFailed := record.Status == "failed" && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
-	if record.Status != idempotencyStatusStarted && !retryableFailed {
+	retryableFailed := record.Status == mutationspkg.LegacyFailed && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
+	if record.Status != idempotencyStatusStarted && record.Status != mutationspkg.PhaseFailedPreCall && !retryableFailed {
 		return store.IdempotencyStartResult{Started: false, Record: record}, nil
 	}
 	record.Status = toStatus
 	record.ResultRef = resultRef
 	s.idempotency[key] = record
 	return store.IdempotencyStartResult{Started: true, Record: record}, nil
+}
+
+func runnerIdempotencyFailureStatus(errorMessage string) (string, string) {
+	message := strings.TrimSpace(errorMessage)
+	for _, phase := range []string{mutationspkg.PhaseFailedPreCall, mutationspkg.PhaseRepairRequired} {
+		prefix := phase + ":"
+		if message == phase {
+			return phase, ""
+		}
+		if strings.HasPrefix(message, prefix) {
+			return phase, strings.TrimSpace(strings.TrimPrefix(message, prefix))
+		}
+	}
+	return mutationspkg.LegacyFailed, errorMessage
 }
 
 type fakeMinter struct {

@@ -169,6 +169,8 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !shouldProcess {
 		commandKey := workflowEventCommandKey(event, payload, claims)
 		commentID := workflowEventCommentID(event, payload, claims)
+		idem, idemErr := h.store.GetIdempotencyKey(r.Context(), processKey)
+		idemPostCallUnknown := idemErr == nil && mutationspkg.IsPostCallUnknown(idem.Status)
 		if record, recordErr := h.store.GetCommandRecord(r.Context(), repo.ID, commentID, commandKey); recordErr == nil {
 			if record.Status == "processing" || record.Status == "repair_required" {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
@@ -179,9 +181,15 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete workflow event idempotency"})
 					return
 				}
+				idemPostCallUnknown = false
 			} else if record.Status == "processed_pending" {
 				_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseRepairRequired+":workflow event processed status is pending durable finalization")
 				writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing finalization is pending repair"})
+				return
+			} else if idemPostCallUnknown {
+				_ = h.markWorkflowEventRepairRequired(r.Context(), repo.ID, commentID, commandKey, metadata)
+				_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseRepairRequired+":workflow event processing outcome is unknown before processor success marker")
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
 				return
 			} else if record.Status != "processed" {
 				if err := h.markWorkflowEventProcessed(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
@@ -190,7 +198,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if idem, idemErr := h.store.GetIdempotencyKey(r.Context(), processKey); idemErr == nil && mutationspkg.IsPostCallUnknown(idem.Status) {
+		if idemPostCallUnknown {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
 			return
 		}

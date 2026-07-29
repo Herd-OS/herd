@@ -8077,6 +8077,9 @@ func TestBuildStableDisagreementComment(t *testing.T) {
 	assert.Contains(t, got, "first verdict bullet")
 	assert.Contains(t, got, "second verdict bullet")
 	assert.Contains(t, got, "herd/stable-disagreement")
+	assert.Contains(t, got, "@herd-os fix")
+	assert.Contains(t, got, "@herd-os integrate")
+	assert.NotContains(t, got, "/herd")
 	// All three numbered resolution options must be present.
 	assert.Contains(t, got, "1. ")
 	assert.Contains(t, got, "2. ")

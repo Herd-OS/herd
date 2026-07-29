@@ -691,7 +691,9 @@ the Integrator halts the cycle.
   verdicts, and the resolution options.
 
 While the `herd/stable-disagreement` label is present, automatic review is
-suspended. Manual `@herd-os review` still executes — it bypasses the label.
+suspended. Manual `@herd-os review` still executes because it bypasses the
+label. Manual `@herd-os integrate` also bypasses the label for recovery and
+merge-as-is decisions.
 
 **Recovery.** The user has three options:
 

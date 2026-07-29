@@ -574,8 +574,8 @@ func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(
 	assert.Len(t, gh.comments, 1)
 	assert.Empty(t, dispatcher.dispatched)
 	key := "repo:42:comment:123:command:review"
-	require.Equal(t, "failed", st.idempotencyKeys[key].Status)
-	assert.Contains(t, st.idempotencyKeys[key].ResultRef, "repair_required")
+	require.Equal(t, "repair_required", st.idempotencyKeys[key].Status)
+	assert.Contains(t, st.idempotencyKeys[key].ResultRef, "github down")
 	require.Len(t, st.commandRecords, 1)
 	assert.JSONEq(t, `{"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
@@ -921,8 +921,7 @@ func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessa
 		return store.ErrNotFound
 	}
 	now := time.Now().UTC()
-	record.Status = "failed"
-	record.ResultRef = errorMessage
+	record.Status, record.ResultRef = commandIdempotencyFailureStatus(errorMessage)
 	record.CompletedAt = &now
 	s.idempotencyKeys[key] = record
 	return nil
@@ -933,14 +932,28 @@ func (s *fakeStore) TryStartIdempotencyKey(_ context.Context, key string, toStat
 	if !ok {
 		return store.IdempotencyStartResult{}, store.ErrNotFound
 	}
-	retryableFailed := record.Status == "failed" && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
-	if record.Status != "intent_recorded" && !retryableFailed {
+	retryableFailed := record.Status == mutations.LegacyFailed && strings.HasPrefix(record.ResultRef, retryableFailedPrefix)
+	if record.Status != mutations.PhaseIntentRecorded && record.Status != mutations.PhaseFailedPreCall && !retryableFailed {
 		return store.IdempotencyStartResult{Started: false, Record: record}, nil
 	}
 	record.Status = toStatus
 	record.ResultRef = resultRef
 	s.idempotencyKeys[key] = record
 	return store.IdempotencyStartResult{Started: true, Record: record}, nil
+}
+
+func commandIdempotencyFailureStatus(errorMessage string) (string, string) {
+	message := strings.TrimSpace(errorMessage)
+	for _, phase := range []string{mutations.PhaseFailedPreCall, mutations.PhaseRepairRequired} {
+		prefix := phase + ":"
+		if message == phase {
+			return phase, ""
+		}
+		if strings.HasPrefix(message, prefix) {
+			return phase, strings.TrimSpace(strings.TrimPrefix(message, prefix))
+		}
+	}
+	return mutations.LegacyFailed, errorMessage
 }
 
 func (s *fakeStore) RecordCommand(_ context.Context, c store.CommandRecord) (bool, error) {

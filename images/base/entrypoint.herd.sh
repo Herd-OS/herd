@@ -59,6 +59,24 @@ require_runner_bootstrap_token() {
   fi
 }
 
+generate_runner_request_nonce() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then
+    tr -d '\n' < /proc/sys/kernel/random/uuid
+    return
+  fi
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen
+    return
+  fi
+  if command -v od >/dev/null 2>&1; then
+    printf '%s-' "$(date +%s%N 2>/dev/null || date +%s)"
+    od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+    printf '\n'
+    return
+  fi
+  printf '%s-%s-%s\n' "$(date +%s%N 2>/dev/null || date +%s)" "${HOSTNAME:-runner}" "$$"
+}
+
 get_token() {
   local response token
   response="$(jq -n \
@@ -106,7 +124,7 @@ REPO_OWNER=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\1|')
 REPO_NAME=$(echo "$REPO_URL" | sed -E 's|.*/([^/]+)/([^/]+)$|\2|')
 RUNNER_NAME_RESOLVED="${RUNNER_NAME:-$(hostname)}"
 RUNNER_LABELS_RESOLVED="${RUNNER_LABELS:-herd-worker}"
-HERD_RUNNER_REQUEST_NONCE="${HERD_RUNNER_REQUEST_NONCE:-$(date +%s)-${HOSTNAME:-runner}-$$}"
+HERD_RUNNER_REQUEST_NONCE="${HERD_RUNNER_REQUEST_NONCE:-$(generate_runner_request_nonce)}"
 HERD_CONTROL_PLANE_URL_RESOLVED="$(normalize_control_plane_url)"
 require_runner_bootstrap_token
 

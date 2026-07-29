@@ -245,6 +245,51 @@ func TestRunOnceClassifiesCommandIdempotencyByMutationPhase(t *testing.T) {
 	}
 }
 
+func TestRunOnceRetriesLegacyFailedCommandWithFailedPreCallMutationAttempt(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := store.NewMemoryStore()
+	repo := seedRepo(t, st, ctx)
+	key := "repo:1:comment:203:command:review"
+	_, err := st.RecordCommand(ctx, store.CommandRecord{
+		RepositoryID: repo.ID,
+		CommentID:    203,
+		CommandKey:   "review",
+		CommandName:  "review",
+		Actor:        "octo",
+		Status:       "acknowledged",
+		CreatedAt:    now.Add(-time.Hour),
+	})
+	require.NoError(t, err)
+	_, err = st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "issue_comment_command",
+		Status:    mutations.LegacyFailed,
+		ResultRef: mutations.PhaseFailedPreCall + ":client setup",
+		CreatedAt: now.Add(-time.Hour),
+	})
+	require.NoError(t, err)
+	require.NoError(t, st.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		MutationType:   "issue_comment_command",
+		Status:         mutations.PhaseFailedPreCall,
+		CreatedAt:      now.Add(-time.Hour),
+	}))
+	commands := &fakeCommandRequeuer{}
+	r := &Reconciler{Store: st, Commands: commands, Now: func() time.Time { return now }, Config: Config{CommandTimeout: time.Minute}}
+
+	report, err := r.RunOnce(ctx)
+
+	require.NoError(t, err)
+	assert.Equal(t, ClassificationSafeToRetry, commandDiagnosticClassification(t, report, key))
+	require.Len(t, commands.items, 1)
+	assert.Equal(t, int64(203), commands.items[0].Command.CommentID)
+	items, err := st.ListReconcileCommands(ctx, now, 10)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, "retry_needed", items[0].Command.Status)
+}
+
 func commandDiagnosticClassification(t *testing.T, report Report, id string) Classification {
 	t.Helper()
 	for _, diagnostic := range report.Diagnostics {
