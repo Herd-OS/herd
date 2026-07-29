@@ -17,6 +17,8 @@ integrator:
     max_conflict_resolution_attempts: 2
     require_ci: true
     review: true
+    review_diff:
+        max_chunks: 10
     review_max_fix_cycles: 0
     review_fix_severity: low
     ci_max_fix_cycles: 0
