@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -398,7 +399,7 @@ func (m *mockRepoService) GetDefaultBranch(ctx context.Context) (string, error) 
 }
 func (m *mockRepoService) CreateBranch(_ context.Context, name, sha string) error {
 	if m.branchExists == nil {
-		return nil
+		m.branchExists = make(map[string]bool)
 	}
 	if m.branchExists[name] {
 		return fmt.Errorf("reference already exists")
@@ -499,6 +500,12 @@ func (m *mockRepoService) GetBranchSHA(ctx context.Context, name string) (string
 			}
 			return "abc123", nil
 		}
+		if strings.HasPrefix(name, "herd/batch/") {
+			return "abc123", nil
+		}
+	}
+	if strings.HasPrefix(name, "herd/batch/") {
+		return "abc123", nil
 	}
 	return "", fmt.Errorf("branch %s not found", name)
 }
@@ -584,6 +591,58 @@ func TestConsolidate_NoOpWorker(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.NoOp)
 	assert.False(t, result.Merged)
+}
+
+func TestConsolidate_ActiveBatchLockSkipsSameBatchWorkerCompletion(t *testing.T) {
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = &platform.Issue{
+		Number: 42, Title: "Test",
+		Labels:    []string{issues.StatusDone},
+		Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+	}
+	active := lockedBatchLockState(1, "herd/batch/1-batch", 99, "active-lock", time.Now().UTC())
+	active.Owner = "batch-owner"
+	lockBranch := BatchLockBranch(1)
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			"herd/batch/1-batch": true,
+			"herd/worker/42-test": true,
+			lockBranch:           true,
+		},
+		branchSHAs: map[string]string{
+			"herd/batch/1-batch": "batch-sha",
+			"herd/worker/42-test": "worker-sha",
+			lockBranch:           "active-sha",
+		},
+		commitMessages: map[string]string{
+			"active-sha": mustBatchLockCommitMessage(t, active),
+		},
+	}
+	mock := &mockPlatform{
+		issues: issueSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			},
+		},
+		repo: repoSvc,
+	}
+
+	out := captureIntegratorStdout(t, func() {
+		result, err := Consolidate(context.Background(), mock, nil, &config.Config{}, ConsolidateParams{RunID: 100})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.True(t, result.BatchLockSkipped)
+		assert.True(t, result.NoOp)
+		assert.Contains(t, result.SkipReason, "Integrator batch lock active; skipping")
+	})
+
+	assert.Contains(t, out, "Integrator batch lock active; skipping")
+	assert.Contains(t, out, "batch=1")
+	assert.Contains(t, out, "branch=herd/batch/1-batch")
+	assert.Contains(t, out, "owner=batch-owner")
+	assert.Equal(t, "active-sha", repoSvc.branchSHAs[lockBranch])
 }
 
 func TestConsolidate_CancelledRun(t *testing.T) {
@@ -2946,6 +3005,24 @@ func runGit(t *testing.T, dir string, args ...string) {
 	}
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %v failed: %s", args, string(out))
+}
+
+func captureIntegratorStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+
+	fn()
+	require.NoError(t, w.Close())
+	var buf strings.Builder
+	_, err = io.Copy(&buf, r)
+	require.NoError(t, err)
+	return buf.String()
 }
 
 // initMultiWorkerRepo creates a bare-origin git repo, a batch branch for the

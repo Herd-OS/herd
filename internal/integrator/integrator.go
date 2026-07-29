@@ -31,6 +31,8 @@ type ConsolidateResult struct {
 	WorkerBranch     string
 	Merged           bool
 	NoOp             bool
+	BatchLockSkipped bool
+	SkipReason       string
 	ConflictDetected bool
 	ConflictIssue    int
 }
@@ -47,6 +49,8 @@ type AdvanceResult struct {
 	AllComplete     bool
 	DispatchedCount int
 	BatchPRNumber   int
+	BatchLockSkipped bool
+	SkipReason       string
 }
 
 // ReviewParams holds the parameters for reviewing a batch PR.
@@ -76,6 +80,8 @@ type ReviewResult struct {
 	SkippedDuplicateApprovedHead bool
 	// SkipReason is a human-readable reason for a skipped review that the CLI can print.
 	SkipReason string
+	// BatchLockSkipped is true when another integrator run owns the same batch lock.
+	BatchLockSkipped bool
 	// HeadSHA is the PR head SHA considered by the review, set for duplicate-skip diagnostics when available.
 	HeadSHA string
 	// ManualInterventionNeeded is true when the agent produced
@@ -125,6 +131,20 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 
 	triggerWorkerBranch := runCtx.WorkerBranch
 	batchBranch := runCtx.BatchBranch
+	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), issue.Milestone.Number, batchBranch, params.RunID, timeNowUTC())
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", issue.Milestone.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), issue.Milestone.Number, batchBranch, params.RunID)
+		return &ConsolidateResult{
+			IssueNumber:      issueNumber,
+			NoOp:             true,
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), issue.Milestone.Number, batchBranch, params.RunID),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, issue.Milestone.Number)
 
 	// Failure/cancellation: relabel the trigger and return — do NOT scan other
 	// candidates in this case (preserves the trigger semantics for failed runs).
@@ -358,6 +378,18 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 	}
 
 	batchBranch := runCtx.BatchBranch
+	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), ms.Number, batchBranch, params.RunID, timeNowUTC())
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), ms.Number, batchBranch, params.RunID)
+		return &AdvanceResult{
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, params.RunID),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
 
 	// List all issues in the milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
@@ -658,6 +690,18 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 	}
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), ms.Number, batchBranch, 0, timeNowUTC())
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), ms.Number, batchBranch, 0)
+		return &AdvanceResult{
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, 0),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
 
 	// List all issues in the milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{

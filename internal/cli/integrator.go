@@ -71,7 +71,9 @@ func newConsolidateCmd() *cobra.Command {
 				return err
 			}
 
-			if result.NoOp {
+			if result.BatchLockSkipped {
+				fmt.Printf("Skipped: %s\n", result.SkipReason)
+			} else if result.NoOp {
 				fmt.Printf("No-op: issue #%d had no worker branch (already done)\n", result.IssueNumber)
 			} else if result.ConflictDetected {
 				fmt.Printf("Warning: conflict detected for issue #%d, relabeled as failed\n", result.IssueNumber)
@@ -152,7 +154,9 @@ func newAdvanceCmd() *cobra.Command {
 				return err
 			}
 
-			if result.AllComplete {
+			if result.BatchLockSkipped {
+				fmt.Printf("Skipped: %s\n", result.SkipReason)
+			} else if result.AllComplete {
 				fmt.Printf("All tiers complete. Batch PR #%d opened.\n", result.BatchPRNumber)
 			} else if result.TierComplete {
 				fmt.Printf("Tier complete. Dispatched %d workers for next tier.\n", result.DispatchedCount)
@@ -268,6 +272,12 @@ func printReviewResultMessage(result *integrator.ReviewResult) {
 func reviewResultMessage(result *integrator.ReviewResult) string {
 	if result == nil {
 		return ""
+	}
+	if result.BatchLockSkipped {
+		if result.SkipReason != "" {
+			return result.SkipReason
+		}
+		return "Integrator batch lock active; skipping."
 	}
 	if result.SkippedDuplicateApprovedHead {
 		if result.SkipReason != "" {
@@ -563,7 +573,11 @@ func newIntegratorCheckCICmd() *cobra.Command {
 			}
 
 			if result.Skipped {
-				fmt.Println("CI check skipped (require_ci is false).")
+				if result.SkipReason != "" {
+					fmt.Printf("Skipped: %s\n", result.SkipReason)
+				} else {
+					fmt.Println("CI check skipped (require_ci is false).")
+				}
 			} else if result.MaxCyclesHit {
 				fmt.Println("CI failed — max fix cycles reached. Manual intervention needed.")
 			} else if len(result.FixIssues) > 0 {

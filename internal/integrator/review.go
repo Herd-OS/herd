@@ -151,6 +151,19 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", ms.Number)
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
+	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), ms.Number, batchBranch, params.RunID, timeNowUTC())
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), ms.Number, batchBranch, params.RunID)
+		return &ReviewResult{
+			BatchPRNumber:    pr.Number,
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, params.RunID),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
 
 	var reviewedHeadSHA string
 	if cfg.Integrator.Review {

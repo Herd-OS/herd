@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/issues"
@@ -243,6 +244,51 @@ func TestCheckCI(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckCI_ActiveBatchLockSkips(t *testing.T) {
+	issueSvc, wf, prSvc := baseCIMocks()
+	now := time.Now().UTC()
+	lockBranch := BatchLockBranch(1)
+	active := lockedBatchLockState(1, "herd/batch/1-batch", 99, "active-batch-lock", now)
+	active.Owner = "batch-owner"
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			"herd/batch/1-batch": true,
+			lockBranch:           true,
+		},
+		branchSHAs: map[string]string{
+			"herd/batch/1-batch": "batch-sha",
+			lockBranch:           "active-sha",
+		},
+		commitMessages: map[string]string{
+			"active-sha": mustBatchLockCommitMessage(t, active),
+		},
+	}
+	mock := &mockPlatformWithChecks{
+		mockPlatform: &mockPlatform{
+			issues:     issueSvc,
+			prs:        prSvc,
+			workflows:  wf,
+			repo:       repoSvc,
+			milestones: &mockMilestoneService{},
+		},
+		checks: &mockCheckService{status: "failure"},
+	}
+
+	out := captureIntegratorStdout(t, func() {
+		result, err := CheckCI(context.Background(), mock, testCIConfig(), CheckCIParams{RunID: 100})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.True(t, result.Skipped)
+		assert.Contains(t, result.SkipReason, "Integrator batch lock active; skipping")
+	})
+
+	assert.Contains(t, out, "Integrator batch lock active; skipping")
+	assert.Contains(t, out, "owner=batch-owner")
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Empty(t, wf.dispatched)
 }
 
 func TestCITriggerHelpers(t *testing.T) {

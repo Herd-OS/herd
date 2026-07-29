@@ -42,6 +42,7 @@ type CheckCIResult struct {
 	FixCycle     int
 	MaxCyclesHit bool
 	Skipped      bool // true if require_ci is false or no batch branch found
+	SkipReason   string
 }
 
 // CheckCI checks CI status on the batch branch after consolidation.
@@ -96,6 +97,22 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", ms.Number)
 		return &CheckCIResult{Skipped: true}, nil
 	}
+	lockRunID := params.RunID
+	if lockRunID == 0 && params.CIRun != nil {
+		lockRunID = params.CIRun.RunID
+	}
+	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), ms.Number, batchBranch, lockRunID, timeNowUTC())
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), ms.Number, batchBranch, lockRunID)
+		return &CheckCIResult{
+			Skipped:    true,
+			SkipReason: batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, lockRunID),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
 
 	// Get CI status
 	status, err := p.Checks().GetCombinedStatus(ctx, batchBranch)
