@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/herd-os/herd/internal/controlplane/commands"
 	"github.com/herd-os/herd/internal/controlplane/reconciler"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/controlplane/workflowevents"
@@ -160,9 +159,35 @@ func TestProductionServerRequiresHostedControlPlaneDependencies(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "production service dependencies")
-	assert.Contains(t, err.Error(), "issue-comment command handler")
+	assert.Contains(t, err.Error(), "queued command processor")
 	assert.Contains(t, err.Error(), "job result processor route")
 	assert.Contains(t, err.Error(), "workflow event processor")
+}
+
+func TestWebhookRouteQueuesIssueCommentWithoutInlineCommandHandler(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	repo, err := st.UpsertRepository(ctx, store.Repository{
+		ID:             42,
+		InstallationID: 77,
+		Owner:          "octo-org",
+		Name:           "herd",
+	})
+	require.NoError(t, err)
+	handler, err := NewServer(Config{
+		Env:           "development",
+		WebhookSecret: "webhook-secret",
+		AppLogin:      "herd-os",
+	}, Dependencies{
+		Store: st,
+	})
+	require.NoError(t, err)
+
+	sendIssueCommentWebhook(t, handler, "delivery-queued-route-test", "@herd-os review", 123)
+	record, err := st.GetCommandRecord(ctx, repo.ID, 123, "review")
+
+	require.NoError(t, err)
+	assert.Equal(t, "queued", record.Status)
 }
 
 func TestProductionServerAcceptsInjectedHostedControlPlaneDependencies(t *testing.T) {
@@ -275,16 +300,9 @@ func productionTestDependencies(st Store) Dependencies {
 		JobResultsRoute: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 		}),
-		IssueCommentCommandHandler: productionTestCommander{},
-		QueuedCommandProcessor:     productionTestQueuedCommandProcessor{},
-		WorkflowEventProcessor:     productionTestWorkflowProcessor{},
+		QueuedCommandProcessor: productionTestQueuedCommandProcessor{},
+		WorkflowEventProcessor: productionTestWorkflowProcessor{},
 	}
-}
-
-type productionTestCommander struct{}
-
-func (productionTestCommander) HandleIssueComment(context.Context, commands.IssueComment) (commands.Result, error) {
-	return commands.Result{Status: commands.StatusAcknowledged}, nil
 }
 
 type productionTestWorkflowProcessor struct{}
