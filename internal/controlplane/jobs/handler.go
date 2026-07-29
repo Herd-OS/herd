@@ -64,7 +64,7 @@ type PatchApplier interface {
 }
 
 type ReviewProcessor interface {
-	SubmitReviewResult(ctx context.Context, repo review.Repository, result review.ReviewCompletedResult) error
+	PrepareSubmitReviewResult(ctx context.Context, repo review.Repository, result review.ReviewCompletedResult) (review.PreparedReviewResultSubmission, error)
 }
 
 type defaultPatchApplier struct{}
@@ -638,14 +638,23 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		"status":        reviewResult.Status,
 		"finding_count": len(reviewResult.Findings),
 	})
+	var prepared review.PreparedReviewResultSubmission
 	_, err := mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
 		Key:          mutationKey,
 		RepositoryID: job.RepositoryID,
 		MutationType: "review_result_process",
 		Request:      request,
 		Response:     func(string) json.RawMessage { return request },
+		Preflight: func() error {
+			var err error
+			prepared, err = h.reviewProcessor.PrepareSubmitReviewResult(ctx, repo, submission)
+			return err
+		},
 		Mutate: func() (string, error) {
-			if err := h.reviewProcessor.SubmitReviewResult(ctx, repo, submission); err != nil {
+			if prepared == nil {
+				return "", mutationspkg.PreCallError{Op: "prepare review result submission", Err: fmt.Errorf("prepared review result submission is missing")}
+			}
+			if err := prepared.Submit(ctx); err != nil {
 				return "", err
 			}
 			return "review_result:processed", nil
