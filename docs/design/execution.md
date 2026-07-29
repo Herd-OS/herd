@@ -589,28 +589,64 @@ and track which review cycle spawned them via a `fix_cycle` field and a
 
 Before creating another review-fix issue, the Integrator parses recent HerdOS
 review result comments and completed review-fix issues for the batch PR. The
-trigger is deterministic: it compares review-cycle trends, deduped finding
-counts, and concrete repeated package/subsystem clusters with supporting
-repeated root-cause evidence to decide whether the fix loop is still making
-progress or needs a different strategy. The cluster input is limited to actual
-findings. Synthetic labels are never valid package/subsystem clusters,
-including chunk labels, coverage headings, `none`, empty values, bare chunk
-fractions such as `1/9`, diff coverage labels, review aggregation headings,
-files-reviewed/source metadata, and other synthetic coverage text. Generic
-root-cause terms such as durable, idempotency, mutation, workflow, retry,
-repair, and dispatch are not sufficient by themselves; they can only help
-describe a strategy when a concrete recurring package/subsystem cluster exists
-and the deterministic gates pass.
+high-volume route is deterministic: when the latest actionable deduplicated
+finding count is at least the internal eight-finding floor, it compares
+review-cycle trends and concrete repeated package/subsystem clusters with
+supporting repeated root-cause evidence. Bounded agent synthesis may refine a
+deterministically valid cluster, but it cannot rescue an ineligible history.
+When synthesis is disabled, unavailable, invalid, low confidence, or rejected
+by safety gates, this route retains its deterministic strategy fallback.
+High-volume issues use
+`Review strategy fix (cycle N): <root cause>`.
 
-When deterministic eligibility succeeds, the Integrator can run bounded agent
-synthesis to refine the valid cluster into one dominant architectural or
-root-cause strategy. Synthesis is post-eligibility only: it cannot rescue an
-otherwise ineligible no-cluster or generic-only history. Safety gates require
-sufficient confidence, recurring symptoms, cycle and fix-attempt evidence,
-concrete acceptance criteria, and duplicate fingerprint checks before HerdOS
-uses synthesized strategy text. When synthesis is disabled, unavailable,
-invalid, low confidence, or rejected by safety gates, HerdOS creates the
-deterministic strategy issue.
+A separate low-volume route handles two through seven latest actionable
+deduplicated findings. It models history chronologically as:
+
+```text
+review(head A) → completed fix → review(head B) → completed fix → …
+```
+
+The route requires synthesis to be enabled and at least
+`max(3, min_completed_cycles)` completed cycles within the configured window.
+Its evidence must span at least three completed fix cycles, and every review in
+the evidence chain, including the latest review, must name a distinct head SHA.
+This proves that a fix completed between reviews instead of treating repeated
+comments on one unchanged head as oscillation. HerdOS then looks for a concrete
+recurring subsystem together with recurring architectural evidence about an
+invariant, lifecycle/state machine, ownership or publication boundary,
+consistency/linearization, durability/recovery, or synchronization. This can
+identify alternating fixes that restore one behavior while breaking another,
+or symptoms that move between endpoints while the underlying state transition
+remains unresolved.
+
+The evidence input is restricted to actionable findings. Broad directory
+coincidence, package matching alone, unrelated findings merely located in the
+same package, generic root-cause words, synthetic aggregation or coverage
+labels, and empty, no-issue, or generated-summary evidence are rejected. Chunk
+labels, coverage headings, `none`, bare fractions such as `1/9`,
+files-reviewed/source metadata, and other review metadata cannot establish a
+subsystem or architectural recurrence.
+
+Low-volume escalation is synthesis-required. The result must be accepted after
+confidence, coherence, recurring-symptom, three-cycle span, subsystem and
+architectural alignment, acceptance-criteria, safety, and fingerprint checks.
+There is no deterministic strategy fallback: disabled synthesis, an agent
+error or timeout, invalid or unsafe output, low confidence, incoherence,
+rejection, or a non-escalation decision returns to ordinary endpoint review
+fixes. Accepted low-volume issues use
+`Review strategy fix: <architectural root cause>`.
+
+Synthesis may include requirement reinterpretation only as an agent-proposed,
+strictly validated exception when literal implementation wording is genuinely
+over-constrained, internally conflicting, or unrealizable under the platform's
+consistency model. It must identify the conflicting requirement and platform
+consistency constraint, preserve a concrete user-visible safety property,
+define a materially different corrected invariant, specify explicit
+linearization and durability boundaries, and add regression criteria covering
+both the corrected invariant and preserved safety property. This mechanism
+cannot weaken correctness, relax a merely difficult requirement, or
+reinterpret requirements deterministically; failure of any validation returns
+the low-volume review to ordinary endpoint fixes.
 
 When eligibility fails, HerdOS posts or renders the normal HerdOS Agent Review
 result and creates ordinary review-fix issues through the existing review flow.
@@ -623,6 +659,11 @@ and fingerprint so repeated review triggers do not dispatch duplicate strategy
 workers. Completed strategy fixes do not suppress future recurrence forever; if
 the same fingerprint reappears after completion, HerdOS may create a new
 strategy issue and mention that the previous strategy fix appears incomplete.
+More broadly, any ready or in-progress ordinary review fix or strategy fix
+defers review and non-convergence evaluation. The Integrator neither invokes
+duplicate synthesis nor posts another review-result comment while the active
+fix can still change the batch head. This preserves head-based review
+idempotency and prevents stale evidence from creating overlapping workers.
 
 #### Review fix-issue dedup
 
