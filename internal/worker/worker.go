@@ -655,7 +655,7 @@ func scrubTransientArtifactsForWorker(ctx context.Context, p platform.Platform, 
 					truncateOutput(cfgErr.Error(), 2000)))
 			return fmt.Errorf("configuring git identity for transient artifact cleanup: %w", cfgErr)
 		}
-		if commitErr := g.Commit(fmt.Sprintf("Remove transient Herd artifacts for #%d", issueNumber)); commitErr != nil {
+		if commitErr := g.CommitPaths(fmt.Sprintf("Remove transient Herd artifacts for #%d", issueNumber), result.Removed...); commitErr != nil {
 			_ = p.Issues().AddComment(ctx, issueNumber,
 				fmt.Sprintf("**Worker failed:** Herd could not commit transient artifact cleanup before finalizing the branch.\n\n```\n%s\n```",
 					truncateOutput(commitErr.Error(), 2000)))

@@ -1167,6 +1167,28 @@ func TestGitHasStagedChanges(t *testing.T) {
 	}
 }
 
+func TestScrubTransientArtifactsForWorker_CommitsOnlyScrubbedArtifacts(t *testing.T) {
+	dir := initTestRepo(t)
+	g := git.New(dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd"), 0755))
+
+	artifactPath := filepath.Join(dir, ".herd", "review-fixes-123.md")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("transient"), 0644))
+	gitRunT(t, dir, "git", "add", ".herd/review-fixes-123.md")
+	gitRunT(t, dir, "git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-m", "add transient artifact")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("staged"), 0644))
+	gitRunT(t, dir, "git", "add", "staged.txt")
+
+	p := &mockPlatform{issues: &mockIssueService{}}
+	require.NoError(t, scrubTransientArtifactsForWorker(context.Background(), p, g, 1073))
+
+	assert.Equal(t, "Remove transient Herd artifacts for #1073\n", gitOutputT(t, dir, "git", "log", "-1", "--format=%s"))
+	assert.Equal(t, ".herd/review-fixes-123.md\n", gitOutputT(t, dir, "git", "show", "--name-only", "--format=", "HEAD"))
+	assert.Equal(t, "A\tstaged.txt\n", gitOutputT(t, dir, "git", "diff", "--cached", "--name-status"))
+	assert.NoFileExists(t, artifactPath)
+}
+
 func TestRunValidation_ValidGoProject(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.21\n"), 0644))

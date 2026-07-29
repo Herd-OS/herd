@@ -449,6 +449,49 @@ func gitOutputOK(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func TestCommitPaths(t *testing.T) {
+	tests := []struct {
+		name      string
+		paths     []string
+		wantErr   string
+		assertion func(t *testing.T, dir string)
+	}{
+		{
+			name:    "empty paths",
+			wantErr: "commit paths: no paths provided",
+		},
+		{
+			name:  "commits only selected paths",
+			paths: []string{"selected.txt"},
+			assertion: func(t *testing.T, dir string) {
+				t.Helper()
+				assert.Equal(t, "selected.txt", gitOutputOK(t, dir, "show", "--name-only", "--format=", "HEAD"))
+				assert.Equal(t, "A\tstaged.txt", gitOutputOK(t, dir, "diff", "--cached", "--name-status"))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := initTestRepo(t)
+			g := New(dir)
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("selected"), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("staged"), 0644))
+			runGit(t, dir, "add", "selected.txt", "staged.txt")
+
+			err := g.CommitPaths("commit selected paths", tt.paths...)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			tt.assertion(t, dir)
+		})
+	}
+}
+
 func TestIsDirty_CleanRepo(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

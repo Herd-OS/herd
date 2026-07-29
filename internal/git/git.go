@@ -171,6 +171,16 @@ func (g *Git) Commit(message string) error {
 	return g.run("commit", "-m", message)
 }
 
+// CommitPaths creates a new commit containing changes for the given paths.
+func (g *Git) CommitPaths(message string, paths ...string) error {
+	if len(paths) == 0 {
+		return fmt.Errorf("commit paths: no paths provided")
+	}
+	args := []string{"commit", "-m", message, "--"}
+	args = append(args, paths...)
+	return g.run(args...)
+}
+
 // AmendNoEdit amends the most recent commit without changing its message.
 func (g *Git) AmendNoEdit() error {
 	return g.run("commit", "--amend", "--no-edit")
