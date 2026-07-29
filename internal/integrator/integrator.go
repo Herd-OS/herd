@@ -61,6 +61,14 @@ type StrandedBatch struct {
 	BatchBranch     string
 }
 
+// PendingWorkerCompletionRecoveryResult describes a patrol recovery pass for
+// done workers that were marked pending while a batch PR already existed.
+type PendingWorkerCompletionRecoveryResult struct {
+	Recovered        int
+	BatchLockSkipped bool
+	SkipReason       string
+}
+
 // ReviewParams holds the parameters for reviewing a batch PR.
 type ReviewParams struct {
 	RunID             int64
@@ -785,6 +793,73 @@ func RecoverStrandedCompletedBatch(ctx context.Context, p platform.Platform, g *
 		return result, false, nil
 	}
 	return result, result.AllComplete && result.BatchPRNumber > 0, nil
+}
+
+// RecoverPendingWorkerCompletionsForBatchPR consolidates pending done worker
+// branches for an existing batch PR before patrol evaluates PR review or CI state.
+func RecoverPendingWorkerCompletionsForBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, pr *platform.PullRequest) (*PendingWorkerCompletionRecoveryResult, error) {
+	if pr == nil || pr.Head == "" || !strings.HasPrefix(pr.Head, "herd/batch/") {
+		return &PendingWorkerCompletionRecoveryResult{}, nil
+	}
+	if g == nil {
+		return &PendingWorkerCompletionRecoveryResult{}, nil
+	}
+	batchNumber, err := ParseBatchBranchMilestone(pr.Head)
+	if err != nil {
+		return &PendingWorkerCompletionRecoveryResult{}, nil
+	}
+	ms, err := p.Milestones().Get(ctx, batchNumber)
+	if err != nil {
+		return nil, fmt.Errorf("getting milestone #%d: %w", batchNumber, err)
+	}
+	if ms == nil || isBatchComplete(ms) {
+		return &PendingWorkerCompletionRecoveryResult{}, nil
+	}
+
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), batchNumber, pr.Head, 0)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", batchNumber, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), batchNumber, pr.Head, 0)
+		return &PendingWorkerCompletionRecoveryResult{
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), batchNumber, pr.Head, 0),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, batchNumber)
+
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{State: "all", Milestone: &batchNumber})
+	if err != nil {
+		return nil, fmt.Errorf("listing milestone issues for pending worker recovery: %w", err)
+	}
+
+	if err := g.ConfigureIdentity("HerdOS Integrator", "herd@herd-os.com"); err != nil {
+		return nil, fmt.Errorf("configuring git identity: %w", err)
+	}
+	if err := g.Fetch("origin"); err != nil {
+		return nil, fmt.Errorf("fetching: %w", err)
+	}
+
+	recovered := 0
+	for _, iss := range allIssues {
+		if iss == nil || issues.StatusLabel(iss.Labels) != issues.StatusDone || !issues.HasLabel(iss.Labels, issues.IntegratorPending) {
+			continue
+		}
+		workerBranch := fmt.Sprintf("herd/worker/%d-%s", iss.Number, planner.Slugify(iss.Title))
+		if _, err := p.Repository().GetBranchSHA(ctx, workerBranch); err != nil {
+			continue
+		}
+		branchResult, err := consolidateWorkerBranch(ctx, p, g, cfg, ConsolidateParams{RepoRoot: g.WorkDir}, iss, ms, workerBranch, pr.Head)
+		if err != nil {
+			return nil, err
+		}
+		if branchResult != nil && (branchResult.Merged || branchResult.NoOp) {
+			recovered++
+		}
+	}
+
+	return &PendingWorkerCompletionRecoveryResult{Recovered: recovered}, nil
 }
 
 func hasPullRequestForHead(prs []*platform.PullRequest, head string) bool {

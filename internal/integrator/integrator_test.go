@@ -655,7 +655,7 @@ func TestConsolidate_ActiveBatchLockSkipsSameBatchWorkerCompletion(t *testing.T)
 	assert.Equal(t, "active-sha", repoSvc.branchSHAs[lockBranch])
 }
 
-func TestRunWorkerCompletionCycle_DrainsLatePendingWorkerBeforeReview(t *testing.T) {
+func TestRunWorkerCompletionCycle_DefersReviewAndCIWhenPendingWorkerArrives(t *testing.T) {
 	ms := &platform.Milestone{Number: 1, Title: "Batch", ClosedIssues: 1}
 	batchBranch := "herd/batch/1-batch"
 	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
@@ -741,19 +741,120 @@ func TestRunWorkerCompletionCycle_DrainsLatePendingWorkerBeforeReview(t *testing
 
 	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
 	result, err := RunWorkerCompletionCycle(context.Background(), mock, ag, g, &config.Config{
-		Integrator: config.Integrator{Review: true},
+		Integrator: config.Integrator{Review: true, RequireCI: true},
 	}, WorkerCompletionCycleParams{RunID: 100, RepoRoot: dir})
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.NotNil(t, result.Review)
+	assert.Nil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
 	assert.True(t, result.PendingDrained)
-	assert.Equal(t, 1, ag.calls, "review should run once after the pending worker is drained")
+	assert.Equal(t, 0, ag.calls, "worker-cycle must not invoke review while same-batch pending completions may be racing")
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-task-a")
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
 	assert.NotNil(t, prInner.created)
+}
+
+func TestRunWorkerCompletionCycle_LatePendingAfterFinalDrainSkipsReviewAndCI(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch", ClosedIssues: 2}
+	batchBranch := "herd/batch/1-batch"
+	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
+		num  int
+		slug string
+	}{
+		{42, "task-a"},
+		{43, "task-b"},
+	})
+
+	issueA := &platform.Issue{
+		Number:    42,
+		Title:     "Task A",
+		State:     "closed",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nA\n",
+	}
+	issueB := &platform.Issue{
+		Number:    43,
+		Title:     "Task B",
+		State:     "closed",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nB\n",
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = issueA
+	issueSvc.getResult[43] = issueB
+	issueSvc.onList = func(platform.IssueFilters) []*platform.Issue {
+		return []*platform.Issue{issueA, issueB}
+	}
+
+	prSvc := &createdVisiblePRService{mockPRService: &mockPRService{}}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			batchBranch:             true,
+			"herd/worker/42-task-a": true,
+		},
+		branchSHAs: map[string]string{
+			batchBranch:             "batch-sha",
+			"herd/worker/42-task-a": "worker-a-sha",
+		},
+	}
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+				101: {ID: 101, Conclusion: "success", Inputs: map[string]string{"issue_number": "43"}},
+			},
+		},
+		repo:       repoSvc,
+		milestones: &mockMilestoneService{getResult: map[int]*platform.Milestone{1: ms}},
+		checks:     &mockCheckService{status: "failure"},
+	}
+
+	lateWorkerTriggered := false
+	repoSvc.onUpdateBranch = func(name, sha string) {
+		if lateWorkerTriggered || name != BatchLockBranch(1) {
+			return
+		}
+		state, ok := parseBatchLockCommitMessage(repoSvc.commitMessages[sha])
+		if !ok || state.Status != "unlocked" {
+			return
+		}
+		lateWorkerTriggered = true
+		repoSvc.branchExists["herd/worker/43-task-b"] = true
+		repoSvc.branchSHAs["herd/worker/43-task-b"] = "worker-b-sha"
+
+		lateResult, lateErr := RunWorkerCompletionCycle(context.Background(), mock, &mockReviewAgent{}, g, &config.Config{}, WorkerCompletionCycleParams{
+			RunID:    101,
+			RepoRoot: dir,
+		})
+		require.NoError(t, lateErr)
+		require.NotNil(t, lateResult)
+		require.True(t, lateResult.BatchLockSkipped)
+		issueB.Labels = append(issueB.Labels, issues.IntegratorPending)
+	}
+
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	result, err := RunWorkerCompletionCycle(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, RequireCI: true},
+	}, WorkerCompletionCycleParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Nil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
+	assert.Equal(t, 0, ag.calls)
+	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-task-a")
+	assert.NotContains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
+	assert.True(t, repoSvc.branchExists["herd/worker/43-task-b"])
 }
 
 func TestConsolidate_CancelledRun(t *testing.T) {

@@ -15,16 +15,18 @@ import (
 
 // PatrolResult holds the result of a monitor patrol.
 type PatrolResult struct {
-	StaleIssues                  int
-	FailedIssues                 int
-	RedispatchedCount            int
-	EscalatedCount               int
-	StuckPRs                     int
-	CIFailures                   int
-	StaleReadyDispatched         int
-	ConflictDetected             int
-	StrandedBatchesRecovered     int
-	StrandedBatchesSkippedLocked int
+	StaleIssues                        int
+	FailedIssues                       int
+	RedispatchedCount                  int
+	EscalatedCount                     int
+	StuckPRs                           int
+	CIFailures                         int
+	StaleReadyDispatched               int
+	ConflictDetected                   int
+	StrandedBatchesRecovered           int
+	StrandedBatchesSkippedLocked       int
+	PendingWorkerBranchesRecovered     int
+	PendingWorkerBranchesSkippedLocked int
 }
 
 const monitorCommentSignature = "**HerdOS Monitor Alert**"
@@ -186,6 +188,23 @@ func PatrolWithGit(ctx context.Context, p platform.Platform, g *git.Git, cfg *co
 	openPRs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open"})
 	if err != nil {
 		return nil, fmt.Errorf("listing open PRs: %w", err)
+	}
+	if g != nil {
+		for _, pr := range openPRs {
+			recoveryResult, err := integrator.RecoverPendingWorkerCompletionsForBatchPR(ctx, p, g, cfg, pr)
+			if err != nil {
+				fmt.Printf("Warning: failed to recover pending worker completions for PR #%d: %v\n", pr.Number, err)
+				continue
+			}
+			if recoveryResult == nil {
+				continue
+			}
+			if recoveryResult.BatchLockSkipped {
+				result.PendingWorkerBranchesSkippedLocked++
+				continue
+			}
+			result.PendingWorkerBranchesRecovered += recoveryResult.Recovered
+		}
 	}
 	for _, pr := range openPRs {
 		if !strings.HasPrefix(pr.Title, "[herd]") {
