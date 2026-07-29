@@ -186,42 +186,21 @@ func actionableReviewSubsystems(findings []string) map[string]struct{} {
 }
 
 func validateLowVolumeSynthesisProvenance(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput, eligibility reviewOscillationEligibility) (bool, string) {
-	sources := make(map[string]agent.ReviewEvidenceSource, len(input.EvidenceSources))
-	for _, source := range input.EvidenceSources {
-		if strings.TrimSpace(source.ID) == "" {
-			return false, "input contains evidence without a stable reference"
-		}
-		if _, duplicate := sources[source.ID]; duplicate {
-			return false, "input contains duplicate evidence reference " + source.ID
-		}
-		sources[source.ID] = source
+	sources, ok, reason := indexedReviewEvidenceSources(input.EvidenceSources)
+	if !ok {
+		return false, reason
 	}
 	eligibleCycles := map[int]struct{}{}
 	for _, cycle := range eligibility.EvidenceCycles {
 		eligibleCycles[cycle.Cycle] = struct{}{}
 	}
-	eligibleCycles[eligibility.LatestCycle] = struct{}{}
-	check := func(reference string, excerpts []agent.ReviewSourceExcerpt) bool {
-		source, ok := sources[reference]
-		if !ok {
-			return false
-		}
-		if source.Kind == "truncation_marker" {
-			return false
-		}
-		if source.Cycle > 0 {
-			if _, eligible := eligibleCycles[source.Cycle]; !eligible {
-				return false
-			}
-		}
-		for _, excerpt := range excerpts {
-			if excerpt.Reference == reference && (strings.TrimSpace(excerpt.Excerpt) == "" || !strings.Contains(source.Excerpt, excerpt.Excerpt)) {
-				return false
-			}
-		}
-		return true
+	allEligibleCycles := make(map[int]struct{}, len(eligibleCycles)+1)
+	for cycle := range eligibleCycles {
+		allEligibleCycles[cycle] = struct{}{}
 	}
-	represented := map[int]struct{}{}
+	allEligibleCycles[eligibility.LatestCycle] = struct{}{}
+	representedHistorical := map[int]struct{}{}
+	latestRepresented := false
 	for _, symptom := range result.RecurringSymptoms {
 		if len(symptom.EvidenceReferences) == 0 {
 			return false, "synthesis symptom has no evidence references"
@@ -233,54 +212,159 @@ func validateLowVolumeSynthesisProvenance(result *agent.ReviewSynthesisResult, i
 			}
 			cyclesSeen[cycle] = struct{}{}
 		}
-		seen := map[string]struct{}{}
+		if ok, reason := validateReviewEvidenceObject(symptom.EvidenceReferences, symptom.SourceExcerpts, sources); !ok {
+			return false, "synthesis symptom " + reason
+		}
 		for _, reference := range symptom.EvidenceReferences {
-			if _, duplicate := seen[reference]; duplicate {
-				return false, "synthesis symptom contains a duplicate evidence reference"
-			}
-			seen[reference] = struct{}{}
-			if !check(reference, symptom.SourceExcerpts) {
-				return false, "synthesis contains missing, foreign, stale, duplicate, or inexact evidence reference"
-			}
 			source := sources[reference]
-			if source.Cycle == 0 {
+			if source.Kind != "review_finding" || source.Cycle == 0 {
 				return false, "synthesis symptom references non-finding evidence"
+			}
+			if _, eligible := allEligibleCycles[source.Cycle]; !eligible {
+				return false, "synthesis symptom references stale or ineligible finding evidence"
 			}
 			if !containsInt(symptom.Cycles, source.Cycle) {
 				return false, "synthesis symptom cycle does not match its evidence reference"
 			}
-			represented[source.Cycle] = struct{}{}
+			if source.Cycle == eligibility.LatestCycle {
+				latestRepresented = true
+			} else {
+				representedHistorical[source.Cycle] = struct{}{}
+			}
 		}
 	}
-	if len(represented) < reviewOscillationMinEvidenceCycles {
-		return false, "synthesis evidence does not span three eligible cycles"
+	if len(representedHistorical) < reviewOscillationMinEvidenceCycles {
+		return false, "synthesis evidence does not span three completed historical evidence cycles"
+	}
+	if !latestRepresented {
+		return false, "synthesis evidence does not cite a finding from the latest review"
 	}
 	if value := result.RequirementReinterpretation; value != nil {
 		if ok, reason := validateReviewRequirementReinterpretation(result); !ok {
 			return false, reason
 		}
-		seen := map[string]struct{}{}
-		hasRequirement := false
-		for _, reference := range value.EvidenceReferences {
-			if _, duplicate := seen[reference]; duplicate {
-				return false, "requirement reinterpretation contains a duplicate evidence reference"
-			}
-			seen[reference] = struct{}{}
-			if !check(reference, value.SourceExcerpts) {
-				return false, "requirement reinterpretation contains missing, foreign, stale, duplicate, or inexact evidence reference"
-			}
-			if sources[reference].Cycle == 0 {
-				hasRequirement = true
-			}
-		}
-		if !hasRequirement {
-			return false, "requirement reinterpretation does not cite an original requirement"
+		if ok, reason := validateRequirementReinterpretationProvenance(value, sources, allEligibleCycles); !ok {
+			return false, reason
 		}
 	}
 	return true, ""
 }
 
-func verifyLowVolumeReviewSynthesis(ctx context.Context, configured agent.Agent, input agent.ReviewSynthesisInput, result *agent.ReviewSynthesisResult, repoRoot string) (bool, string) {
+func indexedReviewEvidenceSources(values []agent.ReviewEvidenceSource) (map[string]agent.ReviewEvidenceSource, bool, string) {
+	sources := make(map[string]agent.ReviewEvidenceSource, len(values))
+	for _, source := range values {
+		if strings.TrimSpace(source.ID) == "" {
+			return nil, false, "input contains evidence without a stable reference"
+		}
+		if _, duplicate := sources[source.ID]; duplicate {
+			return nil, false, "input contains duplicate evidence reference " + source.ID
+		}
+		sources[source.ID] = source
+	}
+	return sources, true, ""
+}
+
+func validateReviewEvidenceObject(references []string, excerpts []agent.ReviewSourceExcerpt, sources map[string]agent.ReviewEvidenceSource) (bool, string) {
+	referenceCounts := make(map[string]int, len(references))
+	for _, reference := range references {
+		referenceCounts[reference]++
+		source, exists := sources[reference]
+		if referenceCounts[reference] > 1 {
+			return false, "contains a duplicate evidence reference"
+		}
+		if !exists || source.Kind == "truncation_marker" {
+			return false, "contains a missing, foreign, stale, or truncation-marker evidence reference"
+		}
+	}
+	return validateReviewSourceExcerpts(referenceCounts, excerpts, sources)
+}
+
+func validateReviewSourceExcerpts(referenceCounts map[string]int, excerpts []agent.ReviewSourceExcerpt, sources map[string]agent.ReviewEvidenceSource) (bool, string) {
+	excerptReferences := make(map[string]struct{}, len(excerpts))
+	for _, excerpt := range excerpts {
+		if _, duplicate := excerptReferences[excerpt.Reference]; duplicate {
+			return false, "contains a duplicate source excerpt reference"
+		}
+		excerptReferences[excerpt.Reference] = struct{}{}
+		if referenceCounts[excerpt.Reference] != 1 {
+			return false, "contains an unknown or unreferenced source excerpt"
+		}
+		source, exists := sources[excerpt.Reference]
+		if !exists || source.Kind == "truncation_marker" {
+			return false, "contains a stale, foreign, or truncation-marker source excerpt"
+		}
+		if strings.TrimSpace(excerpt.Excerpt) == "" {
+			return false, "contains an empty source excerpt"
+		}
+		if !strings.Contains(source.Excerpt, excerpt.Excerpt) {
+			return false, "contains an inexact source excerpt"
+		}
+	}
+	return true, ""
+}
+
+func validateRequirementReinterpretationProvenance(value *agent.ReviewRequirementReinterpretation, sources map[string]agent.ReviewEvidenceSource, eligibleCycles map[int]struct{}) (bool, string) {
+	if ok, reason := validateReviewEvidenceObject(value.EvidenceReferences, value.SourceExcerpts, sources); !ok {
+		return false, "requirement reinterpretation " + reason
+	}
+	hasRequirement := false
+	for _, reference := range value.EvidenceReferences {
+		source := sources[reference]
+		if source.Cycle == 0 && strings.HasPrefix(source.Kind, "requirement_") {
+			hasRequirement = true
+		}
+		if source.Cycle > 0 {
+			if source.Kind != "review_finding" {
+				return false, "requirement reinterpretation references non-finding cycle evidence"
+			}
+			if eligibleCycles != nil {
+				if _, eligible := eligibleCycles[source.Cycle]; !eligible {
+					return false, "requirement reinterpretation references stale finding evidence"
+				}
+			}
+		}
+	}
+	if !hasRequirement {
+		return false, "requirement reinterpretation does not cite an original requirement"
+	}
+	return true, ""
+}
+
+func validateHighVolumeRequirementReinterpretationProvenance(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput) (bool, string) {
+	if result == nil || result.RequirementReinterpretation == nil {
+		return true, ""
+	}
+	sources, ok, reason := indexedReviewEvidenceSources(input.EvidenceSources)
+	if !ok {
+		return false, reason
+	}
+	return validateRequirementReinterpretationProvenance(result.RequirementReinterpretation, sources, nil)
+}
+
+func validateHighVolumeSynthesisSourceExcerpts(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput) (bool, string) {
+	if result == nil {
+		return true, ""
+	}
+	sources, ok, reason := indexedReviewEvidenceSources(input.EvidenceSources)
+	if !ok {
+		return false, reason
+	}
+	for _, symptom := range result.RecurringSymptoms {
+		if len(symptom.SourceExcerpts) == 0 {
+			continue
+		}
+		referenceCounts := make(map[string]int, len(symptom.EvidenceReferences))
+		for _, reference := range symptom.EvidenceReferences {
+			referenceCounts[reference]++
+		}
+		if ok, reason := validateReviewSourceExcerpts(referenceCounts, symptom.SourceExcerpts, sources); !ok {
+			return false, "synthesis symptom " + reason
+		}
+	}
+	return true, ""
+}
+
+func verifyReviewSynthesis(ctx context.Context, configured agent.Agent, input agent.ReviewSynthesisInput, result *agent.ReviewSynthesisResult, repoRoot string) (bool, string) {
 	verifier, ok := configured.(agent.ReviewVerifier)
 	if !ok {
 		return false, "configured agent provider does not support independent verification"
@@ -296,15 +380,11 @@ func verifyLowVolumeReviewSynthesis(ctx context.Context, configured agent.Agent,
 			referenced[reference] = struct{}{}
 		}
 	}
-	var evidence []agent.ReviewEvidenceSource
-	for _, source := range input.EvidenceSources {
-		if _, cited := referenced[source.ID]; cited {
-			evidence = append(evidence, source)
-		}
-	}
+	citedReferences := sortedStringSet(referenced)
+	evidence := boundedReviewVerificationEvidence(input.EvidenceSources, referenced)
 	verificationInput := agent.ReviewVerificationInput{
 		PRNumber: input.PRNumber, BatchNumber: input.BatchNumber, HeadSHA: input.HeadSHA,
-		EvidenceSources: evidence, Synthesis: *result,
+		EvidenceSources: evidence, CitedEvidenceReferences: citedReferences, Synthesis: *result,
 	}
 	verifyCtx, cancel := context.WithTimeout(ctx, reviewVerificationTimeout)
 	defer cancel()
@@ -325,6 +405,39 @@ func verifyLowVolumeReviewSynthesis(ctx context.Context, configured agent.Agent,
 		return false, "verification returned an empty reason"
 	}
 	return true, verification.Reason
+}
+
+func boundedReviewVerificationEvidence(sources []agent.ReviewEvidenceSource, cited map[string]struct{}) []agent.ReviewEvidenceSource {
+	const budget = 40 * 1024
+	selected := make(map[string]struct{}, len(sources))
+	used := 0
+	for _, source := range sources {
+		if _, required := cited[source.ID]; !required || source.Kind == "truncation_marker" {
+			continue
+		}
+		selected[source.ID] = struct{}{}
+		used += len(source.ID) + len(source.Kind) + len(source.Excerpt) + 64
+	}
+	for _, source := range sources {
+		if source.Kind == "truncation_marker" {
+			continue
+		}
+		if _, exists := selected[source.ID]; exists {
+			continue
+		}
+		cost := len(source.ID) + len(source.Kind) + len(source.Excerpt) + 64
+		if used+cost <= budget {
+			selected[source.ID] = struct{}{}
+			used += cost
+		}
+	}
+	out := make([]agent.ReviewEvidenceSource, 0, len(selected))
+	for _, source := range sources {
+		if _, include := selected[source.ID]; include {
+			out = append(out, source)
+		}
+	}
+	return out
 }
 
 func lowVolumeReviewSynthesisInput(input agent.ReviewSynthesisInput, eligibility reviewOscillationEligibility) agent.ReviewSynthesisInput {
@@ -366,11 +479,11 @@ func lowVolumeReviewSynthesisInput(input agent.ReviewSynthesisInput, eligibility
 	// Stable requirement evidence is authoritative for this route. Rendering
 	// the structured copy too would spend the bounded prompt twice.
 	input.OriginalRequirements = nil
-	input.EvidenceSources = boundedLowVolumeEvidenceSources(sources)
+	input.EvidenceSources = boundedLowVolumeEvidenceSources(sources, eligibility)
 	return input
 }
 
-func boundedLowVolumeEvidenceSources(sources []agent.ReviewEvidenceSource) []agent.ReviewEvidenceSource {
+func boundedLowVolumeEvidenceSources(sources []agent.ReviewEvidenceSource, eligibility reviewOscillationEligibility) []agent.ReviewEvidenceSource {
 	const requirementBudget = 16 * 1024
 	const findingBudget = 24 * 1024
 	requirements := make([]agent.ReviewEvidenceSource, 0, len(sources))
@@ -382,24 +495,48 @@ func boundedLowVolumeEvidenceSources(sources []agent.ReviewEvidenceSource) []age
 			findings = append(findings, source)
 		}
 	}
-	appendWithinBudget := func(out []agent.ReviewEvidenceSource, values []agent.ReviewEvidenceSource, budget int, kind string) []agent.ReviewEvidenceSource {
+	appendWithinBudget := func(out []agent.ReviewEvidenceSource, values []agent.ReviewEvidenceSource, budget int, kind string, priorityCycles []int) []agent.ReviewEvidenceSource {
+		selected := make(map[string]struct{}, len(values))
 		used := 0
-		for index, source := range values {
+		trySelect := func(source agent.ReviewEvidenceSource) {
 			cost := len(source.ID) + len(source.Kind) + len(source.Excerpt) + 64
-			if used+cost > budget {
-				out = append(out, agent.ReviewEvidenceSource{
-					ID: "truncation:" + kind, Kind: "truncation_marker",
-					Excerpt: fmt.Sprintf("[TRUNCATED: %d additional %s evidence sources omitted by deterministic budget]", len(values)-index, kind),
-				})
-				break
+			if used+cost <= budget {
+				selected[source.ID] = struct{}{}
+				used += cost
 			}
-			out = append(out, source)
-			used += cost
+		}
+		for _, cycle := range priorityCycles {
+			for _, source := range values {
+				if source.Cycle == cycle {
+					trySelect(source)
+					break
+				}
+			}
+		}
+		for _, source := range values {
+			if _, exists := selected[source.ID]; !exists {
+				trySelect(source)
+			}
+		}
+		for _, source := range values {
+			if _, exists := selected[source.ID]; exists {
+				out = append(out, source)
+			}
+		}
+		if len(selected) < len(values) {
+			out = append(out, agent.ReviewEvidenceSource{
+				ID: "truncation:" + kind, Kind: "truncation_marker",
+				Excerpt: fmt.Sprintf("[TRUNCATED: %d additional %s evidence sources omitted by deterministic budget]", len(values)-len(selected), kind),
+			})
 		}
 		return out
 	}
-	out := appendWithinBudget(nil, requirements, requirementBudget, "requirement")
-	return appendWithinBudget(out, findings, findingBudget, "finding")
+	out := appendWithinBudget(nil, requirements, requirementBudget, "requirement", nil)
+	priorityCycles := []int{eligibility.LatestCycle}
+	for _, cycle := range eligibility.EvidenceCycles {
+		priorityCycles = append(priorityCycles, cycle.Cycle)
+	}
+	return appendWithinBudget(out, findings, findingBudget, "finding", priorityCycles)
 }
 
 func containsInt(values []int, wanted int) bool {

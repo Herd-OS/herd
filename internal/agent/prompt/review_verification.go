@@ -14,10 +14,10 @@ const ReviewVerificationSystemPrompt = `You are an independent HerdOS review-str
 
 Do not use tools, inspect a repository, or perform another code review. Use only the supplied source evidence and synthesis. Return exactly one JSON object with approved, confidence, and reason. Reject when evidence is ambiguous, unrelated, generic, contradictory, or insufficient.`
 
-const reviewVerificationPromptTemplate = `Independently verify the proposed low-volume review strategy.
+const reviewVerificationPromptTemplate = `Independently verify the proposed review strategy.
 
 Approve only if:
-1. The cited findings describe one coherent recurring architectural behavior or root cause, not unrelated findings sharing a package or generic vocabulary.
+1. The cited findings describe one coherent recurring architectural behavior or root cause, not unrelated findings sharing a package or generic vocabulary. Compare cited evidence with all uncited eligible evidence and reject cherry-picking, contradictions, or an unrelated current review.
 2. The proposed strategy and acceptance criteria address that root cause.
 3. If requirement_reinterpretation is present, its corrected invariant and generated criteria preserve and entail the cited original user-visible safety property without weakening or contradiction.
 
@@ -27,7 +27,12 @@ PR: {{.PRNumber}}
 Batch: {{.BatchNumber}}
 Head SHA: {{.HeadSHA}}
 
-Source evidence:
+References cited by the synthesis:
+{{range .CitedEvidenceReferences}}- {{.}}
+{{else}}(none)
+{{end}}
+
+All bounded eligible source evidence:
 {{range .EvidenceSources}}- {{.ID}} [{{.Kind}}{{if .Cycle}}, cycle {{.Cycle}}{{end}}{{if .HeadSHA}}, head {{.HeadSHA}}{{end}}]: {{.Excerpt}}
 {{else}}(none)
 {{end}}
@@ -40,11 +45,12 @@ Return strict JSON only:
 `
 
 type reviewVerificationPromptData struct {
-	PRNumber        int
-	BatchNumber     int
-	HeadSHA         string
-	EvidenceSources []agent.ReviewEvidenceSource
-	SynthesisJSON   string
+	PRNumber                int
+	BatchNumber             int
+	HeadSHA                 string
+	EvidenceSources         []agent.ReviewEvidenceSource
+	CitedEvidenceReferences []string
+	SynthesisJSON           string
 }
 
 func RenderReviewVerificationPrompt(input agent.ReviewVerificationInput) (string, error) {
@@ -59,7 +65,8 @@ func RenderReviewVerificationPrompt(input agent.ReviewVerificationInput) (string
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, reviewVerificationPromptData{
 		PRNumber: input.PRNumber, BatchNumber: input.BatchNumber, HeadSHA: input.HeadSHA,
-		EvidenceSources: input.EvidenceSources, SynthesisJSON: string(synthesisJSON),
+		EvidenceSources: input.EvidenceSources, CitedEvidenceReferences: input.CitedEvidenceReferences,
+		SynthesisJSON: string(synthesisJSON),
 	}); err != nil {
 		return "", fmt.Errorf("executing review verification template: %w", err)
 	}

@@ -1,6 +1,8 @@
 package integrator
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -227,9 +229,20 @@ func TestValidateLowVolumeSynthesisProvenance(t *testing.T) {
 	eligibility := analyzeLowVolumeReviewOscillation(lowVolumeOscillationCycles(), 3, true)
 	require.True(t, eligibility.Eligible)
 	tests := []struct {
-		name   string
-		mutate func(*agent.ReviewSynthesisResult, *agent.ReviewSynthesisInput)
+		name      string
+		mutate    func(*agent.ReviewSynthesisResult, *agent.ReviewSynthesisInput)
+		wantValid bool
 	}{
+		{name: "valid omitted excerpts", mutate: func(*agent.ReviewSynthesisResult, *agent.ReviewSynthesisInput) {}, wantValid: true},
+		{
+			name: "valid exact excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "cycle:1:finding:0", Excerpt: "publication",
+				}}
+			},
+			wantValid: true,
+		},
 		{
 			name: "missing reference",
 			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
@@ -262,10 +275,73 @@ func TestValidateLowVolumeSynthesisProvenance(t *testing.T) {
 			},
 		},
 		{
+			name: "latest review omitted",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences = result.RecurringSymptoms[0].EvidenceReferences[:3]
+				result.RecurringSymptoms[0].Cycles = result.RecurringSymptoms[0].Cycles[:3]
+			},
+		},
+		{
 			name: "inexact excerpt",
 			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
 				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
 					Reference: "cycle:1:finding:0", Excerpt: "generated prose not in source",
+				}}
+			},
+		},
+		{
+			name: "unknown excerpt reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "cycle:404:finding:0", Excerpt: "unknown",
+				}}
+			},
+		},
+		{
+			name: "duplicate excerpt reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				excerpt := agent.ReviewSourceExcerpt{Reference: "cycle:1:finding:0", Excerpt: "publication"}
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{excerpt, excerpt}
+			},
+		},
+		{
+			name: "unreferenced excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "issue:1:criterion:0", Excerpt: "Exclusive ownership",
+				}}
+			},
+		},
+		{
+			name: "empty excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "cycle:1:finding:0", Excerpt: " ",
+				}}
+			},
+		},
+		{
+			name: "stale excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult, input *agent.ReviewSynthesisInput) {
+				input.EvidenceSources = append(input.EvidenceSources, agent.ReviewEvidenceSource{
+					ID: "cycle:99:finding:0", Kind: "review_finding", Cycle: 99, Excerpt: "stale finding",
+				})
+				result.RecurringSymptoms[0].EvidenceReferences = append(result.RecurringSymptoms[0].EvidenceReferences, "cycle:99:finding:0")
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "cycle:99:finding:0", Excerpt: "stale",
+				}}
+				result.RecurringSymptoms[0].Cycles = append(result.RecurringSymptoms[0].Cycles, 99)
+			},
+		},
+		{
+			name: "truncation marker excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult, input *agent.ReviewSynthesisInput) {
+				input.EvidenceSources = append(input.EvidenceSources, agent.ReviewEvidenceSource{
+					ID: "truncation:finding", Kind: "truncation_marker", Excerpt: "[TRUNCATED]",
+				})
+				result.RecurringSymptoms[0].EvidenceReferences = append(result.RecurringSymptoms[0].EvidenceReferences, "truncation:finding")
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "truncation:finding", Excerpt: "[TRUNCATED]",
 				}}
 			},
 		},
@@ -278,8 +354,12 @@ func TestValidateLowVolumeSynthesisProvenance(t *testing.T) {
 
 			ok, reason := validateLowVolumeSynthesisProvenance(result, input, eligibility)
 
-			assert.False(t, ok)
-			assert.NotEmpty(t, reason)
+			assert.Equal(t, test.wantValid, ok)
+			if test.wantValid {
+				assert.Empty(t, reason)
+			} else {
+				assert.NotEmpty(t, reason)
+			}
 		})
 	}
 }
@@ -317,6 +397,101 @@ func TestLowVolumeReviewSynthesisInputUsesStableEvidenceWithoutDuplicateProse(t 
 	assert.Contains(t, bounded.EvidenceSources, agent.ReviewEvidenceSource{
 		ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1, Excerpt: "publication finding",
 	})
+}
+
+func TestBoundedLowVolumeEvidenceSourcesPreservesLatestAndHistoricalCycles(t *testing.T) {
+	eligibility := analyzeLowVolumeReviewOscillation(lowVolumeOscillationCycles(), 3, true)
+	require.True(t, eligibility.Eligible)
+	var sources []agent.ReviewEvidenceSource
+	for cycle := 1; cycle <= 4; cycle++ {
+		for finding := 0; finding < 4; finding++ {
+			sources = append(sources, agent.ReviewEvidenceSource{
+				ID: fmt.Sprintf("cycle:%d:finding:%d", cycle, finding), Kind: "review_finding", Cycle: cycle,
+				Excerpt: strings.Repeat(fmt.Sprintf("cycle-%d ", cycle), 500),
+			})
+		}
+	}
+
+	bounded := boundedLowVolumeEvidenceSources(sources, eligibility)
+
+	for cycle := 1; cycle <= 4; cycle++ {
+		assert.Contains(t, bounded, agent.ReviewEvidenceSource{
+			ID: fmt.Sprintf("cycle:%d:finding:0", cycle), Kind: "review_finding", Cycle: cycle,
+			Excerpt: strings.Repeat(fmt.Sprintf("cycle-%d ", cycle), 500),
+		})
+	}
+	assert.Contains(t, bounded, agent.ReviewEvidenceSource{
+		ID: "truncation:finding", Kind: "truncation_marker",
+		Excerpt: "[TRUNCATED: 10 additional finding evidence sources omitted by deterministic budget]",
+	})
+}
+
+func TestBoundedReviewVerificationEvidencePreservesCitedAndSourceOrdering(t *testing.T) {
+	var sources []agent.ReviewEvidenceSource
+	for index := 0; index < 12; index++ {
+		sources = append(sources, agent.ReviewEvidenceSource{
+			ID: fmt.Sprintf("cycle:%d:finding:0", index+1), Kind: "review_finding", Cycle: index + 1,
+			Excerpt: strings.Repeat("bounded verifier evidence ", 180),
+		})
+	}
+	cited := map[string]struct{}{"cycle:12:finding:0": {}}
+
+	bounded := boundedReviewVerificationEvidence(sources, cited)
+
+	assert.Contains(t, bounded, sources[11])
+	assert.NotEmpty(t, bounded)
+	previousCycle := 0
+	total := 0
+	for _, source := range bounded {
+		assert.Greater(t, source.Cycle, previousCycle)
+		previousCycle = source.Cycle
+		total += len(source.ID) + len(source.Kind) + len(source.Excerpt) + 64
+	}
+	assert.LessOrEqual(t, total, 40*1024)
+}
+
+func TestValidateHighVolumeSynthesisSourceExcerpts(t *testing.T) {
+	tests := []struct {
+		name      string
+		excerpts  []agent.ReviewSourceExcerpt
+		wantValid bool
+	}{
+		{name: "omitted", wantValid: true},
+		{
+			name: "exact",
+			excerpts: []agent.ReviewSourceExcerpt{{
+				Reference: "cycle:1:finding:0", Excerpt: "publication",
+			}},
+			wantValid: true,
+		},
+		{
+			name: "unknown",
+			excerpts: []agent.ReviewSourceExcerpt{{
+				Reference: "cycle:99:finding:0", Excerpt: "unknown",
+			}},
+		},
+		{
+			name: "unreferenced",
+			excerpts: []agent.ReviewSourceExcerpt{{
+				Reference: "issue:1:criterion:0", Excerpt: "Exclusive ownership",
+			}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := lowVolumeSynthesisResult()
+			result.RecurringSymptoms[0].SourceExcerpts = test.excerpts
+
+			ok, reason := validateHighVolumeSynthesisSourceExcerpts(result, validReviewSynthesisInput())
+
+			assert.Equal(t, test.wantValid, ok)
+			if test.wantValid {
+				assert.Empty(t, reason)
+			} else {
+				assert.NotEmpty(t, reason)
+			}
+		})
+	}
 }
 
 func TestValidateReviewRequirementReinterpretation(t *testing.T) {
@@ -397,6 +572,72 @@ func TestValidateReviewRequirementReinterpretation_AcceptsConcreteTextWithoutSem
 
 			assert.True(t, ok, reason)
 			assert.Empty(t, reason)
+		})
+	}
+}
+
+func TestValidateLowVolumeSynthesisProvenance_RequirementSourceExcerpts(t *testing.T) {
+	eligibility := analyzeLowVolumeReviewOscillation(lowVolumeOscillationCycles(), 3, true)
+	require.True(t, eligibility.Eligible)
+	tests := []struct {
+		name      string
+		excerpts  []agent.ReviewSourceExcerpt
+		wantValid bool
+	}{
+		{name: "omitted", wantValid: true},
+		{
+			name: "exact",
+			excerpts: []agent.ReviewSourceExcerpt{{
+				Reference: "issue:1:criterion:0", Excerpt: "Exclusive ownership",
+			}},
+			wantValid: true,
+		},
+		{
+			name: "unknown",
+			excerpts: []agent.ReviewSourceExcerpt{{
+				Reference: "issue:999:criterion:0", Excerpt: "unknown",
+			}},
+		},
+		{
+			name: "duplicate",
+			excerpts: []agent.ReviewSourceExcerpt{
+				{Reference: "issue:1:criterion:0", Excerpt: "Exclusive ownership"},
+				{Reference: "issue:1:criterion:0", Excerpt: "ownership remains"},
+			},
+		},
+		{
+			name: "unreferenced",
+			excerpts: []agent.ReviewSourceExcerpt{{
+				Reference: "cycle:2:finding:0", Excerpt: "recovery",
+			}},
+		},
+		{
+			name: "empty",
+			excerpts: []agent.ReviewSourceExcerpt{{
+				Reference: "issue:1:criterion:0", Excerpt: "",
+			}},
+		},
+		{
+			name: "inexact",
+			excerpts: []agent.ReviewSourceExcerpt{{
+				Reference: "issue:1:criterion:0", Excerpt: "invented requirement prose",
+			}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := lowVolumeSynthesisResult()
+			result.RequirementReinterpretation = validReviewReinterpretation()
+			result.RequirementReinterpretation.SourceExcerpts = test.excerpts
+
+			ok, reason := validateLowVolumeSynthesisProvenance(result, validReviewSynthesisInput(), eligibility)
+
+			assert.Equal(t, test.wantValid, ok)
+			if test.wantValid {
+				assert.Empty(t, reason)
+			} else {
+				assert.NotEmpty(t, reason)
+			}
 		})
 	}
 }
@@ -528,7 +769,7 @@ func lowVolumeSynthesisResult() *agent.ReviewSynthesisResult {
 		RootCauseSummary: "The lifecycle state transition publishes side effects before the ownership invariant is durable.",
 		ProposedStrategy: "Define one linearized lifecycle transition and durable recovery state.",
 		RecurringSymptoms: []agent.ReviewSynthesisSymptom{
-			{Description: "Publication precedes the durable state transition", Cycles: []int{1, 2, 3}, AffectedFiles: []string{"internal/integrator/review.go"}, EvidenceReferences: []string{"cycle:1:finding:0", "cycle:2:finding:0", "cycle:3:finding:0"}},
+			{Description: "Publication precedes the durable state transition", Cycles: []int{1, 2, 3, 4}, AffectedFiles: []string{"internal/integrator/review.go"}, EvidenceReferences: []string{"cycle:1:finding:0", "cycle:2:finding:0", "cycle:3:finding:0", "cycle:4:finding:0"}},
 			{Description: "Recovery sees an inconsistent lifecycle state", Cycles: []int{1, 2, 3}, AffectedFiles: []string{"internal/integrator/review_non_convergence.go"}, EvidenceReferences: []string{"cycle:1:finding:0", "cycle:2:finding:0", "cycle:3:finding:0"}},
 		},
 		AcceptanceCriteria: []string{
@@ -558,6 +799,7 @@ func validReviewSynthesisInput() agent.ReviewSynthesisInput {
 			{ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1, Excerpt: "publication finding"},
 			{ID: "cycle:2:finding:0", Kind: "review_finding", Cycle: 2, Excerpt: "recovery finding"},
 			{ID: "cycle:3:finding:0", Kind: "review_finding", Cycle: 3, Excerpt: "publication finding"},
+			{ID: "cycle:4:finding:0", Kind: "review_finding", Cycle: 4, Excerpt: "current review finding"},
 		},
 		OriginalRequirements: []agent.ReviewSynthesisRequirement{
 			{

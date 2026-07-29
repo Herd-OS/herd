@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/issues"
@@ -775,7 +776,11 @@ func boundedReviewEvidenceExcerpt(value string) string {
 		return value
 	}
 	const marker = "\n[TRUNCATED: deterministic review evidence budget reached]\n"
-	return value[:reviewEvidenceExcerptBudget-len(marker)] + marker
+	keep := reviewEvidenceExcerptBudget - len(marker)
+	for keep > 0 && !utf8.RuneStart(value[keep]) {
+		keep--
+	}
+	return value[:keep] + marker
 }
 
 func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence float64, analysis reviewConvergenceAnalysis) (reviewSynthesisDecision, string) {

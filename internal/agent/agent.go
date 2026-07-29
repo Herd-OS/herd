@@ -247,11 +247,12 @@ type ReviewSynthesisResult struct {
 }
 
 type ReviewVerificationInput struct {
-	PRNumber        int                    `json:"pr_number"`
-	BatchNumber     int                    `json:"batch_number"`
-	HeadSHA         string                 `json:"head_sha"`
-	EvidenceSources []ReviewEvidenceSource `json:"evidence_sources"`
-	Synthesis       ReviewSynthesisResult  `json:"synthesis"`
+	PRNumber                int                    `json:"pr_number"`
+	BatchNumber             int                    `json:"batch_number"`
+	HeadSHA                 string                 `json:"head_sha"`
+	EvidenceSources         []ReviewEvidenceSource `json:"evidence_sources"`
+	CitedEvidenceReferences []string               `json:"cited_evidence_references"`
+	Synthesis               ReviewSynthesisResult  `json:"synthesis"`
 }
 
 type ReviewVerificationResult struct {

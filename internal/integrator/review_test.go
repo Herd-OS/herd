@@ -7544,9 +7544,9 @@ func TestReview_LowVolumeAlternatingOscillationCreatesOneStrategyFixAndDispatch(
 			},
 			{
 				Description:        "Recovery repairs the missing publication state.",
-				Cycles:             []int{36, 37, 38},
+				Cycles:             []int{36, 37, 38, 39},
 				AffectedFiles:      []string{"internal/controlplane/dispatch/recovery.go"},
-				EvidenceReferences: []string{"cycle:36:finding:0", "cycle:37:finding:0", "cycle:38:finding:0"},
+				EvidenceReferences: []string{"cycle:36:finding:0", "cycle:37:finding:0", "cycle:38:finding:0", "cycle:39:finding:0"},
 			},
 		},
 		WhyIndividualFixesAreNotConverging: "Each fix moves the boundary between ownership publication and durable recovery.",
@@ -7570,6 +7570,8 @@ func TestReview_LowVolumeAlternatingOscillationCreatesOneStrategyFixAndDispatch(
 	assert.Equal(t, []int{9601}, result.FixIssues)
 	assert.Equal(t, 1, fx.ag.verificationCalls)
 	assert.NotEmpty(t, fx.ag.verificationInput.EvidenceSources)
+	assert.Greater(t, len(fx.ag.verificationInput.EvidenceSources), len(fx.ag.verificationInput.CitedEvidenceReferences))
+	assert.Contains(t, fx.ag.verificationInput.CitedEvidenceReferences, "cycle:39:finding:0")
 
 	fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
 		Number: 9601, State: "open", Title: fx.createdIssues[0].title,
@@ -7664,6 +7666,40 @@ func TestReview_LowVolumeSynthesisAndVerificationFallbacks(t *testing.T) {
 				)
 			},
 			wantSynthesis: 1,
+		},
+		{
+			name: "latest review evidence omitted",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				for index := range fx.ag.synthesisResult.RecurringSymptoms {
+					symptom := &fx.ag.synthesisResult.RecurringSymptoms[index]
+					var references []string
+					for _, reference := range symptom.EvidenceReferences {
+						if reference != "cycle:39:finding:0" {
+							references = append(references, reference)
+						}
+					}
+					symptom.EvidenceReferences = references
+					var cycles []int
+					for _, cycle := range symptom.Cycles {
+						if cycle != 39 {
+							cycles = append(cycles, cycle)
+						}
+					}
+					symptom.Cycles = cycles
+				}
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "latest review contradicts synthesized history",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.verificationResult = &agent.ReviewVerificationResult{
+					Approved: false, Confidence: .99, Reason: "the latest review contradicts the cited historical root cause",
+				}
+			},
+			wantSynthesis: 1, wantVerification: 1,
 		},
 		{
 			name: "verifier error or malformed output",
@@ -7795,6 +7831,7 @@ func TestReview_NonConvergenceSynthesisCreatesStrategyFixIssue(t *testing.T) {
 	assert.Equal(t, []int{9601}, result.FixIssues)
 	assert.Equal(t, 1, result.FindingsCount)
 	assert.Equal(t, 1, fx.ag.synthesisCalls)
+	assert.Zero(t, fx.ag.verificationCalls)
 	assert.Equal(t, 849, fx.ag.synthesisInput.PRNumber)
 	assert.Equal(t, 111, fx.ag.synthesisInput.BatchNumber)
 	assert.Equal(t, fx.headSHA, fx.ag.synthesisInput.HeadSHA)
@@ -7816,6 +7853,103 @@ func TestReview_NonConvergenceSynthesisCreatesStrategyFixIssue(t *testing.T) {
 	assert.Contains(t, comment, "Strategy fix issue: #9601")
 	require.Len(t, fx.prSvc.reviews, 1)
 	assert.Contains(t, fx.prSvc.reviews[0].body, "Synthesized strategy-level fix worker dispatched -> #9601")
+}
+
+func TestReview_HighVolumeRequirementReinterpretationVerification(t *testing.T) {
+	tests := []struct {
+		name             string
+		configure        func(*reviewNonConvergenceIntegrationFixture)
+		wantVerification int
+		wantSynthesized  bool
+	}{
+		{name: "accepted", configure: func(_ *reviewNonConvergenceIntegrationFixture) {}, wantVerification: 1, wantSynthesized: true},
+		{
+			name: "semantic inversion rejected",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult.RequirementReinterpretation.CorrectedInvariant = "Revoked grants remain usable."
+				fx.ag.verificationResult = &agent.ReviewVerificationResult{
+					Approved: false, Confidence: .99, Reason: "the corrected invariant contradicts the cited requirement",
+				}
+			},
+			wantVerification: 1,
+		},
+		{
+			name: "missing requirement evidence",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult.RequirementReinterpretation.EvidenceReferences = []string{"cycle:35:finding:0"}
+			},
+		},
+		{
+			name: "foreign requirement evidence",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult.RequirementReinterpretation.EvidenceReferences[0] = "issue:9999:criterion:0"
+			},
+		},
+		{
+			name: "verifier error",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.verificationErr = errors.New("provider failed")
+			},
+			wantVerification: 1,
+		},
+		{
+			name: "verifier nil",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.verificationNil = true
+			},
+			wantVerification: 1,
+		},
+		{
+			name: "verifier low confidence",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.verificationResult = &agent.ReviewVerificationResult{
+					Approved: true, Confidence: .5, Reason: "uncertain",
+				}
+			},
+			wantVerification: 1,
+		},
+		{
+			name: "verifier timeout",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.onVerification = func(ctx context.Context) { <-ctx.Done() }
+			},
+			wantVerification: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+			fx.issueSvc.listResult[0].Title = "Preserve revoked grant safety"
+			fx.issueSvc.listResult[0].Body = "---\nherd:\n  version: 1\n  batch: 111\n---\n\n## Task\nUse an intent record across independent stores.\n\n## Acceptance Criteria\n\n- [ ] Revoked grants cannot be used.\n"
+			fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+			fx.ag.synthesisResult.RequirementReinterpretation = validReviewReinterpretation()
+			fx.ag.synthesisResult.RequirementReinterpretation.EvidenceReferences = []string{
+				"issue:42:criterion:0", "cycle:35:finding:0",
+			}
+			if test.name == "verifier timeout" {
+				previous := reviewVerificationTimeout
+				reviewVerificationTimeout = time.Millisecond
+				t.Cleanup(func() { reviewVerificationTimeout = previous })
+			}
+			test.configure(fx)
+
+			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, 1, fx.ag.synthesisCalls)
+			assert.Equal(t, test.wantVerification, fx.ag.verificationCalls)
+			require.Len(t, fx.createdIssues, 1)
+			require.Len(t, fx.wf.dispatched, 1)
+			if test.wantSynthesized {
+				assert.Contains(t, fx.createdIssues[0].body, "Requirement reinterpretation")
+				assert.NotEmpty(t, fx.ag.verificationInput.EvidenceSources)
+				assert.Contains(t, fx.ag.verificationInput.CitedEvidenceReferences, "issue:42:criterion:0")
+			} else {
+				assert.NotContains(t, fx.createdIssues[0].body, "Requirement reinterpretation")
+			}
+		})
+	}
 }
 
 func TestReview_NonConvergenceSynthesisGroupsDifferentlyWordedFindingsByRootCause(t *testing.T) {

@@ -3,6 +3,7 @@ package prompt
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/stretchr/testify/assert"
@@ -220,12 +221,42 @@ func TestRenderReviewSynthesisPrompt_DeterministicBudgetPreservesPriorityEvidenc
 	require.NoError(t, err)
 
 	assert.Equal(t, first, second)
-	assert.Len(t, first, ReviewSynthesisInputBudget)
+	assert.LessOrEqual(t, len(first), ReviewSynthesisInputBudget)
 	assert.Contains(t, first, "issue:10:criterion:0")
 	assert.Contains(t, first, "Revoked grants cannot be used.")
 	assert.Contains(t, first, "cycle:4:finding:0")
 	assert.Contains(t, first, "stale authorization survives recovery")
 	assert.Contains(t, first, ReviewPromptTruncationMarker)
+	assert.Contains(t, first, "## Output Contract")
+	assert.Contains(t, first, "Non-escalation example")
+	assert.True(t, strings.HasSuffix(first, "}\n"))
+}
+
+func TestRenderReviewSynthesisPrompt_BudgetsUnicodeOptionalSectionsWithoutSplittingUTF8(t *testing.T) {
+	input := agent.ReviewSynthesisInput{
+		PRNumber: 1, BatchNumber: 2, HeadSHA: "head",
+		EvidenceSources: []agent.ReviewEvidenceSource{{
+			ID: "cycle:4:finding:0", Kind: "review_finding", Cycle: 4,
+			Excerpt: "internal/state/recovery.go: current review evidence remains authoritative",
+		}},
+		CurrentPRMetadata:    strings.Repeat("🧭 metadata ", 20000),
+		RecentReviewComments: []string{strings.Repeat("修復コメント ", 20000)},
+		WorkerNoOpVerdicts:   []string{strings.Repeat("résumé ", 20000)},
+		AffectedFiles:        []string{strings.Repeat("路径/文件.go ", 20000)},
+	}
+
+	rendered, err := RenderReviewSynthesisPrompt(input, agent.ReviewSynthesisOptions{
+		SystemPrompt: strings.Repeat("安全な指示 ", 20000),
+	})
+
+	require.NoError(t, err)
+	assert.True(t, utf8.ValidString(rendered))
+	assert.LessOrEqual(t, len(rendered), ReviewSynthesisInputBudget)
+	assert.Contains(t, rendered, "cycle:4:finding:0")
+	assert.Contains(t, rendered, "current review evidence remains authoritative")
+	assert.Contains(t, rendered, strings.TrimSpace(ReviewPromptTruncationMarker))
+	assert.Contains(t, rendered, "## Output Contract")
+	assert.Contains(t, rendered, "Non-escalation example")
 }
 
 func TestParseReviewSynthesisOutput(t *testing.T) {

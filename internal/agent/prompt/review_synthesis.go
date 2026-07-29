@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"text/template"
+	"unicode/utf8"
 
 	"github.com/herd-os/herd/internal/agent"
 )
@@ -186,33 +188,189 @@ func RenderReviewSynthesisPrompt(input agent.ReviewSynthesisInput, opts agent.Re
 	if err != nil {
 		return "", fmt.Errorf("parsing review synthesis template: %w", err)
 	}
+	for divisor := 1; divisor <= 1024; divisor *= 2 {
+		data := budgetedReviewSynthesisPromptData(input, opts, divisor)
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, data); err != nil {
+			return "", fmt.Errorf("executing review synthesis template: %w", err)
+		}
+		if buf.Len() <= ReviewSynthesisInputBudget {
+			return buf.String(), nil
+		}
+	}
+	return "", fmt.Errorf("authoritative review synthesis evidence and complete output contract exceed bounded input budget")
+}
 
-	data := ReviewSynthesisPromptData{
+func budgetedReviewSynthesisPromptData(input agent.ReviewSynthesisInput, opts agent.ReviewSynthesisOptions, divisor int) ReviewSynthesisPromptData {
+	limit := func(value int) int {
+		if divisor <= 0 {
+			return 0
+		}
+		return value / divisor
+	}
+	return ReviewSynthesisPromptData{
 		PRNumber:               input.PRNumber,
 		BatchNumber:            input.BatchNumber,
 		HeadSHA:                input.HeadSHA,
 		HeadRef:                input.HeadRef,
-		CurrentPRMetadata:      input.CurrentPRMetadata,
-		RecentReviewComments:   input.RecentReviewComments,
+		CurrentPRMetadata:      budgetReviewPromptString(input.CurrentPRMetadata, limit(4096)),
+		RecentReviewComments:   budgetReviewPromptStrings(input.RecentReviewComments, limit(6144)),
 		OriginalRequirements:   input.OriginalRequirements,
-		PriorStrategyFixIssues: input.PriorStrategyFixIssues,
-		Cycles:                 input.Cycles,
-		CompletedFixIssues:     input.CompletedFixIssues,
-		WorkerNoOpVerdicts:     input.WorkerNoOpVerdicts,
-		AffectedFiles:          input.AffectedFiles,
+		PriorStrategyFixIssues: budgetReviewStrategyFixIssues(input.PriorStrategyFixIssues, limit(4096)),
+		Cycles:                 budgetReviewSynthesisCycles(input.Cycles, limit(8192)),
+		CompletedFixIssues:     budgetReviewFixIssues(input.CompletedFixIssues, limit(6144)),
+		WorkerNoOpVerdicts:     budgetReviewPromptStrings(input.WorkerNoOpVerdicts, limit(4096)),
+		AffectedFiles:          budgetReviewPromptStrings(input.AffectedFiles, limit(3072)),
 		EvidenceSources:        input.EvidenceSources,
-		RoleInstructions:       opts.SystemPrompt,
+		RoleInstructions:       budgetReviewPromptString(opts.SystemPrompt, limit(4096)),
 	}
+}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("executing review synthesis template: %w", err)
+func budgetReviewPromptString(value string, budget int) string {
+	if value == "" || len(value) <= budget {
+		return value
 	}
-	rendered := buf.String()
-	if len(rendered) > ReviewSynthesisInputBudget {
-		rendered = rendered[:ReviewSynthesisInputBudget-len(ReviewPromptTruncationMarker)] + ReviewPromptTruncationMarker
+	marker := strings.TrimSpace(ReviewPromptTruncationMarker)
+	if budget <= len(marker) {
+		return marker
 	}
-	return rendered, nil
+	keep := budget - len(marker) - 1
+	for keep > 0 && !utf8.RuneStart(value[keep]) {
+		keep--
+	}
+	return value[:keep] + "\n" + marker
+}
+
+func budgetReviewPromptStrings(values []string, budget int) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	remaining := budget
+	for index, value := range values {
+		if len(value)+1 <= remaining {
+			out = append(out, value)
+			remaining -= len(value) + 1
+			continue
+		}
+		if remaining > 0 {
+			out = append(out, budgetReviewPromptString(value, remaining))
+		} else {
+			out = append(out, strings.TrimSpace(ReviewPromptTruncationMarker))
+		}
+		if index+1 < len(values) {
+			out = append(out, fmt.Sprintf("[TRUNCATED: %d additional optional values omitted]", len(values)-index-1))
+		}
+		break
+	}
+	return out
+}
+
+func budgetReviewStrategyFixIssues(values []agent.ReviewSynthesisStrategyFixIssue, budget int) []agent.ReviewSynthesisStrategyFixIssue {
+	out := append([]agent.ReviewSynthesisStrategyFixIssue(nil), values...)
+	remaining := budget
+	for index := range out {
+		cost := len(out[index].Title) + len(out[index].Summary) + len(out[index].Fingerprint) + 64
+		if cost <= remaining {
+			remaining -= cost
+			continue
+		}
+		out[index].Summary = budgetReviewPromptString(out[index].Summary, remaining)
+		out = out[:index+1]
+		out[index].Summary += fmt.Sprintf("\n[TRUNCATED: %d additional strategy summaries omitted]", len(values)-index-1)
+		return out
+	}
+	return out
+}
+
+func budgetReviewSynthesisCycles(values []agent.ReviewSynthesisCycle, budget int) []agent.ReviewSynthesisCycle {
+	out := make([]agent.ReviewSynthesisCycle, len(values))
+	remaining := budget
+	truncated := false
+	for index, value := range values {
+		out[index] = value
+		out[index].FindingsBySeverity = budgetReviewFindingsBySeverity(value.FindingsBySeverity, remaining/3)
+		out[index].CompletedFixIssues = budgetReviewFixIssues(value.CompletedFixIssues, remaining/3)
+		out[index].AffectedFiles = budgetReviewPromptStrings(value.AffectedFiles, remaining/6)
+		out[index].ChunkCoverageSummary = budgetReviewPromptString(value.ChunkCoverageSummary, remaining/6)
+		cost := reviewFindingsLength(out[index].FindingsBySeverity) +
+			reviewFixIssuesLength(out[index].CompletedFixIssues) +
+			stringsLength(out[index].AffectedFiles) + len(out[index].ChunkCoverageSummary)
+		if cost > remaining {
+			truncated = true
+			remaining = 0
+		} else {
+			remaining -= cost
+		}
+	}
+	if truncated && len(out) > 0 {
+		out[len(out)-1].ChunkCoverageSummary += "\n" + strings.TrimSpace(ReviewPromptTruncationMarker)
+	}
+	return out
+}
+
+func budgetReviewFindingsBySeverity(values map[string][]string, budget int) map[string][]string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make(map[string][]string, len(values))
+	remaining := budget
+	for _, key := range keys {
+		out[key] = budgetReviewPromptStrings(values[key], remaining)
+		remaining -= stringsLength(out[key])
+		if remaining <= 0 {
+			break
+		}
+	}
+	return out
+}
+
+func reviewFindingsLength(values map[string][]string) int {
+	total := 0
+	for key, findings := range values {
+		total += len(key) + stringsLength(findings)
+	}
+	return total
+}
+
+func reviewFixIssuesLength(values []agent.ReviewSynthesisFixIssue) int {
+	total := 0
+	for _, value := range values {
+		total += len(value.Title) + len(value.ValidationStatus) + stringsLength(value.FilesSummary) + 64
+	}
+	return total
+}
+
+func budgetReviewFixIssues(values []agent.ReviewSynthesisFixIssue, budget int) []agent.ReviewSynthesisFixIssue {
+	out := append([]agent.ReviewSynthesisFixIssue(nil), values...)
+	remaining := budget
+	for index := range out {
+		out[index].Body = ""
+		out[index].FilesSummary = budgetReviewPromptStrings(out[index].FilesSummary, remaining/3)
+		out[index].ValidationStatus = budgetReviewPromptString(out[index].ValidationStatus, remaining/3)
+		cost := len(out[index].Title) + len(out[index].ValidationStatus) + stringsLength(out[index].FilesSummary) + 64
+		if cost <= remaining {
+			remaining -= cost
+			continue
+		}
+		out = out[:index+1]
+		out[index].ValidationStatus = strings.TrimSpace(ReviewPromptTruncationMarker)
+		return out
+	}
+	return out
+}
+
+func stringsLength(values []string) int {
+	total := 0
+	for _, value := range values {
+		total += len(value)
+	}
+	return total
 }
 
 func ParseReviewSynthesisOutput(output string) (*agent.ReviewSynthesisResult, error) {

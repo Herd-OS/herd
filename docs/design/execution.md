@@ -594,8 +594,12 @@ finding count is at least the internal eight-finding floor, it compares
 review-cycle trends and concrete repeated package/subsystem clusters with
 supporting repeated root-cause evidence. Bounded agent synthesis may refine a
 deterministically valid cluster, but it cannot rescue an ineligible history.
-When synthesis is disabled, unavailable, invalid, low confidence, or rejected
-by safety gates, this route retains its deterministic strategy fallback.
+Ordinary synthesis needs no extra verifier call. A synthesis that proposes
+requirement reinterpretation must cite stable current-batch requirement
+evidence and pass independent semantic verification. When synthesis is
+disabled, unavailable, invalid, low confidence, has invalid reinterpretation
+provenance, or fails mandatory verification, this route retains its
+deterministic strategy fallback.
 High-volume issues use
 `Review strategy fix (cycle N): <root cause>`.
 
@@ -619,17 +623,23 @@ shared behavior or root cause from words or package location.
 
 Requirements and findings receive deterministic evidence IDs such as
 `issue:1121:criterion:0` and `cycle:4:finding:1`. Synthesis symptoms and
-requirement reinterpretations must cite these IDs. HerdOS validates every ID,
-eligible cycle, and optional exact excerpt against the bounded current-batch
-input. Requirements and findings have highest prompt-budget priority; concise
-fix outcomes follow, and repeated fix bodies are omitted.
+requirement reinterpretations must cite these IDs. Symptoms must cite at least
+three distinct completed historical cycles and at least one finding from the
+latest review; the latest review does not count toward the historical minimum.
+HerdOS validates every ID, eligible cycle, and every generated optional exact
+excerpt against the bounded current-batch input. Requirements and findings
+have highest prompt-budget priority; concise fix outcomes follow, and repeated
+fix bodies are omitted.
 
 Low-volume escalation is synthesis-required. After strict schema and
 provenance validation, HerdOS makes a fresh bounded no-tools call through the
-configured agent provider. This independent verifier decides whether the cited
-findings share one architectural behavior/root cause, whether the strategy and
-criteria address it, and whether any requirement reinterpretation preserves
-and entails the cited user-visible safety property. Only an explicit,
+configured agent provider. The verifier receives all bounded eligible
+requirement and finding evidence together with the IDs cited by synthesis, so
+it can compare cited and uncited evidence. It decides whether the findings
+share one architectural behavior/root cause, whether the latest review agrees,
+whether the strategy and criteria address it, and whether any requirement
+reinterpretation preserves and entails the cited user-visible safety property.
+Only an explicit,
 high-confidence approval can create a strategy issue. There is no deterministic
 strategy fallback: disabled synthesis, either agent call timing out or failing,
 malformed or nil output, invalid provenance, rejection, ambiguity, or low

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/prompt"
@@ -1626,6 +1627,16 @@ func reviewStrategyIssueBody(batchPR int) string {
 		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: batchPR, FixCycle: 6},
 		Task:        "Fix the strategy.",
 	})
+}
+
+func TestBoundedReviewEvidenceExcerptPreservesUnicode(t *testing.T) {
+	value := strings.Repeat("現在のレビュー証拠🧭", reviewEvidenceExcerptBudget)
+
+	got := boundedReviewEvidenceExcerpt(value)
+
+	assert.True(t, utf8.ValidString(got))
+	assert.LessOrEqual(t, len(got), reviewEvidenceExcerptBudget)
+	assert.Contains(t, got, "[TRUNCATED: deterministic review evidence budget reached]")
 }
 
 func reviewStrategyIssue(number int, state string, labels []string, body string) *platform.Issue {
