@@ -246,7 +246,7 @@ func TestSynthesizeReviewNonConvergence_PrependsSystemPromptAndParsesOutput(t *t
 	content := fmt.Sprintf(`#!/bin/sh
 printf '%%s\0' "$@" > '%s'
 cat > '%s'
-echo '{"should_escalate":false,"confidence":0.64,"reason":"evidence is weak"}'
+echo '{"should_escalate":true,"confidence":0.64,"root_cause_title":"Cross-store invariant","requirement_reinterpretation":{"constraint_kind":"over_constrained","conflicting_requirement":"instant visibility everywhere","platform_consistency_constraint":"replicas converge asynchronously","preserved_safety_property":"revoked grants cannot be used","corrected_invariant":"revocation linearizes before asynchronous cleanup","linearization_boundaries":["revocation marker"],"durability_boundaries":["marker persisted"]}}'
 `, argvDump, stdinDump)
 	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
 
@@ -256,12 +256,36 @@ echo '{"should_escalate":false,"confidence":0.64,"reason":"evidence is weak"}'
 		BatchNumber:       116,
 		HeadSHA:           "sha-21",
 		CurrentPRMetadata: "metadata marker",
+		OriginalRequirements: []agent.ReviewSynthesisRequirement{{
+			IssueNumber: 1121,
+			Title:       "OpenCode original requirement marker",
+			Task:        "preserve revocation safety",
+		}},
+		PriorStrategyFixIssues: []agent.ReviewSynthesisStrategyFixIssue{{
+			Number:  70,
+			Cycle:   1,
+			Title:   "OpenCode prior strategy marker",
+			HeadSHA: "sha-20",
+		}},
+		Cycles: []agent.ReviewSynthesisCycle{{
+			Cycle:   1,
+			HeadSHA: "sha-20",
+			CompletedFixIssues: []agent.ReviewSynthesisFixIssue{{
+				Number:           71,
+				Title:            "OpenCode cycle fix marker",
+				Body:             "cycle fix body",
+				ValidationStatus: "passed cycle validation",
+				WorkerReport:     true,
+			}},
+		}},
 	}, agent.ReviewSynthesisOptions{RepoRoot: dir})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.False(t, result.ShouldEscalate)
+	assert.True(t, result.ShouldEscalate)
 	assert.Equal(t, 0.64, result.Confidence)
-	assert.Equal(t, "evidence is weak", result.Reason)
+	assert.Equal(t, "Cross-store invariant", result.RootCauseTitle)
+	require.NotNil(t, result.RequirementReinterpretation)
+	assert.Equal(t, agent.ReviewRequirementOverConstrained, result.RequirementReinterpretation.ConstraintKind)
 
 	stdinBytes, err := os.ReadFile(stdinDump)
 	require.NoError(t, err)
@@ -269,6 +293,10 @@ echo '{"should_escalate":false,"confidence":0.64,"reason":"evidence is weak"}'
 	assert.True(t, strings.HasPrefix(stdinContent, prompt.ReviewSynthesisSystemPrompt))
 	assert.Contains(t, stdinContent, "sha-21")
 	assert.Contains(t, stdinContent, "metadata marker")
+	assert.Contains(t, stdinContent, "OpenCode original requirement marker")
+	assert.Contains(t, stdinContent, "OpenCode prior strategy marker")
+	assert.Contains(t, stdinContent, "OpenCode cycle fix marker")
+	assert.Contains(t, stdinContent, "passed cycle validation")
 
 	argv := readArgvDump(t, argvDump)
 	assert.Equal(t, "run", argv[0])

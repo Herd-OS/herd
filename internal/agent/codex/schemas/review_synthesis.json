@@ -59,6 +59,55 @@
         "type": "string"
       }
     },
+    "requirement_reinterpretation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "constraint_kind",
+        "conflicting_requirement",
+        "platform_consistency_constraint",
+        "preserved_safety_property",
+        "corrected_invariant",
+        "linearization_boundaries",
+        "durability_boundaries"
+      ],
+      "properties": {
+        "constraint_kind": {
+          "type": "string",
+          "enum": [
+            "over_constrained",
+            "internally_conflicting",
+            "platform_non_atomic"
+          ]
+        },
+        "conflicting_requirement": {
+          "type": "string"
+        },
+        "platform_consistency_constraint": {
+          "type": "string"
+        },
+        "preserved_safety_property": {
+          "type": "string"
+        },
+        "corrected_invariant": {
+          "type": "string"
+        },
+        "linearization_boundaries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "durability_boundaries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "reason": {
       "type": "string"
     }

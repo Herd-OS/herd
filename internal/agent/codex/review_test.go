@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -199,7 +200,7 @@ for a in "$@"; do
   prev="$a"
 done
 if [ -n "$schema" ]; then cp "$schema" '%s'; fi
-if [ -n "$out" ]; then printf '%%s' '{"should_escalate":true,"confidence":0.93,"root_cause_title":"Shared review state","recurring_symptoms":[{"description":"same stale finding","cycles":[2,3],"affected_files":["internal/review.go"]}]}' > "$out"; fi
+if [ -n "$out" ]; then printf '%%s' '{"should_escalate":true,"confidence":0.93,"root_cause_title":"Shared review state","recurring_symptoms":[{"description":"same stale finding","cycles":[2,3],"affected_files":["internal/review.go"]}],"requirement_reinterpretation":{"constraint_kind":"platform_non_atomic","conflicting_requirement":"one atomic cross-store commit","platform_consistency_constraint":"stores commit independently","preserved_safety_property":"exclusive ownership","corrected_invariant":"durable intent gates visibility","linearization_boundaries":["intent creation","visibility marker"],"durability_boundaries":["intent persisted","recovery completed"]}}' > "$out"; fi
 `, argvDump, stdinDump, schemaCopy)
 	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
 
@@ -209,6 +210,28 @@ if [ -n "$out" ]; then printf '%%s' '{"should_escalate":true,"confidence":0.93,"
 		BatchNumber:       116,
 		HeadSHA:           "sha-31",
 		CurrentPRMetadata: "metadata marker",
+		OriginalRequirements: []agent.ReviewSynthesisRequirement{{
+			IssueNumber: 1121,
+			Title:       "Codex original requirement marker",
+			Task:        "preserve exclusive ownership",
+		}},
+		PriorStrategyFixIssues: []agent.ReviewSynthesisStrategyFixIssue{{
+			Number:  61,
+			Cycle:   2,
+			Title:   "Codex prior strategy marker",
+			HeadSHA: "sha-30",
+		}},
+		Cycles: []agent.ReviewSynthesisCycle{{
+			Cycle:   2,
+			HeadSHA: "sha-30",
+			CompletedFixIssues: []agent.ReviewSynthesisFixIssue{{
+				Number:           62,
+				Title:            "Codex cycle fix marker",
+				Body:             "Codex completed fix body",
+				ValidationStatus: "Codex validation marker",
+				WorkerReport:     true,
+			}},
+		}},
 	}, agent.ReviewSynthesisOptions{RepoRoot: dir})
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -216,6 +239,9 @@ if [ -n "$out" ]; then printf '%%s' '{"should_escalate":true,"confidence":0.93,"
 	assert.Equal(t, 0.93, result.Confidence)
 	assert.Equal(t, "Shared review state", result.RootCauseTitle)
 	assert.Len(t, result.RecurringSymptoms, 1)
+	require.NotNil(t, result.RequirementReinterpretation)
+	assert.Equal(t, agent.ReviewRequirementPlatformNonAtomic, result.RequirementReinterpretation.ConstraintKind)
+	assert.Equal(t, "exclusive ownership", result.RequirementReinterpretation.PreservedSafetyProperty)
 
 	argv := readArgvDump(t, argvDump)
 	require.NotEmpty(t, argv)
@@ -229,11 +255,48 @@ if [ -n "$out" ]; then printf '%%s' '{"should_escalate":true,"confidence":0.93,"
 	assert.True(t, strings.HasPrefix(stdinContent, prompt.ReviewSynthesisSystemPrompt))
 	assert.Contains(t, stdinContent, "sha-31")
 	assert.Contains(t, stdinContent, "metadata marker")
+	assert.Contains(t, stdinContent, "Codex original requirement marker")
+	assert.Contains(t, stdinContent, "Codex prior strategy marker")
+	assert.Contains(t, stdinContent, "Codex cycle fix marker")
+	assert.Contains(t, stdinContent, "Codex validation marker")
 
 	schemaBytes, err := os.ReadFile(schemaCopy)
 	require.NoError(t, err)
 	assert.Contains(t, string(schemaBytes), `"should_escalate"`)
 	assert.Contains(t, string(schemaBytes), `"root_cause_title"`)
+
+	var schema struct {
+		Required   []string `json:"required"`
+		Properties map[string]struct {
+			AdditionalProperties *bool `json:"additionalProperties"`
+			Required             []string
+			Properties           map[string]struct {
+				Enum     []string `json:"enum"`
+				MinItems int      `json:"minItems"`
+			}
+		}
+	}
+	require.NoError(t, json.Unmarshal(schemaBytes, &schema))
+	assert.Equal(t, []string{"should_escalate", "confidence"}, schema.Required,
+		"the optional reinterpretation must not change required top-level keys")
+	reinterpretationSchema, ok := schema.Properties["requirement_reinterpretation"]
+	require.True(t, ok)
+	require.NotNil(t, reinterpretationSchema.AdditionalProperties)
+	assert.False(t, *reinterpretationSchema.AdditionalProperties)
+	assert.ElementsMatch(t, []string{
+		"constraint_kind",
+		"conflicting_requirement",
+		"platform_consistency_constraint",
+		"preserved_safety_property",
+		"corrected_invariant",
+		"linearization_boundaries",
+		"durability_boundaries",
+	}, reinterpretationSchema.Required)
+	assert.Equal(t,
+		[]string{"over_constrained", "internally_conflicting", "platform_non_atomic"},
+		reinterpretationSchema.Properties["constraint_kind"].Enum)
+	assert.Equal(t, 1, reinterpretationSchema.Properties["linearization_boundaries"].MinItems)
+	assert.Equal(t, 1, reinterpretationSchema.Properties["durability_boundaries"].MinItems)
 }
 
 func TestSynthesizeReviewNonConvergence_UnparseableOutputReturnsError(t *testing.T) {

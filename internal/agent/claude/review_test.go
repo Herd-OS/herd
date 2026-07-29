@@ -145,7 +145,7 @@ func TestSynthesizeReviewNonConvergence_UsesPromptAndParsesOutput(t *testing.T) 
 	err := os.WriteFile(script, []byte(fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$@" > '%s'
 cat > '%s'
-echo '{"should_escalate":true,"confidence":0.88,"root_cause_title":"Shared invariant missing","recurring_symptoms":[{"description":"same bug","cycles":[2,3],"affected_files":["internal/foo.go"]}]}'
+echo '{"should_escalate":true,"confidence":0.88,"root_cause_title":"Shared invariant missing","recurring_symptoms":[{"description":"same bug","cycles":[2,3],"affected_files":["internal/foo.go"]}],"requirement_reinterpretation":{"constraint_kind":"internally_conflicting","conflicting_requirement":"conflicting literal requirement","platform_consistency_constraint":"single visibility boundary","preserved_safety_property":"users retain exclusive ownership","corrected_invariant":"visibility follows durable ownership","linearization_boundaries":["ownership grant"],"durability_boundaries":["grant persisted"]}}'
 `, argvDump, stdinDump)), 0755)
 	require.NoError(t, err)
 
@@ -156,12 +156,36 @@ echo '{"should_escalate":true,"confidence":0.88,"root_cause_title":"Shared invar
 		HeadSHA:           "head-sha",
 		HeadRef:           "worker/ref",
 		CurrentPRMetadata: "metadata marker",
+		OriginalRequirements: []agent.ReviewSynthesisRequirement{{
+			IssueNumber: 1121,
+			Title:       "original requirement marker",
+			Task:        "preserve user ownership",
+		}},
+		PriorStrategyFixIssues: []agent.ReviewSynthesisStrategyFixIssue{{
+			Number:  81,
+			Cycle:   2,
+			Title:   "prior strategy marker",
+			HeadSHA: "prior-head",
+		}},
+		Cycles: []agent.ReviewSynthesisCycle{{
+			Cycle:   2,
+			HeadSHA: "prior-head",
+			CompletedFixIssues: []agent.ReviewSynthesisFixIssue{{
+				Number:           82,
+				Title:            "cycle fix marker",
+				Body:             "fix task body marker",
+				ValidationStatus: "cycle validation marker",
+				WorkerReport:     true,
+			}},
+		}},
 	}, agent.ReviewSynthesisOptions{RepoRoot: dir})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.ShouldEscalate)
 	assert.Equal(t, 0.88, result.Confidence)
 	assert.Equal(t, "Shared invariant missing", result.RootCauseTitle)
+	require.NotNil(t, result.RequirementReinterpretation)
+	assert.Equal(t, agent.ReviewRequirementInternallyConflicting, result.RequirementReinterpretation.ConstraintKind)
 
 	stdinBytes, err := os.ReadFile(stdinDump)
 	require.NoError(t, err)
@@ -169,6 +193,10 @@ echo '{"should_escalate":true,"confidence":0.88,"root_cause_title":"Shared invar
 	assert.Contains(t, stdinContent, "## Current PR Metadata")
 	assert.Contains(t, stdinContent, "head-sha")
 	assert.Contains(t, stdinContent, "metadata marker")
+	assert.Contains(t, stdinContent, "original requirement marker")
+	assert.Contains(t, stdinContent, "prior strategy marker")
+	assert.Contains(t, stdinContent, "cycle fix marker")
+	assert.Contains(t, stdinContent, "cycle validation marker")
 
 	argvBytes, err := os.ReadFile(argvDump)
 	require.NoError(t, err)

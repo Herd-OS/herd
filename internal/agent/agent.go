@@ -129,16 +129,18 @@ type ReviewSynthesisOptions struct {
 }
 
 type ReviewSynthesisInput struct {
-	PRNumber             int
-	BatchNumber          int
-	HeadSHA              string
-	HeadRef              string
-	CurrentPRMetadata    string
-	RecentReviewComments []string
-	Cycles               []ReviewSynthesisCycle
-	CompletedFixIssues   []ReviewSynthesisFixIssue
-	WorkerNoOpVerdicts   []string
-	AffectedFiles        []string
+	PRNumber               int
+	BatchNumber            int
+	HeadSHA                string
+	HeadRef                string
+	CurrentPRMetadata      string
+	RecentReviewComments   []string
+	OriginalRequirements   []ReviewSynthesisRequirement
+	PriorStrategyFixIssues []ReviewSynthesisStrategyFixIssue
+	Cycles                 []ReviewSynthesisCycle
+	CompletedFixIssues     []ReviewSynthesisFixIssue
+	WorkerNoOpVerdicts     []string
+	AffectedFiles          []string
 }
 
 type ReviewSynthesisCycle struct {
@@ -150,6 +152,7 @@ type ReviewSynthesisCycle struct {
 	Status               string
 	AffectedFiles        []string
 	ChunkCoverageSummary string
+	CompletedFixIssues   []ReviewSynthesisFixIssue
 }
 
 type ReviewSynthesisFixIssue struct {
@@ -162,6 +165,44 @@ type ReviewSynthesisFixIssue struct {
 	WorkerReport     bool
 }
 
+type ReviewRequirementConstraintKind string
+
+const (
+	ReviewRequirementOverConstrained       ReviewRequirementConstraintKind = "over_constrained"
+	ReviewRequirementInternallyConflicting ReviewRequirementConstraintKind = "internally_conflicting"
+	ReviewRequirementPlatformNonAtomic     ReviewRequirementConstraintKind = "platform_non_atomic"
+)
+
+type ReviewRequirementReinterpretation struct {
+	ConstraintKind                ReviewRequirementConstraintKind `json:"constraint_kind"`
+	ConflictingRequirement        string                          `json:"conflicting_requirement"`
+	PlatformConsistencyConstraint string                          `json:"platform_consistency_constraint"`
+	PreservedSafetyProperty       string                          `json:"preserved_safety_property"`
+	CorrectedInvariant            string                          `json:"corrected_invariant"`
+	LinearizationBoundaries       []string                        `json:"linearization_boundaries"`
+	DurabilityBoundaries          []string                        `json:"durability_boundaries"`
+}
+
+type ReviewSynthesisRequirement struct {
+	IssueNumber           int
+	Title                 string
+	Task                  string
+	ImplementationDetails string
+	AcceptanceCriteria    []string
+	Context               string
+}
+
+type ReviewSynthesisStrategyFixIssue struct {
+	Number      int
+	Cycle       int
+	Title       string
+	StatusLabel string
+	State       string
+	Fingerprint string
+	HeadSHA     string
+	Summary     string
+}
+
 type ReviewSynthesisSymptom struct {
 	Description   string   `json:"description"`
 	Cycles        []int    `json:"cycles"`
@@ -169,14 +210,15 @@ type ReviewSynthesisSymptom struct {
 }
 
 type ReviewSynthesisResult struct {
-	ShouldEscalate                     bool                     `json:"should_escalate"`
-	Confidence                         float64                  `json:"confidence"`
-	RootCauseTitle                     string                   `json:"root_cause_title,omitempty"`
-	RootCauseSummary                   string                   `json:"root_cause_summary,omitempty"`
-	RecurringSymptoms                  []ReviewSynthesisSymptom `json:"recurring_symptoms,omitempty"`
-	WhyIndividualFixesAreNotConverging string                   `json:"why_individual_fixes_are_not_converging,omitempty"`
-	ProposedStrategy                   string                   `json:"proposed_strategy,omitempty"`
-	AcceptanceCriteria                 []string                 `json:"acceptance_criteria,omitempty"`
-	NonGoals                           []string                 `json:"non_goals,omitempty"`
-	Reason                             string                   `json:"reason,omitempty"`
+	ShouldEscalate                     bool                               `json:"should_escalate"`
+	Confidence                         float64                            `json:"confidence"`
+	RootCauseTitle                     string                             `json:"root_cause_title,omitempty"`
+	RootCauseSummary                   string                             `json:"root_cause_summary,omitempty"`
+	RecurringSymptoms                  []ReviewSynthesisSymptom           `json:"recurring_symptoms,omitempty"`
+	WhyIndividualFixesAreNotConverging string                             `json:"why_individual_fixes_are_not_converging,omitempty"`
+	ProposedStrategy                   string                             `json:"proposed_strategy,omitempty"`
+	AcceptanceCriteria                 []string                           `json:"acceptance_criteria,omitempty"`
+	NonGoals                           []string                           `json:"non_goals,omitempty"`
+	Reason                             string                             `json:"reason,omitempty"`
+	RequirementReinterpretation        *ReviewRequirementReinterpretation `json:"requirement_reinterpretation,omitempty"`
 }

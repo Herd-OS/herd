@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/herd-os/herd/internal/agent"
@@ -16,16 +17,54 @@ func TestRenderReviewSynthesisPrompt_RequiredSectionsAndEvidence(t *testing.T) {
 		HeadRef:              "feature/review-synthesis",
 		CurrentPRMetadata:    "mergeable: false",
 		RecentReviewComments: []string{"cycle 4 review comment"},
-		Cycles: []agent.ReviewSynthesisCycle{{
-			Cycle:                4,
-			HeadSHA:              "abc123",
-			FindingsAfterDedupe:  2,
-			FindingsBySeverity:   map[string][]string{"HIGH": []string{"internal/foo.go: missing invariant"}},
-			FixIssueNumbers:      []int{91},
-			Status:               "changes_requested",
-			AffectedFiles:        []string{"internal/foo.go"},
-			ChunkCoverageSummary: "2 chunks reviewed",
+		OriginalRequirements: []agent.ReviewSynthesisRequirement{{
+			IssueNumber:           1121,
+			Title:                 "Preserve ownership",
+			Task:                  "Keep a single owner through recovery.",
+			ImplementationDetails: "Use the shared state machine.",
+			AcceptanceCriteria:    []string{"Concurrent grants remain exclusive."},
+			Context:               "The platform commits stores independently.",
 		}},
+		PriorStrategyFixIssues: []agent.ReviewSynthesisStrategyFixIssue{{
+			Number:      77,
+			Cycle:       3,
+			Title:       "Serialize grants",
+			StatusLabel: "status:done",
+			State:       "closed",
+			Fingerprint: "strategy-77",
+			HeadSHA:     "before-abc123",
+			Summary:     "Moved serialization to the durable store.",
+		}},
+		Cycles: []agent.ReviewSynthesisCycle{
+			{
+				Cycle:                3,
+				HeadSHA:              "before-abc123",
+				FindingsAfterDedupe:  1,
+				FindingsBySeverity:   map[string][]string{"HIGH": {"ownership race before fix"}},
+				FixIssueNumbers:      []int{90},
+				Status:               "changes_requested",
+				AffectedFiles:        []string{"internal/foo.go"},
+				ChunkCoverageSummary: "2 chunks reviewed",
+				CompletedFixIssues: []agent.ReviewSynthesisFixIssue{{
+					Number:           90,
+					Title:            "Fix ownership race",
+					Body:             "cycle 3 worker changed the shared state machine",
+					StatusLabel:      "status:done",
+					FilesSummary:     []string{"internal/foo.go"},
+					ValidationStatus: "validated-cycle-3",
+					WorkerReport:     true,
+				}},
+			},
+			{
+				Cycle:               4,
+				HeadSHA:             "abc123",
+				FindingsAfterDedupe: 2,
+				FindingsBySeverity:  map[string][]string{"HIGH": {"moved durability symptom after fix"}},
+				FixIssueNumbers:     []int{91},
+				Status:              "changes_requested",
+				AffectedFiles:       []string{"internal/foo.go"},
+			},
+		},
 		CompletedFixIssues: []agent.ReviewSynthesisFixIssue{{
 			Number:           91,
 			Title:            "Fix repeated review finding",
@@ -45,8 +84,10 @@ func TestRenderReviewSynthesisPrompt_RequiredSectionsAndEvidence(t *testing.T) {
 	for _, want := range []string{
 		"## Current PR Metadata",
 		"## Recent Review Result Comments",
+		"## Original Batch Requirements",
+		"## Prior Strategy Fix Attempts",
 		"## Deduplicated Findings By Cycle",
-		"## Completed Review-Fix Issues",
+		"## Completed Review-Fix Issues (Global Backward-Compatible Summary)",
 		"## Worker No-Op Verdicts",
 		"## Affected Files/Packages",
 		"## Output Contract",
@@ -59,13 +100,28 @@ func TestRenderReviewSynthesisPrompt_RequiredSectionsAndEvidence(t *testing.T) {
 		"feature/review-synthesis",
 		"mergeable: false",
 		"cycle 4 review comment",
-		"internal/foo.go: missing invariant",
+		"Keep a single owner through recovery.",
+		"Concurrent grants remain exclusive.",
+		"Moved serialization to the durable store.",
+		"ownership race before fix",
+		"cycle 3 worker changed the shared state machine",
+		"validated-cycle-3",
+		"moved durability symptom after fix",
 		"#91",
 		"worker says no-op for stale symptom",
 		"prefer repo invariants",
 	} {
 		assert.Contains(t, rendered, want)
 	}
+
+	cycle3 := strings.Index(rendered, "### Cycle 3")
+	cycle3Fix := strings.Index(rendered, "#### Fix issue #90")
+	cycle4 := strings.Index(rendered, "### Cycle 4")
+	require.NotEqual(t, -1, cycle3)
+	require.NotEqual(t, -1, cycle3Fix)
+	require.NotEqual(t, -1, cycle4)
+	assert.Less(t, cycle3, cycle3Fix)
+	assert.Less(t, cycle3Fix, cycle4)
 }
 
 func TestReviewSynthesisPrompt_StrictJSONExamplesAndToolBan(t *testing.T) {
@@ -78,6 +134,8 @@ func TestReviewSynthesisPrompt_StrictJSONExamplesAndToolBan(t *testing.T) {
 		`"non_goals"`,
 		`"should_escalate": false`,
 		`"reason"`,
+		`"requirement_reinterpretation"`,
+		`"constraint_kind": "platform_non_atomic"`,
 		"Do NOT use any tools",
 		"Do NOT create issues, comments, files, or pull requests",
 		"Do NOT mutate repository or GitHub state",
@@ -86,22 +144,62 @@ func TestReviewSynthesisPrompt_StrictJSONExamplesAndToolBan(t *testing.T) {
 	}
 }
 
-func TestReviewSynthesisPrompt_RejectsChunkCoverageClusters(t *testing.T) {
-	for _, want := range []string{
-		"Chunk labels and coverage bookkeeping are context only",
-		"not package/root-cause clusters",
-		`"Chunk 1/9"`,
-		`"1/9"`,
-		`"Diff Coverage"`,
-		`"Review Aggregation"`,
-		`"Files reviewed"`,
-		`"Source: local-git"`,
-		"synthetic coverage text",
-		"root_cause_title",
-		"recurring_symptoms.description",
-		"affected_files",
-	} {
-		assert.Contains(t, ReviewSynthesisPromptTemplate, want)
+func TestReviewSynthesisPrompt_EvidenceAndCorrectnessGuardrails(t *testing.T) {
+	tests := []struct {
+		name  string
+		wants []string
+	}{
+		{
+			name: "rejects generic and synthetic evidence",
+			wants: []string{
+				"generic metadata",
+				"broad directory coincidence",
+				"unrelated findings",
+				"empty findings",
+				"coverage/chunk headings",
+				"generated summaries",
+				"no-issue/approved verdicts",
+				"Chunk labels and coverage bookkeeping are context only",
+				`"Chunk 1/9"`,
+				`"Diff Coverage"`,
+				`"Review Aggregation"`,
+				`"Source: local-git"`,
+			},
+		},
+		{
+			name: "recognizes semantic non-convergence",
+			wants: []string{
+				"alternating fixes",
+				"symptoms that move between components",
+				"shared state machines",
+				"lifecycle, synchronization, durability, ownership, or linearization boundaries",
+				"need not use identical text",
+				"incompatible behaviors",
+				"coherent, concrete subsystem",
+			},
+		},
+		{
+			name: "prevents silent correctness weakening",
+			wants: []string{
+				"Omit requirement_reinterpretation for ordinary synthesis",
+				"merely difficult, expensive, or repeatedly implemented incorrectly",
+				"never a general license to relax difficult acceptance criteria",
+				"silently weaken correctness",
+				"all seven nested fields are mandatory",
+				"preserve a user-visible safety property",
+				"materially different corrected invariant",
+				"explicit, non-empty linearization and durability boundary lists",
+				"test both the corrected invariant and the preserved safety property",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, want := range tc.wants {
+				assert.Contains(t, ReviewSynthesisPromptTemplate, want)
+			}
+		})
 	}
 }
 
@@ -155,4 +253,66 @@ func TestParseReviewSynthesisOutput_InvalidJSONReturnsError(t *testing.T) {
 			assert.Error(t, err)
 		})
 	}
+}
+
+func TestParseReviewSynthesisOutput_RequirementReinterpretation(t *testing.T) {
+	tests := []struct {
+		name     string
+		fragment string
+		wantKind *agent.ReviewRequirementConstraintKind
+	}{
+		{
+			name:     "ordinary synthesis omits reinterpretation",
+			fragment: "",
+		},
+		{
+			name:     "over constrained",
+			fragment: `"requirement_reinterpretation":` + reinterpretationJSON(agent.ReviewRequirementOverConstrained),
+			wantKind: constraintKindPointer(agent.ReviewRequirementOverConstrained),
+		},
+		{
+			name:     "internally conflicting",
+			fragment: `"requirement_reinterpretation":` + reinterpretationJSON(agent.ReviewRequirementInternallyConflicting),
+			wantKind: constraintKindPointer(agent.ReviewRequirementInternallyConflicting),
+		},
+		{
+			name:     "platform non atomic",
+			fragment: `"requirement_reinterpretation":` + reinterpretationJSON(agent.ReviewRequirementPlatformNonAtomic),
+			wantKind: constraintKindPointer(agent.ReviewRequirementPlatformNonAtomic),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			output := `{"should_escalate":true,"confidence":0.9`
+			if tc.fragment != "" {
+				output += "," + tc.fragment
+			}
+			output += "}"
+
+			got, err := ParseReviewSynthesisOutput(output)
+			require.NoError(t, err)
+			if tc.wantKind == nil {
+				assert.Nil(t, got.RequirementReinterpretation)
+				return
+			}
+
+			require.NotNil(t, got.RequirementReinterpretation)
+			assert.Equal(t, *tc.wantKind, got.RequirementReinterpretation.ConstraintKind)
+			assert.Equal(t, "literal atomic commit", got.RequirementReinterpretation.ConflictingRequirement)
+			assert.Equal(t, "independent stores", got.RequirementReinterpretation.PlatformConsistencyConstraint)
+			assert.Equal(t, "exclusive ownership", got.RequirementReinterpretation.PreservedSafetyProperty)
+			assert.Equal(t, "intent-based visibility", got.RequirementReinterpretation.CorrectedInvariant)
+			assert.Equal(t, []string{"intent creation", "visibility marker"}, got.RequirementReinterpretation.LinearizationBoundaries)
+			assert.Equal(t, []string{"intent persisted", "recovery completed"}, got.RequirementReinterpretation.DurabilityBoundaries)
+		})
+	}
+}
+
+func reinterpretationJSON(kind agent.ReviewRequirementConstraintKind) string {
+	return `{"constraint_kind":"` + string(kind) + `","conflicting_requirement":"literal atomic commit","platform_consistency_constraint":"independent stores","preserved_safety_property":"exclusive ownership","corrected_invariant":"intent-based visibility","linearization_boundaries":["intent creation","visibility marker"],"durability_boundaries":["intent persisted","recovery completed"]}`
+}
+
+func constraintKindPointer(kind agent.ReviewRequirementConstraintKind) *agent.ReviewRequirementConstraintKind {
+	return &kind
 }
