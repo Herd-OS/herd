@@ -167,7 +167,11 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 	if req.OperationKind == "create" {
 		identitySHA = req.FromSHA
 	}
-	key := idempotencyKey("branch", "repo", s.Repo.ID, req.BranchName, identitySHA, req.OperationKind)
+	keyParts := []any{"branch", "repo", s.Repo.ID, req.BranchName, identitySHA, req.OperationKind}
+	if req.OperationKind == "update" {
+		keyParts = append(keyParts, req.NewSHA)
+	}
+	key := idempotencyKey(keyParts...)
 	preflight := func() error {
 		if req.OperationKind == "create" {
 			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)

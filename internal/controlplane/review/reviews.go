@@ -326,10 +326,12 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 				return fmt.Errorf("get review submission mutation attempt: %w", attemptErr)
 			}
 		}
-		if record.Status == "failed" {
+		if record.Status == "failed" && !mutationspkg.IsPreCallRetryableRecord(record.Status, record.ResultRef) {
 			if attempt, attemptErr := s.Mutations.GetGitHubMutationAttempt(ctx, key); attemptErr != nil && !errors.Is(attemptErr, store.ErrNotFound) {
 				return fmt.Errorf("get failed review submission mutation attempt: %w", attemptErr)
-			} else if attemptErr == nil && !mutationspkg.IsPreCallRetryable(attempt.Status) && !mutationspkg.IsCompleted(attempt.Status) {
+			} else if errors.Is(attemptErr, store.ErrNotFound) {
+				return fmt.Errorf("%w: %s failed without pre-call mutation metadata; repair required", ErrReviewSubmissionInProgress, key)
+			} else if !mutationspkg.IsPreCallRetryable(attempt.Status) && !mutationspkg.IsCompleted(attempt.Status) {
 				return fmt.Errorf("%w: %s has unknown outcome after failed mutation attempt", ErrReviewSubmissionInProgress, key)
 			}
 		}

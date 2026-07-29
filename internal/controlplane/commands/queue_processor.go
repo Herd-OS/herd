@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +13,10 @@ import (
 
 type PendingCommandStore interface {
 	ListReconcileCommands(ctx context.Context, createdBefore time.Time, limit int) ([]store.ReconcileCommand, error)
+}
+
+type commandStatusUpdater interface {
+	UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error
 }
 
 type QueueProcessor struct {
@@ -38,20 +43,40 @@ func (p QueueProcessor) ProcessOnce(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("list queued commands: %w", err)
 	}
 	processed := 0
+	var errs []error
 	for _, item := range items {
 		if queuedCommandTerminal(item) {
 			continue
 		}
 		event, err := queuedIssueCommentEvent(item)
 		if err != nil {
-			return processed, err
+			errs = append(errs, err)
+			_ = p.markQueuedCommandRepairRequired(ctx, item, err)
+			continue
 		}
 		if _, err := p.Handler.HandleIssueComment(ctx, event); err != nil {
-			return processed, err
+			errs = append(errs, err)
+			_ = p.markQueuedCommandRepairRequired(ctx, item, err)
+			continue
 		}
 		processed++
 	}
-	return processed, nil
+	return processed, errors.Join(errs...)
+}
+
+func (p QueueProcessor) markQueuedCommandRepairRequired(ctx context.Context, item store.ReconcileCommand, cause error) error {
+	updater, ok := p.Store.(commandStatusUpdater)
+	if !ok {
+		return nil
+	}
+	metadata, err := json.Marshal(map[string]any{
+		"error":      cause.Error(),
+		"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return err
+	}
+	return updater.UpdateCommandStatus(ctx, item.Command.RepositoryID, item.Command.CommentID, item.Command.CommandKey, "repair_required", metadata)
 }
 
 func queuedCommandTerminal(item store.ReconcileCommand) bool {

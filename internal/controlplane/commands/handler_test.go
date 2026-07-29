@@ -205,6 +205,40 @@ func TestQueueProcessorProcessesQueuedCommandOnce(t *testing.T) {
 	assert.Equal(t, "dispatched", record.Status)
 }
 
+func TestQueueProcessorContinuesAfterMalformedQueuedCommand(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	repo, err := st.UpsertRepository(ctx, store.Repository{InstallationID: 77, Owner: "octo-org", Name: "herd"})
+	require.NoError(t, err)
+	require.NotZero(t, repo.ID)
+	require.NoError(t, recordQueuedCommandWithStatus(ctx, st, IssueComment{Owner: "octo-org", Repo: "herd", CommentID: 1001, SenderLogin: "OWNER"}, "review", "review", StatusQueued, json.RawMessage(`{"raw":"@herd-os review"}`)))
+	event := validComment("OWNER", "@herd-os review")
+	require.NoError(t, EnqueueIssueCommentCommand(ctx, st, "herd-os", event))
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	processor := QueueProcessor{
+		Store: st,
+		Handler: Handler{
+			AppLogin:   "herd-os",
+			Store:      st,
+			GitHub:     gh,
+			Dispatcher: dispatcher,
+		},
+		Now: func() time.Time { return time.Now().UTC().Add(time.Hour) },
+	}
+
+	processed, err := processor.ProcessOnce(ctx)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing issue number")
+	assert.Equal(t, 1, processed)
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+	bad, err := st.GetCommandRecord(ctx, repo.ID, 1001, "review")
+	require.NoError(t, err)
+	assert.Equal(t, "repair_required", bad.Status)
+}
+
 func TestQueueProcessorReplaysMultilinePrompt(t *testing.T) {
 	tests := []struct {
 		name       string

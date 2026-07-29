@@ -228,6 +228,36 @@ func TestWriteRunnerEnvRejectsUnsafeRunnerBootstrapTokenBeforeWriting(t *testing
 	assert.True(t, os.IsNotExist(statErr))
 }
 
+func TestWriteRunnerEnvUpdatesExportedManagedKeysOnce(t *testing.T) {
+	dir := t.TempDir()
+	existing := strings.Join([]string{
+		"# existing",
+		"export HERD_CONTROL_PLANE_URL=https://old.example",
+		"",
+		`export HERD_RUNNER_BOOTSTRAP_TOKEN="old" # stale`,
+		"OTHER=value # keep",
+		"",
+	}, "\n")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte(existing), 0600))
+
+	err := writeRunnerEnv(dir, "hrb_new", "https://new.example/")
+
+	require.NoError(t, err)
+	env, err := os.ReadFile(filepath.Join(dir, ".env"))
+	require.NoError(t, err)
+	assert.Equal(t, strings.Join([]string{
+		"# existing",
+		"HERD_CONTROL_PLANE_URL=https://new.example",
+		"",
+		"HERD_RUNNER_BOOTSTRAP_TOKEN=hrb_new",
+		"OTHER=value # keep",
+		"",
+		"",
+	}, "\n"), string(env))
+	assert.Equal(t, 1, strings.Count(string(env), "HERD_CONTROL_PLANE_URL="))
+	assert.Equal(t, 1, strings.Count(string(env), "HERD_RUNNER_BOOTSTRAP_TOKEN="))
+}
+
 func TestValidatedEffectiveControlPlaneURLRejectsUnsafeValues(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -317,8 +347,8 @@ func TestRunInitReusesExistingSelfHostedControlPlaneURL(t *testing.T) {
 	err = runInitWithOptions(initOptions{SkipLabels: true, SkipWorkflows: true})
 
 	require.NoError(t, err)
-	assert.Equal(t, "https://herd.internal", registrarURL)
-	require.Len(t, reg.reqs, 1)
+	assert.Empty(t, registrarURL)
+	assert.Empty(t, reg.reqs)
 	env, err := os.ReadFile(filepath.Join(dir, ".env"))
 	require.NoError(t, err)
 	assert.Contains(t, string(env), "HERD_CONTROL_PLANE_URL=https://herd.internal")
@@ -354,10 +384,9 @@ func TestRunInitExplicitControlPlaneURLOverridesExistingConfig(t *testing.T) {
 	err = runInitWithOptions(initOptions{SkipLabels: true, SkipWorkflows: true, ControlPlaneURL: "https://override.example"})
 
 	require.NoError(t, err)
-	assert.Equal(t, "https://override.example", registrarURL)
-	env, err := os.ReadFile(filepath.Join(dir, ".env"))
-	require.NoError(t, err)
-	assert.Contains(t, string(env), "HERD_CONTROL_PLANE_URL=https://override.example")
+	assert.Empty(t, registrarURL)
+	_, err = os.Stat(filepath.Join(dir, ".env"))
+	assert.True(t, os.IsNotExist(err))
 }
 
 func TestRunInitExistingHostedConfigPersistsExplicitSelfHostedControlPlaneURL(t *testing.T) {

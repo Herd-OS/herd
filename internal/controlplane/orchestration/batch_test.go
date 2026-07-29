@@ -276,6 +276,43 @@ func TestRecoverWorkflowDispatchIntentRefusesAmbiguousDispatches(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestDispatchReadyWorkersReadyIssueIgnoresOldCompletedDispatchAtStaleHead(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branches["herd/batch/7-demo"] = "new-head"
+	disp := &fakeDispatcher{}
+	st := newFakeStore()
+	svc := newTestService(fake, st, disp)
+	oldReq := cpdispatch.DispatchRequest{
+		RepoID:       svc.Repo.ID,
+		Kind:         cpdispatch.JobKindWorker,
+		WorkflowFile: "herd-worker.yml",
+		Ref:          "main",
+		BatchNumber:  7,
+		IssueNumber:  1,
+		BatchBranch:  "herd/batch/7-demo",
+		HeadSHA:      "old-head",
+	}
+	st.keys["old"] = store.IdempotencyKey{Key: "old", Scope: "workflow_dispatch", Status: "completed", Metadata: workflowDispatchMetadata(t, oldReq), CreatedAt: fixedClock()}
+
+	count, err := svc.DispatchReadyWorkers(ctx, DispatchReadyWorkersRequest{
+		BatchNumber: 7,
+		BatchBranch: "herd/batch/7-demo",
+		TierIssues:  []int{1},
+		AllIssues: []*platform.Issue{{
+			Number: 1,
+			Labels: []string{issues.StatusReady},
+			Body:   "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n",
+		}},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	require.Len(t, disp.requests, 1)
+	assert.Equal(t, "new-head", disp.requests[0].HeadSHA)
+	assert.Equal(t, "new-head", disp.requests[0].ExpectedHeadSHA)
+}
+
 func TestDispatchReadyWorkersCallStartedDispatchDoesNotMarkInProgressOrRedispatch(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
@@ -315,7 +352,7 @@ func TestDispatchReadyWorkersCallStartedDispatchDoesNotMarkInProgressOrRedispatc
 	assert.Empty(t, fake.issues.added[1])
 }
 
-func TestDispatchReadyWorkers_SuppressesDuplicateWhenHeadAdvancesAfterDispatchBeforeStatusTransition(t *testing.T) {
+func TestDispatchReadyWorkersRedispatchesReadyIssueWhenHeadAdvancesAfterDispatchBeforeStatusTransition(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
 	fake.repo.branches["herd/batch/7-demo"] = "batch-head-1"
@@ -350,9 +387,10 @@ func TestDispatchReadyWorkers_SuppressesDuplicateWhenHeadAdvancesAfterDispatchBe
 	secondCount, secondErr := svc.DispatchReadyWorkers(ctx, req)
 
 	require.NoError(t, secondErr)
-	assert.Equal(t, 0, secondCount)
-	assert.Len(t, disp.requests, 1)
-	assert.Equal(t, []string{issues.StatusReady}, fake.issues.removed[1])
+	assert.Equal(t, 1, secondCount)
+	assert.Len(t, disp.requests, 2)
+	assert.Equal(t, "batch-head-2", disp.requests[1].HeadSHA)
+	assert.Equal(t, []string{issues.StatusReady, issues.StatusReady}, fake.issues.removed[1])
 	assert.Equal(t, []string{issues.StatusInProgress}, fake.issues.added[1])
 }
 

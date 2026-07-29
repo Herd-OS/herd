@@ -285,7 +285,7 @@ func TestSubmitPRReviewOnceRequiresMutationStore(t *testing.T) {
 	assert.Empty(t, gh.reviews)
 }
 
-func TestSubmitPRReviewOnceFailedRecordWithoutMutationRecordsAttemptBeforeReview(t *testing.T) {
+func TestSubmitPRReviewOnceFailedRecordWithoutMutationRequiresRepair(t *testing.T) {
 	gh := &fakeReviewGitHub{}
 	mutations := newFakeReviewMutationStore()
 	svc := ReviewService{GitHub: gh, Mutations: mutations}
@@ -293,6 +293,24 @@ func TestSubmitPRReviewOnceFailedRecordWithoutMutationRecordsAttemptBeforeReview
 	result := reviewResult(ResultStatusApproved, "head")
 	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
 	mutations.idem[key] = store.IdempotencyKey{Key: key, Scope: "review_submission", Status: "failed"}
+
+	err := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repair required")
+	assert.Empty(t, gh.reviews)
+	_, err = mutations.GetGitHubMutationAttempt(context.Background(), key)
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestSubmitPRReviewOnceFailedPreCallRecordRetries(t *testing.T) {
+	gh := &fakeReviewGitHub{}
+	mutations := newFakeReviewMutationStore()
+	svc := ReviewService{GitHub: gh, Mutations: mutations}
+	repo := testRepo(true)
+	result := reviewResult(ResultStatusApproved, "head")
+	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
+	mutations.idem[key] = store.IdempotencyKey{Key: key, Scope: "review_submission", Status: "failed", ResultRef: mutationspkg.PhaseFailedPreCall + ":network down"}
 
 	err := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
 

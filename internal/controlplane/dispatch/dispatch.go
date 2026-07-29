@@ -113,9 +113,6 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 	if d.Store == nil {
 		return DispatchResult{}, fmt.Errorf("dispatch store is required")
 	}
-	if d.GitHub == nil {
-		return DispatchResult{}, fmt.Errorf("dispatch GitHub client is required")
-	}
 	if err := d.requireMutationStore(); err != nil {
 		return DispatchResult{}, err
 	}
@@ -256,6 +253,10 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 	if err != nil {
 		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseFailedPreCall+":"+err.Error())
 		return DispatchResult{}, err
+	}
+	if d.GitHub == nil {
+		_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseFailedPreCall+":dispatch GitHub client is required")
+		return DispatchResult{}, fmt.Errorf("dispatch GitHub client is required")
 	}
 	mutationStore, ok := d.Store.(mutationguard.Store)
 	if !ok {

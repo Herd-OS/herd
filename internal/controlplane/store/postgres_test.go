@@ -708,6 +708,30 @@ func TestPostgresUpsertRepositoryUpdatesRenameByGitHubID(t *testing.T) {
 	assert.Equal(t, int64(3003), got.GitHubID)
 }
 
+func TestPostgresUpsertRepositoryReconcilesOwnerNameRowWithGitHubID(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	require.NoError(t, ApplyMigrations(ctx, db))
+	s := &PostgresStore{db: db}
+	require.NoError(t, s.UpsertInstallation(ctx, Installation{
+		ID:           1001,
+		AccountLogin: "octo",
+		AccountID:    2002,
+		TargetType:   "Organization",
+	}))
+
+	local, err := s.UpsertRepository(ctx, Repository{InstallationID: 1001, Owner: "octo", Name: "repo", DefaultBranch: "main"})
+	require.NoError(t, err)
+	hosted, err := s.UpsertRepository(ctx, Repository{GitHubID: 3003, InstallationID: 1001, Owner: "octo", Name: "repo", DefaultBranch: "trunk"})
+	require.NoError(t, err)
+
+	assert.Equal(t, local.ID, hosted.ID)
+	got, err := s.GetRepository(ctx, "octo", "repo")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3003), got.GitHubID)
+	assert.Equal(t, "trunk", got.DefaultBranch)
+}
+
 func TestPostgresUpsertRepositoryAllowsDistinctRepositoriesWithoutGitHubID(t *testing.T) {
 	ctx := context.Background()
 	db := newPostgresDB(t, ctx)

@@ -3,6 +3,7 @@ package git
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -449,6 +450,9 @@ func redactGitConfig(entry string) string {
 }
 
 func sensitiveGitConfigKey(key string) bool {
+	if gitSecretPattern.MatchString(key) || strings.Contains(key, "://") && strings.Contains(strings.Split(key, "://")[1], "@") {
+		return true
+	}
 	key = strings.ToLower(key)
 	for _, marker := range []string{"authorization", "token", "password", "extraheader"} {
 		if strings.Contains(key, marker) {
@@ -459,12 +463,19 @@ func sensitiveGitConfigKey(key string) bool {
 }
 
 func sensitiveGitConfigValue(value string) bool {
-	value = strings.ToLower(value)
-	return strings.Contains(value, "authorization:") ||
-		strings.Contains(value, "bearer ") ||
-		strings.Contains(value, "token ") ||
-		strings.Contains(value, "x-access-token") ||
-		strings.Contains(value, "password")
+	lower := strings.ToLower(value)
+	if gitSecretPattern.MatchString(value) {
+		return true
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.User != nil {
+		return true
+	}
+	return strings.Contains(lower, "authorization:") ||
+		strings.Contains(lower, "bearer ") ||
+		strings.Contains(lower, "token ") ||
+		strings.Contains(lower, "x-access-token") ||
+		strings.Contains(lower, "password") ||
+		strings.Contains(lower, "credential.helper")
 }
 
 func parseNameStatus(out string) []NameStatusEntry {
