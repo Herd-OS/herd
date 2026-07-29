@@ -51,12 +51,16 @@ func (m *mockPlatform) Checks() platform.CheckService {
 
 type mockCheckService struct {
 	status        string
+	err           error
 	checkedRefs   []string
 	rerunFailedOn []string
 }
 
 func (m *mockCheckService) GetCombinedStatus(_ context.Context, ref string) (string, error) {
 	m.checkedRefs = append(m.checkedRefs, ref)
+	if m.err != nil {
+		return "", m.err
+	}
 	return m.status, nil
 }
 func (m *mockCheckService) RerunFailedChecks(_ context.Context, ref string) error {
@@ -676,6 +680,80 @@ func TestPatrolWithGit_PendingRecoverySkipsReviewWhenCheckCILockSkipped(t *testi
 	assert.Equal(t, 1, result.PendingWorkerBranchesRecovered)
 	assert.Equal(t, 1, result.PendingWorkerBranchesSkippedLocked)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
+	assert.NotContains(t, prSvc.comments[100], "/herd review")
+	assert.False(t, repoSvc.branchExists[workerBranch])
+}
+
+func TestPatrolWithGit_PendingRecoverySkipsReviewWhenCheckCIError(t *testing.T) {
+	g := setupMonitorBatchRepo(t)
+	batchBranch := "herd/batch/1-batch"
+	workerBranch := "herd/worker/43-task-b"
+	runMonitorGit(t, g.WorkDir, "checkout", "main")
+	runMonitorGit(t, g.WorkDir, "checkout", "-b", workerBranch)
+	require.NoError(t, os.WriteFile(filepath.Join(g.WorkDir, "worker43.txt"), []byte("worker 43\n"), 0644))
+	runMonitorGit(t, g.WorkDir, "add", ".")
+	runMonitorGit(t, g.WorkDir, "commit", "-m", "Complete #43")
+	runMonitorGit(t, g.WorkDir, "push", "origin", workerBranch)
+	runMonitorGit(t, g.WorkDir, "checkout", batchBranch)
+
+	ms := &platform.Milestone{Number: 1, Title: "Batch", State: "open", ClosedIssues: 2}
+	issueSvc := newMockIssueService()
+	issueSvc.listByMilestone = map[int][]*platform.Issue{
+		1: {
+			{
+				Number:    42,
+				Title:     "Task A",
+				State:     "closed",
+				Labels:    []string{issues.StatusDone},
+				Milestone: ms,
+				Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nA\n",
+			},
+			{
+				Number:    43,
+				Title:     "Task B",
+				State:     "closed",
+				Labels:    []string{issues.StatusDone, issues.IntegratorPending},
+				Milestone: ms,
+				Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nB\n",
+			},
+		},
+	}
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 100, Title: "[herd] Batch", Head: batchBranch, State: "open", CreatedAt: time.Now()},
+	}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			batchBranch:  true,
+			workerBranch: true,
+		},
+		branchSHAs: map[string]string{
+			batchBranch:  "batch-sha",
+			workerBranch: "worker-b-sha",
+		},
+	}
+	checkSvc := &mockCheckService{err: fmt.Errorf("checks API unavailable")}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      repoSvc,
+		milestones: &mockMilestoneService{
+			getResult:  map[int]*platform.Milestone{1: ms},
+			listResult: []*platform.Milestone{ms},
+		},
+		checks: checkSvc,
+	}
+
+	result, err := PatrolWithGit(context.Background(), mock, g, &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.PendingWorkerBranchesRecovered)
+	assert.Equal(t, 0, result.PendingWorkerBranchesSkippedLocked)
+	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
+	assert.Contains(t, checkSvc.checkedRefs, batchBranch)
 	assert.NotContains(t, prSvc.comments[100], "/herd review")
 	assert.False(t, repoSvc.branchExists[workerBranch])
 }

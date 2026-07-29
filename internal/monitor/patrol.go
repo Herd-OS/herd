@@ -212,6 +212,7 @@ func PatrolWithGit(ctx context.Context, p platform.Platform, g *git.Git, cfg *co
 					checkResult, err := integrator.CheckCI(ctx, p, cfg, integrator.CheckCIParams{BatchNumber: batchNumber})
 					if err != nil {
 						fmt.Printf("Warning: failed to resume CI check for PR #%d after pending worker recovery: %v\n", pr.Number, err)
+						continue
 					}
 					if checkResult != nil && checkResult.BatchLockSkipped {
 						fmt.Printf("Pending worker recovery CI resume skipped; active batch lock for PR #%d (%s): %s\n", pr.Number, pr.Head, checkResult.SkipReason)

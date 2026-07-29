@@ -1570,6 +1570,10 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		fmt.Printf("Pending worker completion published for batch #%d before PR creation side effects; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
 		return 0, nil
 	}
+	if deferWorkerSideEffects, _ := ctx.Value(workerCompletionCycleContextKey{}).(bool); deferWorkerSideEffects {
+		fmt.Printf("Worker-held batch lock for batch #%d cannot atomically create a PR; deferring batch PR open to a quiescent recovery pass.\n", ms.Number)
+		return 0, nil
+	}
 
 	pr, err := p.PullRequests().Create(ctx, title, body, batchBranch, defaultBranch)
 	if err != nil {

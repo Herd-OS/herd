@@ -774,13 +774,13 @@ func TestRunWorkerCompletionCycle_CleanAllCompleteOpensPRReviewsAndChecksCI(t *t
 	require.NotNil(t, result)
 	require.NotNil(t, result.Advance)
 	assert.True(t, result.Advance.AllComplete)
-	require.NotNil(t, result.Review)
-	require.NotNil(t, result.CheckCI)
-	assert.Equal(t, 1, ag.calls)
-	assert.True(t, result.Review.Approved)
-	assert.Equal(t, "success", result.CheckCI.Status)
-	assert.NotNil(t, prInner.created)
-	assert.False(t, result.SideEffectsDeferred)
+	assert.Equal(t, 0, result.Advance.BatchPRNumber)
+	assert.Nil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
+	assert.Equal(t, 0, ag.calls)
+	assert.Nil(t, prInner.created)
+	assert.Equal(t, 0, prInner.createCalls)
+	assert.True(t, result.SideEffectsDeferred)
 }
 
 func TestRunWorkerCompletionCycle_DrainsPendingWorkerPublishedAfterAdvanceScanBeforeOpeningPR(t *testing.T) {
@@ -878,16 +878,16 @@ func TestRunWorkerCompletionCycle_DrainsPendingWorkerPublishedAfterAdvanceScanBe
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.PendingDrained)
-	assert.False(t, result.SideEffectsDeferred)
-	require.NotNil(t, result.Review)
-	require.NotNil(t, result.CheckCI)
-	assert.Equal(t, 1, ag.calls)
-	assert.Equal(t, "success", result.CheckCI.Status)
+	assert.True(t, result.SideEffectsDeferred)
+	assert.Nil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
+	assert.Equal(t, 0, ag.calls)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-task-a")
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
-	assert.NotNil(t, prInner.created)
+	assert.Nil(t, prInner.created)
+	assert.Equal(t, 0, prInner.createCalls)
 }
 
 func TestRunWorkerCompletionCycle_DrainsPendingWorkerPublishedImmediatelyBeforePRCreation(t *testing.T) {
@@ -986,16 +986,25 @@ func TestRunWorkerCompletionCycle_DrainsPendingWorkerPublishedImmediatelyBeforeP
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.PendingDrained)
-	assert.False(t, result.SideEffectsDeferred)
-	require.NotNil(t, result.Review)
-	require.NotNil(t, result.CheckCI)
-	assert.Equal(t, 1, ag.calls)
-	assert.Equal(t, "success", result.CheckCI.Status)
-	assert.Equal(t, 1, prInner.createCalls)
-	assert.NotNil(t, prInner.created)
+	assert.True(t, result.SideEffectsDeferred)
+	assert.Nil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
+	assert.Equal(t, 0, ag.calls)
+	assert.Equal(t, 0, prInner.createCalls)
+	assert.Nil(t, prInner.created)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
+
+	issueB.Labels = []string{issues.StatusDone}
+	recovered, opened, err := RecoverStrandedCompletedBatch(context.Background(), mock, g, &config.Config{}, 1)
+	require.NoError(t, err)
+	require.NotNil(t, recovered)
+	assert.True(t, opened)
+	assert.True(t, recovered.AllComplete)
+	assert.Equal(t, 100, recovered.BatchPRNumber)
+	assert.Equal(t, 1, prInner.createCalls)
+	require.NotNil(t, prInner.created)
 }
 
 func TestRunWorkerCompletionCycle_PendingAfterHeldLockGuardSkipsPRUntilConsolidated(t *testing.T) {
@@ -1104,9 +1113,10 @@ func TestRunWorkerCompletionCycle_PendingAfterHeldLockGuardSkipsPRUntilConsolida
 	assert.True(t, result.PendingDrained)
 	require.NotNil(t, result.Advance)
 	assert.True(t, result.Advance.AllComplete)
-	assert.Equal(t, 100, result.Advance.BatchPRNumber)
-	assert.Equal(t, 1, prInner.createCalls)
-	require.NotNil(t, prInner.created)
+	assert.Equal(t, 0, result.Advance.BatchPRNumber)
+	assert.True(t, result.SideEffectsDeferred)
+	assert.Equal(t, 0, prInner.createCalls)
+	assert.Nil(t, prInner.created)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
@@ -1187,7 +1197,7 @@ func TestRunWorkerCompletionCycle_PendingBeforeReviewDefersReviewAndCI(t *testin
 			return
 		}
 		sideEffectBoundaries++
-		if lateWorkerTriggered || sideEffectBoundaries != 2 {
+		if lateWorkerTriggered || sideEffectBoundaries != 1 {
 			return
 		}
 		lateWorkerTriggered = true
@@ -1219,7 +1229,8 @@ func TestRunWorkerCompletionCycle_PendingBeforeReviewDefersReviewAndCI(t *testin
 	assert.Empty(t, prSvc.reviews)
 	assert.Empty(t, prSvc.comments)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
-	assert.True(t, repoSvc.branchExists["herd/worker/43-task-b"])
+	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
 }
 
 func TestRunWorkerCompletionCycle_PendingBeforeCheckCIDefersCI(t *testing.T) {
@@ -1298,7 +1309,7 @@ func TestRunWorkerCompletionCycle_PendingBeforeCheckCIDefersCI(t *testing.T) {
 			return
 		}
 		sideEffectBoundaries++
-		if lateWorkerTriggered || sideEffectBoundaries != 3 {
+		if lateWorkerTriggered || sideEffectBoundaries != 1 {
 			return
 		}
 		lateWorkerTriggered = true
@@ -1324,13 +1335,14 @@ func TestRunWorkerCompletionCycle_PendingBeforeCheckCIDefersCI(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.SideEffectsDeferred)
-	require.NotNil(t, result.Review)
+	assert.Nil(t, result.Review)
 	assert.Nil(t, result.CheckCI)
-	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, 0, ag.calls)
 	assert.Empty(t, wfSvc.dispatched)
 	assert.Empty(t, issueSvc.createdTitle)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
-	assert.True(t, repoSvc.branchExists["herd/worker/43-task-b"])
+	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
 }
 
 func TestRunWorkerCompletionCycle_FinalUnlockPendingOccursAfterHeldLockSideEffects(t *testing.T) {
@@ -1424,15 +1436,15 @@ func TestRunWorkerCompletionCycle_FinalUnlockPendingOccursAfterHeldLockSideEffec
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.False(t, result.SideEffectsDeferred)
-	require.NotNil(t, result.Review)
-	require.NotNil(t, result.CheckCI)
-	assert.Equal(t, 1, ag.calls)
+	assert.True(t, result.SideEffectsDeferred)
+	assert.Nil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
+	assert.Equal(t, 0, ag.calls)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-task-a")
 	assert.NotContains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
 	assert.True(t, repoSvc.branchExists["herd/worker/43-task-b"])
-	assert.NotEmpty(t, prSvc.reviews)
+	assert.Empty(t, prSvc.reviews)
 }
 
 func TestRecoverStrandedCompletedBatch_DrainsPendingWorkerBeforeOpeningPR(t *testing.T) {
