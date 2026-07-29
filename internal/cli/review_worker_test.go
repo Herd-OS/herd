@@ -131,6 +131,59 @@ func TestHostedReviewReadTokenPrefersValidatedEnvControlPlaneURL(t *testing.T) {
 	assert.True(t, calledEnvControlPlane)
 }
 
+func TestRuntimeControlPlaneURLHostedValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		envURL  string
+		cfgURL  string
+		wantURL string
+		wantErr string
+	}{
+		{
+			name:    "rejects non-local cleartext env url",
+			envURL:  "http://example.com",
+			wantErr: "must use https",
+		},
+		{
+			name:    "accepts https self hosted env url",
+			envURL:  "https://control.example.com",
+			wantURL: "https://control.example.com",
+		},
+		{
+			name:    "accepts local cleartext dev url",
+			envURL:  "http://127.0.0.1:8080",
+			wantURL: "http://127.0.0.1:8080",
+		},
+		{
+			name:    "rejects non-local cleartext config url",
+			cfgURL:  "http://example.com",
+			wantErr: "must use https",
+		},
+		{
+			name:    "accepts https config url",
+			cfgURL:  "https://herd.internal",
+			wantURL: "https://herd.internal",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HERD_CONTROL_PLANE_URL", tt.envURL)
+			cfg := &config.Config{ControlPlaneURL: tt.cfgURL}
+
+			got, err := runtimeControlPlaneURL(cfg)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantURL, got)
+		})
+	}
+}
+
 func TestGitHubActionsOIDCTokenRejectsMissingEnvironment(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")

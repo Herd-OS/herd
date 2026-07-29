@@ -1839,3 +1839,36 @@ func (g commandGitHub) AddIssueComment(ctx context.Context, owner, repo string, 
 	}
 	return comment.GetID(), nil
 }
+
+func (g commandGitHub) ListIssueComments(ctx context.Context, owner, repo string, issueNumber int) ([]commands.IssueCommentSummary, error) {
+	if g.store == nil {
+		return nil, fmt.Errorf("command GitHub repository store is not configured")
+	}
+	registered, err := g.store.GetRepository(ctx, owner, repo)
+	if err != nil {
+		return nil, fmt.Errorf("lookup repository for command acknowledgement repair: %w", err)
+	}
+	client, _, err := appauth.NewInstallationClient(ctx, g.tokenSource, registered.InstallationID)
+	if err != nil {
+		return nil, err
+	}
+	opts := &gh.IssueListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
+	var out []commands.IssueCommentSummary
+	for {
+		comments, resp, err := client.Issues.ListComments(ctx, owner, repo, issueNumber, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing acknowledgement comments for issue #%d: %w", issueNumber, err)
+		}
+		for _, comment := range comments {
+			out = append(out, commands.IssueCommentSummary{
+				ID:   comment.GetID(),
+				Body: comment.GetBody(),
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return out, nil
+}

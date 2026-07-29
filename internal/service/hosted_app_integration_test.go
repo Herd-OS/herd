@@ -423,6 +423,16 @@ func (g *hostedAppGitHub) AddIssueComment(_ context.Context, _, _ string, _ int,
 	return int64(len(g.issueComments)), nil
 }
 
+func (g *hostedAppGitHub) ListIssueComments(context.Context, string, string, int) ([]commands.IssueCommentSummary, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	comments := make([]commands.IssueCommentSummary, 0, len(g.issueComments))
+	for i, body := range g.issueComments {
+		comments = append(comments, commands.IssueCommentSummary{ID: int64(i + 1), Body: body})
+	}
+	return comments, nil
+}
+
 func (g *hostedAppGitHub) CreateCommitStatus(_ context.Context, _ int64, _, _, _ string, status platform.CommitStatus) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -67,6 +67,7 @@ func queuedIssueCommentEvent(item store.ReconcileCommand) (IssueComment, error) 
 	var metadata struct {
 		Action            string `json:"action"`
 		Raw               string `json:"raw"`
+		Prompt            string `json:"prompt"`
 		AuthorAssociation string `json:"author_association"`
 		IssueNumber       int    `json:"issue_number"`
 		PRNumber          int    `json:"pr_number"`
@@ -91,7 +92,7 @@ func queuedIssueCommentEvent(item store.ReconcileCommand) (IssueComment, error) 
 		Repo:              item.Repository.Name,
 		IssueNumber:       issueNumber,
 		CommentID:         item.Command.CommentID,
-		CommentBody:       metadata.Raw,
+		CommentBody:       queuedCommentBody(metadata.Raw, metadata.Prompt),
 		CommentAuthorType: "User",
 		SenderLogin:       item.Command.Actor,
 		AuthorAssociation: metadata.AuthorAssociation,
@@ -100,4 +101,23 @@ func queuedIssueCommentEvent(item store.ReconcileCommand) (IssueComment, error) 
 		event.PullRequestURL = fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", item.Repository.Owner, item.Repository.Name, metadata.PRNumber)
 	}
 	return event, nil
+}
+
+func queuedCommentBody(raw string, prompt string) string {
+	raw = strings.TrimRight(raw, "\r\n")
+	prompt = strings.TrimRight(prompt, "\r\n")
+	if prompt == "" || strings.Contains(raw, "\n") {
+		return raw
+	}
+	if raw == "" {
+		return prompt
+	}
+	firstLine, rest := firstNonEmptyLineWithRest(prompt)
+	if firstLine != "" && strings.HasSuffix(raw, firstLine) {
+		if strings.TrimRight(rest, "\r\n") == "" {
+			return raw
+		}
+		return raw + "\n" + strings.TrimRight(rest, "\r\n")
+	}
+	return raw + "\n" + prompt
 }

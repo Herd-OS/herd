@@ -141,13 +141,45 @@ func hostedReviewReadToken(ctx context.Context, cfg *config.Config) (string, err
 }
 
 func runtimeControlPlaneURL(cfg *config.Config) (string, error) {
+	var raw string
 	if value := strings.TrimSpace(os.Getenv("HERD_CONTROL_PLANE_URL")); value != "" {
-		return validatedEffectiveControlPlaneURL(value)
+		raw = value
+	} else if cfg == nil {
+		raw = ""
+	} else {
+		raw = cfg.EffectiveControlPlaneURL()
 	}
-	if cfg == nil {
-		return validatedEffectiveControlPlaneURL("")
+	controlPlaneURL, err := validatedEffectiveControlPlaneURL(raw)
+	if err != nil {
+		return "", err
 	}
-	return validatedEffectiveControlPlaneURL(cfg.EffectiveControlPlaneURL())
+	if err := validateHostedRuntimeControlPlaneURL(controlPlaneURL); err != nil {
+		return "", err
+	}
+	return controlPlaneURL, nil
+}
+
+func validateHostedRuntimeControlPlaneURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed == nil || parsed.Host == "" {
+		return fmt.Errorf("hosted control-plane URL is invalid")
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if parsed.Scheme == "http" && isLocalhostControlPlaneHost(parsed.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("hosted control-plane URL must use https")
+}
+
+func isLocalhostControlPlaneHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func githubActionsOIDCToken(ctx context.Context) (string, error) {

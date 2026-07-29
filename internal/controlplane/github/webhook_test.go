@@ -355,6 +355,47 @@ func TestHandlerIssueCommentCommandQueuedOnceForDuplicateDelivery(t *testing.T) 
 	assert.Len(t, store.commands, 1)
 }
 
+func TestHandlerIssueCommentEnqueueFailureRetriesOnRedelivery(t *testing.T) {
+	payload := []byte(`{
+		"action":"created",
+		"installation":{"id":42},
+		"repository":{"id":99,"name":"herd","owner":{"login":"octo-org"},"default_branch":"main"},
+		"issue":{"number":7,"pull_request":{"url":"https://api.github.com/repos/octo-org/herd/pulls/7"}},
+		"comment":{"id":123,"body":"@herd-os review","author_association":"OWNER","user":{"login":"mona","type":"User"}},
+		"sender":{"login":"mona","type":"User"}
+	}`)
+	store := &fakeStore{
+		recordCommandErrs: []error{errors.New("command storage unavailable")},
+		repositoriesByName: map[string]store.Repository{
+			"octo-org/herd": {ID: 10, Owner: "octo-org", Name: "herd", InstallationID: 42},
+		},
+	}
+	handler := NewHandler("secret", store, log.New(io.Discard, "", 0))
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-enqueue-retry")
+	req.Header.Set("X-GitHub-Event", EventIssueComment)
+	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Len(t, store.commands, 0)
+	require.Len(t, store.deliveries, 1)
+	assert.Equal(t, "failed_pre_processor", store.deliveries[0].Status)
+
+	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-enqueue-retry")
+	req.Header.Set("X-GitHub-Event", EventIssueComment)
+	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Len(t, store.commands, 1)
+	assert.Equal(t, "processed", store.deliveries[0].Status)
+}
+
 func TestHandlerIssueCommentMarkProcessedFailureDoesNotReenqueueOnRedelivery(t *testing.T) {
 	payload := []byte(`{
 		"action":"created",
@@ -471,6 +512,7 @@ type fakeStore struct {
 	upsertRepoErr       error
 	upsertRepoErrs      []error
 	failProcessedUpdate bool
+	recordCommandErrs   []error
 
 	deliveries    []store.WebhookDelivery
 	installations []store.Installation
@@ -597,6 +639,13 @@ func (s *fakeStore) GetRepository(_ context.Context, owner string, name string) 
 }
 
 func (s *fakeStore) RecordCommand(_ context.Context, c store.CommandRecord) (bool, error) {
+	if len(s.recordCommandErrs) > 0 {
+		err := s.recordCommandErrs[0]
+		s.recordCommandErrs = s.recordCommandErrs[1:]
+		if err != nil {
+			return false, err
+		}
+	}
 	for _, existing := range s.commands {
 		if existing.RepositoryID == c.RepositoryID && existing.CommentID == c.CommentID && existing.CommandKey == c.CommandKey {
 			return false, nil

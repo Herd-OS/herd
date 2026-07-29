@@ -158,6 +158,71 @@ func TestQueueProcessorProcessesQueuedCommandOnce(t *testing.T) {
 	assert.Equal(t, "dispatched", record.Status)
 }
 
+func TestQueueProcessorReplaysMultilinePrompt(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		kind       CommandKind
+		wantPrompt string
+	}{
+		{
+			name:       "fix",
+			body:       "@herd-os fix\nplease update auth handling\ninclude regression tests",
+			kind:       CommandFix,
+			wantPrompt: "please update auth handling\ninclude regression tests",
+		},
+		{
+			name:       "fix ci",
+			body:       "@herd-os fix-ci\nplease inspect the failing job\nkeep the retry idempotent",
+			kind:       CommandFixCI,
+			wantPrompt: "please inspect the failing job\nkeep the retry idempotent",
+		},
+		{
+			name:       "review",
+			body:       "@herd-os review\nfocus on callback retry safety\ninclude command queue paths",
+			kind:       CommandReview,
+			wantPrompt: "focus on callback retry safety\ninclude command queue paths",
+		},
+		{
+			name:       "same line plus multiline",
+			body:       "@herd-os fix auth handling\ninclude regression tests",
+			kind:       CommandFix,
+			wantPrompt: "auth handling\ninclude regression tests",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := store.NewMemoryStore()
+			_, err := st.UpsertRepository(ctx, store.Repository{InstallationID: 77, Owner: "octo-org", Name: "herd"})
+			require.NoError(t, err)
+			event := validComment("OWNER", tt.body)
+			require.NoError(t, EnqueueIssueCommentCommand(ctx, st, "herd-os", event))
+			dispatcher := &fakeDispatcher{}
+			processor := QueueProcessor{
+				Store: st,
+				Handler: Handler{
+					AppLogin:   "herd-os",
+					Store:      st,
+					GitHub:     &fakeGitHub{},
+					Dispatcher: dispatcher,
+				},
+				Now: func() time.Time { return time.Now().UTC().Add(time.Hour) },
+			}
+
+			processed, err := processor.ProcessOnce(ctx)
+
+			require.NoError(t, err)
+			assert.Equal(t, 1, processed)
+			require.Len(t, dispatcher.dispatched, 1)
+			assert.Equal(t, tt.kind, dispatcher.dispatched[0].Command.Kind)
+			assert.Equal(t, strings.Split(tt.body, "\n")[0], dispatcher.dispatched[0].Command.Raw)
+			assert.Equal(t, tt.wantPrompt, dispatcher.dispatched[0].Command.Prompt)
+		})
+	}
+}
+
 func TestQueueProcessorReplaysAcknowledgedCommandWithCompletedAckIdempotency(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()
@@ -613,15 +678,15 @@ func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "add acknowledgement comment")
-	require.Error(t, retryErr)
-	assert.Contains(t, retryErr.Error(), "outcome is unknown")
+	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
-	assert.Empty(t, dispatcher.dispatched)
+	assert.Len(t, dispatcher.dispatched, 1)
 	key := "repo:42:comment:123:command:review"
-	require.Equal(t, "repair_required", st.idempotencyKeys[key].Status)
-	assert.Contains(t, st.idempotencyKeys[key].ResultRef, "github down")
+	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
-	assert.JSONEq(t, `{"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
+	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
 func TestHandlerAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing.T) {
@@ -650,7 +715,7 @@ func TestHandlerAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing
 
 func TestHandlerAcknowledgementRecordAndFallbackCompletionFailureDoesNotAckAgain(t *testing.T) {
 	st := newFakeStore()
-	st.updateErrs = []error{errors.New("store down")}
+	st.updateErrs = []error{errors.New("store down"), nil}
 	st.completeErrs = []error{errors.New("idempotency down")}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
@@ -659,15 +724,18 @@ func TestHandlerAcknowledgementRecordAndFallbackCompletionFailureDoesNotAckAgain
 
 	_, err := h.HandleIssueComment(context.Background(), event)
 	_, retryErr := h.HandleIssueComment(context.Background(), event)
+	_, finalErr := h.HandleIssueComment(context.Background(), event)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "record acknowledgement comment")
+	assert.Contains(t, err.Error(), "complete idempotency key")
 	require.Error(t, retryErr)
-	assert.Contains(t, retryErr.Error(), "repair required")
+	assert.Contains(t, retryErr.Error(), "record acknowledgement comment")
+	require.NoError(t, finalErr)
 	assert.Len(t, gh.comments, 1)
-	assert.Empty(t, dispatcher.dispatched)
+	assert.Len(t, dispatcher.dispatched, 1)
 	key := "repo:42:comment:123:command:review"
-	require.Equal(t, "call_started", st.idempotencyKeys[key].Status)
+	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
 }
 
 func TestHandlerAcknowledgementCompletionFailureRedeliveryDoesNotAckAgain(t *testing.T) {
@@ -683,7 +751,7 @@ func TestHandlerAcknowledgementCompletionFailureRedeliveryDoesNotAckAgain(t *tes
 	_, retryErr := h.HandleIssueComment(context.Background(), event)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "record acknowledgement intent")
+	assert.Contains(t, err.Error(), "complete idempotency key")
 	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
 	assert.Empty(t, dispatcher.dispatched)
@@ -738,7 +806,7 @@ func TestHandlerRecordFailureRetryPostsOneAcknowledgement(t *testing.T) {
 
 func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t *testing.T) {
 	st := newFakeStore()
-	st.updateErrs = []error{nil, nil, errors.New("store down"), nil}
+	st.updateErrs = []error{nil, errors.New("store down"), nil}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
@@ -760,7 +828,7 @@ func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t 
 
 func TestHandlerDispatchStatusAndFallbackFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
 	st := newFakeStore()
-	st.updateErrs = []error{nil, nil, errors.New("store down")}
+	st.updateErrs = []error{nil, errors.New("store down")}
 	st.completeErrs = []error{nil, errors.New("idempotency down")}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
@@ -850,7 +918,7 @@ func TestHandlerStoreAndGitHubFailures(t *testing.T) {
 			body:    "@herd-os dispatch",
 			store:   func() *fakeStore { s := newFakeStore(); s.completeErr = errors.New("down"); return s }(),
 			github:  &fakeGitHub{},
-			wantErr: "record acknowledgement intent",
+			wantErr: "complete idempotency key",
 		},
 	}
 
@@ -891,8 +959,9 @@ type fakeStore struct {
 	completeErrs []error
 	updateErrs   []error
 
-	idempotencyKeys map[string]store.IdempotencyKey
-	commandRecords  []store.CommandRecord
+	idempotencyKeys  map[string]store.IdempotencyKey
+	mutationAttempts map[string]store.GitHubMutationAttempt
+	commandRecords   []store.CommandRecord
 }
 
 func newFakeStore() *fakeStore {
@@ -903,7 +972,8 @@ func newFakeStore() *fakeStore {
 			Owner:          "octo-org",
 			Name:           "herd",
 		},
-		idempotencyKeys: map[string]store.IdempotencyKey{},
+		idempotencyKeys:  map[string]store.IdempotencyKey{},
+		mutationAttempts: map[string]store.GitHubMutationAttempt{},
 	}
 }
 
@@ -984,6 +1054,51 @@ func (s *fakeStore) TryStartIdempotencyKey(_ context.Context, key string, toStat
 	record.ResultRef = resultRef
 	s.idempotencyKeys[key] = record
 	return store.IdempotencyStartResult{Started: true, Record: record}, nil
+}
+
+func (s *fakeStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHubMutationAttempt) error {
+	if _, ok := s.mutationAttempts[a.IdempotencyKey]; ok {
+		return store.ErrAlreadyExists
+	}
+	s.mutationAttempts[a.IdempotencyKey] = a
+	return nil
+}
+
+func (s *fakeStore) GetGitHubMutationAttempt(_ context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error) {
+	attempt, ok := s.mutationAttempts[idempotencyKey]
+	if !ok {
+		return store.GitHubMutationAttempt{}, store.ErrNotFound
+	}
+	return attempt, nil
+}
+
+func (s *fakeStore) CompleteGitHubMutationAttempt(_ context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error {
+	attempt, ok := s.mutationAttempts[idempotencyKey]
+	if !ok {
+		return store.ErrNotFound
+	}
+	attempt.Status = status
+	attempt.Response = response
+	attempt.Error = errorMessage
+	attempt.CompletedAt = &completedAt
+	s.mutationAttempts[idempotencyKey] = attempt
+	return nil
+}
+
+func (s *fakeStore) TryStartGitHubMutationAttempt(_ context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error) {
+	attempt, ok := s.mutationAttempts[idempotencyKey]
+	if !ok {
+		return store.GitHubMutationStartResult{}, store.ErrNotFound
+	}
+	for _, status := range allowedStatuses {
+		if attempt.Status == status {
+			attempt.Status = mutations.PhaseCallStarted
+			attempt.CompletedAt = &completedAt
+			s.mutationAttempts[idempotencyKey] = attempt
+			return store.GitHubMutationStartResult{Started: true, Attempt: attempt}, nil
+		}
+	}
+	return store.GitHubMutationStartResult{Started: false, Attempt: attempt}, nil
 }
 
 func commandIdempotencyFailureStatus(errorMessage string) (string, string) {
@@ -1074,6 +1189,16 @@ func (g *fakeGitHub) AddIssueComment(_ context.Context, owner, repo string, issu
 	}
 	g.comments = append(g.comments, fakeComment{owner: owner, repo: repo, issueNumber: issueNumber, body: body})
 	return int64(1000 + len(g.comments)), nil
+}
+
+func (g *fakeGitHub) ListIssueComments(_ context.Context, owner, repo string, issueNumber int) ([]IssueCommentSummary, error) {
+	var out []IssueCommentSummary
+	for i, comment := range g.comments {
+		if comment.owner == owner && comment.repo == repo && comment.issueNumber == issueNumber {
+			out = append(out, IssueCommentSummary{ID: int64(1001 + i), Body: comment.body})
+		}
+	}
+	return out, nil
 }
 
 type fakeDispatcher struct {

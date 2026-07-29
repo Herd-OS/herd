@@ -232,7 +232,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := h.processEvent(r.Context(), event); err != nil {
 		h.logger.Printf("process GitHub webhook delivery=%s event=%s action=%s: %v", deliveryID, eventName, action, err)
 		status := "repair_required"
-		if eventHasOnlyIdempotentStoreUpserts(event) {
+		if eventHasRetryablePreProcessorSideEffects(event) {
 			status = "failed_pre_processor"
 		}
 		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, status, err.Error(), nil)
@@ -257,9 +257,9 @@ func (h Handler) markDeliveryProcessed(ctx context.Context, deliveryID string) e
 	return h.store.UpdateWebhookDeliveryStatus(ctx, deliveryID, "processed", "", &now)
 }
 
-func eventHasOnlyIdempotentStoreUpserts(event Event) bool {
+func eventHasRetryablePreProcessorSideEffects(event Event) bool {
 	switch event.(type) {
-	case InstallationEvent, InstallationRepositoriesEvent:
+	case InstallationEvent, InstallationRepositoriesEvent, IssueCommentEvent:
 		return true
 	default:
 		return false

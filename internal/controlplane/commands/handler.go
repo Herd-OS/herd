@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 )
@@ -23,10 +24,15 @@ type Store interface {
 	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
 	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
 	UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error
 	TryStartIdempotencyKey(ctx context.Context, key string, toStatus string, resultRef string, retryableFailedPrefix string) (store.IdempotencyStartResult, error)
+	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
+	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
+	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
 }
 
 type IdempotencyFailureStore interface {
@@ -40,6 +46,12 @@ type QueueStore interface {
 
 type AppGitHub interface {
 	AddIssueComment(ctx context.Context, owner, repo string, issueNumber int, body string) (commentID int64, err error)
+	ListIssueComments(ctx context.Context, owner, repo string, issueNumber int) ([]IssueCommentSummary, error)
+}
+
+type IssueCommentSummary struct {
+	ID   int64
+	Body string
 }
 
 type CommandDispatcher interface {
@@ -181,9 +193,6 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 	if dispatchPending && dispatchable {
 		if h.Dispatcher == nil {
 			return Result{}, fmt.Errorf("command dispatcher is not configured")
-		}
-		if err := h.markCommandDispatching(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
-			return Result{}, err
 		}
 		if err := h.Dispatcher.DispatchCommand(ctx, DispatchCommand{
 			RepositoryID:   repo.ID,
@@ -426,30 +435,58 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 }
 
 func (h Handler) addAcknowledgement(ctx context.Context, repo store.Repository, event IssueComment, commandKey, ackBody, idempotencyKey string, metadata json.RawMessage, dispatchable bool) (store.Repository, bool, string, json.RawMessage, error) {
-	start, err := h.Store.TryStartIdempotencyKey(ctx, idempotencyKey, mutations.PhaseCallStarted, mutations.PhaseCallStarted, mutations.PhaseFailedPreCall+":")
+	req, err := json.Marshal(map[string]any{
+		"owner":        event.Owner,
+		"repo":         event.Repo,
+		"issue_number": event.IssueNumber,
+		"comment_id":   event.CommentID,
+		"command_key":  commandKey,
+		"body":         ackBody,
+	})
 	if err != nil {
-		return store.Repository{}, false, "", nil, fmt.Errorf("mark acknowledgement call started: %w", err)
+		return store.Repository{}, false, "", nil, fmt.Errorf("marshal acknowledgement mutation request: %w", err)
 	}
-	if !start.Started && !mutations.IsPreCallRetryable(start.Record.Status) {
-		return store.Repository{}, false, "", nil, fmt.Errorf("command acknowledgement %q outcome is unknown after started acknowledgement attempt; repair required", idempotencyKey)
-	}
-	ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)
+	result, err := mutationguard.Run(ctx, h.Store, mutationguard.RunRequest{
+		Key:          idempotencyKey,
+		RepositoryID: repo.ID,
+		MutationType: "issue_comment_acknowledgement",
+		Request:      req,
+		Mutate: func() (string, error) {
+			ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("issue_comment:%d", ackID), nil
+		},
+		Repair: func() (string, bool, error) {
+			return h.repairAcknowledgement(ctx, event, ackBody)
+		},
+	})
 	if err != nil {
-		if failures, ok := h.Store.(IdempotencyFailureStore); ok {
-			_ = failures.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseRepairRequired+":"+err.Error())
-		}
 		return store.Repository{}, false, "", nil, fmt.Errorf("add acknowledgement comment: %w", err)
 	}
+	ackID, ok := parseAckResultRef(result.ResultRef)
+	if !ok {
+		return store.Repository{}, false, "", nil, fmt.Errorf("add acknowledgement comment: invalid result %q", result.ResultRef)
+	}
 	ackMetadata := commandMetadataWithAck(metadata, ackID)
-	ackResultRef := fmt.Sprintf("issue_comment:%d", ackID)
 	if err := h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata); err != nil {
-		_ = h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef)
 		return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement comment: %w", err)
 	}
-	if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, ackResultRef); err != nil {
-		return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement intent: %w", err)
-	}
 	return repo, dispatchable, idempotencyKey, ackMetadata, nil
+}
+
+func (h Handler) repairAcknowledgement(ctx context.Context, event IssueComment, ackBody string) (string, bool, error) {
+	comments, err := h.GitHub.ListIssueComments(ctx, event.Owner, event.Repo, event.IssueNumber)
+	if err != nil {
+		return "", false, fmt.Errorf("list issue comments for acknowledgement repair: %w", err)
+	}
+	for _, comment := range comments {
+		if strings.TrimSpace(comment.Body) == strings.TrimSpace(ackBody) && comment.ID > 0 {
+			return fmt.Sprintf("issue_comment:%d", comment.ID), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func commandMetadataWithAck(metadata json.RawMessage, ackID int64) json.RawMessage {
@@ -487,13 +524,6 @@ func parseAckResultRef(resultRef string) (int64, bool) {
 func (h Handler) markCommandDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
 	if err := h.Store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "dispatched", metadata); err != nil {
 		return fmt.Errorf("mark command dispatched: %w", err)
-	}
-	return nil
-}
-
-func (h Handler) markCommandDispatching(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
-	if err := h.Store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "dispatching", metadata); err != nil {
-		return fmt.Errorf("mark command dispatching: %w", err)
 	}
 	return nil
 }
