@@ -128,27 +128,28 @@ func runInitWithOptions(opts initOptions) error {
 		return err
 	}
 
+	cfg := existingConfig
+
 	// 2. Create config
 	if !configExists {
-		cfg := config.Default()
+		cfg = *config.Default()
 		cfg.Platform.Owner = owner
 		cfg.Platform.Repo = repo
 		if isSelfHostedControlPlane(opts.ControlPlaneURL) {
 			cfg.ControlPlaneURL = opts.ControlPlaneURL
 		}
-		if err := config.Save(dir, cfg); err != nil {
+		if err := config.Save(dir, &cfg); err != nil {
 			return fmt.Errorf("creating config: %w", err)
 		}
 		fmt.Println(display.Success("Created " + config.ConfigFile))
 	} else {
-		persistedConfig := existingConfig
 		nextControlPlaneURL := ""
 		if isSelfHostedControlPlane(opts.ControlPlaneURL) {
 			nextControlPlaneURL = opts.ControlPlaneURL
 		}
-		if persistedConfig.ControlPlaneURL != nextControlPlaneURL {
-			persistedConfig.ControlPlaneURL = nextControlPlaneURL
-			if err := config.Save(dir, &persistedConfig); err != nil {
+		if cfg.ControlPlaneURL != nextControlPlaneURL {
+			cfg.ControlPlaneURL = nextControlPlaneURL
+			if err := config.Save(dir, &cfg); err != nil {
 				return fmt.Errorf("updating config: %w", err)
 			}
 		}
@@ -157,7 +158,7 @@ func runInitWithOptions(opts initOptions) error {
 
 	// Load the (possibly user-edited) config so workflow rendering picks up
 	// fields like workers.extra_env.
-	cfg, err := config.Load(dir)
+	renderConfig, err := config.Load(dir)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
@@ -189,7 +190,7 @@ func runInitWithOptions(opts initOptions) error {
 
 	// 5. Install workflow files
 	if !opts.SkipWorkflows {
-		if err := installWorkflows(dir, cfg); err != nil {
+		if err := installWorkflows(dir, renderConfig); err != nil {
 			return err
 		}
 	} else {

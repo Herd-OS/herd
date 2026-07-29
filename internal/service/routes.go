@@ -16,9 +16,6 @@ import (
 func registerAPIRoutes(mux *http.ServeMux, cfg Config, deps Dependencies) error {
 	productionLike := cfg.Env == "production" || cfg.Env == "staging"
 	webhookOptions := []cpgithub.Option{cpgithub.WithAppLogin(cfg.AppLogin)}
-	if deps.IssueCommentCommandHandler != nil {
-		webhookOptions = append(webhookOptions, cpgithub.WithIssueCommentCommandHandler(deps.IssueCommentCommandHandler))
-	}
 	if strings.TrimSpace(cfg.WebhookSecret) == "" {
 		if productionLike {
 			return fmt.Errorf("webhook secret is not configured")

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -123,7 +124,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 		RegisterRepositoryRoute:      registerRoute,
 		RunnerRegistrationTokenRoute: runnerRoute,
 		JobResultsRoute:              jobResultsRoute,
-		IssueCommentCommandHandler:   commandHandler,
+		IssueCommentCommandHandler:   hostedAppInlineCommanderGuard{},
 	})
 	require.NoError(t, err)
 
@@ -237,6 +238,12 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 	staleWorkerPayload["base_sha"] = "old-base"
 	_ = postJobResult(t, handler, workerJobID, staleWorkerPayload, http.StatusConflict)
 	assert.Len(t, patcher.requests, 1, "stale worker base must be rejected before patch application")
+}
+
+type hostedAppInlineCommanderGuard struct{}
+
+func (hostedAppInlineCommanderGuard) HandleIssueComment(context.Context, commands.IssueComment) (commands.Result, error) {
+	return commands.Result{}, errors.New("webhook ingress must not execute issue-comment commands inline")
 }
 
 func persistWorkflowRunID(t *testing.T, ctx context.Context, st *store.MemoryStore, jobID string, runID string, now time.Time) {

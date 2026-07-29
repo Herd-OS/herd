@@ -55,9 +55,20 @@ func TestSubmitReviewResultSetsStatusesAndReviews(t *testing.T) {
 	}
 }
 
-func TestSubmitReviewResultStaleApprovedCallbackCannotMarkNewerHeadSuccess(t *testing.T) {
+func TestSubmitReviewResultStaleApprovedCallbackDoesNotMutateNewerHeadStatus(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "new-head", URL: "https://github.test/pr/42"}}
-	statusGH := &fakeStatusGitHub{}
+	statusGH := &fakeStatusGitHub{statuses: []capturedStatus{{
+		installationID: 99,
+		owner:          "octo",
+		repo:           "widgets",
+		sha:            "new-head",
+		status: platform.CommitStatus{
+			State:       string(ReviewStatusSuccess),
+			Context:     HerdReviewContext,
+			Description: "Herd Review approved",
+			TargetURL:   "https://example.test/current",
+		},
+	}}}
 	locks := newFakeLockStore()
 	repo := testRepo(true)
 	locks.locks[lockKey(repo.ID, 42, "old-head")] = store.ReviewLock{
@@ -82,7 +93,8 @@ func TestSubmitReviewResultStaleApprovedCallbackCannotMarkNewerHeadSuccess(t *te
 	assert.Empty(t, gh.reviews)
 	require.Len(t, statusGH.statuses, 1)
 	assert.Equal(t, "new-head", statusGH.statuses[0].sha)
-	assert.Equal(t, "pending", statusGH.statuses[0].status.State)
+	assert.Equal(t, "success", statusGH.statuses[0].status.State)
+	assert.Equal(t, "https://example.test/current", statusGH.statuses[0].status.TargetURL)
 	assert.NotContains(t, locks.locks, lockKey(repo.ID, 42, "old-head"))
 	assert.Contains(t, locks.locks, lockKey(repo.ID, 42, "new-head"))
 }

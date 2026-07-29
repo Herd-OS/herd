@@ -231,7 +231,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.processEvent(r.Context(), event); err != nil {
 		h.logger.Printf("process GitHub webhook delivery=%s event=%s action=%s: %v", deliveryID, eventName, action, err)
-		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "repair_required", err.Error(), nil)
+		status := "repair_required"
+		if eventHasOnlyIdempotentStoreUpserts(event) {
+			status = "failed_pre_processor"
+		}
+		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, status, err.Error(), nil)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "process webhook event: storage unavailable",
 		})
@@ -251,6 +255,15 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h Handler) markDeliveryProcessed(ctx context.Context, deliveryID string) error {
 	now := time.Now().UTC()
 	return h.store.UpdateWebhookDeliveryStatus(ctx, deliveryID, "processed", "", &now)
+}
+
+func eventHasOnlyIdempotentStoreUpserts(event Event) bool {
+	switch event.(type) {
+	case InstallationEvent, InstallationRepositoriesEvent:
+		return true
+	default:
+		return false
+	}
 }
 
 func (h Handler) processEvent(ctx context.Context, event Event) error {

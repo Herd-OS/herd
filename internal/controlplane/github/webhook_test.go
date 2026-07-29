@@ -415,21 +415,22 @@ func TestHandlerUpsertFailureReturnsServerError(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Len(t, store.deliveries, 1)
-	assert.Equal(t, "repair_required", store.deliveries[0].Status)
+	assert.Equal(t, "failed_pre_processor", store.deliveries[0].Status)
 }
 
-func TestHandlerDoesNotRetryProcessorStartedDeliveryOnRedelivery(t *testing.T) {
+func TestHandlerRetriesInstallationRepositoriesUpsertFailureOnRedelivery(t *testing.T) {
 	payload := []byte(`{
-		"action":"created",
+		"action":"added",
 		"installation":{"id":42,"account":{"login":"octo-org","id":100,"type":"Organization"}},
-		"repositories":[{"id":99,"name":"herd","owner":{"login":"octo-org"}}]
+		"repository_selection":"selected",
+		"repositories_added":[{"id":99,"name":"herd","owner":{"login":"octo-org"},"default_branch":"main"}]
 	}`)
-	store := &fakeStore{upsertRepoErr: errors.New("database unavailable")}
+	store := &fakeStore{upsertRepoErrs: []error{errors.New("database unavailable")}}
 	handler := NewHandler("secret", store, log.New(io.Discard, "", 0))
 
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
 	req.Header.Set("X-GitHub-Delivery", "delivery-redeliver-after-failure")
-	req.Header.Set("X-GitHub-Event", EventInstallation)
+	req.Header.Set("X-GitHub-Event", EventInstallationRepositories)
 	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -437,20 +438,20 @@ func TestHandlerDoesNotRetryProcessorStartedDeliveryOnRedelivery(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Len(t, store.repositories, 0)
 	require.Len(t, store.deliveries, 1)
-	assert.Equal(t, "repair_required", store.deliveries[0].Status)
+	assert.Equal(t, "failed_pre_processor", store.deliveries[0].Status)
 
-	store.upsertRepoErr = nil
 	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
 	req.Header.Set("X-GitHub-Delivery", "delivery-redeliver-after-failure")
-	req.Header.Set("X-GitHub-Event", EventInstallation)
+	req.Header.Set("X-GitHub-Event", EventInstallationRepositories)
 	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusConflict, rec.Code)
-	require.Len(t, store.repositories, 0)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Len(t, store.repositories, 1)
+	assert.Equal(t, "herd", store.repositories[0].Name)
 	require.Len(t, store.deliveries, 1)
-	assert.Equal(t, "repair_required", store.deliveries[0].Status)
+	assert.Equal(t, "processed", store.deliveries[0].Status)
 }
 
 func sign(secret string, payload []byte) string {
@@ -468,6 +469,7 @@ type fakeStore struct {
 	recordErr           error
 	upsertInstErr       error
 	upsertRepoErr       error
+	upsertRepoErrs      []error
 	failProcessedUpdate bool
 
 	deliveries    []store.WebhookDelivery
@@ -545,13 +547,36 @@ func (s *fakeStore) UpsertInstallation(_ context.Context, i store.Installation) 
 	if s.upsertInstErr != nil {
 		return s.upsertInstErr
 	}
+	for idx, existing := range s.installations {
+		if existing.ID == i.ID {
+			s.installations[idx] = i
+			return nil
+		}
+	}
 	s.installations = append(s.installations, i)
 	return nil
 }
 
 func (s *fakeStore) UpsertRepository(_ context.Context, r store.Repository) (store.Repository, error) {
+	if len(s.upsertRepoErrs) > 0 {
+		err := s.upsertRepoErrs[0]
+		s.upsertRepoErrs = s.upsertRepoErrs[1:]
+		if err != nil {
+			return store.Repository{}, err
+		}
+	}
 	if s.upsertRepoErr != nil {
 		return store.Repository{}, s.upsertRepoErr
+	}
+	for idx, existing := range s.repositories {
+		if existing.GitHubID == r.GitHubID && r.GitHubID != 0 {
+			s.repositories[idx] = r
+			return r, nil
+		}
+		if existing.Owner == r.Owner && existing.Name == r.Name {
+			s.repositories[idx] = r
+			return r, nil
+		}
 	}
 	s.repositories = append(s.repositories, r)
 	return r, nil

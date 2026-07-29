@@ -216,7 +216,7 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 	}
 	defer s.releaseReviewLock(ctx, repo, result.PRNumber, result.HeadSHA)
 	if current.HeadSHA != "" && current.HeadSHA != result.HeadSHA {
-		return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, current.HeadSHA, ReviewStatusPending, "Herd Review pending for the latest PR head", targetURL(result, current.URL))
+		return nil
 	}
 
 	if result.Status == ResultStatusChangesRequested && repo.ReviewFixEnabled && s.Fixes != nil {
