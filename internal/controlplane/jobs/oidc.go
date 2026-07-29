@@ -102,7 +102,7 @@ func ValidateOIDCClaims(claims OIDCClaims, expected ExpectedOIDCIdentity, opts O
 	if expectedRef != "" && claims.Ref != expectedRef {
 		return fmt.Errorf("invalid OIDC ref")
 	}
-	if expected.Workflow != "" && !workflowMatches(claims, expected.Workflow) {
+	if expected.Workflow != "" && !workflowMatches(claims, expected) {
 		return fmt.Errorf("invalid OIDC workflow")
 	}
 	if expected.RunID != "" && claims.RunID != expected.RunID {
@@ -400,14 +400,23 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func workflowMatches(claims OIDCClaims, expected string) bool {
-	expected = normalizeExpectedWorkflow(expected)
-	expectedFile := strings.TrimPrefix(expected, ".github/workflows/")
-	refFile, ok := workflowFileFromRef(claims.WorkflowRef)
+func workflowMatches(claims OIDCClaims, expected ExpectedOIDCIdentity) bool {
+	expectedWorkflow := normalizeExpectedWorkflow(expected.Workflow)
+	expectedFile := strings.TrimPrefix(expectedWorkflow, ".github/workflows/")
+	expectedRef := normalizeExpectedRef(expected.Ref)
+	if expectedRef == "" {
+		// Some endpoints derive the expected workflow from the operation
+		// rather than a durable job. In that case both values are still signed:
+		// bind workflow_ref's definition ref to the token's ref claim.
+		expectedRef = claims.Ref
+	}
+	refRepository, refFile, ref, ok := workflowIdentityFromRef(claims.WorkflowRef)
 	if !ok {
 		return false
 	}
-	return refFile == expected || refFile == expectedFile
+	return refRepository == expected.Repository &&
+		ref == expectedRef &&
+		(refFile == expectedWorkflow || refFile == expectedFile)
 }
 
 func normalizeExpectedWorkflow(workflow string) string {
@@ -419,15 +428,21 @@ func normalizeExpectedWorkflow(workflow string) string {
 }
 
 func workflowFileFromRef(workflowRef string) (string, bool) {
-	beforeRef, _, ok := strings.Cut(workflowRef, "@")
+	_, file, _, ok := workflowIdentityFromRef(workflowRef)
+	return file, ok
+}
+
+func workflowIdentityFromRef(workflowRef string) (string, string, string, bool) {
+	beforeRef, ref, ok := strings.Cut(strings.TrimSpace(workflowRef), "@")
 	if !ok {
-		return "", false
+		return "", "", "", false
 	}
-	_, file, ok := strings.Cut(beforeRef, "/.github/workflows/")
-	if !ok || file == "" || strings.Contains(file, "/") {
-		return "", false
+	repository, file, ok := strings.Cut(beforeRef, "/.github/workflows/")
+	if !ok || repository == "" || strings.Count(repository, "/") != 1 ||
+		file == "" || strings.Contains(file, "/") || strings.TrimSpace(ref) == "" {
+		return "", "", "", false
 	}
-	return file, true
+	return repository, file, ref, true
 }
 
 func firstMetadataString(metadata map[string]any, keys ...string) string {

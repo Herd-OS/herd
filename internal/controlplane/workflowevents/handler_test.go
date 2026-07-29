@@ -498,6 +498,7 @@ func TestHandlerSameWorkflowRunAcrossRepositoriesDoesNotCollide(t *testing.T) {
 		Validator: fixedValidator(func() jobs.OIDCClaims {
 			claims := validEventClaims(now)
 			claims.Repository = "acme/herd"
+			claims.WorkflowRef = "acme/herd/.github/workflows/herd-integrator.yml@refs/heads/main"
 			return claims
 		}()),
 		Audience:  "herd-control-plane",

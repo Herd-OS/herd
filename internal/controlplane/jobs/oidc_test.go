@@ -457,6 +457,91 @@ func TestValidateOIDCClaimsRejectsWorkflowNameWithWrongWorkflowRef(t *testing.T)
 	assert.Contains(t, err.Error(), "invalid OIDC workflow")
 }
 
+func TestValidateOIDCClaimsBindsWorkflowRefIdentity(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	base := OIDCClaims{
+		Issuer:      GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "acme/widgets",
+		Ref:         "refs/heads/main",
+		Workflow:    "herd-worker.yml",
+		WorkflowRef: "acme/widgets/.github/workflows/herd-worker.yml@refs/heads/main",
+		RunID:       "123",
+		ExpiresAt:   now.Add(time.Hour),
+	}
+	expected := ExpectedOIDCIdentity{
+		Repository: "acme/widgets",
+		Ref:        "refs/heads/main",
+		Workflow:   ".github/workflows/herd-worker.yml",
+		RunID:      "123",
+	}
+	tests := []struct {
+		name        string
+		workflowRef string
+		wantError   bool
+	}{
+		{name: "valid full identity", workflowRef: base.WorkflowRef},
+		{name: "other repository", workflowRef: "other/widgets/.github/workflows/herd-worker.yml@refs/heads/main", wantError: true},
+		{name: "other definition ref", workflowRef: "acme/widgets/.github/workflows/herd-worker.yml@refs/heads/other", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claims := base
+			claims.WorkflowRef = tt.workflowRef
+
+			err := ValidateOIDCClaims(claims, expected, OIDCOptions{Now: func() time.Time { return now }})
+
+			if tt.wantError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid OIDC workflow")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateOIDCClaimsBindsWorkflowRefToSignedRefWithoutDurableRef(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	base := OIDCClaims{
+		Issuer:      GitHubActionsIssuer,
+		Audience:    []string{"herd-control-plane"},
+		Repository:  "acme/widgets",
+		Ref:         "refs/heads/main",
+		Workflow:    "herd-worker.yml",
+		WorkflowRef: "acme/widgets/.github/workflows/herd-worker.yml@refs/heads/main",
+		RunID:       "123",
+		ExpiresAt:   now.Add(time.Hour),
+	}
+	expected := ExpectedOIDCIdentity{
+		Repository: "acme/widgets",
+		Workflow:   ".github/workflows/herd-worker.yml",
+	}
+	tests := []struct {
+		name        string
+		workflowRef string
+		wantError   bool
+	}{
+		{name: "matching signed ref", workflowRef: base.WorkflowRef},
+		{name: "different workflow definition ref", workflowRef: "acme/widgets/.github/workflows/herd-worker.yml@refs/heads/other", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claims := base
+			claims.WorkflowRef = tt.workflowRef
+
+			err := ValidateOIDCClaims(claims, expected, OIDCOptions{Now: func() time.Time { return now }})
+
+			if tt.wantError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid OIDC workflow")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestValidateOIDCClaimsRejectsWrongIdentityFields(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	base := OIDCClaims{

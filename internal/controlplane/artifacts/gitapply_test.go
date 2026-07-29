@@ -125,36 +125,50 @@ func TestApplyTrustedAuthenticatedCloneErrorRedactsInstallationToken(t *testing.
 }
 
 func TestApplyRejectsUntrustedAuthenticatedCloneBeforeTokenMint(t *testing.T) {
-	root := t.TempDir()
-	source := &countingTokenSource{token: "ghs_secret_installation_token"}
-	_, err := Apply(context.Background(), ApplyRequest{
-		Repository:      "acme/widgets",
-		CloneURL:        "https://example.invalid/acme/widgets.git",
-		InstallationID:  123,
-		TargetBranch:    "main",
-		BaseSHA:         "base",
-		ExpectedHeadSHA: "base",
-		Artifact: ValidatedArtifact{
-			Metadata: PatchMetadata{
+	tests := []struct {
+		name     string
+		cloneURL string
+	}{
+		{name: "other HTTPS host", cloneURL: "https://example.invalid/acme/widgets.git"},
+		{name: "local path", cloneURL: "/tmp/acme-widgets.git"},
+		{name: "file URL", cloneURL: "file:///tmp/acme-widgets.git"},
+		{name: "HTTP URL", cloneURL: "http://github.com/acme/widgets.git"},
+		{name: "SSH URL", cloneURL: "git@github.com:acme/widgets.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := &countingTokenSource{token: "ghs_secret_installation_token"}
+			_, err := Apply(context.Background(), ApplyRequest{
 				Repository:      "acme/widgets",
-				JobID:           "job-1",
+				CloneURL:        tt.cloneURL,
+				InstallationID:  123,
+				TargetBranch:    "main",
 				BaseSHA:         "base",
 				ExpectedHeadSHA: "base",
-				Format:          FormatGitDiffBinary,
-			},
-			Data: []byte("diff --git a/file.txt b/file.txt\n"),
-		},
-		Identity:    DefaultIdentity("HerdOS", "herd@example.com"),
-		TokenSource: source,
-		TempDir:     root,
-	})
+				Artifact: ValidatedArtifact{
+					Metadata: PatchMetadata{
+						Repository:      "acme/widgets",
+						JobID:           "job-1",
+						BaseSHA:         "base",
+						ExpectedHeadSHA: "base",
+						Format:          FormatGitDiffBinary,
+					},
+					Data: []byte("diff --git a/file.txt b/file.txt\n"),
+				},
+				Identity:    DefaultIdentity("HerdOS", "herd@example.com"),
+				TokenSource: source,
+				TempDir:     root,
+			})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "trusted GitHub HTTPS URL")
-	assert.Equal(t, 0, source.calls)
-	assert.NoFileExists(t, filepath.Join(root, "git-token"))
-	assert.NoFileExists(t, filepath.Join(root, "git-askpass.sh"))
-	assert.NoDirExists(t, filepath.Join(root, "repo"))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "trusted GitHub HTTPS URL")
+			assert.Equal(t, 0, source.calls)
+			assert.NoFileExists(t, filepath.Join(root, "git-token"))
+			assert.NoFileExists(t, filepath.Join(root, "git-askpass.sh"))
+			assert.NoDirExists(t, filepath.Join(root, "repo"))
+		})
+	}
 }
 
 func TestApplyRejectsEmptyInstallationTokenBeforeGitAuthSetup(t *testing.T) {
@@ -288,10 +302,19 @@ func TestApplyAuthenticatedCloneDoesNotPersistTokenInTempDir(t *testing.T) {
 	artifact := diffArtifact(t, source, base, head)
 	tempDir := t.TempDir()
 	token := "ghs_secret_installation_token"
+	cloneURL := "https://github.com/acme/widgets.git"
+	configRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(configRoot, "git"), 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(configRoot, "git", "config"),
+		[]byte("[url \""+remote+"\"]\n\tinsteadOf = "+cloneURL+"\n"),
+		0600,
+	))
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
 
 	_, err := Apply(context.Background(), ApplyRequest{
 		Repository:      "acme/widgets",
-		CloneURL:        remote,
+		CloneURL:        cloneURL,
 		InstallationID:  123,
 		TargetBranch:    "main",
 		BaseSHA:         base,

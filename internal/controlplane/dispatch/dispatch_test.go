@@ -115,6 +115,39 @@ func TestIdempotencyKeyKeepsManualCommandReplayStableAcrossHeadChanges(t *testin
 	assert.Equal(t, IdempotencyKey(first), IdempotencyKey(second))
 }
 
+func TestDispatcherManualRetryUsesDurableRequestSnapshot(t *testing.T) {
+	st := newFakeStore()
+	st.createJobErrs = []error{errors.New("database down"), nil}
+	gh := &fakeWorkflowClient{}
+	first := validRequest()
+	first.ManualDispatchKey = "comment:123:command:dispatch:issue:55"
+	first.HeadSHA = "head-a"
+	first.BaseSHA = "head-a"
+	first.ExpectedHeadSHA = "head-a"
+
+	_, err := (Dispatcher{Store: st, GitHub: gh}).Dispatch(context.Background(), first)
+	require.Error(t, err)
+	assert.Empty(t, gh.calls)
+
+	redelivery := first
+	redelivery.HeadSHA = "head-b"
+	redelivery.BaseSHA = "head-b"
+	redelivery.ExpectedHeadSHA = "head-b"
+	result, err := (Dispatcher{Store: st, GitHub: gh}).Dispatch(context.Background(), redelivery)
+
+	require.NoError(t, err)
+	require.Len(t, gh.calls, 1)
+	assert.Equal(t, "head-a", gh.calls[0].inputs["expected_head_sha"])
+	assert.Equal(t, "head-a", st.jobs[result.JobID].HeadSHA)
+	assert.Equal(t, "head-a", st.jobs[result.JobID].BaseSHA)
+
+	replayed, err := (Dispatcher{Store: st, GitHub: gh}).Dispatch(context.Background(), first)
+	require.NoError(t, err)
+	assert.False(t, replayed.Created)
+	assert.Equal(t, result.JobID, replayed.JobID)
+	assert.Len(t, gh.calls, 1)
+}
+
 func TestDispatcherDuplicateDispatchIsIdempotent(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeWorkflowClient{}

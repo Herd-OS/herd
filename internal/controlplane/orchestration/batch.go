@@ -204,11 +204,15 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			// worker remains authoritative until it is explicitly failed or
 			// stale, so a branch advance must not create a second worker.
 			recovered, recoveredOK = s.recoverWorkflowDispatchIntent(ctx, dispatchReq)
-			if recoveredOK &&
-				recovered.Request.HeadSHA != batchHeadSHA &&
-				(!s.hasIssueStatusTransitionIntent(ctx, issueNumber, status, recovered.Result, recovered.Request.HeadSHA) ||
-					!s.dispatchAttemptActive(ctx, recovered.Result.JobID)) {
-				recoveredOK = false
+			if recoveredOK && recovered.Request.HeadSHA != batchHeadSHA {
+				// A new head is not proof that the prior worker stopped.
+				// Only a durable terminal job permits a new dispatch generation;
+				// missing or unreadable state is unknown and fails closed.
+				state, stateErr := s.dispatchAttemptState(ctx, recovered.Result.JobID)
+				if stateErr != nil {
+					return dispatched, fmt.Errorf("determine recovered dispatch job %s state: %w", recovered.Result.JobID, stateErr)
+				}
+				recoveredOK = state != dispatchAttemptTerminal
 			}
 		}
 		var result cpdispatch.DispatchResult
@@ -248,29 +252,28 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 	return dispatched, nil
 }
 
-func (s Service) dispatchAttemptActive(ctx context.Context, jobID string) bool {
+type dispatchAttemptClassification int
+
+const (
+	dispatchAttemptUnknown dispatchAttemptClassification = iota
+	dispatchAttemptActive
+	dispatchAttemptTerminal
+)
+
+func (s Service) dispatchAttemptState(ctx context.Context, jobID string) (dispatchAttemptClassification, error) {
 	if strings.TrimSpace(jobID) == "" {
-		return false
+		return dispatchAttemptUnknown, fmt.Errorf("recovered dispatch is missing job ID")
 	}
 	job, err := s.Store.GetJob(ctx, jobID)
 	if err != nil {
-		return false
+		return dispatchAttemptUnknown, fmt.Errorf("get recovered dispatch job: %w", err)
 	}
 	switch strings.ToLower(strings.TrimSpace(job.Status)) {
 	case "failed", "failure", "timed_out", "cancelled", "completed", "success":
-		return false
+		return dispatchAttemptTerminal, nil
 	default:
-		return true
+		return dispatchAttemptActive, nil
 	}
-}
-
-func (s Service) hasIssueStatusTransitionIntent(ctx context.Context, issueNumber int, status string, result cpdispatch.DispatchResult, fallback string) bool {
-	if status != issues.StatusReady && status != issues.StatusBlocked {
-		return false
-	}
-	key := issueStatusTransitionKey(s.Repo.ID, issueNumber, status, "remove", issueStatusTransitionID(result, fallback))
-	_, err := s.Store.GetIdempotencyKey(ctx, key)
-	return err == nil
 }
 
 func (s Service) workflowDispatchIntentRecord(ctx context.Context, req cpdispatch.DispatchRequest) (store.IdempotencyKey, bool) {

@@ -138,7 +138,7 @@ func Prepare(ctx context.Context, req ApplyRequest) (PreparedApply, error) {
 	var gitConfig []string
 	var gitEnv []string
 	var tokenValue string
-	if req.TokenSource != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.CloneURL)), "https://") {
+	if req.TokenSource != nil {
 		if err := validateTrustedGitHubCloneURL(req.CloneURL, req.Repository); err != nil {
 			return PreparedApply{}, preCallError(err)
 		}
@@ -265,7 +265,7 @@ func validateApplyRequest(req ApplyRequest) error {
 func validateTrustedGitHubCloneURL(cloneURL, repository string) error {
 	parsed, err := url.Parse(strings.TrimSpace(cloneURL))
 	if err != nil {
-		return fmt.Errorf("parse clone URL: %w", err)
+		return fmt.Errorf("clone URL must be a trusted GitHub HTTPS URL for %s: %w", repository, err)
 	}
 	if parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, "github.com") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return fmt.Errorf("clone URL must be a trusted GitHub HTTPS URL for %s", repository)

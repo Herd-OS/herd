@@ -162,6 +162,11 @@ func (d Dispatcher) recordIntent(ctx context.Context, req DispatchRequest) (stri
 		"pr_number":      req.PRNumber,
 		"batch_branch":   req.BatchBranch,
 		"head_sha":       req.HeadSHA,
+		// The idempotency key for a manual command deliberately survives a
+		// moving head. Persist the complete request so every retry uses the
+		// original durable identity instead of mixing a new caller snapshot
+		// with the original job.
+		"dispatch_request": req,
 	}
 	if req.ReviewPrompt != "" {
 		keyMetadataValues["review_prompt"] = req.ReviewPrompt
@@ -373,7 +378,9 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		}
 	}
 	var metadata struct {
-		JobID string `json:"job_id"`
+		JobID           string           `json:"job_id"`
+		HeadSHA         string           `json:"head_sha"`
+		DispatchRequest *DispatchRequest `json:"dispatch_request"`
 	}
 	if err := json.Unmarshal(record.Metadata, &metadata); err != nil {
 		return DispatchResult{}, fmt.Errorf("decode dispatch idempotency metadata: %w", err)
@@ -381,13 +388,19 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 	if metadata.JobID == "" {
 		return DispatchResult{}, fmt.Errorf("dispatch idempotency record is missing job_id")
 	}
+	durableReq := req
+	if metadata.DispatchRequest != nil {
+		durableReq = *metadata.DispatchRequest
+	} else if metadata.HeadSHA != "" && metadata.HeadSHA != req.HeadSHA {
+		return DispatchResult{}, fmt.Errorf("dispatch retry head SHA %q does not match durable head SHA %q", req.HeadSHA, metadata.HeadSHA)
+	}
 	job, err := d.Store.GetJob(ctx, metadata.JobID)
 	if errors.Is(err, store.ErrNotFound) && mutations.IsPreCallRetryableRecord(record.Status, record.ResultRef) {
-		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
+		inputs, inputErr := WorkflowInputs(durableReq, metadata.JobID)
 		if inputErr != nil {
 			return DispatchResult{}, inputErr
 		}
-		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), true)
+		return d.dispatchWithJob(ctx, durableReq, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), true)
 	}
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("get existing dispatch job: %w", err)
@@ -404,11 +417,11 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		}
 	}
 	if mutations.IsPreCallRetryableRecord(record.Status, record.ResultRef) {
-		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
+		inputs, inputErr := WorkflowInputs(durableReq, metadata.JobID)
 		if inputErr != nil {
 			return DispatchResult{}, inputErr
 		}
-		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
+		return d.dispatchWithJob(ctx, durableReq, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
 	}
 	if mutations.Normalize(record.Status) == mutations.PhaseCallStarted {
 		preCall, preCallErr := d.preDispatchMutation(ctx, idempotencyKey)
@@ -416,11 +429,11 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 			return DispatchResult{}, preCallErr
 		}
 		if preCall {
-			inputs, inputErr := WorkflowInputs(req, metadata.JobID)
+			inputs, inputErr := WorkflowInputs(durableReq, metadata.JobID)
 			if inputErr != nil {
 				return DispatchResult{}, inputErr
 			}
-			return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
+			return d.dispatchWithJob(ctx, durableReq, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
 		}
 	}
 	if completed, result, recoverErr := d.completedDispatchMutation(ctx, idempotencyKey); recoverErr != nil {

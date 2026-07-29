@@ -88,6 +88,22 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 	}
 	start, err := st.TryStartGitHubMutationAttempt(ctx, req.Key, []string{mutations.PhaseIntentRecorded, mutations.PhaseFailedPreCall}, now(req.Now))
 	if err != nil {
+		// A conditional write may commit and still return a transport error.
+		// Re-read before classifying the failure: unknown transition outcomes
+		// are post-call-unknown and must never be downgraded to failed_pre_call.
+		attempt, readErr := st.GetGitHubMutationAttempt(ctx, req.Key)
+		if readErr != nil {
+			reason := fmt.Sprintf("call-start transition outcome is unknown: %v; reread: %v", err, readErr)
+			_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseRepairRequired+":"+reason)
+			return RunResult{}, fmt.Errorf("mark mutation call started: %s", reason)
+		}
+		if !mutations.IsPreCallRetryable(attempt.Status) {
+			if result, handled, convergeErr := convergeExisting(ctx, st, req, attempt); handled || convergeErr != nil {
+				return result, convergeErr
+			}
+			markRepairRequired(ctx, st, req.Key, attempt, err.Error(), req.Now)
+			return RunResult{}, fmt.Errorf("mutation attempt %q start outcome is unknown; repair required before retry", req.Key)
+		}
 		_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseFailedPreCall, nil, err.Error(), now(req.Now))
 		_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseFailedPreCall+":"+err.Error())
 		return RunResult{}, preCallError("mark mutation call started", err)

@@ -162,13 +162,54 @@ func TestRunMutationBoundaryPreflightFailureIsRetryable(t *testing.T) {
 	assert.Equal(t, mutations.PhaseCompleted, st.attempts["k"].Status)
 }
 
+func TestRunMutationBoundaryStartCommitWithErrorFailsClosed(t *testing.T) {
+	st := newFakeBoundaryStore()
+	st.startErr = errors.New("database response lost")
+	st.persistStartOnError = true
+	calls := 0
+
+	_, err := Run(context.Background(), st, RunRequest{
+		Key:          "k",
+		RepositoryID: 1,
+		MutationType: "workflow_dispatch",
+		Mutate: func() (string, error) {
+			calls++
+			return "job:1", nil
+		},
+		Now: fixedBoundaryTime,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repair required")
+	assert.Equal(t, 0, calls)
+	assert.Equal(t, mutations.PhaseRepairRequired, st.attempts["k"].Status)
+
+	_, err = Run(context.Background(), st, RunRequest{
+		Key:          "k",
+		RepositoryID: 1,
+		MutationType: "workflow_dispatch",
+		Mutate: func() (string, error) {
+			calls++
+			return "job:1", nil
+		},
+		Now: fixedBoundaryTime,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repair required")
+	assert.Equal(t, 0, calls)
+	assert.Equal(t, mutations.PhaseRepairRequired, st.attempts["k"].Status)
+}
+
 func fixedBoundaryTime() time.Time {
 	return time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 }
 
 type fakeBoundaryStore struct {
-	attempts map[string]store.GitHubMutationAttempt
-	idem     map[string]store.IdempotencyKey
+	attempts            map[string]store.GitHubMutationAttempt
+	idem                map[string]store.IdempotencyKey
+	startErr            error
+	persistStartOnError bool
 }
 
 func newFakeBoundaryStore() *fakeBoundaryStore {
@@ -229,6 +270,14 @@ func (s *fakeBoundaryStore) TryStartGitHubMutationAttempt(_ context.Context, key
 	}
 	for _, status := range allowedStatuses {
 		if attempt.Status == status {
+			if s.startErr != nil {
+				if s.persistStartOnError {
+					attempt.Status = mutations.PhaseCallStarted
+					attempt.CompletedAt = &completedAt
+					s.attempts[key] = attempt
+				}
+				return store.GitHubMutationStartResult{}, s.startErr
+			}
 			attempt.Status = mutations.PhaseCallStarted
 			attempt.CompletedAt = &completedAt
 			s.attempts[key] = attempt

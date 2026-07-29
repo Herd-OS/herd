@@ -276,7 +276,7 @@ func TestRecoverWorkflowDispatchIntentRefusesAmbiguousDispatches(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestDispatchReadyWorkersReadyIssueIgnoresOldCompletedDispatchAtStaleHead(t *testing.T) {
+func TestDispatchReadyWorkersMissingRecoveredJobFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
 	fake.repo.branches["herd/batch/7-demo"] = "new-head"
@@ -306,11 +306,42 @@ func TestDispatchReadyWorkersReadyIssueIgnoresOldCompletedDispatchAtStaleHead(t 
 		}},
 	})
 
-	require.NoError(t, err)
-	assert.Equal(t, 1, count)
-	require.Len(t, disp.requests, 1)
-	assert.Equal(t, "new-head", disp.requests[0].HeadSHA)
-	assert.Equal(t, "new-head", disp.requests[0].ExpectedHeadSHA)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "get recovered dispatch job")
+	assert.Equal(t, 0, count)
+	assert.Empty(t, disp.requests)
+}
+
+func TestDispatchReadyWorkersUnreadableRecoveredJobFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branches["herd/batch/7-demo"] = "new-head"
+	disp := &fakeDispatcher{}
+	st := newFakeStore()
+	st.getJobErrs["job-1"] = errors.New("temporary database failure")
+	svc := newTestService(fake, st, disp)
+	oldReq := cpdispatch.DispatchRequest{
+		RepoID: svc.Repo.ID, Kind: cpdispatch.JobKindWorker, WorkflowFile: "herd-worker.yml",
+		Ref: "main", BatchNumber: 7, IssueNumber: 1, BatchBranch: "herd/batch/7-demo",
+		HeadSHA: "old-head",
+	}
+	st.keys["old"] = store.IdempotencyKey{
+		Key: "old", Scope: "workflow_dispatch", Status: mutations.PhaseCompleted,
+		Metadata: workflowDispatchMetadata(t, oldReq), CreatedAt: fixedClock(),
+	}
+
+	count, err := svc.DispatchReadyWorkers(ctx, DispatchReadyWorkersRequest{
+		BatchNumber: 7, BatchBranch: "herd/batch/7-demo", TierIssues: []int{1},
+		AllIssues: []*platform.Issue{{
+			Number: 1, Labels: []string{issues.StatusReady},
+			Body: "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n",
+		}},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "temporary database failure")
+	assert.Equal(t, 0, count)
+	assert.Empty(t, disp.requests)
 }
 
 func TestDispatchReadyWorkersCallStartedDispatchDoesNotMarkInProgressOrRedispatch(t *testing.T) {
@@ -431,28 +462,35 @@ func TestDispatchReadyWorkersFailedAttemptAtOldHeadDispatchesNewGeneration(t *te
 
 func TestDispatchAttemptActive(t *testing.T) {
 	tests := []struct {
-		name   string
-		jobID  string
-		status string
-		want   bool
+		name      string
+		jobID     string
+		status    string
+		want      dispatchAttemptClassification
+		wantError bool
 	}{
-		{name: "dispatching", jobID: "active", status: "dispatching", want: true},
-		{name: "blank status remains active", jobID: "blank", want: true},
-		{name: "failed", jobID: "failed", status: "failed"},
-		{name: "completed", jobID: "completed", status: "completed"},
-		{name: "missing job", jobID: "missing"},
-		{name: "missing identity"},
+		{name: "dispatching", jobID: "active", status: "dispatching", want: dispatchAttemptActive},
+		{name: "blank status remains active", jobID: "blank", want: dispatchAttemptActive},
+		{name: "failed", jobID: "failed", status: "failed", want: dispatchAttemptTerminal},
+		{name: "completed", jobID: "completed", status: "completed", want: dispatchAttemptTerminal},
+		{name: "missing job is unknown", jobID: "missing", want: dispatchAttemptUnknown, wantError: true},
+		{name: "missing identity is unknown", want: dispatchAttemptUnknown, wantError: true},
 	}
 	st := newFakeStore()
 	for _, tt := range tests {
-		if tt.jobID != "" && tt.name != "missing job" {
+		if tt.jobID != "" && tt.name != "missing job is unknown" {
 			st.jobs[tt.jobID] = store.Job{JobID: tt.jobID, Status: tt.status}
 		}
 	}
 	svc := newTestService(newFakePlatform(), st, &fakeDispatcher{})
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, svc.dispatchAttemptActive(context.Background(), tt.jobID))
+			got, err := svc.dispatchAttemptState(context.Background(), tt.jobID)
+			if tt.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -910,6 +948,7 @@ type fakeStore struct {
 	recordMutationErrs   map[string][]error
 	completeMutationErrs map[string][]error
 	jobs                 map[string]store.Job
+	getJobErrs           map[string]error
 }
 
 func newFakeStore() *fakeStore {
@@ -921,10 +960,14 @@ func newFakeStore() *fakeStore {
 		recordMutationErrs:   map[string][]error{},
 		completeMutationErrs: map[string][]error{},
 		jobs:                 map[string]store.Job{},
+		getJobErrs:           map[string]error{},
 	}
 }
 
 func (s *fakeStore) GetJob(_ context.Context, jobID string) (store.Job, error) {
+	if err := s.getJobErrs[jobID]; err != nil {
+		return store.Job{}, err
+	}
 	job, ok := s.jobs[jobID]
 	if !ok {
 		return store.Job{}, store.ErrNotFound
