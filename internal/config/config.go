@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -201,6 +202,9 @@ func Load(dir string) (*Config, error) {
 	}
 
 	applyEnvOverrides(cfg)
+	if err := normalizeControlPlaneURL(cfg); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
@@ -245,4 +249,20 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Workers.TimeoutMinutes = n
 		}
 	}
+}
+
+func normalizeControlPlaneURL(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	value := strings.TrimSpace(cfg.ControlPlaneURL)
+	if value == "" {
+		cfg.ControlPlaneURL = ""
+		return nil
+	}
+	if err := validateHTTPURL("control_plane_url", value); err != nil {
+		return fmt.Errorf("control plane URL: %w", err)
+	}
+	cfg.ControlPlaneURL = value
+	return nil
 }

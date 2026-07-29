@@ -144,6 +144,43 @@ image_publish:
 	assert.Equal(t, []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM", "NPM_TOKEN"}, cfg.ImagePublish.BuildSecrets)
 }
 
+func TestLoadRejectsUnsafeControlPlaneURLEnvOverride(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "userinfo", value: "https://user:token@cp.example.com", wantErr: "userinfo"},
+		{name: "query", value: "https://cp.example.com?token=secret", wantErr: "query string"},
+		{name: "fragment", value: "https://cp.example.com#token", wantErr: "fragment"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(""), 0644))
+			t.Setenv("HERD_CONTROL_PLANE_URL", tt.value)
+
+			_, err := Load(dir)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestLoadNormalizesControlPlaneURLEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(""), 0644))
+	t.Setenv("HERD_CONTROL_PLANE_URL", "  https://cp.example.com  ")
+
+	cfg, err := Load(dir)
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://cp.example.com", cfg.ControlPlaneURL)
+	assert.Equal(t, "https://cp.example.com", cfg.EffectiveControlPlaneURL())
+}
+
 func TestLoadAgentExecFields(t *testing.T) {
 	dir := t.TempDir()
 	content := `version: 1
