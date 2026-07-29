@@ -963,9 +963,39 @@ func TestBuildReviewSynthesisInputAffectedFilesIgnoreChunkCoverageMetadata(t *te
 	}, input.AffectedFiles)
 	assert.ElementsMatch(t, []string{"internal/controlplane/review/repair.go"}, input.Cycles[0].AffectedFiles)
 	assert.ElementsMatch(t, []string{"internal/controlplane/review/fix.go"}, input.CompletedFixIssues[0].FilesSummary)
+	require.Len(t, input.Cycles[0].CompletedFixIssues, 1)
+	assert.Equal(t, 91, input.Cycles[0].CompletedFixIssues[0].Number)
 	for _, noisy := range []string{"Chunk 1/9", "1/9", "Diff Coverage", "Review Aggregation", "Files reviewed", "Source: local-git", "internal/controlplane/review", "internal/noise/from-worker-report.go"} {
 		assert.NotContains(t, input.AffectedFiles, noisy)
 	}
+}
+
+func TestBuildReviewSynthesisInputOriginalRequirementsAndPriorStrategies(t *testing.T) {
+	originalBody := issues.RenderBody(issues.IssueBody{
+		FrontMatter:           issues.FrontMatter{Version: 1, Batch: 111},
+		Task:                  "Preserve exclusive ownership.",
+		ImplementationDetails: "Publish only after durable intent.",
+		Criteria:              []string{"Ownership remains visible."},
+		Context:               "Original milestone specification.",
+	})
+	strategyBody := appendReviewNonConvergenceFingerprintWithHeadSHA(issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: 849, FixCycle: 7},
+		Task:        "Prior state-machine strategy.",
+	}), "prior-fingerprint", "prior-head")
+	allIssues := []*platform.Issue{
+		{Number: 10, Title: "Original task", Body: originalBody},
+		{Number: 20, Title: "Review strategy fix: publication invariant", State: "closed", Labels: []string{issues.ReviewNonConverging, issues.StatusDone}, Body: strategyBody},
+	}
+
+	input := buildReviewSynthesisInput(&platform.PullRequest{Number: 849}, &platform.Milestone{Number: 111}, "head", nil, nil, allIssues, nil, "")
+
+	require.Len(t, input.OriginalRequirements, 1)
+	assert.Equal(t, "Preserve exclusive ownership.", input.OriginalRequirements[0].Task)
+	assert.Equal(t, []string{"Ownership remains visible."}, input.OriginalRequirements[0].AcceptanceCriteria)
+	require.Len(t, input.PriorStrategyFixIssues, 1)
+	assert.Equal(t, 7, input.PriorStrategyFixIssues[0].Cycle)
+	assert.Equal(t, "prior-fingerprint", input.PriorStrategyFixIssues[0].Fingerprint)
+	assert.Equal(t, "prior-head", input.PriorStrategyFixIssues[0].HeadSHA)
 }
 
 func TestBuildSynthesizedStrategyFixIssueBody(t *testing.T) {

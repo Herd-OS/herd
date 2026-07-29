@@ -460,6 +460,10 @@ func isConcreteReviewPackageCluster(value string) bool {
 	if value == "" || strings.EqualFold(value, "none") || isReviewClusterNoise(value) {
 		return false
 	}
+	switch strings.ToLower(strings.Trim(value, "/")) {
+	case "internal", "cmd", "docs", "doc", "test", "tests", "pkg", "src", "lib", "scripts", "tools":
+		return false
+	}
 	return true
 }
 
@@ -638,7 +642,8 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 		input.Cycles = append(input.Cycles, synthCycle)
 	}
 
-	for _, issue := range reviewHistoryIssuesForPR(allIssues, input.PRNumber) {
+	fixByCycle := map[int][]agent.ReviewSynthesisFixIssue{}
+	for _, issue := range allIssues {
 		if issue == nil {
 			continue
 		}
@@ -647,7 +652,35 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 			continue
 		}
 		fm := parsed.FrontMatter
-		if fm.Type != "fix" || fm.BatchPR != input.PRNumber || fm.FixCycle <= 0 || fm.CIFixCycle > 0 || fm.ConflictResolution {
+		if fm.Type != "fix" {
+			if strings.TrimSpace(parsed.Task) == "" && strings.TrimSpace(parsed.ImplementationDetails) == "" &&
+				len(parsed.Criteria) == 0 && strings.TrimSpace(parsed.Context) == "" {
+				continue
+			}
+			input.OriginalRequirements = append(input.OriginalRequirements, agent.ReviewSynthesisRequirement{
+				IssueNumber:           issue.Number,
+				Title:                 issue.Title,
+				Task:                  parsed.Task,
+				ImplementationDetails: parsed.ImplementationDetails,
+				AcceptanceCriteria:    append([]string(nil), parsed.Criteria...),
+				Context:               parsed.Context,
+			})
+			continue
+		}
+		if fm.BatchPR != input.PRNumber || fm.FixCycle <= 0 || fm.CIFixCycle > 0 || fm.ConflictResolution {
+			continue
+		}
+		if issues.HasLabel(issue.Labels, issues.ReviewNonConverging) && strings.HasPrefix(issue.Title, "Review strategy fix") {
+			marker, ok := parseReviewNonConvergenceFingerprintMarker(issue.Body)
+			if !ok {
+				continue
+			}
+			input.PriorStrategyFixIssues = append(input.PriorStrategyFixIssues, agent.ReviewSynthesisStrategyFixIssue{
+				Number: issue.Number, Cycle: fm.FixCycle, Title: issue.Title,
+				StatusLabel: issues.StatusLabel(issue.Labels), State: issue.State,
+				Fingerprint: marker.Fingerprint, HeadSHA: marker.HeadSHA,
+				Summary: extractReviewPriorStrategySummary(parsed),
+			})
 			continue
 		}
 		status := issues.StatusLabel(issue.Labels)
@@ -658,7 +691,7 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 		for _, file := range files {
 			affectedFiles[file] = struct{}{}
 		}
-		input.CompletedFixIssues = append(input.CompletedFixIssues, agent.ReviewSynthesisFixIssue{
+		fix := agent.ReviewSynthesisFixIssue{
 			Number:           issue.Number,
 			Title:            issue.Title,
 			Body:             issue.Body,
@@ -666,11 +699,28 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 			FilesSummary:     files,
 			ValidationStatus: extractReviewValidationStatus(issue.Body),
 			WorkerReport:     bodyHasWorkerReport(issue.Body),
-		})
+		}
+		input.CompletedFixIssues = append(input.CompletedFixIssues, fix)
+		fixByCycle[fm.FixCycle] = append(fixByCycle[fm.FixCycle], fix)
 	}
+	sort.SliceStable(input.OriginalRequirements, func(i, j int) bool {
+		return input.OriginalRequirements[i].IssueNumber < input.OriginalRequirements[j].IssueNumber
+	})
+	sort.SliceStable(input.PriorStrategyFixIssues, func(i, j int) bool {
+		if input.PriorStrategyFixIssues[i].Cycle != input.PriorStrategyFixIssues[j].Cycle {
+			return input.PriorStrategyFixIssues[i].Cycle < input.PriorStrategyFixIssues[j].Cycle
+		}
+		return input.PriorStrategyFixIssues[i].Number < input.PriorStrategyFixIssues[j].Number
+	})
 	sort.SliceStable(input.CompletedFixIssues, func(i, j int) bool {
 		return input.CompletedFixIssues[i].Number < input.CompletedFixIssues[j].Number
 	})
+	for i := range input.Cycles {
+		input.Cycles[i].CompletedFixIssues = append([]agent.ReviewSynthesisFixIssue(nil), fixByCycle[input.Cycles[i].Cycle]...)
+		sort.SliceStable(input.Cycles[i].CompletedFixIssues, func(a, b int) bool {
+			return input.Cycles[i].CompletedFixIssues[a].Number < input.Cycles[i].CompletedFixIssues[b].Number
+		})
+	}
 	input.AffectedFiles = sortedStringSet(affectedFiles)
 	return input
 }
@@ -710,6 +760,9 @@ func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence 
 	if synthesizedReviewStrategyFingerprint(result) == "" {
 		return reviewSynthesisDecisionFallback, "synthesis fingerprint is empty"
 	}
+	if ok, reason := validateReviewRequirementReinterpretation(result); !ok {
+		return reviewSynthesisDecisionFallback, reason
+	}
 	return reviewSynthesisDecisionEscalate, "synthesis passed safety gates"
 }
 
@@ -738,7 +791,19 @@ func synthesizedReviewStrategyFingerprint(result *agent.ReviewSynthesisResult) s
 	if len(symptomEntries) == 0 {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(root + "\n" + strings.Join(symptomEntries, "\n")))
+	parts := []string{root, strings.Join(symptomEntries, "\n")}
+	if reinterpretation := result.RequirementReinterpretation; reinterpretation != nil {
+		parts = append(parts,
+			normalizeReviewSynthesisFingerprintText(string(reinterpretation.ConstraintKind)),
+			normalizeReviewSynthesisFingerprintText(reinterpretation.ConflictingRequirement),
+			normalizeReviewSynthesisFingerprintText(reinterpretation.PlatformConsistencyConstraint),
+			normalizeReviewSynthesisFingerprintText(reinterpretation.PreservedSafetyProperty),
+			normalizeReviewSynthesisFingerprintText(reinterpretation.CorrectedInvariant),
+			strings.Join(normalizedSortedReviewStrings(reinterpretation.LinearizationBoundaries), ","),
+			strings.Join(normalizedSortedReviewStrings(reinterpretation.DurabilityBoundaries), ","),
+		)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
 	return hex.EncodeToString(sum[:])[:12]
 }
 
@@ -1215,6 +1280,13 @@ func normalizeReviewPackagePath(raw string) string {
 	if parts[0] == "internal" && len(parts) >= 3 {
 		return strings.Join(parts[:3], "/")
 	}
+	switch strings.ToLower(parts[0]) {
+	case "internal", "cmd", "docs", "doc", "test", "tests", "pkg", "src", "lib", "scripts", "tools":
+		if len(parts) < 2 {
+			return dir
+		}
+		return strings.Join(parts[:2], "/")
+	}
 	return dir
 }
 
@@ -1395,6 +1467,9 @@ func buildSynthesizedStrategyImplementationDetails(result *agent.ReviewSynthesis
 	sections = append(sections, "Proposed strategy:\n"+fallbackString(strings.TrimSpace(result.ProposedStrategy), "No strategy provided."))
 	sections = append(sections, "Acceptance criteria:\n"+formatBullets(trimBlankStrings(result.AcceptanceCriteria)))
 	sections = append(sections, "Non-goals:\n"+formatBullets(trimBlankStrings(result.NonGoals)))
+	if reinterpretation := result.RequirementReinterpretation; reinterpretation != nil {
+		sections = append(sections, formatReviewRequirementReinterpretation(reinterpretation))
+	}
 	if summary := buildPriorStrategyFixIssueSummary(prior); summary != "" {
 		sections = append(sections, "Prior strategy fix attempts:\n"+summary)
 	}
@@ -1848,7 +1923,12 @@ func isReviewFindingMetadataNoise(text string) bool {
 		return true
 	}
 	lower := strings.ToLower(text)
-	return strings.HasPrefix(lower, "reviewed ") && strings.Contains(lower, "chunk")
+	if strings.HasPrefix(lower, "reviewed ") && strings.Contains(lower, "chunk") {
+		return true
+	}
+	return strings.HasPrefix(lower, "generated summary") ||
+		strings.HasPrefix(lower, "generated review summary") ||
+		strings.HasPrefix(lower, "summary generated")
 }
 
 func isReviewFindingDismissalText(text string) bool {

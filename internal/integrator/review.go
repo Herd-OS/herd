@@ -302,10 +302,11 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		if parsed.FrontMatter.Type == "fix" || parsed.FrontMatter.CIFixCycle > 0 {
 			status := issues.StatusLabel(iss.Labels)
 			if status == issues.StatusInProgress || status == issues.StatusReady {
-				if issues.HasLabel(iss.Labels, issues.ReviewNonConverging) && strings.HasPrefix(iss.Title, "Review strategy fix") {
-					continue
+				if kind, cycle, active := activeReviewFixIssue(iss, parsed); active {
+					fmt.Printf("Review non-convergence evaluation deferred: issue #%d cycle %d kind=%s status=%s\n", iss.Number, cycle, kind, status)
+				} else {
+					fmt.Printf("Skipping review: fix issue #%d is still %s\n", iss.Number, status)
 				}
-				fmt.Printf("Skipping review: fix issue #%d is still %s\n", iss.Number, status)
 				return &ReviewResult{BatchPRNumber: pr.Number}, nil
 			}
 		}
@@ -664,8 +665,11 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		actionableHighFindings, actionableMediumFindings, actionableLowFindings, actionableCriteriaFindings := filterFindingsBySeverity(actionableFindings)
 		history = appendCurrentReviewHistoryCycleIfMissing(history, nextCycle, currentHeadSHA, rawReviewFindings, actionableFindings, actionableHighFindings, actionableMediumFindings, actionableLowFindings, actionableCriteriaFindings)
 		analysis := analyzeReviewConvergence(history, cfg.Integrator.ReviewNonConvergence.MinCompletedCycles)
+		fmt.Printf("Review non-convergence route evaluated: route=high-volume completed_cycles=%d latest_findings=%d decision=%s rationale=%s\n",
+			countCompletedReviewCycles(history), analysis.LatestFindingCount, analysis.Decision, analysis.Rationale)
 		if analysis.Decision == reviewDecisionEscalateToArchitectureFix {
 			if cfg.Integrator.ReviewNonConvergence.SynthesisEnabled {
+				fmt.Println("Review non-convergence synthesis invocation: route=high-volume")
 				synthesisCtx, cancel := context.WithTimeout(ctx, reviewSynthesisTimeout)
 				synthesisInput := buildReviewSynthesisInput(pr, ms, currentHeadSHA, prComments, history, allIssues, workerNoOpVerdicts, reviewOpts.CurrentPRMetadata)
 				synthesisResult, synthesisErr := ag.SynthesizeReviewNonConvergence(synthesisCtx, synthesisInput, agent.ReviewSynthesisOptions{
@@ -678,6 +682,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				} else if decision, reason := evaluateReviewSynthesis(synthesisResult, cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence, analysis); decision != reviewSynthesisDecisionEscalate {
 					fmt.Printf("Review non-convergence synthesis fallback: %s\n", reason)
 				} else {
+					fmt.Printf("Review non-convergence synthesis decision: route=high-volume decision=escalate confidence=%.2f\n", synthesisResult.Confidence)
 					fingerprint := synthesizedReviewStrategyFingerprint(synthesisResult)
 					if duplicate, ok := findDuplicateSynthesizedStrategyFixIssue(allIssues, pr.Number, fingerprint, currentHeadSHA); ok {
 						fmt.Printf("Review non-convergence synthesis duplicate suppressed by strategy issue #%d\n", duplicate.Number)
@@ -801,6 +806,71 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				BatchPRNumber: pr.Number,
 				FindingsCount: 1,
 			}, nil
+		} else {
+			oscillation := analyzeLowVolumeReviewOscillation(history, cfg.Integrator.ReviewNonConvergence.MinCompletedCycles, cfg.Integrator.ReviewNonConvergence.SynthesisEnabled)
+			fmt.Printf("Review non-convergence route evaluated: route=low-volume completed_cycles=%d latest_findings=%d recurring_subsystems=%s recurring_architecture=%s distinct_heads=%t completed_fix_chain=%t eligible=%t rationale=%s\n",
+				oscillation.CompletedCycleCount, oscillation.LatestFindingCount, formatStringList(oscillation.RecurringSubsystems),
+				formatStringList(oscillation.RecurringArchitecturalTerms), oscillation.DistinctHeadSHAsConfirmed,
+				oscillation.CompletedFixChainConfirmed, oscillation.Eligible, oscillation.Rationale)
+			if oscillation.Eligible {
+				fmt.Println("Review non-convergence synthesis invocation: route=low-volume")
+				synthesisCtx, cancel := context.WithTimeout(ctx, reviewSynthesisTimeout)
+				synthesisInput := buildReviewSynthesisInput(pr, ms, currentHeadSHA, prComments, history, allIssues, workerNoOpVerdicts, reviewOpts.CurrentPRMetadata)
+				synthesisResult, synthesisErr := ag.SynthesizeReviewNonConvergence(synthesisCtx, synthesisInput, agent.ReviewSynthesisOptions{
+					RepoRoot: params.RepoRoot, SystemPrompt: reviewOpts.SystemPrompt,
+				})
+				cancel()
+				if synthesisErr != nil {
+					fmt.Printf("Review non-convergence synthesis decision: route=low-volume decision=fallback reason=%v\n", synthesisErr)
+				} else if decision, reason := evaluateLowVolumeReviewSynthesis(synthesisResult, cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence, oscillation); decision != reviewSynthesisDecisionEscalate {
+					confidence := 0.0
+					if synthesisResult != nil {
+						confidence = synthesisResult.Confidence
+					}
+					fmt.Printf("Review non-convergence synthesis decision: route=low-volume decision=%s confidence=%.2f reason=%s\n", decision, confidence, reason)
+				} else {
+					fingerprint := synthesizedReviewStrategyFingerprint(synthesisResult)
+					fmt.Printf("Review non-convergence synthesis decision: route=low-volume decision=escalate confidence=%.2f\n", synthesisResult.Confidence)
+					if duplicate, ok := findDuplicateSynthesizedStrategyFixIssue(allIssues, pr.Number, fingerprint, currentHeadSHA); ok {
+						fmt.Printf("Review non-convergence synthesis duplicate suppressed by strategy issue #%d\n", duplicate.Number)
+						return &ReviewResult{FixIssues: []int{duplicate.Number}, FixCycle: nextCycle, BatchPRNumber: pr.Number, FindingsCount: 1}, nil
+					}
+
+					priorStrategyFixIssues := findPriorCompletedStrategyFixIssues(allIssues, pr.Number, fingerprint)
+					strategyBody := buildSynthesizedStrategyFixIssueBody(ms, pr, nextCycle, synthesisResult, synthesisInput, fingerprint, priorStrategyFixIssues)
+					truncatedBody, overflow := issues.TruncateIssueBody(strategyBody)
+					fixIssue, createErr := p.Issues().Create(postReviewCtx, buildLowVolumeSynthesizedStrategyFixIssueTitle(synthesisResult), truncatedBody,
+						[]string{issues.TypeFix, issues.StatusInProgress, issues.ReviewNonConverging}, &ms.Number)
+					if createErr != nil {
+						return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: 1}, nil
+					}
+					for _, comment := range issues.SplitOverflowComments(overflow) {
+						if cerr := p.Issues().AddComment(postReviewCtx, fixIssue.Number, comment); cerr != nil {
+							fmt.Printf("Warning: failed to post overflow comment on fix issue #%d: %v\n", fixIssue.Number, cerr)
+						}
+					}
+					_, dispatchErr := p.Workflows().Dispatch(postReviewCtx, "herd-worker.yml", defaultBranchForDispatch, map[string]string{
+						"issue_number": fmt.Sprintf("%d", fixIssue.Number), "batch_branch": batchBranch,
+						"timeout_minutes": fmt.Sprintf("%d", cfg.Workers.TimeoutMinutes), "runner_label": cfg.Workers.RunnerLabel,
+					})
+					if dispatchErr != nil {
+						_ = p.Issues().RemoveLabels(postReviewCtx, fixIssue.Number, []string{issues.StatusInProgress})
+						_ = p.Issues().AddLabels(postReviewCtx, fixIssue.Number, []string{issues.StatusFailed})
+						_ = p.Issues().AddComment(postReviewCtx, fixIssue.Number, fmt.Sprintf("Failed to dispatch strategy-level fix worker: %v", dispatchErr))
+						return &ReviewResult{BatchPRNumber: pr.Number, AllCreatesFailed: true, FindingsCount: 1}, nil
+					}
+					comment := buildSynthesizedReviewNonConvergencePRComment(synthesisResult, fixIssue.Number)
+					comment = appendReviewMetadataAndCoverage(comment)
+					comment, err = markReviewResult(comment, reviewResultStatusChangesRequested, nextCycle, 1)
+					if err != nil {
+						return nil, err
+					}
+					_ = p.PullRequests().AddComment(postReviewCtx, pr.Number, comment)
+					_ = p.PullRequests().CreateReview(postReviewCtx, pr.Number, fmt.Sprintf("Review/fix loop is oscillating. Synthesized strategy-level fix worker dispatched -> #%d.", fixIssue.Number), platform.ReviewRequestChanges)
+					return &ReviewResult{FixIssues: []int{fixIssue.Number}, FixCycle: nextCycle, BatchPRNumber: pr.Number, FindingsCount: 1}, nil
+				}
+			}
+			fmt.Printf("Review non-convergence ordinary-fix fallback: cycle=%d rationale=%s\n", nextCycle, oscillation.Rationale)
 		}
 	}
 
@@ -1866,6 +1936,24 @@ func activeFixIssues(allIssues []*platform.Issue) []*platform.Issue {
 		}
 	}
 	return out
+}
+
+func activeReviewFixIssue(issue *platform.Issue, parsed *issues.IssueBody) (kind string, cycle int, active bool) {
+	if issue == nil || parsed == nil || issue.State == "closed" || parsed.FrontMatter.Type != "fix" {
+		return "", 0, false
+	}
+	status := issues.StatusLabel(issue.Labels)
+	if status != issues.StatusReady && status != issues.StatusInProgress {
+		return "", 0, false
+	}
+	cycle = parsed.FrontMatter.FixCycle
+	if issues.HasLabel(issue.Labels, issues.ReviewNonConverging) && strings.HasPrefix(issue.Title, "Review strategy fix") {
+		return "strategy-fix", cycle, true
+	}
+	if strings.HasPrefix(issue.Title, "Review fixes") || parsed.FrontMatter.FixCycle > 0 {
+		return "review-fix", cycle, true
+	}
+	return "", 0, false
 }
 
 // dedupFindings removes findings that are similar to existing open fix issues.

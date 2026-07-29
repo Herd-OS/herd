@@ -7715,11 +7715,13 @@ func TestReview_NonConvergenceSynthesisDuplicateSuppressesCreation(t *testing.T)
 
 			require.NoError(t, err)
 			require.NotNil(t, result)
-			assert.Equal(t, []int{9700}, result.FixIssues)
+			assert.Empty(t, result.FixIssues)
+			assert.Zero(t, fx.ag.calls)
+			assert.Zero(t, fx.ag.synthesisCalls)
 			assert.Empty(t, fx.createdIssues)
 			assert.Empty(t, fx.wf.dispatched)
-			comment := requireCommentContaining(t, fx.prSvc.comments, "already being addressed by strategy issue #9700")
-			assert.Contains(t, comment, "Synthesized root cause")
+			assert.Empty(t, fx.prSvc.comments)
+			assert.Empty(t, fx.prSvc.reviews)
 		})
 	}
 }
