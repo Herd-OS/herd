@@ -159,6 +159,67 @@ func TestExpectedIdentityFromJobUsesRepositoryFallback(t *testing.T) {
 	}
 }
 
+func TestStrictExpectedIdentityFromJobRequiresHostedMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata json.RawMessage
+		wantErr  string
+	}{
+		{
+			name:     "valid",
+			metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"main","workflow_file":"worker.yml","workflow_run_id":123}`),
+		},
+		{
+			name:    "missing metadata",
+			wantErr: "missing",
+		},
+		{
+			name:     "malformed metadata",
+			metadata: json.RawMessage(`{`),
+			wantErr:  "malformed",
+		},
+		{
+			name:     "missing repository",
+			metadata: json.RawMessage(`{"ref":"main","workflow_file":"worker.yml","workflow_run_id":123}`),
+			wantErr:  "repository",
+		},
+		{
+			name:     "missing ref",
+			metadata: json.RawMessage(`{"repository":"acme/widgets","workflow_file":"worker.yml","workflow_run_id":123}`),
+			wantErr:  "ref",
+		},
+		{
+			name:     "missing workflow",
+			metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"main","workflow_run_id":123}`),
+			wantErr:  "workflow",
+		},
+		{
+			name:     "missing run ID",
+			metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"main","workflow_file":"worker.yml"}`),
+			wantErr:  "workflow_run_id",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := StrictExpectedIdentityFromJob(store.Job{Metadata: tt.metadata})
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Empty(t, got.Repository)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, ExpectedOIDCIdentity{
+				Repository: "acme/widgets",
+				Ref:        "refs/heads/main",
+				Workflow:   "worker.yml",
+				RunID:      "123",
+			}, got)
+		})
+	}
+}
+
 func TestJWKSValidatorValidateWithLocalKey(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)

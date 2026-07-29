@@ -56,6 +56,16 @@ type ExpectedOIDCIdentity struct {
 	RunID      string
 }
 
+var requiredHostedIdentityFields = []struct {
+	name  string
+	value func(ExpectedOIDCIdentity) string
+}{
+	{name: "repository", value: func(identity ExpectedOIDCIdentity) string { return identity.Repository }},
+	{name: "ref", value: func(identity ExpectedOIDCIdentity) string { return identity.Ref }},
+	{name: "workflow", value: func(identity ExpectedOIDCIdentity) string { return identity.Workflow }},
+	{name: "workflow_run_id", value: func(identity ExpectedOIDCIdentity) string { return identity.RunID }},
+}
+
 func BearerToken(header string) (string, error) {
 	parts := strings.Fields(strings.TrimSpace(header))
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
@@ -120,6 +130,23 @@ func ExpectedIdentityFromJob(job store.Job, repository string) ExpectedOIDCIdent
 		expected.Repository = metadataRepository
 	}
 	return expected
+}
+
+func StrictExpectedIdentityFromJob(job store.Job) (ExpectedOIDCIdentity, error) {
+	if len(job.Metadata) == 0 {
+		return ExpectedOIDCIdentity{}, fmt.Errorf("job OIDC identity metadata is missing")
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(job.Metadata, &metadata); err != nil {
+		return ExpectedOIDCIdentity{}, fmt.Errorf("job OIDC identity metadata is malformed")
+	}
+	expected := ExpectedIdentityFromJob(job, "")
+	for _, field := range requiredHostedIdentityFields {
+		if strings.TrimSpace(field.value(expected)) == "" {
+			return ExpectedOIDCIdentity{}, fmt.Errorf("job OIDC identity metadata is missing %s", field.name)
+		}
+	}
+	return expected, nil
 }
 
 func normalizeExpectedRef(ref string) string {

@@ -15,9 +15,18 @@ import (
 // Store is the durable boundary for GitHub-visible mutations. Callers must
 // acquire an idempotency key before using this boundary, then every outbound
 // GitHub API mutation must pass through RecordGitHubMutationAttempt and
-// TryStartGitHubMutationAttempt before the API call is made. Only
-// intent_recorded and failed_pre_call may be retried automatically; once a call
-// is marked call_started, retries must converge by replaying a completed
+// TryStartGitHubMutationAttempt immediately before the API call is made.
+//
+// The shared state machine is:
+//   - intent_recorded: durable intent exists, no GitHub-visible call has begun.
+//   - call_started: the GitHub-visible call may have happened; this is the
+//     post-call-unknown boundary if the process crashes or persistence fails.
+//   - completed: the visible effect is known and exact redelivery can replay it.
+//   - failed_pre_call: setup failed before a visible call and may be retried.
+//   - repair_required: a non-pre-call failure needs operation-specific lookup.
+//
+// Only intent_recorded and failed_pre_call may be retried automatically; once a
+// call is marked call_started, retries must converge by replaying a completed
 // mutation record or by an operation-specific repair lookup.
 type Store interface {
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error

@@ -100,6 +100,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 			Ref:         "refs/heads/main",
 			Workflow:    "herd-review.yml",
 			WorkflowRef: "octo-org/herd/.github/workflows/herd-review.yml@refs/heads/main",
+			RunID:       "12345",
 			ExpiresAt:   now.Add(time.Hour),
 		}},
 		Audience:        "herd-control-plane",
@@ -171,6 +172,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 	assert.Equal(t, "herd-review.yml", workflows.dispatches[0].workflowFile)
 	reviewJobID := workflows.dispatches[0].inputs["job_id"]
 	require.NotEmpty(t, reviewJobID)
+	persistWorkflowRunID(t, ctx, st, reviewJobID, "12345", now)
 	require.Len(t, gh.statuses, 1)
 	assert.Equal(t, "pending", gh.statuses[0].State)
 
@@ -228,7 +230,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 		BaseSHA:        "base",
 		Status:         "dispatched",
 		WorkerBranch:   "herd/worker/845",
-		Metadata:       json.RawMessage(`{"repository":"octo-org/herd","ref":"refs/heads/main","workflow_file":"herd-review.yml","requester_name":"Mona","requester_email":"mona@example.com"}`),
+		Metadata:       json.RawMessage(`{"repository":"octo-org/herd","ref":"refs/heads/main","workflow_file":"herd-review.yml","workflow_run_id":"12345","requester_name":"Mona","requester_email":"mona@example.com"}`),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}))
@@ -256,6 +258,18 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 	staleWorkerPayload["base_sha"] = "old-base"
 	_ = postJobResult(t, handler, workerJobID, staleWorkerPayload, http.StatusConflict)
 	assert.Len(t, patcher.requests, 1, "stale worker base must be rejected before patch application")
+}
+
+func persistWorkflowRunID(t *testing.T, ctx context.Context, st *store.MemoryStore, jobID string, runID string, now time.Time) {
+	t.Helper()
+	job, err := st.GetJob(ctx, jobID)
+	require.NoError(t, err)
+	metadata := map[string]any{}
+	require.NoError(t, json.Unmarshal(job.Metadata, &metadata))
+	metadata["workflow_run_id"] = runID
+	updated, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	require.NoError(t, st.UpdateJobStatus(ctx, jobID, job.Status, updated, now))
 }
 
 func postJSON[T any](t *testing.T, handler http.Handler, path string, body any, wantStatus int) T {

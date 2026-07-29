@@ -397,6 +397,8 @@ func TestReviewWorkflow_DefaultMatchesCommittedWorkflowAndPostsReviewCallback(t 
 	assert.Contains(t, s, `actual_head="$(git rev-parse HEAD)"`)
 	assert.Contains(t, s, `checked out ${actual_head}`)
 	assert.Contains(t, s, `kind: "review_completed"`)
+	assert.Contains(t, s, `'. + {`)
+	assert.Contains(t, s, `"$COMMAND_RESULT"`)
 	assert.Contains(t, s, `approved|changes_requested|failed|timeout|unparseable`)
 	assert.Contains(t, s, `Herd Review timed out after ${HERD_REVIEW_TIMEOUT_MINUTES} minute(s).`)
 	assert.Contains(t, s, `Herd Review workflow did not produce a structured result.`)

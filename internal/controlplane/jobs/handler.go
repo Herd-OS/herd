@@ -173,9 +173,9 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
-	expected := ExpectedIdentityFromJob(job, "")
-	if expected.Repository == "" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "job repository metadata is missing"})
+	expected, err := StrictExpectedIdentityFromJob(job)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
 	if envelope.Repository != expected.Repository {
@@ -325,9 +325,9 @@ func (h Handler) serveReadToken(w http.ResponseWriter, r *http.Request, jobID st
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not eligible for hosted review read token"})
 		return
 	}
-	expected := ExpectedIdentityFromJob(job, "")
-	if expected.Repository == "" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "job repository metadata is missing"})
+	expected, err := StrictExpectedIdentityFromJob(job)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
 	token, err := BearerToken(r.Header.Get("Authorization"))
@@ -424,9 +424,6 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 	}
 	repo := reviewRepositoryFromJob(job, reviewResult.Repository)
 	targetURL := firstMetadataString(metadataMap(job.Metadata), "workflow_run_url", "run_url", "target_url", "pr_url")
-	if err := h.markReviewResultMutationCallStarted(ctx, mutationKey); err != nil {
-		return err
-	}
 	err = h.reviewProcessor.SubmitReviewResult(ctx, repo, review.ReviewCompletedResult{
 		Repository:  reviewResult.Repository,
 		JobID:       reviewResult.JobID,
@@ -523,26 +520,6 @@ func (h Handler) acquireReviewResultMutation(ctx context.Context, key string, jo
 		}
 	}
 	return true, nil
-}
-
-func (h Handler) markReviewResultMutationCallStarted(ctx context.Context, key string) error {
-	recorder, ok := h.store.(MutationRecorder)
-	if !ok {
-		return fmt.Errorf("review result mutation recorder is not configured")
-	}
-	starter, ok := h.store.(MutationStarter)
-	if !ok {
-		return fmt.Errorf("review result mutation starter is not configured")
-	}
-	start, err := starter.TryStartGitHubMutationAttempt(ctx, key, []string{mutationspkg.PhaseIntentRecorded, mutationspkg.PhaseFailedPreCall}, h.now())
-	if err != nil {
-		_ = recorder.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseFailedPreCall, nil, err.Error(), h.now())
-		return fmt.Errorf("mark review result mutation call started: %w", err)
-	}
-	if !start.Started {
-		return fmt.Errorf("review result mutation %q is %s; repair required before retry", key, start.Attempt.Status)
-	}
-	return nil
 }
 
 func (h Handler) completeReviewResultMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error) error {

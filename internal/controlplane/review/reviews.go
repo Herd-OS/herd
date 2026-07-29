@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -551,7 +552,29 @@ func reviewBody(result ReviewCompletedResult) string {
 }
 
 func reviewSubmissionKey(repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) string {
-	return fmt.Sprintf("review_submission:%d:%d:%s:%s:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.Status, event, result.JobID)
+	return fmt.Sprintf("review_submission:%d:%d:%s:%s:%s:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.Status, event, result.JobID, reviewVisiblePayloadHash(result, event))
+}
+
+func reviewVisiblePayloadHash(result ReviewCompletedResult, event platform.ReviewEvent) string {
+	payload := struct {
+		Body     string               `json:"body"`
+		Event    platform.ReviewEvent `json:"event"`
+		FixCycle int                  `json:"fix_cycle"`
+		Findings []Finding            `json:"findings,omitempty"`
+		Summary  string               `json:"summary"`
+	}{
+		Body:     reviewBody(result),
+		Event:    event,
+		FixCycle: result.FixCycle,
+		Findings: result.Findings,
+		Summary:  strings.TrimSpace(result.Summary),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "invalid"
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func reviewSubmissionFailureCommentKey(repo Repository, result ReviewCompletedResult) string {

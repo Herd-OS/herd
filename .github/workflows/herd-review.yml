@@ -137,7 +137,12 @@ jobs:
             STATUS="failed"
             SUMMARY="Herd Review workflow failed after producing an approval result."
           fi
-          jq -n \
+          COMMAND_RESULT="/tmp/herd-review-command-result.json"
+          if ! jq -e 'type == "object"' "$COMMAND_RESULT" >/dev/null 2>&1; then
+            COMMAND_RESULT="$(mktemp)"
+            printf '{}\n' > "$COMMAND_RESULT"
+          fi
+          jq \
             --arg repository "$HERD_REPOSITORY" \
             --arg job_id "$HERD_JOB_ID" \
             --argjson batch_number "$HERD_BATCH_NUMBER" \
@@ -145,7 +150,7 @@ jobs:
             --arg head_sha "$HERD_EXPECTED_HEAD_SHA" \
             --arg status "$STATUS" \
             --arg summary "$SUMMARY" \
-            '{
+            '. + {
               version: 1,
               kind: "review_completed",
               repository: $repository,
@@ -156,6 +161,7 @@ jobs:
               status: $status,
               summary: $summary
             }' \
+            "$COMMAND_RESULT" \
             > /tmp/herd-review-result.json
           attempt=1
           delay=1

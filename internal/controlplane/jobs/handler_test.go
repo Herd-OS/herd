@@ -65,6 +65,20 @@ func validReviewJobMetadata() json.RawMessage {
 	return json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345","workflow_run_url":"https://example.test/run"}`)
 }
 
+func validJobMetadataWith(extra map[string]any) json.RawMessage {
+	metadata := map[string]any{
+		"repository":      "acme/widgets",
+		"ref":             "refs/heads/herd/worker/837",
+		"workflow_file":   "worker.yml",
+		"workflow_run_id": "12345",
+	}
+	for key, value := range extra {
+		metadata[key] = value
+	}
+	out, _ := json.Marshal(metadata)
+	return out
+}
+
 func TestHandlerDuplicateCallbacksAreIdempotent(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -428,7 +442,7 @@ func TestHandlerPassesDisabledReviewMetadata(t *testing.T) {
 		InstallationID: 9,
 		PRNumber:       42,
 		HeadSHA:        "head",
-		Metadata:       json.RawMessage(`{"integrator":{"review":false}}`),
+		Metadata:       validJobMetadataWith(map[string]any{"integrator": map[string]any{"review": false}}),
 	}
 	processor := &capturingReviewProcessor{}
 	handler := NewHandler(HandlerOptions{
@@ -648,7 +662,7 @@ func TestHandlerAppliesValidPatchArtifactAndRecordsCommitSHA(t *testing.T) {
 		HeadSHA:        "head",
 		BaseSHA:        "base",
 		WorkerBranch:   "herd/worker/837",
-		Metadata:       json.RawMessage(`{"requester_name":"Mona","requester_email":"mona@example.com"}`),
+		Metadata:       validJobMetadataWith(map[string]any{"requester_name": "Mona", "requester_email": "mona@example.com"}),
 	}
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
@@ -731,7 +745,7 @@ func TestHandlerAppliesBundledWorkerBranchArtifactAndRecordsCommitSHA(t *testing
 		HeadSHA:        "head",
 		BaseSHA:        "base",
 		WorkerBranch:   "herd/worker/837",
-		Metadata:       json.RawMessage(`{"requester_name":"Mona","requester_email":"mona@example.com"}`),
+		Metadata:       validJobMetadataWith(map[string]any{"requester_name": "Mona", "requester_email": "mona@example.com"}),
 	}
 	patch := []byte("diff --git a/file.txt b/file.txt\n")
 	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "herd-worker.patch", patch)
@@ -846,6 +860,50 @@ func TestHandlerRejectsOIDCValidatorFailure(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Empty(t, st.results)
+}
+
+func TestHandlerRejectsCallbackWhenHostedOIDCIdentityMetadataMissing(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		metadata json.RawMessage
+		wantErr  string
+	}{
+		{name: "missing ref", metadata: json.RawMessage(`{"repository":"acme/widgets","workflow_file":"worker.yml","workflow_run_id":"12345"}`), wantErr: "ref"},
+		{name: "missing workflow", metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_run_id":"12345"}`), wantErr: "workflow"},
+		{name: "missing run ID", metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml"}`), wantErr: "workflow_run_id"},
+		{name: "malformed metadata", metadata: json.RawMessage(`{`), wantErr: "malformed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newResultStore()
+			st.jobs["job-1"] = store.Job{
+				JobID:        "job-1",
+				RepositoryID: 7,
+				HeadSHA:      "head",
+				BaseSHA:      "base",
+				WorkerBranch: "herd/worker/837",
+				Metadata:     tt.metadata,
+			}
+			artifactStore := &flakyArtifactStore{errs: []error{errors.New("artifact should not be fetched")}}
+			handler := NewHandler(HandlerOptions{
+				Store:         st,
+				Validator:     fixedOIDCValidator(validClaims(now)),
+				Audience:      "herd-control-plane",
+				Now:           func() time.Time { return now },
+				ArtifactStore: artifactStore,
+				PatchApplier:  fixedPatchApplier{},
+			})
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, resultRequest("job-1", validWorkerPayload("job-1", "head")))
+
+			require.Equal(t, http.StatusConflict, rec.Code)
+			assert.Contains(t, rec.Body.String(), tt.wantErr)
+			assert.Empty(t, st.results)
+			assert.Len(t, artifactStore.errs, 1)
+		})
+	}
 }
 
 func TestHandlerDuplicateWorkerPatchAppliesOnce(t *testing.T) {
@@ -1300,6 +1358,8 @@ func TestHandlerDoesNotRetryReviewResultAfterProcessorFailure(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusInternalServerError, second.Code)
 	assert.Len(t, processor.calls, 1)
+	require.Len(t, st.mutationCompletions, 1)
+	assert.Equal(t, mutationspkg.PhaseRepairRequired, st.mutationCompletions[0].status)
 	assert.Empty(t, st.results)
 }
 
@@ -1325,6 +1385,9 @@ func TestHandlerRetriesReviewResultAfterProcessorPreCallFailure(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, processor.calls, 2)
+	require.Len(t, st.mutationCompletions, 2)
+	assert.Equal(t, mutationspkg.PhaseFailedPreCall, st.mutationCompletions[0].status)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationCompletions[1].status)
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusApproved, st.results[0].Status)
 }
@@ -1383,11 +1446,14 @@ func (s *resultStore) GetJob(_ context.Context, jobID string) (store.Job, error)
 }
 
 func withDefaultJobRepositoryMetadata(raw json.RawMessage) json.RawMessage {
-	metadata := map[string]any{"repository": "acme/widgets"}
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &metadata)
-		metadata["repository"] = "acme/widgets"
+	if len(raw) == 0 {
+		return validJobMetadata()
 	}
+	metadata := map[string]any{}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return raw
+	}
+	metadata["repository"] = "acme/widgets"
 	out, _ := json.Marshal(metadata)
 	return out
 }
@@ -1476,6 +1542,11 @@ func (s *resultStore) RecordGitHubMutationAttempt(_ context.Context, attempt sto
 		s.recordMutationErrs = s.recordMutationErrs[1:]
 		if err != nil {
 			return err
+		}
+	}
+	for _, existing := range s.mutationAttempts {
+		if existing.IdempotencyKey == attempt.IdempotencyKey {
+			return store.ErrAlreadyExists
 		}
 	}
 	s.mutationAttempts = append(s.mutationAttempts, attempt)
