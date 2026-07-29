@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 type registerFakeStore struct {
@@ -72,8 +74,20 @@ func (v *fakeSetupVerifier) VerifySetupRepository(_ context.Context, setupToken 
 }
 
 type fakeAppVerifier struct {
+	findErr        error
 	err            error
+	installation   AppInstallation
 	installationID int64
+}
+
+func (v *fakeAppVerifier) FindRepositoryInstallation(_ context.Context, _ string, _ string) (AppInstallation, error) {
+	if v.findErr != nil {
+		return AppInstallation{}, v.findErr
+	}
+	if v.installation.ID != 0 {
+		return v.installation, nil
+	}
+	return AppInstallation{ID: 42, AccountLogin: "octo", AccountID: 100, AccountType: "Organization"}, nil
 }
 
 func (v *fakeAppVerifier) VerifyAppAccess(_ context.Context, installationID int64, _ string, _ string) error {
@@ -166,7 +180,7 @@ func TestRegisterHandlerFailures(t *testing.T) {
 			name:       "app not installed",
 			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
 			setup:      &fakeSetupVerifier{repo: SetupRepository{ID: 99, Admin: true}},
-			app:        &fakeAppVerifier{},
+			app:        &fakeAppVerifier{findErr: ErrAppInstallation},
 			wantStatus: http.StatusConflict,
 			wantError:  "GitHub App is not installed",
 		},
@@ -302,6 +316,55 @@ func TestGitHubRateLimitErrorClassifiesTypedForbiddenRateLimits(t *testing.T) {
 			assert.Equal(t, tt.want, githubRateLimitError(tt.err))
 		})
 	}
+}
+
+func TestDefaultGitHubVerifiersUseSetupTokenForAdminAndAppAuthForInstallationDiscovery(t *testing.T) {
+	seenAuth := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/v3")
+		seenAuth[path] = r.Header.Get("Authorization")
+		switch path {
+		case "/user":
+			writeJSON(w, http.StatusOK, map[string]string{"login": "mona"})
+		case "/repos/octo/herd":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id":             99,
+				"name":           "herd",
+				"full_name":      "octo/herd",
+				"default_branch": "main",
+				"private":        true,
+				"permissions":    map[string]bool{"admin": true},
+			})
+		case "/repos/octo/herd/installation":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id":      42,
+				"account": map[string]any{"login": "octo", "id": 100, "type": "Organization"},
+			})
+		default:
+			writeJSON(w, http.StatusNotFound, map[string]string{"message": "not found"})
+		}
+	}))
+	defer server.Close()
+	clientFor := func(httpClient *http.Client) *ghapi.Client {
+		client, err := ghapi.NewClient(httpClient).WithEnterpriseURLs(server.URL+"/", server.URL+"/")
+		require.NoError(t, err)
+		return client
+	}
+	setup := githubSetupVerifier{newClient: clientFor}
+	appHTTPClient := oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "app-jwt"}))
+	app := githubAppVerifier{appClient: clientFor(appHTTPClient)}
+
+	repo, err := setup.VerifySetupRepository(context.Background(), "gho_setup", "octo", "herd")
+	require.NoError(t, err)
+	installation, err := app.FindRepositoryInstallation(context.Background(), "octo", "herd")
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(99), repo.ID)
+	assert.Zero(t, repo.InstallationID)
+	assert.Equal(t, int64(42), installation.ID)
+	assert.Equal(t, "Bearer gho_setup", seenAuth["/user"])
+	assert.Equal(t, "Bearer gho_setup", seenAuth["/repos/octo/herd"])
+	assert.Equal(t, "Bearer app-jwt", seenAuth["/repos/octo/herd/installation"])
 }
 
 func registerRequest(body string) *http.Request {

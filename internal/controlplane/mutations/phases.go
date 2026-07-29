@@ -3,14 +3,18 @@ package mutations
 import "strings"
 
 const (
-	PhaseIntentRecorded = "intent_recorded"
-	PhaseCallStarted    = "call_started"
-	PhaseCompleted      = "completed"
-	PhaseFailedPreCall  = "failed_pre_call"
-	PhaseRepairRequired = "repair_required"
+	PhaseIntentRecorded  = "intent_recorded"
+	PhaseCallStarted     = "call_started"
+	PhasePostCallUnknown = "post_call_unknown"
+	PhaseCompleted       = "completed"
+	PhaseFailedPreCall   = "failed_pre_call"
+	PhaseRepairRequired  = "repair_required"
 
-	LegacyStarted = "started"
-	LegacyFailed  = "failed"
+	LegacyStarted              = "started"
+	LegacyFailed               = "failed"
+	LegacyWebhookStarted       = "processor_started"
+	LegacyWebhookCompleted     = "processed"
+	LegacyWebhookFailedPreCall = "failed_pre_processor"
 )
 
 // IsPreCallRetryable reports whether a GitHub-visible mutation can be retried
@@ -42,7 +46,7 @@ func IsPreCallRetryableRecord(status, resultRef string) bool {
 
 func IsPostCallUnknown(status string) bool {
 	switch Normalize(status) {
-	case PhaseCallStarted, PhaseRepairRequired:
+	case PhaseCallStarted, PhasePostCallUnknown, PhaseRepairRequired:
 		return true
 	default:
 		return false
@@ -55,8 +59,12 @@ func IsCompleted(status string) bool {
 
 func Normalize(status string) string {
 	switch strings.TrimSpace(status) {
-	case LegacyStarted:
+	case LegacyStarted, LegacyWebhookStarted:
 		return PhaseCallStarted
+	case LegacyWebhookCompleted:
+		return PhaseCompleted
+	case LegacyWebhookFailedPreCall:
+		return PhaseFailedPreCall
 	case LegacyFailed:
 		return PhaseRepairRequired
 	default:

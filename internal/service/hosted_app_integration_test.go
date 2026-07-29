@@ -349,6 +349,10 @@ func (v hostedAppSetupVerifier) VerifySetupRepository(_ context.Context, setupTo
 
 type hostedAppInstallationVerifier struct{}
 
+func (hostedAppInstallationVerifier) FindRepositoryInstallation(context.Context, string, string) (cpgithub.AppInstallation, error) {
+	return cpgithub.AppInstallation{ID: 42, AccountLogin: "octo", AccountID: 100, AccountType: "Organization"}, nil
+}
+
 func (hostedAppInstallationVerifier) VerifyAppAccess(context.Context, int64, string, string) error {
 	return nil
 }

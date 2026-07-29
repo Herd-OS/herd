@@ -121,7 +121,7 @@ func (s *MemoryStore) TryStartWebhookDeliveryProcessing(_ context.Context, deliv
 	if !allowed {
 		return WebhookDeliveryStartResult{Started: false, Delivery: delivery}, nil
 	}
-	delivery.Status = "processor_started"
+	delivery.Status = mutations.PhaseCallStarted
 	delivery.Error = ""
 	delivery.ProcessedAt = nil
 	s.webhookDeliveries[deliveryID] = delivery

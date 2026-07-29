@@ -55,7 +55,15 @@ type SetupVerifier interface {
 	VerifySetupRepository(ctx context.Context, setupToken string, owner string, name string) (SetupRepository, error)
 }
 
+type AppInstallation struct {
+	ID           int64
+	AccountLogin string
+	AccountID    int64
+	AccountType  string
+}
+
 type AppInstallationVerifier interface {
+	FindRepositoryInstallation(ctx context.Context, owner string, name string) (AppInstallation, error)
 	VerifyAppAccess(ctx context.Context, installationID int64, owner string, name string) error
 }
 
@@ -93,14 +101,14 @@ func NewRegisterHandler(opts RegisterHandlerOptions) http.Handler {
 }
 
 func NewDefaultRegisterHandler(store RegistrationStore, appCfg appauth.AppConfig, appLogin string, controlPlaneURL string) (http.Handler, error) {
-	tokenSource, _, err := appauth.NewGitHubTokenSource(appCfg)
+	tokenSource, appHTTPClient, err := appauth.NewGitHubTokenSource(appCfg)
 	if err != nil {
 		return nil, err
 	}
 	return NewRegisterHandler(RegisterHandlerOptions{
 		Store:           store,
 		SetupVerifier:   githubSetupVerifier{},
-		AppVerifier:     githubAppVerifier{source: tokenSource},
+		AppVerifier:     githubAppVerifier{source: tokenSource, appClient: ghapi.NewClient(appHTTPClient)},
 		AppLogin:        appLogin,
 		ControlPlaneURL: controlPlaneURL,
 	}), nil
@@ -155,11 +163,26 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "repository registration requires admin access; run `gh auth login -h github.com` as a repo admin and retry"})
 		return
 	}
-	if setupRepo.InstallationID == 0 {
+	appInstallation, err := h.appVerifier.FindRepositoryInstallation(r.Context(), req.Owner, req.Name)
+	if err != nil {
+		if errors.Is(err, ErrAppInstallation) {
+			h.recordAttempt(r.Context(), setupRepo.ID, 0, req.Owner, req.Name, "rejected", ErrAppInstallation.Error())
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "Herd GitHub App is not installed for this repository; install the App for the repository and retry `herd init`"})
+			return
+		}
+		h.recordAttempt(r.Context(), setupRepo.ID, 0, req.Owner, req.Name, "rejected", "find GitHub App installation: GitHub unavailable")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "find GitHub App installation: GitHub unavailable, retry repository registration"})
+		return
+	}
+	if appInstallation.ID == 0 {
 		h.recordAttempt(r.Context(), setupRepo.ID, 0, req.Owner, req.Name, "rejected", ErrAppInstallation.Error())
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "Herd GitHub App is not installed for this repository; install the App for the repository and retry `herd init`"})
 		return
 	}
+	setupRepo.InstallationID = appInstallation.ID
+	setupRepo.AccountLogin = appInstallation.AccountLogin
+	setupRepo.AccountID = appInstallation.AccountID
+	setupRepo.AccountType = appInstallation.AccountType
 	if err := h.appVerifier.VerifyAppAccess(r.Context(), setupRepo.InstallationID, req.Owner, req.Name); err != nil {
 		if !errors.Is(err, ErrAppInstallationMatch) {
 			h.recordAttempt(r.Context(), setupRepo.ID, setupRepo.InstallationID, req.Owner, req.Name, "rejected", "verify GitHub App installation access: GitHub unavailable")
@@ -294,11 +317,16 @@ func sanitizeRegistrationError(msg string, setupToken string) string {
 	return msg
 }
 
-type githubSetupVerifier struct{}
+type githubSetupVerifier struct {
+	newClient func(*http.Client) *ghapi.Client
+}
 
-func (githubSetupVerifier) VerifySetupRepository(ctx context.Context, setupToken string, owner string, name string) (SetupRepository, error) {
+func (v githubSetupVerifier) VerifySetupRepository(ctx context.Context, setupToken string, owner string, name string) (SetupRepository, error) {
 	httpClient := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: setupToken}))
 	client := ghapi.NewClient(httpClient)
+	if v.newClient != nil {
+		client = v.newClient(httpClient)
+	}
 	if _, _, err := client.Users.Get(ctx, ""); err != nil {
 		return SetupRepository{}, fmt.Errorf("verify authenticated GitHub user: %w", err)
 	}
@@ -310,36 +338,43 @@ func (githubSetupVerifier) VerifySetupRepository(ctx context.Context, setupToken
 	if !admin {
 		return SetupRepository{}, ErrRepoUnauthorized
 	}
-	installation, _, err := client.Apps.FindRepositoryInstallation(ctx, owner, name)
+	return SetupRepository{
+		ID:            repo.GetID(),
+		Owner:         owner,
+		Name:          name,
+		FullName:      repo.GetFullName(),
+		DefaultBranch: repo.GetDefaultBranch(),
+		Private:       repo.GetPrivate(),
+		Admin:         true,
+	}, nil
+}
+
+type githubAppVerifier struct {
+	source    appauth.TokenSource
+	appClient *ghapi.Client
+}
+
+func (v githubAppVerifier) FindRepositoryInstallation(ctx context.Context, owner string, name string) (AppInstallation, error) {
+	if v.appClient == nil {
+		return AppInstallation{}, fmt.Errorf("GitHub App client is required")
+	}
+	installation, _, err := v.appClient.Apps.FindRepositoryInstallation(ctx, owner, name)
 	if err != nil {
 		if githubRateLimitError(err) {
-			return SetupRepository{}, fmt.Errorf("find repository installation: %w", err)
+			return AppInstallation{}, fmt.Errorf("find repository installation: %w", err)
 		}
 		if githubStatusCode(err) == http.StatusNotFound || githubStatusCode(err) == http.StatusForbidden {
-			return SetupRepository{}, ErrAppInstallation
+			return AppInstallation{}, ErrAppInstallation
 		}
-		return SetupRepository{}, fmt.Errorf("find repository installation: %w", err)
+		return AppInstallation{}, fmt.Errorf("find repository installation: %w", err)
 	}
-	out := SetupRepository{
-		ID:             repo.GetID(),
-		Owner:          owner,
-		Name:           name,
-		FullName:       repo.GetFullName(),
-		DefaultBranch:  repo.GetDefaultBranch(),
-		Private:        repo.GetPrivate(),
-		Admin:          true,
-		InstallationID: installation.GetID(),
-	}
+	out := AppInstallation{ID: installation.GetID()}
 	if installation.GetAccount() != nil {
 		out.AccountLogin = installation.GetAccount().GetLogin()
 		out.AccountID = installation.GetAccount().GetID()
 		out.AccountType = installation.GetAccount().GetType()
 	}
 	return out, nil
-}
-
-type githubAppVerifier struct {
-	source appauth.TokenSource
 }
 
 func (v githubAppVerifier) VerifyAppAccess(ctx context.Context, installationID int64, owner string, name string) error {

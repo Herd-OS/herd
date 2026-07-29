@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/commands"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 )
 
@@ -157,7 +158,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Event:       eventName,
 		Action:      action,
 		PayloadHash: hash,
-		Status:      "intent_recorded",
+		Status:      mutations.PhaseIntentRecorded,
 		Metadata:    mustJSON(map[string]string{"event": eventName, "action": action}),
 		ReceivedAt:  time.Now().UTC(),
 	})
@@ -179,24 +180,35 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "webhook delivery payload hash mismatch"})
 			return
 		}
-		if existing.Status == "processed" {
+		if mutations.IsCompleted(existing.Status) {
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "duplicate"})
 			return
 		}
-		switch existing.Status {
-		case "intent_recorded", "failed_pre_processor", "failed":
-		case "processor_started", "repair_required":
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "webhook delivery outcome is unknown; repair required"})
-			return
-		default:
+		if !mutations.IsPreCallRetryable(existing.Status) && mutations.IsPostCallUnknown(existing.Status) {
+			repaired, err := h.repairDelivery(r.Context(), deliveryID, eventName, payload)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "repair webhook delivery: storage unavailable"})
+				return
+			}
+			if repaired {
+				writeJSON(w, http.StatusAccepted, map[string]string{"status": "repaired"})
+				return
+			}
+			_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, mutations.PhaseRepairRequired, "webhook delivery outcome is unknown; repair required", nil)
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "webhook delivery outcome is unknown; repair required"})
 			return
 		}
+		if !mutations.IsPreCallRetryable(existing.Status) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "webhook delivery outcome is unknown; repair required"})
+			return
+		}
+		// Retryable pre-call states have not crossed the GitHub-visible
+		// mutation boundary; continue below and attempt processing once.
 	}
 
 	event, err := ParseEvent(eventName, payload)
 	if err != nil {
-		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "failed_pre_processor", err.Error(), nil)
+		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, mutations.PhaseFailedPreCall, err.Error(), nil)
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "parse webhook payload: unsupported payload shape",
 		})
@@ -214,7 +226,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	start, err := h.store.TryStartWebhookDeliveryProcessing(r.Context(), deliveryID, []string{"intent_recorded", "failed_pre_processor", "failed"})
+	start, err := h.store.TryStartWebhookDeliveryProcessing(r.Context(), deliveryID, []string{mutations.PhaseIntentRecorded, mutations.PhaseFailedPreCall, mutations.LegacyWebhookFailedPreCall})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "update webhook delivery: storage unavailable",
@@ -222,7 +234,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !start.Started {
-		if start.Delivery.Status == "processed" {
+		if mutations.IsCompleted(start.Delivery.Status) {
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "duplicate"})
 			return
 		}
@@ -231,9 +243,9 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.processEvent(r.Context(), event); err != nil {
 		h.logger.Printf("process GitHub webhook delivery=%s event=%s action=%s: %v", deliveryID, eventName, action, err)
-		status := "repair_required"
+		status := mutations.PhaseRepairRequired
 		if eventHasRetryablePreProcessorSideEffects(event) {
-			status = "failed_pre_processor"
+			status = mutations.PhaseFailedPreCall
 		}
 		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, status, err.Error(), nil)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -243,7 +255,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.markDeliveryProcessed(r.Context(), deliveryID); err != nil {
-		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, "repair_required", err.Error(), nil)
+		_ = h.store.UpdateWebhookDeliveryStatus(r.Context(), deliveryID, mutations.PhasePostCallUnknown, err.Error(), nil)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "update webhook delivery: storage unavailable",
 		})
@@ -254,12 +266,33 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h Handler) markDeliveryProcessed(ctx context.Context, deliveryID string) error {
 	now := time.Now().UTC()
-	return h.store.UpdateWebhookDeliveryStatus(ctx, deliveryID, "processed", "", &now)
+	return h.store.UpdateWebhookDeliveryStatus(ctx, deliveryID, mutations.PhaseCompleted, "", &now)
+}
+
+func (h Handler) repairDelivery(ctx context.Context, deliveryID string, eventName string, payload []byte) (bool, error) {
+	event, err := ParseEvent(eventName, payload)
+	if err != nil || event == nil {
+		return false, err
+	}
+	switch e := event.(type) {
+	case IssueCommentEvent:
+		queueStore, ok := h.store.(commands.QueueStore)
+		if !ok {
+			return false, fmt.Errorf("command queue storage is not configured")
+		}
+		queued, err := commands.IssueCommentCommandQueued(ctx, queueStore, h.appLogin, issueCommentCommand(e))
+		if err != nil || !queued {
+			return queued, err
+		}
+		return true, h.markDeliveryProcessed(ctx, deliveryID)
+	default:
+		return false, nil
+	}
 }
 
 func eventHasRetryablePreProcessorSideEffects(event Event) bool {
 	switch event.(type) {
-	case InstallationEvent, InstallationRepositoriesEvent:
+	case InstallationEvent, InstallationRepositoriesEvent, IssueCommentEvent:
 		return true
 	default:
 		return false
@@ -280,18 +313,7 @@ func (h Handler) processEvent(ctx context.Context, event Event) error {
 }
 
 func (h Handler) processIssueComment(ctx context.Context, e IssueCommentEvent) error {
-	event := commands.IssueComment{
-		Action:            e.Action,
-		Owner:             e.Repository.Owner,
-		Repo:              e.Repository.Name,
-		IssueNumber:       e.IssueNumber,
-		PullRequestURL:    e.PullRequestURL,
-		CommentID:         e.CommentID,
-		CommentBody:       e.CommentBody,
-		CommentAuthorType: firstNonEmpty(e.CommentAuthorType, e.SenderType),
-		SenderLogin:       e.SenderLogin,
-		AuthorAssociation: e.CommentAuthorAssociation,
-	}
+	event := issueCommentCommand(e)
 	queueStore, ok := h.store.(commands.QueueStore)
 	if !ok {
 		return fmt.Errorf("command queue storage is not configured")
@@ -307,6 +329,21 @@ func (h Handler) processIssueComment(ctx context.Context, e IssueCommentEvent) e
 		return err
 	}
 	return nil
+}
+
+func issueCommentCommand(e IssueCommentEvent) commands.IssueComment {
+	return commands.IssueComment{
+		Action:            e.Action,
+		Owner:             e.Repository.Owner,
+		Repo:              e.Repository.Name,
+		IssueNumber:       e.IssueNumber,
+		PullRequestURL:    e.PullRequestURL,
+		CommentID:         e.CommentID,
+		CommentBody:       e.CommentBody,
+		CommentAuthorType: firstNonEmpty(e.CommentAuthorType, e.SenderType),
+		SenderLogin:       e.SenderLogin,
+		AuthorAssociation: e.CommentAuthorAssociation,
+	}
 }
 
 func (h Handler) processInstallation(ctx context.Context, e InstallationEvent) error {

@@ -117,10 +117,10 @@ func (s *PostgresStore) TryStartWebhookDeliveryProcessing(ctx context.Context, d
 	var metadata []byte
 	err := s.db.QueryRowContext(ctx, `
 		UPDATE webhook_deliveries
-		SET status = 'processor_started', error = '', processed_at = NULL
-		WHERE delivery_id = $1 AND status = ANY($2)
+		SET status = $2, error = '', processed_at = NULL
+		WHERE delivery_id = $1 AND status = ANY($3)
 		RETURNING id, delivery_id, event, action, payload_hash, status, error, metadata, received_at, processed_at`,
-		deliveryID, pq.Array(allowedStatuses)).Scan(
+		deliveryID, mutations.PhaseCallStarted, pq.Array(allowedStatuses)).Scan(
 		&d.ID, &d.DeliveryID, &d.Event, &d.Action, &d.PayloadHash, &d.Status, &d.Error, &metadata, &d.ReceivedAt, &d.ProcessedAt)
 	if err == nil {
 		d.Metadata = json.RawMessage(metadata)

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/commands"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -226,7 +227,7 @@ func TestHandlerMarksMalformedAcceptedDeliveryFailed(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Len(t, st.deliveries, 1)
-	assert.Equal(t, "failed_pre_processor", st.deliveries[0].Status)
+	assert.Equal(t, mutations.PhaseFailedPreCall, st.deliveries[0].Status)
 	assert.NotEmpty(t, st.deliveries[0].Error)
 }
 
@@ -317,7 +318,7 @@ func TestHandlerIssueCommentCommanderFailureDoesNotRepairDeliveryAfterQueue(t *t
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	assert.Empty(t, commander.events)
 	require.Len(t, store.deliveries, 1)
-	assert.Equal(t, "processed", store.deliveries[0].Status)
+	assert.Equal(t, mutations.PhaseCompleted, store.deliveries[0].Status)
 	assert.Empty(t, store.deliveries[0].Error)
 	assert.Len(t, store.commands, 1)
 }
@@ -355,7 +356,7 @@ func TestHandlerIssueCommentCommandQueuedOnceForDuplicateDelivery(t *testing.T) 
 	assert.Len(t, store.commands, 1)
 }
 
-func TestHandlerIssueCommentEnqueueFailureWithoutRecordRequiresRepair(t *testing.T) {
+func TestHandlerIssueCommentEnqueueFailureWithoutRecordRetriesOnceOnRedelivery(t *testing.T) {
 	payload := []byte(`{
 		"action":"created",
 		"installation":{"id":42},
@@ -382,7 +383,7 @@ func TestHandlerIssueCommentEnqueueFailureWithoutRecordRequiresRepair(t *testing
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Len(t, store.commands, 0)
 	require.Len(t, store.deliveries, 1)
-	assert.Equal(t, "repair_required", store.deliveries[0].Status)
+	assert.Equal(t, mutations.PhaseFailedPreCall, store.deliveries[0].Status)
 
 	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
 	req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-enqueue-retry")
@@ -391,9 +392,9 @@ func TestHandlerIssueCommentEnqueueFailureWithoutRecordRequiresRepair(t *testing
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusConflict, rec.Code)
-	require.Len(t, store.commands, 0)
-	assert.Equal(t, "repair_required", store.deliveries[0].Status)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Len(t, store.commands, 1)
+	assert.Equal(t, mutations.PhaseCompleted, store.deliveries[0].Status)
 }
 
 func TestHandlerIssueCommentEnqueueInsertThenErrorRepairsWithoutDuplicate(t *testing.T) {
@@ -423,7 +424,7 @@ func TestHandlerIssueCommentEnqueueInsertThenErrorRepairsWithoutDuplicate(t *tes
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	require.Len(t, store.commands, 1)
-	assert.Equal(t, "processed", store.deliveries[0].Status)
+	assert.Equal(t, mutations.PhaseCompleted, store.deliveries[0].Status)
 
 	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
 	req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-enqueue-insert-then-error")
@@ -463,7 +464,7 @@ func TestHandlerIssueCommentMarkProcessedFailureDoesNotReenqueueOnRedelivery(t *
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Len(t, store.commands, 1)
 	require.Len(t, store.deliveries, 1)
-	assert.Equal(t, "repair_required", store.deliveries[0].Status)
+	assert.Equal(t, mutations.PhasePostCallUnknown, store.deliveries[0].Status)
 
 	store.failProcessedUpdate = false
 	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
@@ -474,9 +475,9 @@ func TestHandlerIssueCommentMarkProcessedFailureDoesNotReenqueueOnRedelivery(t *
 
 	handler.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Equal(t, http.StatusAccepted, rec.Code)
 	assert.Len(t, store.commands, 1)
-	assert.Equal(t, "repair_required", store.deliveries[0].Status)
+	assert.Equal(t, mutations.PhaseCompleted, store.deliveries[0].Status)
 }
 
 func TestHandlerUpsertFailureReturnsServerError(t *testing.T) {
@@ -496,7 +497,7 @@ func TestHandlerUpsertFailureReturnsServerError(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Len(t, store.deliveries, 1)
-	assert.Equal(t, "failed_pre_processor", store.deliveries[0].Status)
+	assert.Equal(t, mutations.PhaseFailedPreCall, store.deliveries[0].Status)
 }
 
 func TestHandlerRetriesInstallationRepositoriesUpsertFailureOnRedelivery(t *testing.T) {
@@ -519,7 +520,7 @@ func TestHandlerRetriesInstallationRepositoriesUpsertFailureOnRedelivery(t *test
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Len(t, store.repositories, 0)
 	require.Len(t, store.deliveries, 1)
-	assert.Equal(t, "failed_pre_processor", store.deliveries[0].Status)
+	assert.Equal(t, mutations.PhaseFailedPreCall, store.deliveries[0].Status)
 
 	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
 	req.Header.Set("X-GitHub-Delivery", "delivery-redeliver-after-failure")
@@ -532,7 +533,7 @@ func TestHandlerRetriesInstallationRepositoriesUpsertFailureOnRedelivery(t *test
 	require.Len(t, store.repositories, 1)
 	assert.Equal(t, "herd", store.repositories[0].Name)
 	require.Len(t, store.deliveries, 1)
-	assert.Equal(t, "processed", store.deliveries[0].Status)
+	assert.Equal(t, mutations.PhaseCompleted, store.deliveries[0].Status)
 }
 
 func sign(secret string, payload []byte) string {
@@ -571,7 +572,7 @@ func (s *fakeStore) RecordWebhookDelivery(_ context.Context, d store.WebhookDeli
 	if s.recordCreated != nil {
 		s.deliveries = append(s.deliveries, d)
 		if !*s.recordCreated {
-			s.deliveries[len(s.deliveries)-1].Status = "processed"
+			s.deliveries[len(s.deliveries)-1].Status = mutations.PhaseCompleted
 		}
 		return *s.recordCreated, nil
 	}
@@ -594,7 +595,7 @@ func (s *fakeStore) GetWebhookDelivery(_ context.Context, deliveryID string) (st
 }
 
 func (s *fakeStore) UpdateWebhookDeliveryStatus(_ context.Context, deliveryID string, status string, errorMessage string, processedAt *time.Time) error {
-	if status == "processed" && s.failProcessedUpdate {
+	if status == mutations.PhaseCompleted && s.failProcessedUpdate {
 		return errors.New("processed update failed")
 	}
 	for i := range s.deliveries {
@@ -615,7 +616,7 @@ func (s *fakeStore) TryStartWebhookDeliveryProcessing(_ context.Context, deliver
 		}
 		for _, status := range allowedStatuses {
 			if s.deliveries[i].Status == status {
-				s.deliveries[i].Status = "processor_started"
+				s.deliveries[i].Status = mutations.PhaseCallStarted
 				s.deliveries[i].Error = ""
 				s.deliveries[i].ProcessedAt = nil
 				return store.WebhookDeliveryStartResult{Started: true, Delivery: s.deliveries[i]}, nil
