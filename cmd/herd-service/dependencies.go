@@ -302,10 +302,10 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 		return fmt.Errorf("getting PR #%d: %w", cmd.PRNumber, err)
 	}
 	if !strings.HasPrefix(pr.Head, "herd/batch/") {
-		return addPRCommandResult(ctx, p, cmd.PRNumber, "⚠️ `@herd-os resolve-conflicts` can only be used on Herd batch PRs.")
+		return d.addPRCommandResult(ctx, p, cmd, cmd.PRNumber, "not-batch-pr", "⚠️ `@herd-os resolve-conflicts` can only be used on Herd batch PRs.")
 	}
 	if prReportsNonConflictBlocker(pr) {
-		return addPRCommandResult(ctx, p, cmd.PRNumber, "ℹ️ PR is not currently conflicting with base.")
+		return d.addPRCommandResult(ctx, p, cmd, cmd.PRNumber, "not-conflicting-blocker", "ℹ️ PR is not currently conflicting with base.")
 	}
 	batchNum, err := integrator.ParseBatchBranchMilestone(pr.Head)
 	if err != nil {
@@ -320,17 +320,17 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 		return fmt.Errorf("getting PR #%d mergeability: %w", cmd.PRNumber, err)
 	}
 	if !known {
-		return addPRCommandResult(ctx, p, cmd.PRNumber, "⚠️ Herd could not determine whether this PR is currently conflicting with base yet. Please retry `@herd-os resolve-conflicts` in a moment.")
+		return d.addPRCommandResult(ctx, p, cmd, cmd.PRNumber, "mergeability-unknown", "⚠️ Herd could not determine whether this PR is currently conflicting with base yet. Please retry `@herd-os resolve-conflicts` in a moment.")
 	}
 	if legacycommands.PRReportsClean(pr) || !legacycommands.PRReportsConflict(pr) {
-		return addPRCommandResult(ctx, p, cmd.PRNumber, "ℹ️ PR is not currently conflicting with base.")
+		return d.addPRCommandResult(ctx, p, cmd, cmd.PRNumber, "not-conflicting-clean", "ℹ️ PR is not currently conflicting with base.")
 	}
 	existing, err := integrator.FindActivePRConflictResolutionIssue(ctx, p, ms.Number, pr.Number, pr.HeadSHA, pr.BaseSHA)
 	if err != nil {
 		return err
 	}
 	if existing != nil && (issues.HasLabel(existing.Labels, issues.StatusInProgress) || issues.HasLabel(existing.Labels, issues.StatusReady)) {
-		return addPRCommandResult(ctx, p, cmd.PRNumber, fmt.Sprintf("⚠️ A conflict-resolution issue is already active for this PR (#%d).", existing.Number))
+		return d.addPRCommandResult(ctx, p, cmd, cmd.PRNumber, "already-active", fmt.Sprintf("⚠️ A conflict-resolution issue is already active for this PR (#%d).", existing.Number))
 	}
 	params := integrator.ConflictResolutionIssueParams{
 		Kind:           integrator.ConflictResolutionKindPRBase,
@@ -379,7 +379,7 @@ func (d productionCommandDispatcher) dispatchResolveConflictsCommand(ctx context
 		}
 		return fmt.Errorf("dispatching conflict-resolution worker for issue #%d: %w", fixIssueNumber, err)
 	}
-	return addPRCommandResult(ctx, p, cmd.PRNumber, fmt.Sprintf("🔧 Created conflict-resolution issue #%d and dispatched worker.", fixIssueNumber))
+	return d.addPRCommandResult(ctx, p, cmd, cmd.PRNumber, "dispatched", fmt.Sprintf("🔧 Created conflict-resolution issue #%d and dispatched worker.", fixIssueNumber))
 }
 
 func (d productionCommandDispatcher) markConflictResolutionDispatchFailed(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, issueNumber int, dispatchErr error) error {
@@ -445,6 +445,15 @@ func (d productionCommandDispatcher) commandIssueMutation(ctx context.Context, c
 	request, err := json.Marshal(requestValues)
 	if err != nil {
 		return err
+	}
+	_, err = d.Dispatcher.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "command_issue_" + action,
+		Status:    mutations.PhaseIntentRecorded,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf("acquire command issue mutation idempotency key: %w", err)
 	}
 	_, err = mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
 		Key:          key,
@@ -616,7 +625,7 @@ func (d productionCommandDispatcher) dispatchIssueCommand(ctx context.Context, c
 		return fmt.Errorf("issue #%d has no milestone (not part of a batch)", issueNumber)
 	}
 	if issues.HasLabel(issue.Labels, issues.TypeManual) {
-		return addIssueCommandResult(ctx, p, cmd.IssueNumber, fmt.Sprintf("Issue #%d is a manual task and cannot be dispatched to a worker.", issueNumber))
+		return d.addIssueCommandResult(ctx, p, cmd, cmd.IssueNumber, "manual-task", fmt.Sprintf("Issue #%d is a manual task and cannot be dispatched to a worker.", issueNumber))
 	}
 	status := issues.StatusLabel(issue.Labels)
 	recoveredRemovedStatus := ""
@@ -648,25 +657,7 @@ func (d productionCommandDispatcher) dispatchIssueCommand(ctx context.Context, c
 	if err != nil {
 		return fmt.Errorf("getting %s SHA: %w", batchBranch, err)
 	}
-	statusToRemove := status
-	if statusToRemove == "" {
-		statusToRemove = recoveredRemovedStatus
-	}
-	if statusToRemove == issues.StatusReady || statusToRemove == issues.StatusFailed {
-		if err := d.mutateDispatchIssueLabel(ctx, cmd, issueNumber, statusToRemove, "remove", "start", func() error {
-			return p.Issues().RemoveLabels(ctx, issueNumber, []string{statusToRemove})
-		}); err != nil {
-			return fmt.Errorf("removing label: %w", err)
-		}
-	}
-	if status != issues.StatusInProgress {
-		if err := d.mutateDispatchIssueLabel(ctx, cmd, issueNumber, issues.StatusInProgress, "add", "start", func() error {
-			return p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusInProgress})
-		}); err != nil {
-			return fmt.Errorf("adding in-progress label: %w", err)
-		}
-	}
-	err = d.dispatchWorkflowCommand(ctx, cpdispatch.DispatchRequest{
+	dispatchReq := cpdispatch.DispatchRequest{
 		RepoID:          cmd.RepositoryID,
 		Owner:           cmd.Owner,
 		Repo:            cmd.Repo,
@@ -685,7 +676,29 @@ func (d productionCommandDispatcher) dispatchIssueCommand(ctx context.Context, c
 		TimeoutMinutes:  d.TimeoutMinutes,
 		ControlPlaneURL: d.ControlPlaneURL,
 		Reason:          fmt.Sprintf("@herd-os dispatch comment %d by %s", cmd.CommentID, cmd.Actor),
-	})
+	}
+	if err := d.Dispatcher.RecordIntent(ctx, dispatchReq); err != nil {
+		return fmt.Errorf("recording issue #%d worker dispatch intent: %w", issueNumber, err)
+	}
+	statusToRemove := status
+	if statusToRemove == "" {
+		statusToRemove = recoveredRemovedStatus
+	}
+	if statusToRemove == issues.StatusReady || statusToRemove == issues.StatusFailed {
+		if err := d.mutateDispatchIssueLabel(ctx, cmd, issueNumber, statusToRemove, "remove", "start", func() error {
+			return p.Issues().RemoveLabels(ctx, issueNumber, []string{statusToRemove})
+		}); err != nil {
+			return fmt.Errorf("removing label: %w", err)
+		}
+	}
+	if status != issues.StatusInProgress {
+		if err := d.mutateDispatchIssueLabel(ctx, cmd, issueNumber, issues.StatusInProgress, "add", "start", func() error {
+			return p.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusInProgress})
+		}); err != nil {
+			return fmt.Errorf("adding in-progress label: %w", err)
+		}
+	}
+	err = d.dispatchWorkflowCommand(ctx, dispatchReq)
 	if err != nil {
 		_ = d.mutateDispatchIssueLabel(ctx, cmd, issueNumber, issues.StatusInProgress, "remove", "dispatch-failed", func() error {
 			return p.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusInProgress})
@@ -695,7 +708,7 @@ func (d productionCommandDispatcher) dispatchIssueCommand(ctx context.Context, c
 		})
 		return fmt.Errorf("dispatching issue #%d worker: %w", issueNumber, err)
 	}
-	return addIssueCommandResult(ctx, p, cmd.IssueNumber, fmt.Sprintf("🔧 Dispatched worker for issue #%d.", issueNumber))
+	return d.addIssueCommandResult(ctx, p, cmd, cmd.IssueNumber, "dispatched", fmt.Sprintf("🔧 Dispatched worker for issue #%d.", issueNumber))
 }
 
 func (d productionCommandDispatcher) commandPlatform(ctx context.Context, cmd commands.DispatchCommand) (platform.Platform, error) {
@@ -744,21 +757,72 @@ func commandTriggerComment(cmd commands.DispatchCommand) string {
 	return triggerComment
 }
 
-func addPRCommandResult(ctx context.Context, p platform.Platform, prNumber int, body string) error {
-	if err := p.PullRequests().AddComment(ctx, prNumber, body); err != nil {
-		return fmt.Errorf("posting PR command result: %w", err)
-	}
-	return nil
+func (d productionCommandDispatcher) addPRCommandResult(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, prNumber int, purpose string, body string) error {
+	return d.commandResultCommentMutation(ctx, cmd, "pr", prNumber, purpose, body, func() (string, error) {
+		if err := p.PullRequests().AddComment(ctx, prNumber, body); err != nil {
+			return "", fmt.Errorf("posting PR command result: %w", err)
+		}
+		return "pr_comment:unknown:" + purpose, nil
+	})
 }
 
-func addIssueCommandResult(ctx context.Context, p platform.Platform, issueNumber int, body string) error {
+func (d productionCommandDispatcher) addIssueCommandResult(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand, issueNumber int, purpose string, body string) error {
 	if issueNumber <= 0 {
 		return nil
 	}
-	if err := p.Issues().AddComment(ctx, issueNumber, body); err != nil {
-		return fmt.Errorf("posting issue command result: %w", err)
+	return d.commandResultCommentMutation(ctx, cmd, "issue", issueNumber, purpose, body, func() (string, error) {
+		commentID, err := p.Issues().AddCommentReturningID(ctx, issueNumber, body)
+		if err != nil {
+			return "", fmt.Errorf("posting issue command result: %w", err)
+		}
+		if commentID <= 0 {
+			return "issue_comment:unknown:" + purpose, nil
+		}
+		return fmt.Sprintf("issue_comment:%d", commentID), nil
+	})
+}
+
+func (d productionCommandDispatcher) commandResultCommentMutation(ctx context.Context, cmd commands.DispatchCommand, targetKind string, targetNumber int, purpose string, body string, fn func() (string, error)) error {
+	if d.Dispatcher.Store == nil {
+		return fmt.Errorf("durable dispatcher store is required")
 	}
-	return nil
+	mutationStore, ok := d.Dispatcher.Store.(mutationguard.Store)
+	if !ok {
+		return fmt.Errorf("durable dispatcher store does not support GitHub mutation attempts")
+	}
+	bodyHash := sha256.Sum256([]byte(body))
+	bodyHashText := hex.EncodeToString(bodyHash[:])
+	key := commandStableKey("command-result-comment", cmd.RepositoryID, cmd.CommentID, cmd.Command.Kind, targetKind, targetNumber, purpose, bodyHashText)
+	request, err := json.Marshal(map[string]any{
+		"repository_id": cmd.RepositoryID,
+		"comment_id":    cmd.CommentID,
+		"command":       cmd.Command.Kind,
+		"target_kind":   targetKind,
+		"target_number": targetNumber,
+		"purpose":       purpose,
+		"body_sha256":   bodyHashText,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = d.Dispatcher.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "command_result_comment",
+		Status:    mutations.PhaseIntentRecorded,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf("acquire command result comment idempotency key: %w", err)
+	}
+	_, err = mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
+		Key:          key,
+		RepositoryID: cmd.RepositoryID,
+		MutationType: "command_result_comment",
+		Request:      request,
+		Mutate:       fn,
+		Now:          time.Now,
+	})
+	return err
 }
 
 func latestPRWithKnownMergeabilityFrom(ctx context.Context, prs platform.PullRequestService, prNumber int, initial *platform.PullRequest) (*platform.PullRequest, bool, error) {

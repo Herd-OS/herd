@@ -266,6 +266,34 @@ func TestHandlerDuplicateReviewCallbackUsesStableIdentityAcrossJSONFormatting(t 
 	assert.Len(t, st.results, 1)
 }
 
+func TestHandlerProcessesChangedReviewVisibleOutputDistinctly(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head", Metadata: validJobMetadata()}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+	changedPayload := strings.Replace(validReviewPayload(), `"summary":"review summary"`, `"summary":"corrected review summary"`, 1)
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", validReviewPayload()))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", changedPayload))
+
+	require.Equal(t, http.StatusAccepted, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.NotContains(t, second.Body.String(), `"created":false`)
+	require.Len(t, processor.calls, 2)
+	assert.Equal(t, "review summary", processor.calls[0].result.Summary)
+	assert.Equal(t, "corrected review summary", processor.calls[1].result.Summary)
+	assert.Len(t, st.results, 2)
+}
+
 func TestHandlerStartedCallbackDoesNotProcessAgain(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()

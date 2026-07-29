@@ -472,7 +472,7 @@ func reviewResultMutationKey(result Result, job store.Job) string {
 		result.StatusValue(),
 	}
 	if reviewResult, ok := result.(ReviewCompletedResult); ok {
-		parts = append(parts, reviewResult.Repository, fmt.Sprint(reviewResult.BatchNumber), fmt.Sprint(reviewResult.PRNumber), reviewResult.HeadSHA, fmt.Sprint(reviewResult.FixCycle))
+		parts = append(parts, reviewResult.Repository, fmt.Sprint(reviewResult.BatchNumber), fmt.Sprint(reviewResult.PRNumber), reviewResult.HeadSHA, fmt.Sprint(reviewResult.FixCycle), canonicalReviewOutputIdentity(reviewResult))
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return "review_result:" + hex.EncodeToString(sum[:])

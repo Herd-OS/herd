@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -88,7 +90,9 @@ func TestHostedReviewReadTokenUsesControlPlaneWithoutLegacyGitHubToken(t *testin
 		})
 	}))
 	t.Cleanup(cp.Close)
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", oidc.URL+"/token?existing=1")
+	restore := replaceGitHubActionsOIDCHTTPClient(rewriteOIDCClient(t, oidc.URL))
+	t.Cleanup(restore)
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://pipelines.actions.githubusercontent.com/token?existing=1")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "request-token")
 
 	token, err := hostedReviewReadToken(t.Context(), &config.Config{ControlPlaneURL: cp.URL})
@@ -113,7 +117,9 @@ func TestGitHubActionsOIDCTokenRejectsEmptyValue(t *testing.T) {
 		_, _ = w.Write([]byte(`{"value":""}`))
 	}))
 	t.Cleanup(oidc.Close)
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", strings.TrimRight(oidc.URL, "/")+"/token")
+	restore := replaceGitHubActionsOIDCHTTPClient(rewriteOIDCClient(t, oidc.URL))
+	t.Cleanup(restore)
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://pipelines.actions.githubusercontent.com/token")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "request-token")
 
 	token, err := githubActionsOIDCToken(t.Context())
@@ -121,4 +127,62 @@ func TestGitHubActionsOIDCTokenRejectsEmptyValue(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, token)
 	assert.Contains(t, err.Error(), "did not include a token")
+}
+
+func TestGitHubActionsOIDCTokenRejectsUntrustedURLs(t *testing.T) {
+	tests := []struct {
+		name       string
+		requestURL string
+		want       string
+	}{
+		{name: "http", requestURL: "http://pipelines.actions.githubusercontent.com/token", want: "must use https"},
+		{name: "unexpected host", requestURL: "https://example.test/token", want: "host is not trusted"},
+		{name: "userinfo", requestURL: "https://token@pipelines.actions.githubusercontent.com/token", want: "URL is invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", tt.requestURL)
+			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "request-token")
+
+			token, err := githubActionsOIDCToken(t.Context())
+
+			require.Error(t, err)
+			assert.Empty(t, token)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestValidateGitHubActionsOIDCRequestURLAcceptsActionsHost(t *testing.T) {
+	parsed, err := url.Parse("https://pipelines.actions.githubusercontent.com/_apis/oidc/token")
+	require.NoError(t, err)
+
+	assert.NoError(t, validateGitHubActionsOIDCRequestURL(parsed))
+}
+
+func replaceGitHubActionsOIDCHTTPClient(client oidcHTTPDoer) func() {
+	previous := githubActionsOIDCHTTPClient
+	githubActionsOIDCHTTPClient = client
+	return func() {
+		githubActionsOIDCHTTPClient = previous
+	}
+}
+
+func rewriteOIDCClient(t *testing.T, target string) *http.Client {
+	t.Helper()
+	targetURL, err := url.Parse(strings.TrimRight(target, "/"))
+	require.NoError(t, err)
+	return &http.Client{Transport: rewriteOIDCTransport{target: targetURL, base: http.DefaultTransport}}
+}
+
+type rewriteOIDCTransport struct {
+	target *url.URL
+	base   http.RoundTripper
+}
+
+func (t rewriteOIDCTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rewritten := req.Clone(context.Background())
+	rewritten.URL.Scheme = t.target.Scheme
+	rewritten.URL.Host = t.target.Host
+	return t.base.RoundTrip(rewritten)
 }

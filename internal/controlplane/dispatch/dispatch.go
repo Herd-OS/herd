@@ -119,6 +119,41 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 		return DispatchResult{}, err
 	}
 
+	idempotencyKey, jobID, now, created, err := d.recordIntent(ctx, req)
+	if err != nil {
+		return DispatchResult{}, err
+	}
+	if !created {
+		return d.duplicateResult(ctx, req, idempotencyKey)
+	}
+
+	inputs, err := WorkflowInputs(req, jobID)
+	if err != nil {
+		return DispatchResult{}, err
+	}
+	return d.dispatchWithJob(ctx, req, idempotencyKey, jobID, inputs, now, true)
+}
+
+// RecordIntent persists the pre-call workflow dispatch boundary without
+// invoking GitHub. Callers that must perform other durable state transitions
+// before the workflow_dispatch API call use this to ensure redelivery can
+// recover from labels or other local state that say "started" before the
+// external workflow is actually dispatched.
+func (d Dispatcher) RecordIntent(ctx context.Context, req DispatchRequest) error {
+	if err := validateRequest(req); err != nil {
+		return err
+	}
+	if d.Store == nil {
+		return fmt.Errorf("dispatch store is required")
+	}
+	if err := d.requireMutationStore(); err != nil {
+		return err
+	}
+	_, _, _, _, err := d.recordIntent(ctx, req)
+	return err
+}
+
+func (d Dispatcher) recordIntent(ctx context.Context, req DispatchRequest) (string, string, time.Time, bool, error) {
 	idempotencyKey := IdempotencyKey(req)
 	jobID := "job_" + uuid.NewString()
 	now := time.Now().UTC()
@@ -139,7 +174,7 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 	}
 	keyMetadata, err := json.Marshal(keyMetadataValues)
 	if err != nil {
-		return DispatchResult{}, fmt.Errorf("marshal idempotency metadata: %w", err)
+		return "", "", time.Time{}, false, fmt.Errorf("marshal idempotency metadata: %w", err)
 	}
 	created, err := d.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       idempotencyKey,
@@ -149,17 +184,9 @@ func (d Dispatcher) Dispatch(ctx context.Context, req DispatchRequest) (Dispatch
 		CreatedAt: now,
 	})
 	if err != nil {
-		return DispatchResult{}, fmt.Errorf("acquire dispatch idempotency key: %w", err)
+		return "", "", time.Time{}, false, fmt.Errorf("acquire dispatch idempotency key: %w", err)
 	}
-	if !created {
-		return d.duplicateResult(ctx, req, idempotencyKey)
-	}
-
-	inputs, err := WorkflowInputs(req, jobID)
-	if err != nil {
-		return DispatchResult{}, err
-	}
-	return d.dispatchWithJob(ctx, req, idempotencyKey, jobID, inputs, now, true)
+	return idempotencyKey, jobID, now, created, nil
 }
 
 func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, idempotencyKey string, jobID string, inputs map[string]string, now time.Time, createJob bool) (DispatchResult, error) {

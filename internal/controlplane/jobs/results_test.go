@@ -327,6 +327,23 @@ func TestResultIdempotencyKeyIncludesReviewVisibleOutput(t *testing.T) {
 	assert.NotEqual(t, ResultIdempotencyKey(baseResult, basePayload), ResultIdempotencyKey(changedResult, changedPayload))
 }
 
+func TestResultIdempotencyKeyIncludesWorkerTaskIdentity(t *testing.T) {
+	basePayload := []byte(`{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"job-1","batch_number":1,"issue_number":2,"target_branch":"herd/batch/1-test","base_sha":"base","expected_head_sha":"head","patch_artifact":"patch.diff","status":"success"}`)
+	changedIssuePayload := []byte(`{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"job-1","batch_number":1,"issue_number":3,"target_branch":"herd/batch/1-test","base_sha":"base","expected_head_sha":"head","patch_artifact":"patch.diff","status":"success"}`)
+	changedBatchPayload := []byte(`{"version":1,"kind":"worker_completed","repository":"acme/widgets","job_id":"job-1","batch_number":2,"issue_number":2,"target_branch":"herd/batch/1-test","base_sha":"base","expected_head_sha":"head","patch_artifact":"patch.diff","status":"success"}`)
+	baseResult, err := ParseResultPayload(basePayload)
+	require.NoError(t, err)
+	changedIssueResult, err := ParseResultPayload(changedIssuePayload)
+	require.NoError(t, err)
+	changedBatchResult, err := ParseResultPayload(changedBatchPayload)
+	require.NoError(t, err)
+
+	baseKey := ResultIdempotencyKey(baseResult, basePayload)
+
+	assert.NotEqual(t, baseKey, ResultIdempotencyKey(changedIssueResult, changedIssuePayload))
+	assert.NotEqual(t, baseKey, ResultIdempotencyKey(changedBatchResult, changedBatchPayload))
+}
+
 func TestParseReviewCompletedTerminalFailureStatuses(t *testing.T) {
 	tests := []string{StatusFailure, StatusTimedOut, StatusUnparseable, StatusMaxCyclesHit}
 	for _, status := range tests {

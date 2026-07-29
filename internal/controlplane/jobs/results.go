@@ -137,7 +137,7 @@ func ResultIdempotencyKey(result Result, _ []byte) string {
 	parts := []string{envelope.Kind, envelope.Repository, envelope.JobID}
 	switch r := result.(type) {
 	case WorkerCompletedResult:
-		parts = append(parts, r.TargetBranch, r.BaseSHA, r.ExpectedHeadSHA, r.PatchArtifact, r.Status)
+		parts = append(parts, fmt.Sprintf("%d", r.BatchNumber), fmt.Sprintf("%d", r.IssueNumber), r.TargetBranch, r.BaseSHA, r.ExpectedHeadSHA, r.PatchArtifact, r.Status)
 	case ReviewCompletedResult:
 		parts = append(parts, fmt.Sprintf("%d", r.PRNumber), r.HeadSHA, r.Status, canonicalReviewOutputIdentity(r))
 	}

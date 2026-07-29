@@ -484,6 +484,122 @@ func TestProductionDispatchCommandRedeliveryAfterInProgressLabelDispatchesOnce(t
 	assert.NotContains(t, p.issues.byNumber[42].Labels, issues.StatusFailed)
 }
 
+func TestProductionDispatchCommandRedeliveryAfterIntentAndInProgressLabelDispatchesOnce(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{})
+	p.issues.byNumber[42] = &platform.Issue{
+		Number:    42,
+		Title:     "Do work",
+		Labels:    []string{issues.StatusInProgress},
+		Milestone: &platform.Milestone{Number: 7, Title: "Command Surface"},
+	}
+	p.repo.branchSHAs["herd/batch/7-command-surface"] = "batch-sha"
+	workflow := &recordingWorkflowClient{}
+	st := store.NewMemoryStore()
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: st, GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+	cmd := resolveConflictsCommand()
+	cmd.IssueNumber = 7
+	cmd.PRNumber = 7
+	cmd.Command = commands.ParsedCommand{Kind: commands.CommandDispatch, Args: []string{"42"}}
+	require.NoError(t, d.Dispatcher.RecordIntent(context.Background(), cpdispatch.DispatchRequest{
+		RepoID:          cmd.RepositoryID,
+		Owner:           cmd.Owner,
+		Repo:            cmd.Repo,
+		InstallationID:  cmd.InstallationID,
+		Kind:            cpdispatch.JobKindWorker,
+		WorkflowFile:    "herd-worker.yml",
+		Ref:             "main",
+		BatchNumber:     7,
+		IssueNumber:     42,
+		PRNumber:        7,
+		BatchBranch:     "herd/batch/7-command-surface",
+		BaseSHA:         "batch-sha",
+		HeadSHA:         "batch-sha",
+		ExpectedHeadSHA: "batch-sha",
+		RunnerLabel:     "herd-worker",
+		TimeoutMinutes:  30,
+		ControlPlaneURL: "https://control.example.test",
+		Reason:          "@herd-os dispatch comment 99 by mona",
+	}))
+	labelKey := dispatchIssueLabelKey(cmd, 42, issues.StatusInProgress, "add", "start")
+	require.NoError(t, st.RecordGitHubMutationAttempt(context.Background(), store.GitHubMutationAttempt{
+		IdempotencyKey: labelKey,
+		RepositoryID:   42,
+		MutationType:   "dispatch_issue_label_add",
+		Status:         mutations.PhaseCompleted,
+		CreatedAt:      time.Now().UTC(),
+	}))
+
+	err := d.DispatchCommand(context.Background(), cmd)
+
+	require.NoError(t, err)
+	require.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "42", workflow.dispatches[0].inputs["issue_number"])
+	assert.Contains(t, strings.Join(p.issues.comments[7], "\n"), "Dispatched worker for issue #42")
+}
+
+func TestProductionResolveConflictsCommandResultCommentRedeliveryDoesNotDuplicateAfterUnknownPost(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{batchPR("CLEAN", false, false)})
+	p.prs.addCommentErrs = []error{assert.AnError, nil}
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: &recordingWorkflowClient{}},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+
+	firstErr := d.DispatchCommand(context.Background(), resolveConflictsCommand())
+	secondErr := d.DispatchCommand(context.Background(), resolveConflictsCommand())
+
+	require.Error(t, firstErr)
+	require.Error(t, secondErr)
+	assert.Contains(t, secondErr.Error(), "repair required")
+	assert.Len(t, p.prs.comments, 1)
+}
+
+func TestProductionDispatchCommandResultCommentRedeliveryDoesNotDuplicateAfterUnknownPost(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{})
+	p.issues.byNumber[42] = &platform.Issue{
+		Number:    42,
+		Title:     "Do work",
+		Labels:    []string{issues.StatusReady},
+		Milestone: &platform.Milestone{Number: 7, Title: "Command Surface"},
+	}
+	p.issues.addCommentErrs = []error{assert.AnError, nil}
+	p.repo.branchSHAs["herd/batch/7-command-surface"] = "batch-sha"
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: store.NewMemoryStore(), GitHub: &recordingWorkflowClient{}},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+	cmd := resolveConflictsCommand()
+	cmd.IssueNumber = 7
+	cmd.PRNumber = 7
+	cmd.Command = commands.ParsedCommand{Kind: commands.CommandDispatch, Args: []string{"42"}}
+
+	firstErr := d.DispatchCommand(context.Background(), cmd)
+	secondErr := d.DispatchCommand(context.Background(), cmd)
+
+	require.Error(t, firstErr)
+	require.Error(t, secondErr)
+	assert.Contains(t, secondErr.Error(), "repair required")
+	assert.Len(t, p.issues.comments[7], 1)
+}
+
 func TestProductionFixCommandsCreateTrackingIssueAndDispatchCreatedIssue(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -941,10 +1057,11 @@ func (p *fakeCommandPlatform) Repository() platform.RepositoryService    { retur
 func (p *fakeCommandPlatform) Checks() platform.CheckService             { return nil }
 
 type fakeCommandPRService struct {
-	mu       sync.Mutex
-	prs      []*platform.PullRequest
-	gets     int
-	comments []string
+	mu             sync.Mutex
+	prs            []*platform.PullRequest
+	gets           int
+	comments       []string
+	addCommentErrs []error
 }
 
 func (s *fakeCommandPRService) Get(context.Context, int) (*platform.PullRequest, error) {
@@ -964,6 +1081,11 @@ func (s *fakeCommandPRService) AddComment(_ context.Context, _ int, body string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.comments = append(s.comments, body)
+	if len(s.addCommentErrs) > 0 {
+		err := s.addCommentErrs[0]
+		s.addCommentErrs = s.addCommentErrs[1:]
+		return err
+	}
 	return nil
 }
 func (s *fakeCommandPRService) Create(context.Context, string, string, string, string) (*platform.PullRequest, error) {
@@ -997,6 +1119,7 @@ type fakeCommandIssueService struct {
 	listed               []*platform.Issue
 	created              []*platform.Issue
 	comments             map[int][]string
+	addCommentErrs       []error
 	blockCreateStarted   chan struct{}
 	releaseBlockedCreate chan struct{}
 	createStarted        bool
@@ -1077,6 +1200,11 @@ func (s *fakeCommandIssueService) AddComment(_ context.Context, number int, body
 		s.comments = map[int][]string{}
 	}
 	s.comments[number] = append(s.comments[number], body)
+	if len(s.addCommentErrs) > 0 {
+		err := s.addCommentErrs[0]
+		s.addCommentErrs = s.addCommentErrs[1:]
+		return err
+	}
 	return nil
 }
 func (s *fakeCommandIssueService) AddCommentReturningID(ctx context.Context, number int, body string) (int64, error) {

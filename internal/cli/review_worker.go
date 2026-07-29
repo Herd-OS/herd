@@ -19,6 +19,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type oidcHTTPDoer interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+var githubActionsOIDCHTTPClient oidcHTTPDoer = http.DefaultClient
+
 func newReviewWorkerCmd() *cobra.Command {
 	var prNumber int
 	var resultFile string
@@ -140,21 +146,42 @@ func githubActionsOIDCToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse GitHub Actions OIDC request URL: %w", err)
 	}
-	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return "", fmt.Errorf("GitHub Actions OIDC request URL must use http or https")
+	if err := validateGitHubActionsOIDCRequestURL(parsed); err != nil {
+		return "", err
+	}
+	return fetchGitHubActionsOIDCToken(ctx, parsed, requestToken, githubActionsOIDCHTTPClient)
+}
+
+func validateGitHubActionsOIDCRequestURL(parsed *url.URL) error {
+	if parsed == nil {
+		return fmt.Errorf("GitHub Actions OIDC request URL is invalid")
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("GitHub Actions OIDC request URL must use https")
 	}
 	if parsed.Host == "" || parsed.User != nil {
-		return "", fmt.Errorf("GitHub Actions OIDC request URL is invalid")
+		return fmt.Errorf("GitHub Actions OIDC request URL is invalid")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "pipelines.actions.githubusercontent.com" && !strings.HasSuffix(host, ".actions.githubusercontent.com") {
+		return fmt.Errorf("GitHub Actions OIDC request URL host is not trusted")
+	}
+	return nil
+}
+
+func fetchGitHubActionsOIDCToken(ctx context.Context, parsed *url.URL, requestToken string, client oidcHTTPDoer) (string, error) {
+	if client == nil {
+		client = http.DefaultClient
 	}
 	q := parsed.Query()
 	q.Set("audience", "herd-control-plane")
 	parsed.RawQuery = q.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil) //nolint:gosec // URL is supplied by GitHub Actions OIDC runtime and validated above.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil) //nolint:gosec // URL is validated to HTTPS GitHub Actions OIDC hosts before this helper is called.
 	if err != nil {
 		return "", fmt.Errorf("create GitHub Actions OIDC request: %w", err)
 	}
 	req.Header.Set("Authorization", "bearer "+requestToken)
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec // Request URL is the validated GitHub Actions OIDC runtime endpoint.
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetch GitHub Actions OIDC token: %w", err)
 	}
