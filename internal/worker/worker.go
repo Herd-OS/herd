@@ -641,7 +641,7 @@ func scrubTransientArtifactsForWorker(ctx context.Context, p platform.Platform, 
 	fmt.Println(message)
 	_ = p.Issues().AddComment(ctx, issueNumber, message)
 
-	staged, stagedErr := gitHasStagedChanges(g)
+	staged, stagedErr := g.HasCachedChanges(result.Removed...)
 	if stagedErr != nil {
 		_ = p.Issues().AddComment(ctx, issueNumber,
 			fmt.Sprintf("**Worker failed:** Herd could not inspect transient artifact cleanup before finalizing the branch.\n\n```\n%s\n```",

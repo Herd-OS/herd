@@ -1189,6 +1189,51 @@ func TestScrubTransientArtifactsForWorker_CommitsOnlyScrubbedArtifacts(t *testin
 	assert.NoFileExists(t, artifactPath)
 }
 
+func TestScrubTransientArtifactsForWorker_DoesNotCommitWithoutArtifactCachedDiff(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, dir string, artifactPath string)
+	}{
+		{
+			name: "untracked artifact",
+			setup: func(t *testing.T, dir string, artifactPath string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(artifactPath, []byte("transient"), 0644))
+			},
+		},
+		{
+			name: "staged new artifact",
+			setup: func(t *testing.T, dir string, artifactPath string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(artifactPath, []byte("transient"), 0644))
+				gitRunT(t, dir, "git", "add", ".herd/review-fixes-123.md")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := initTestRepo(t)
+			g := git.New(dir)
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd"), 0755))
+
+			artifactPath := filepath.Join(dir, ".herd", "review-fixes-123.md")
+			tt.setup(t, dir, artifactPath)
+
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("staged"), 0644))
+			gitRunT(t, dir, "git", "add", "staged.txt")
+			beforeHead := gitOutputT(t, dir, "git", "rev-parse", "HEAD")
+
+			p := &mockPlatform{issues: &mockIssueService{}}
+			require.NoError(t, scrubTransientArtifactsForWorker(context.Background(), p, g, 1075))
+
+			assert.Equal(t, beforeHead, gitOutputT(t, dir, "git", "rev-parse", "HEAD"))
+			assert.Equal(t, "A\tstaged.txt\n", gitOutputT(t, dir, "git", "diff", "--cached", "--name-status"))
+			assert.NoFileExists(t, artifactPath)
+		})
+	}
+}
+
 func TestRunValidation_ValidGoProject(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.21\n"), 0644))

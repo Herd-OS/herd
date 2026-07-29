@@ -492,6 +492,79 @@ func TestCommitPaths(t *testing.T) {
 	}
 }
 
+func TestHasCachedChanges(t *testing.T) {
+	tests := []struct {
+		name    string
+		paths   []string
+		setup   func(t *testing.T, dir string)
+		want    bool
+		wantErr string
+	}{
+		{
+			name:    "empty paths",
+			wantErr: "checking cached changes: no paths provided",
+		},
+		{
+			name:  "clean selected path",
+			paths: []string{"selected.txt"},
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("untracked"), 0644))
+			},
+			want: false,
+		},
+		{
+			name:  "unrelated staged path only",
+			paths: []string{"selected.txt"},
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("staged"), 0644))
+				runGit(t, dir, "add", "staged.txt")
+			},
+			want: false,
+		},
+		{
+			name:  "selected staged add",
+			paths: []string{"selected.txt"},
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("selected"), 0644))
+				runGit(t, dir, "add", "selected.txt")
+			},
+			want: true,
+		},
+		{
+			name:  "selected staged delete",
+			paths: []string{"README.md"},
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				runGit(t, dir, "rm", "README.md")
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := initTestRepo(t)
+			g := New(dir)
+			if tt.setup != nil {
+				tt.setup(t, dir)
+			}
+
+			got, err := g.HasCachedChanges(tt.paths...)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestIsDirty_CleanRepo(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

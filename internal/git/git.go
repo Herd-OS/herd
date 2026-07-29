@@ -181,6 +181,25 @@ func (g *Git) CommitPaths(message string, paths ...string) error {
 	return g.run(args...)
 }
 
+// HasCachedChanges reports whether the given paths have staged changes.
+func (g *Git) HasCachedChanges(paths ...string) (bool, error) {
+	if len(paths) == 0 {
+		return false, fmt.Errorf("checking cached changes: no paths provided")
+	}
+	args := []string{"diff", "--cached", "--quiet", "--"}
+	args = append(args, paths...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = g.WorkDir
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, err
+}
+
 // AmendNoEdit amends the most recent commit without changing its message.
 func (g *Git) AmendNoEdit() error {
 	return g.run("commit", "--amend", "--no-edit")
