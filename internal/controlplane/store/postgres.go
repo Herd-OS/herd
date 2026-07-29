@@ -158,7 +158,7 @@ func (s *PostgresStore) UpsertInstallation(ctx context.Context, i Installation) 
 func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Repository, error) {
 	conflictTarget := "(owner, name)"
 	if r.GitHubID != 0 {
-		conflictTarget = "(github_id)"
+		conflictTarget = "(github_id) WHERE github_id IS NOT NULL"
 	}
 	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		INSERT INTO repositories (github_id, installation_id, owner, name, default_branch, private, registered_at, updated_at, metadata)
