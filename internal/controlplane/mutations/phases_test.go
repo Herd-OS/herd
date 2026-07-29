@@ -32,3 +32,25 @@ func TestPhaseClassification(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPreCallRetryableRecord(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    string
+		resultRef string
+		want      bool
+	}{
+		{name: "explicit failed pre call status", status: PhaseFailedPreCall, want: true},
+		{name: "intent recorded status", status: PhaseIntentRecorded, want: true},
+		{name: "legacy failed with failed pre call result ref", status: LegacyFailed, resultRef: PhaseFailedPreCall + ":temporary setup failure", want: true},
+		{name: "legacy failed without marker", status: LegacyFailed, resultRef: "github call outcome unknown", want: false},
+		{name: "call started with marker is not retryable", status: PhaseCallStarted, resultRef: PhaseFailedPreCall + ":late marker", want: false},
+		{name: "completed is not retryable", status: PhaseCompleted, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsPreCallRetryableRecord(tt.status, tt.resultRef))
+		})
+	}
+}

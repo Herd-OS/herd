@@ -1708,6 +1708,44 @@ func TestHandlerRetriesReviewResultAfterProcessorPreCallFailure(t *testing.T) {
 	assert.Equal(t, StatusApproved, st.results[0].Status)
 }
 
+func TestAcquireResultCallbackRetriesLegacyFailedPreCallMarker(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name          string
+		status        string
+		resultRef     string
+		wantProcess   bool
+		wantErrSubstr string
+	}{
+		{name: "legacy failed pre call marker retries", status: mutationspkg.LegacyFailed, resultRef: mutationspkg.PhaseFailedPreCall + ":temporary validation failure", wantProcess: true},
+		{name: "generic failed does not retry", status: mutationspkg.LegacyFailed, resultRef: "github-visible result unknown", wantProcess: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newResultStore()
+			callbackKey := "job_result:callback"
+			st.idem[callbackKey] = store.IdempotencyKey{
+				Key:       callbackKey,
+				Scope:     "job_result_callback",
+				Status:    tt.status,
+				ResultRef: tt.resultRef,
+				CreatedAt: now,
+			}
+			handler := Handler{store: st, now: func() time.Time { return now }}
+
+			shouldProcess, err := handler.acquireResultCallback(context.Background(), callbackKey, "job-1", "result-1")
+
+			if tt.wantErrSubstr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErrSubstr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantProcess, shouldProcess)
+		})
+	}
+}
+
 func TestHandlerRetryAfterReviewAcceptanceCompletionFailureDoesNotResubmit(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -1866,6 +1904,36 @@ func TestHandlerReviewResultCompletionPersistenceFailureDoesNotResubmit(t *testi
 	require.Contains(t, st.idem, key)
 	assert.Equal(t, "completed", st.idem[key].Status)
 	assert.Equal(t, "review_result:processed", st.idem[key].ResultRef)
+}
+
+func TestProcessReviewResultRepairsAfterMutationAndIdempotencyCompletionFailures(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	job := store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	result := mustParseReviewPayload(t, validReviewPayload())
+	key := reviewResultMutationKey(result, job)
+	st.mutationCompleteErrs = []error{errors.New("mutation store down")}
+	st.completeIdemErrs = map[string][]error{key: {errors.New("idempotency store down"), nil}}
+	processor := &capturingReviewProcessor{}
+	handler := Handler{
+		store:           st,
+		now:             func() time.Time { return now },
+		reviewProcessor: processor,
+	}
+
+	firstErr := handler.processReviewResult(context.Background(), result, job)
+	secondErr := handler.processReviewResult(context.Background(), result, job)
+
+	require.Error(t, firstErr)
+	require.NoError(t, secondErr)
+	assert.Len(t, processor.calls, 1)
+	assert.Len(t, processor.repairs, 1)
+	require.Contains(t, st.idem, key)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.idem[key].Status)
+	assert.Equal(t, "review_result:processed", st.idem[key].ResultRef)
+	attempt, err := st.GetGitHubMutationAttempt(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, mutationspkg.PhaseCompleted, attempt.Status)
 }
 
 func TestHandlerRejectsReviewResultWhenProcessorMissing(t *testing.T) {
@@ -2179,8 +2247,10 @@ type mutationCompletion struct {
 
 type capturingReviewProcessor struct {
 	calls       []reviewProcessorCall
+	repairs     []reviewProcessorCall
 	prepareErrs []error
 	errs        []error
+	repairErrs  []error
 }
 
 type reviewProcessorCall struct {
@@ -2205,6 +2275,18 @@ func (p *capturingReviewProcessor) PrepareSubmitReviewResult(_ context.Context, 
 		}
 		return nil
 	}), nil
+}
+
+func (p *capturingReviewProcessor) RepairSubmittedReviewResult(_ context.Context, repo review.Repository, result review.ReviewCompletedResult) (bool, error) {
+	p.repairs = append(p.repairs, reviewProcessorCall{repo: repo, result: result})
+	if len(p.repairErrs) > 0 {
+		err := p.repairErrs[0]
+		p.repairErrs = p.repairErrs[1:]
+		if err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 type reviewSubmissionFunc func(context.Context) error

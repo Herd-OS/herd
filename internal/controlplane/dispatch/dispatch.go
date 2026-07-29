@@ -246,7 +246,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 			CreatedAt:      now,
 			UpdatedAt:      now,
 		}); err != nil {
-			_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
+			_ = d.Store.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseFailedPreCall+":"+err.Error())
 			return DispatchResult{}, fmt.Errorf("create dispatch job: %w", err)
 		}
 	}
@@ -387,7 +387,7 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 		return DispatchResult{}, fmt.Errorf("dispatch idempotency record is missing job_id")
 	}
 	job, err := d.Store.GetJob(ctx, metadata.JobID)
-	if errors.Is(err, store.ErrNotFound) && (record.Status == "failed" || mutations.IsPreCallRetryable(record.Status)) {
+	if errors.Is(err, store.ErrNotFound) && mutations.IsPreCallRetryableRecord(record.Status, record.ResultRef) {
 		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
 		if inputErr != nil {
 			return DispatchResult{}, inputErr
@@ -407,13 +407,8 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 			result.Created = false
 			return result, nil
 		}
-		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
-		if inputErr != nil {
-			return DispatchResult{}, inputErr
-		}
-		return d.dispatchWithJob(ctx, req, idempotencyKey, metadata.JobID, inputs, time.Now().UTC(), false)
 	}
-	if mutations.IsPreCallRetryable(record.Status) {
+	if mutations.IsPreCallRetryableRecord(record.Status, record.ResultRef) {
 		inputs, inputErr := WorkflowInputs(req, metadata.JobID)
 		if inputErr != nil {
 			return DispatchResult{}, inputErr

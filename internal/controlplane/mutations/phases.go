@@ -28,6 +28,18 @@ func IsPreCallRetryable(status string) bool {
 	}
 }
 
+// IsPreCallRetryableRecord reports whether an idempotency record can safely
+// rerun a GitHub-visible mutation. Some stores persist failed_pre_call as the
+// durable status, while legacy stores keep a generic failed status and store
+// the phase marker in the result/error ref. Generic failed records are treated
+// as post-call-unknown and must not be retried automatically.
+func IsPreCallRetryableRecord(status, resultRef string) bool {
+	if IsPreCallRetryable(status) {
+		return true
+	}
+	return Normalize(status) == PhaseRepairRequired && strings.HasPrefix(strings.TrimSpace(resultRef), PhaseFailedPreCall+":")
+}
+
 func IsPostCallUnknown(status string) bool {
 	switch Normalize(status) {
 	case PhaseCallStarted, PhaseRepairRequired:

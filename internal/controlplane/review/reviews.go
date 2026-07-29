@@ -217,6 +217,18 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 	return submission.Submit(ctx)
 }
 
+// RepairSubmittedReviewResult converges a job-level review_result_process
+// mutation after the outer boundary reached post-call-unknown. The review
+// service owns the GitHub-visible sub-mutations, so repair re-enters the same
+// idempotent submission path instead of letting the job callback submit a
+// second unguarded review/status update.
+func (s ReviewService) RepairSubmittedReviewResult(ctx context.Context, repo Repository, result ReviewCompletedResult) (bool, error) {
+	if err := s.SubmitReviewResult(ctx, repo, result); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s ReviewService) PrepareSubmitReviewResult(ctx context.Context, repo Repository, result ReviewCompletedResult) (PreparedReviewResultSubmission, error) {
 	if !repo.ReviewEnabled {
 		return preparedReviewResultSubmissionFunc(func(context.Context) error { return nil }), nil

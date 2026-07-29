@@ -325,15 +325,39 @@ func TestDispatcherRequiresMutationStore(t *testing.T) {
 	assert.Empty(t, st.jobs)
 }
 
-func TestDispatcherDuplicateFailedStartedRecordCanRetry(t *testing.T) {
+func TestDispatcherDuplicateGenericFailedRecordDoesNotRedispatch(t *testing.T) {
 	st := newFakeStore()
 	req := validRequest()
 	key := IdempotencyKey(req)
 	st.idempotencyKeys[key] = store.IdempotencyKey{
-		Key:      key,
-		Scope:    "workflow_dispatch",
-		Status:   "failed",
-		Metadata: json.RawMessage(`{"job_id":"job-existing"}`),
+		Key:       key,
+		Scope:     "workflow_dispatch",
+		Status:    "failed",
+		ResultRef: "dispatch outcome unknown",
+		Metadata:  json.RawMessage(`{"job_id":"job-existing"}`),
+	}
+	st.jobs["job-existing"] = store.Job{JobID: "job-existing"}
+
+	gh := &fakeWorkflowClient{}
+	result, err := Dispatcher{Store: st, GitHub: gh}.Dispatch(context.Background(), req)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already in progress")
+	assert.Empty(t, result.JobID)
+	assert.Empty(t, gh.calls)
+	assert.Equal(t, "failed", st.idempotencyKeys[key].Status)
+}
+
+func TestDispatcherDuplicateFailedPreCallRecordRetries(t *testing.T) {
+	st := newFakeStore()
+	req := validRequest()
+	key := IdempotencyKey(req)
+	st.idempotencyKeys[key] = store.IdempotencyKey{
+		Key:       key,
+		Scope:     "workflow_dispatch",
+		Status:    "failed",
+		ResultRef: mutations.PhaseFailedPreCall + ":temporary setup failure",
+		Metadata:  json.RawMessage(`{"job_id":"job-existing"}`),
 	}
 	st.jobs["job-existing"] = store.Job{JobID: "job-existing"}
 

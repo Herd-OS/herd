@@ -617,6 +617,77 @@ func TestOpenBatchPRRetryRepairsAfterMutationAttemptCompletionFailure(t *testing
 	assert.Equal(t, 1, len(fake.prs.createCalls))
 }
 
+func TestOpenBatchPRRedeliveryRepairsCreateWhenDurableCompletionFails(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("batch-pr", "repo", svc.Repo.ID, "batch", 4)
+	st.completeMutationErrs[key] = []error{errors.New("mutation store down"), nil}
+	st.completeErrs[key] = []error{errors.New("idempotency store down"), nil}
+	req := OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	}
+
+	first, firstErr := svc.OpenBatchPR(ctx, req)
+	second, secondErr := svc.OpenBatchPR(ctx, req)
+
+	require.Error(t, firstErr)
+	assert.Nil(t, first)
+	require.NoError(t, secondErr)
+	require.NotNil(t, second)
+	assert.Equal(t, 1, second.Number)
+	assert.Equal(t, "completed", st.keys[key].Status)
+	assert.Equal(t, "pr:1", st.keys[key].ResultRef)
+	assert.Equal(t, mutations.PhaseCompleted, st.mutations[key].Status)
+	assert.Equal(t, 1, len(fake.prs.createCalls))
+}
+
+func TestOpenBatchPRRedeliveryRepairsExistingUpdateWhenDurableCompletionFails(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.prs.items[42] = &platform.PullRequest{
+		Number: 42,
+		Title:  "[herd] Old",
+		Body:   "old",
+		State:  "open",
+		Head:   "herd/batch/4-demo",
+		Base:   "main",
+	}
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("batch-pr", "repo", svc.Repo.ID, "batch", 4)
+	st.completeMutationErrs[key] = []error{errors.New("mutation store down"), nil}
+	st.completeErrs[key] = []error{errors.New("idempotency store down"), nil}
+	req := OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] New",
+		Body:        "new",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	}
+
+	first, firstErr := svc.OpenBatchPR(ctx, req)
+	second, secondErr := svc.OpenBatchPR(ctx, req)
+
+	require.Error(t, firstErr)
+	assert.Nil(t, first)
+	require.NoError(t, secondErr)
+	require.NotNil(t, second)
+	assert.Equal(t, 42, second.Number)
+	assert.Equal(t, "[herd] New", second.Title)
+	assert.Equal(t, "new", second.Body)
+	assert.Nil(t, fake.prs.created)
+	assert.Equal(t, 1, fake.prs.updated)
+	assert.Equal(t, "completed", st.keys[key].Status)
+	assert.Equal(t, "pr:42", st.keys[key].ResultRef)
+	assert.Equal(t, mutations.PhaseCompleted, st.mutations[key].Status)
+}
+
 func TestEnsureTaskIssueStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()

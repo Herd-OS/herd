@@ -41,7 +41,9 @@ func (s Service) OpenBatchPR(ctx context.Context, req OpenBatchPRRequest) (*plat
 		var err error
 		existing, err = s.Platform.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: req.Head})
 		return err
-	}, nil, func() (string, error) {
+	}, func() (string, bool, error) {
+		return s.repairOpenBatchPR(ctx, req)
+	}, func() (string, error) {
 		if len(existing) > 0 {
 			title := req.Title
 			body := req.Body
@@ -87,6 +89,30 @@ func (s Service) OpenBatchPR(ctx context.Context, req OpenBatchPRRequest) (*plat
 		return s.Platform.PullRequests().Get(ctx, pr.Number)
 	}
 	return pr, nil
+}
+
+func (s Service) repairOpenBatchPR(ctx context.Context, req OpenBatchPRRequest) (string, bool, error) {
+	existing, err := s.Platform.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: req.Head})
+	if err != nil {
+		return "", false, fmt.Errorf("repair batch PR lookup: %w", err)
+	}
+	if len(existing) == 0 {
+		return "", false, nil
+	}
+	pr := existing[0]
+	if pr.Base != "" && pr.Base != req.Base {
+		return "", false, fmt.Errorf("repair batch PR head %s found base %s, expected %s", req.Head, pr.Base, req.Base)
+	}
+	if pr.Title != req.Title || pr.Body != req.Body {
+		title := req.Title
+		body := req.Body
+		updated, err := s.Platform.PullRequests().Update(ctx, pr.Number, &title, &body)
+		if err != nil {
+			return "", false, fmt.Errorf("repair batch PR metadata: %w", err)
+		}
+		pr = updated
+	}
+	return fmt.Sprintf("pr:%d", pr.Number), true, nil
 }
 
 func batchPRContentFingerprint(title, body string) string {

@@ -67,6 +67,10 @@ type ReviewProcessor interface {
 	PrepareSubmitReviewResult(ctx context.Context, repo review.Repository, result review.ReviewCompletedResult) (review.PreparedReviewResultSubmission, error)
 }
 
+type ReviewResultRepairer interface {
+	RepairSubmittedReviewResult(ctx context.Context, repo review.Repository, result review.ReviewCompletedResult) (bool, error)
+}
+
 type defaultPatchApplier struct{}
 
 func (defaultPatchApplier) Prepare(ctx context.Context, req artifacts.ApplyRequest) (artifacts.PreparedApply, error) {
@@ -710,7 +714,7 @@ func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, 
 	switch {
 	case status == mutationspkg.PhaseCompleted:
 		return false, nil
-	case mutationspkg.IsPreCallRetryable(status):
+	case mutationspkg.IsPreCallRetryableRecord(record.Status, record.ResultRef):
 		return true, nil
 	case mutationspkg.IsPostCallUnknown(status):
 		return false, nil
@@ -755,15 +759,7 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		FixCycle:    reviewResult.FixCycle,
 		Findings:    reviewFindings(reviewResult.Findings),
 	}
-	request, _ := json.Marshal(map[string]any{
-		"job_id":        reviewResult.JobID,
-		"repository":    reviewResult.Repository,
-		"batch_number":  reviewResult.BatchNumber,
-		"pr_number":     reviewResult.PRNumber,
-		"head_sha":      reviewResult.HeadSHA,
-		"status":        reviewResult.Status,
-		"finding_count": len(reviewResult.Findings),
-	})
+	request, _ := json.Marshal(submission)
 	var prepared review.PreparedReviewResultSubmission
 	_, err := mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
 		Key:          mutationKey,
@@ -790,6 +786,17 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 				return "", err
 			}
 			return "review_result:processed", nil
+		},
+		Repair: func() (string, bool, error) {
+			repairer, ok := h.reviewProcessor.(ReviewResultRepairer)
+			if !ok {
+				return "", false, nil
+			}
+			repaired, err := repairer.RepairSubmittedReviewResult(ctx, repo, submission)
+			if err != nil || !repaired {
+				return "", repaired, err
+			}
+			return "review_result:processed", true, nil
 		},
 		Now: h.now,
 	})
