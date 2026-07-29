@@ -293,7 +293,18 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 	}
 	targetIssueNumber, err := resolveCommandIssueNumber(cmd, event)
 	if err != nil {
-		return err
+		metadata, marshalErr := json.Marshal(map[string]any{
+			"args":               cmd.Args,
+			"prompt":             cmd.Prompt,
+			"raw":                cmd.Raw,
+			"error":              err.Error(),
+			"author_association": event.AuthorAssociation,
+			"action":             event.Action,
+		})
+		if marshalErr != nil {
+			return fmt.Errorf("marshal invalid command metadata: %w", marshalErr)
+		}
+		return recordQueuedCommandWithStatus(ctx, st, event, string(cmd.Kind), string(cmd.Kind), StatusIgnored, metadata)
 	}
 	metadataBody := map[string]any{
 		"args":               cmd.Args,

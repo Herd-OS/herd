@@ -175,9 +175,9 @@ func TestRecoverWorkflowDispatchIntentChoosesLatestCompletedMatchingDispatch(t *
 	recovered, ok := svc.recoverWorkflowDispatchIntent(context.Background(), req)
 
 	require.True(t, ok)
-	assert.Equal(t, "new-head", recovered.HeadSHA)
-	assert.Equal(t, "new-head", recovered.BaseSHA)
-	assert.Equal(t, "new-head", recovered.ExpectedHeadSHA)
+	assert.Equal(t, "new-head", recovered.Request.HeadSHA)
+	assert.Equal(t, "new-head", recovered.Request.BaseSHA)
+	assert.Equal(t, "new-head", recovered.Request.ExpectedHeadSHA)
 }
 
 func TestRecoverWorkflowDispatchIntentRefusesAmbiguousDispatches(t *testing.T) {
@@ -205,12 +205,14 @@ func TestRecoverWorkflowDispatchIntentRefusesAmbiguousDispatches(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestDispatchReadyWorkers_StatusTransitionKeysArePerDispatchIdentity(t *testing.T) {
+func TestDispatchReadyWorkers_SuppressesDuplicateWhenHeadAdvancesAfterDispatchBeforeStatusTransition(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
 	fake.repo.branches["herd/batch/7-demo"] = "batch-head-1"
 	disp := &fakeDispatcher{}
-	svc := newTestService(fake, newFakeStore(), disp)
+	st := newFakeStore()
+	st.completeErrs[issueStatusTransitionKey(123, 1, issues.StatusReady, "remove", "job-1")] = []error{errors.New("crash after workflow dispatch")}
+	svc := newTestService(fake, st, disp)
 	req := DispatchReadyWorkersRequest{
 		BatchNumber: 7,
 		BatchBranch: "herd/batch/7-demo",
@@ -224,19 +226,24 @@ func TestDispatchReadyWorkers_StatusTransitionKeysArePerDispatchIdentity(t *test
 	}
 
 	firstCount, firstErr := svc.DispatchReadyWorkers(ctx, req)
-	duplicateCount, duplicateErr := svc.DispatchReadyWorkers(ctx, req)
+	require.Error(t, firstErr)
+	assert.Equal(t, 0, firstCount)
+	require.Len(t, disp.requests, 1)
+	st.keys[cpdispatch.IdempotencyKey(disp.requests[0])] = store.IdempotencyKey{
+		Key:       cpdispatch.IdempotencyKey(disp.requests[0]),
+		Scope:     "workflow_dispatch",
+		Status:    "completed",
+		Metadata:  workflowDispatchMetadata(t, disp.requests[0]),
+		CreatedAt: fixedClock(),
+	}
 	fake.repo.branches["herd/batch/7-demo"] = "batch-head-2"
 	secondCount, secondErr := svc.DispatchReadyWorkers(ctx, req)
 
-	require.NoError(t, firstErr)
-	require.NoError(t, duplicateErr)
 	require.NoError(t, secondErr)
-	assert.Equal(t, 1, firstCount)
-	assert.Equal(t, 0, duplicateCount)
-	assert.Equal(t, 1, secondCount)
-	assert.Len(t, disp.requests, 2)
-	assert.Equal(t, []string{issues.StatusReady, issues.StatusReady}, fake.issues.removed[1])
-	assert.Equal(t, []string{issues.StatusInProgress, issues.StatusInProgress}, fake.issues.added[1])
+	assert.Equal(t, 0, secondCount)
+	assert.Len(t, disp.requests, 1)
+	assert.Equal(t, []string{issues.StatusReady}, fake.issues.removed[1])
+	assert.Equal(t, []string{issues.StatusInProgress}, fake.issues.added[1])
 }
 
 func workflowDispatchMetadata(t *testing.T, req cpdispatch.DispatchRequest) json.RawMessage {
@@ -250,6 +257,7 @@ func workflowDispatchMetadata(t *testing.T, req cpdispatch.DispatchRequest) json
 		"issue_number":  req.IssueNumber,
 		"batch_branch":  req.BatchBranch,
 		"head_sha":      req.HeadSHA,
+		"job_id":        "job-1",
 	})
 	require.NoError(t, err)
 	return data
@@ -963,6 +971,8 @@ type fakeRepoService struct {
 	updated       []string
 	branchErrs    []error
 	branchLookups []string
+	beforeUpdate  func(name string)
+	beforeDelete  func(name string)
 }
 
 func (s *fakeRepoService) GetInfo(context.Context) (*platform.RepoInfo, error) {
@@ -979,6 +989,19 @@ func (s *fakeRepoService) DeleteBranch(_ context.Context, name string) error {
 	delete(s.branches, name)
 	s.deleted = append(s.deleted, name)
 	return nil
+}
+func (s *fakeRepoService) DeleteBranchIfHead(ctx context.Context, name, expectedHeadSHA string) error {
+	if s.beforeDelete != nil {
+		s.beforeDelete(name)
+	}
+	current, err := s.GetBranchSHA(ctx, name)
+	if err != nil {
+		return err
+	}
+	if current != expectedHeadSHA {
+		return fmt.Errorf("deleting branch %s: head mismatch: expected %s, got %s: %w", name, expectedHeadSHA, current, platform.ErrRefUpdateConflict)
+	}
+	return s.DeleteBranch(ctx, name)
 }
 func (s *fakeRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
 	s.branchLookups = append(s.branchLookups, name)
@@ -999,6 +1022,19 @@ func (s *fakeRepoService) UpdateBranchToCommit(_ context.Context, name, sha stri
 	s.branches[name] = sha
 	s.updated = append(s.updated, name)
 	return nil
+}
+func (s *fakeRepoService) UpdateBranchToCommitIfHead(ctx context.Context, name, sha, expectedHeadSHA string, force bool) error {
+	if s.beforeUpdate != nil {
+		s.beforeUpdate(name)
+	}
+	current, err := s.GetBranchSHA(ctx, name)
+	if err != nil {
+		return err
+	}
+	if current != expectedHeadSHA {
+		return fmt.Errorf("updating branch %s: head mismatch: expected %s, got %s: %w", name, expectedHeadSHA, current, platform.ErrRefUpdateConflict)
+	}
+	return s.UpdateBranchToCommit(ctx, name, sha, force)
 }
 
 type fakeMilestoneService struct {

@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"time"
 
+	"github.com/herd-os/herd/internal/appauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -287,6 +289,13 @@ func TestGitHubActionsStoreRequiresTokenSource(t *testing.T) {
 	assert.Contains(t, err.Error(), "token source")
 }
 
+func TestGitHubActionsStoreRequiresWorkflowRunID(t *testing.T) {
+	_, err := GitHubActionsStore{TokenSource: artifactTokenSource{}}.OpenArtifact(ContextWithArtifactRepository(context.Background(), "acme/widgets", 99), "worker-branch")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workflow_run_id")
+}
+
 type memoryArtifactStore map[string][]byte
 
 func (s memoryArtifactStore) OpenArtifact(_ context.Context, name string) (io.ReadCloser, error) {
@@ -295,6 +304,12 @@ func (s memoryArtifactStore) OpenArtifact(_ context.Context, name string) (io.Re
 		return nil, fmt.Errorf("missing artifact")
 	}
 	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+type artifactTokenSource struct{}
+
+func (artifactTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+	return appauth.InstallationToken{Token: "ghs_test", ExpiresAt: time.Now().UTC().Add(time.Hour)}, nil
 }
 
 func mustJSON(t *testing.T, v any) []byte {

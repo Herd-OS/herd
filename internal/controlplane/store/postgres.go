@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/lib/pq"
 )
 
@@ -407,8 +408,10 @@ func (s *PostgresStore) AcquireIdempotencyKey(ctx context.Context, key Idempoten
 			completed_at = EXCLUDED.completed_at
 		WHERE idempotency_keys.status <> 'completed'
 		  AND idempotency_keys.expires_at IS NOT NULL
-		  AND idempotency_keys.expires_at < now()`,
-		key.Key, key.Scope, key.Status, key.ResultRef, key.ExpiresAt, metadataOrEmpty(key.Metadata), timeOrNow(key.CreatedAt), key.CompletedAt)
+		  AND idempotency_keys.expires_at < now()
+		  AND idempotency_keys.status = ANY($9)`,
+		key.Key, key.Scope, key.Status, key.ResultRef, key.ExpiresAt, metadataOrEmpty(key.Metadata), timeOrNow(key.CreatedAt), key.CompletedAt,
+		pq.Array([]string{mutations.PhaseIntentRecorded, mutations.PhaseFailedPreCall}))
 	return createdFromResult(result, err)
 }
 

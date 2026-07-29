@@ -32,6 +32,9 @@ func (s GitHubActionsStore) OpenArtifact(ctx context.Context, name string) (io.R
 	if artifactCtx.InstallationID <= 0 {
 		return nil, fmt.Errorf("artifact installation context is required")
 	}
+	if artifactCtx.WorkflowRunID <= 0 {
+		return nil, fmt.Errorf("artifact workflow_run_id context is required")
+	}
 	client, _, err := appauth.NewInstallationClient(ctx, s.TokenSource, artifactCtx.InstallationID)
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub installation client: %w", err)
@@ -88,8 +91,5 @@ func (s GitHubActionsStore) OpenArtifact(ctx context.Context, name string) (io.R
 }
 
 func listArtifacts(ctx context.Context, client *gh.Client, owner, repo string, workflowRunID int64, opts *gh.ListArtifactsOptions) (*gh.ArtifactList, *gh.Response, error) {
-	if workflowRunID > 0 {
-		return client.Actions.ListWorkflowRunArtifacts(ctx, owner, repo, workflowRunID, &opts.ListOptions)
-	}
-	return client.Actions.ListArtifacts(ctx, owner, repo, opts)
+	return client.Actions.ListWorkflowRunArtifacts(ctx, owner, repo, workflowRunID, &opts.ListOptions)
 }

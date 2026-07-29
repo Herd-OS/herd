@@ -346,7 +346,7 @@ func (s *MemoryStore) AcquireIdempotencyKey(_ context.Context, key IdempotencyKe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.idempotencyKeys[key.Key]; ok {
-		if existing.ExpiresAt != nil && time.Now().UTC().After(*existing.ExpiresAt) && existing.Status != "completed" {
+		if existing.ExpiresAt != nil && time.Now().UTC().After(*existing.ExpiresAt) && mutations.IsPreCallRetryable(existing.Status) {
 			s.idempotencyKeys[key.Key] = key
 			return true, nil
 		}

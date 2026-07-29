@@ -296,6 +296,17 @@ func (s *repositoryService) DeleteBranch(ctx context.Context, name string) error
 	return nil
 }
 
+func (s *repositoryService) DeleteBranchIfHead(ctx context.Context, name, expectedHeadSHA string) error {
+	current, err := s.GetBranchSHA(ctx, name)
+	if err != nil {
+		return err
+	}
+	if current != expectedHeadSHA {
+		return fmt.Errorf("deleting branch %s: head mismatch: expected %s, got %s: %w", name, expectedHeadSHA, current, platform.ErrRefUpdateConflict)
+	}
+	return s.DeleteBranch(ctx, name)
+}
+
 func (s *repositoryService) GetBranchSHA(ctx context.Context, name string) (string, error) {
 	ref, _, err := s.c.gh.Git.GetRef(ctx, s.c.owner, s.c.repo, "refs/heads/"+name)
 	if err != nil {
@@ -329,4 +340,15 @@ func (s *repositoryService) UpdateBranchToCommit(ctx context.Context, name, sha 
 		return fmt.Errorf("updating branch %s to %s: %w", name, sha, err)
 	}
 	return nil
+}
+
+func (s *repositoryService) UpdateBranchToCommitIfHead(ctx context.Context, name, sha, expectedHeadSHA string, force bool) error {
+	current, err := s.GetBranchSHA(ctx, name)
+	if err != nil {
+		return err
+	}
+	if current != expectedHeadSHA {
+		return fmt.Errorf("updating branch %s to %s: head mismatch: expected %s, got %s: %w", name, sha, expectedHeadSHA, current, platform.ErrRefUpdateConflict)
+	}
+	return s.UpdateBranchToCommit(ctx, name, sha, force)
 }

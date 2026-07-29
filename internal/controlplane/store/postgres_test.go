@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -295,17 +296,7 @@ func TestPostgresStoreMethods(t *testing.T) {
 	attempt, err := store.GetGitHubMutationAttempt(ctx, "mutation-1")
 	require.NoError(t, err)
 	assert.Equal(t, "completed", attempt.Status)
-	expiredAt := time.Now().Add(-time.Hour)
-	created, err = store.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: "expired-key", Scope: "runner-registration-token", Status: "started", ExpiresAt: &expiredAt, ResultRef: "old"})
-	require.NoError(t, err)
-	assert.True(t, created)
-	freshExpiry := time.Now().Add(time.Hour)
-	created, err = store.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: "expired-key", Scope: "runner-registration-token", Status: "started", ExpiresAt: &freshExpiry, ResultRef: "new"})
-	require.NoError(t, err)
-	assert.True(t, created)
-	gotKey, err = store.GetIdempotencyKey(ctx, "expired-key")
-	require.NoError(t, err)
-	assert.Equal(t, "new", gotKey.ResultRef)
+	assertExpiredIdempotencyReclaimPolicy(t, ctx, store)
 
 	state := ReviewState{RepositoryID: repoID, PRNumber: 7, HeadSHA: "def456", Status: "pending", LastJobID: job.JobID}
 	require.NoError(t, store.SetReviewState(ctx, state))
@@ -327,6 +318,46 @@ func TestPostgresHealthFailure(t *testing.T) {
 
 	err = store.Health(ctx)
 	require.Error(t, err)
+}
+
+type idempotencyAcquireStore interface {
+	AcquireIdempotencyKey(ctx context.Context, key IdempotencyKey) (bool, error)
+	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
+}
+
+func assertExpiredIdempotencyReclaimPolicy(t *testing.T, ctx context.Context, st idempotencyAcquireStore) {
+	t.Helper()
+	expiredAt := time.Now().UTC().Add(-time.Hour)
+	freshExpiry := time.Now().UTC().Add(time.Hour)
+	tests := []struct {
+		name        string
+		status      string
+		wantCreated bool
+		wantRef     string
+	}{
+		{name: "intent recorded is reclaimed", status: mutations.PhaseIntentRecorded, wantCreated: true, wantRef: "new"},
+		{name: "failed pre call is reclaimed", status: mutations.PhaseFailedPreCall, wantCreated: true, wantRef: "new"},
+		{name: "call started is preserved", status: mutations.PhaseCallStarted, wantRef: "old"},
+		{name: "repair required is preserved", status: mutations.PhaseRepairRequired, wantRef: "old"},
+		{name: "legacy started is preserved", status: mutations.LegacyStarted, wantRef: "old"},
+		{name: "legacy failed is preserved", status: mutations.LegacyFailed, wantRef: "old"},
+		{name: "completed is preserved", status: mutations.PhaseCompleted, wantRef: "old"},
+	}
+	for _, tt := range tests {
+		t.Run("expired idempotency "+tt.name, func(t *testing.T) {
+			key := "expired-" + strings.ReplaceAll(tt.status, "_", "-")
+			created, err := st.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: key, Scope: "runner-registration-token", Status: tt.status, ExpiresAt: &expiredAt, ResultRef: "old"})
+			require.NoError(t, err)
+			assert.True(t, created)
+
+			created, err = st.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: key, Scope: "runner-registration-token", Status: mutations.PhaseIntentRecorded, ExpiresAt: &freshExpiry, ResultRef: "new"})
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCreated, created)
+			gotKey, err := st.GetIdempotencyKey(ctx, key)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantRef, gotKey.ResultRef)
+		})
+	}
 }
 
 func TestPostgresUpsertInstallationStoresEmptyEventsWhenOmitted(t *testing.T) {
@@ -450,17 +481,7 @@ func TestMemoryStore(t *testing.T) {
 	assert.Equal(t, "github timeout", gotKey.ResultRef)
 	_, err = s.GetIdempotencyKey(ctx, "missing")
 	require.ErrorIs(t, err, ErrNotFound)
-	expiredAt := time.Now().Add(-time.Hour)
-	created, err = s.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: "expired-k", Status: "started", ExpiresAt: &expiredAt, ResultRef: "old"})
-	require.NoError(t, err)
-	assert.True(t, created)
-	freshExpiry := time.Now().Add(time.Hour)
-	created, err = s.AcquireIdempotencyKey(ctx, IdempotencyKey{Key: "expired-k", Status: "started", ExpiresAt: &freshExpiry, ResultRef: "new"})
-	require.NoError(t, err)
-	assert.True(t, created)
-	gotKey, err = s.GetIdempotencyKey(ctx, "expired-k")
-	require.NoError(t, err)
-	assert.Equal(t, "new", gotKey.ResultRef)
+	assertExpiredIdempotencyReclaimPolicy(t, ctx, s)
 	require.ErrorIs(t, s.CompleteIdempotencyKey(ctx, "missing", "ref"), ErrNotFound)
 	require.ErrorIs(t, s.FailIdempotencyKey(ctx, "missing", "boom"), ErrNotFound)
 

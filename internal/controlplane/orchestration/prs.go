@@ -104,8 +104,9 @@ type BranchOperationRequest struct {
 	Force           bool
 }
 
-type branchUpdater interface {
-	UpdateBranchToCommit(ctx context.Context, name, sha string, force bool) error
+type guardedBranchMutator interface {
+	UpdateBranchToCommitIfHead(ctx context.Context, name, sha, expectedHeadSHA string, force bool) error
+	DeleteBranchIfHead(ctx context.Context, name, expectedHeadSHA string) error
 }
 
 // ApplyBranchOperation performs create/update/delete keyed by repo, branch,
@@ -181,13 +182,17 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 			}
 			return "branch:" + req.BranchName, s.Platform.Repository().CreateBranch(ctx, req.BranchName, req.FromSHA)
 		case "update":
-			updater, ok := s.Platform.Repository().(branchUpdater)
+			updater, ok := s.Platform.Repository().(guardedBranchMutator)
 			if !ok {
-				return "", fmt.Errorf("repository client does not support branch update")
+				return "", fmt.Errorf("repository client does not support guarded branch update")
 			}
-			return "branch:" + req.BranchName, updater.UpdateBranchToCommit(ctx, req.BranchName, req.NewSHA, req.Force)
+			return "branch:" + req.BranchName, updater.UpdateBranchToCommitIfHead(ctx, req.BranchName, req.NewSHA, req.ExpectedHeadSHA, req.Force)
 		case "delete":
-			return "branch:" + req.BranchName, s.Platform.Repository().DeleteBranch(ctx, req.BranchName)
+			deleter, ok := s.Platform.Repository().(guardedBranchMutator)
+			if !ok {
+				return "", fmt.Errorf("repository client does not support guarded branch delete")
+			}
+			return "branch:" + req.BranchName, deleter.DeleteBranchIfHead(ctx, req.BranchName, req.ExpectedHeadSHA)
 		default:
 			return "", fmt.Errorf("unsupported branch operation %q", req.OperationKind)
 		}

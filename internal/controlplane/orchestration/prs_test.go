@@ -217,6 +217,63 @@ func TestApplyBranchOperationCreateTransientLookupFailsPreCallUntilRedelivery(t 
 	assert.Equal(t, "fresh", fake.repo.branches["herd/worker/1-task"])
 }
 
+func TestApplyBranchOperationGuardsHeadAtMutationBoundary(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name      string
+		req       BranchOperationRequest
+		advance   func(*fakeRepoService)
+		wantValue string
+	}{
+		{
+			name: "update rejects branch advanced after preflight",
+			req: BranchOperationRequest{
+				OperationKind:   "update",
+				BranchName:      "herd/worker/1-task",
+				ExpectedHeadSHA: "old",
+				NewSHA:          "new",
+			},
+			advance: func(repo *fakeRepoService) {
+				repo.beforeUpdate = func(name string) {
+					repo.branches[name] = "advanced"
+				}
+			},
+			wantValue: "advanced",
+		},
+		{
+			name: "delete rejects branch advanced after preflight",
+			req: BranchOperationRequest{
+				OperationKind:   "delete",
+				BranchName:      "herd/worker/1-task",
+				ExpectedHeadSHA: "old",
+			},
+			advance: func(repo *fakeRepoService) {
+				repo.beforeDelete = func(name string) {
+					repo.branches[name] = "advanced"
+				}
+			},
+			wantValue: "advanced",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakePlatform()
+			fake.repo.branches["herd/worker/1-task"] = "old"
+			tt.advance(fake.repo)
+			svc := newTestService(fake, newFakeStore(), nil)
+
+			err := svc.ApplyBranchOperation(ctx, tt.req)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "head mismatch")
+			assert.ErrorIs(t, err, platform.ErrRefUpdateConflict)
+			assert.Equal(t, tt.wantValue, fake.repo.branches["herd/worker/1-task"])
+			assert.Empty(t, fake.repo.updated)
+			assert.Empty(t, fake.repo.deleted)
+		})
+	}
+}
+
 func TestApplyBranchOperationValidatesOperationBeforeMutationAttempt(t *testing.T) {
 	ctx := context.Background()
 

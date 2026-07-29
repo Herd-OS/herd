@@ -254,7 +254,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if transientPatchValidationError(applyErr) {
-			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
+			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, mutationspkg.PhaseFailedPreCall+":"+applyErr.Error())
 			writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
 			return
 		}
@@ -272,7 +272,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:      h.now(),
 		})
 		if err != nil {
-			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
+			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record rejected job result"})
 			return
 		}
@@ -286,7 +286,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !patchReplayed {
 		if applyErr := h.processWorkerPatch(r.Context(), result, job, patchArtifact, applyMetadata); applyErr != nil {
-			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
+			message := applyErr.Error()
+			var preCallErr mutationspkg.PreCallError
+			if errors.As(applyErr, &preCallErr) {
+				message = mutationspkg.PhaseFailedPreCall + ":" + message
+			}
+			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, message)
 			writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
 			return
 		}
@@ -298,7 +303,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.processReviewResult(r.Context(), result, job); err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
+		message := err.Error()
+		var preCallErr mutationspkg.PreCallError
+		if errors.As(err, &preCallErr) {
+			message = mutationspkg.PhaseFailedPreCall + ":" + message
+		}
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, message)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
 		return
 	}
@@ -316,7 +326,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      h.now(),
 	})
 	if err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record job result"})
 		return
 	}
@@ -619,8 +629,6 @@ func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, 
 	case status == mutationspkg.PhaseCompleted:
 		return false, nil
 	case mutationspkg.IsPreCallRetryable(status):
-		return true, nil
-	case record.Status == "failed":
 		return true, nil
 	case mutationspkg.IsPostCallUnknown(status):
 		return false, nil
@@ -1010,7 +1018,7 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 	if err != nil {
 		_ = h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall, nil, err)
 		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
-		return err
+		return mutationspkg.PreCallError{Op: "prepare patch apply", Err: err}
 	}
 	defer prepared.Cleanup()
 	if err := h.markPatchMutationCallStarted(ctx, idempotencyKey); err != nil {
@@ -1177,7 +1185,7 @@ func (h Handler) recordPatchMutationAttempt(ctx context.Context, idempotencyKey 
 			if errors.Is(err, store.ErrAlreadyExists) {
 				return fmt.Errorf("patch mutation already in progress: %w", err)
 			}
-			return fmt.Errorf("record patch mutation attempt: %w", err)
+			return mutationspkg.PreCallError{Op: "record patch mutation attempt", Err: err}
 		}
 	}
 	return nil

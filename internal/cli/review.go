@@ -179,6 +179,8 @@ func buildReviewPromptData(ctx context.Context, client reviewInputServices, prNu
 		PRURL:                  pr.URL,
 		PRBaseBranch:           pr.Base,
 		PRHeadBranch:           pr.Head,
+		PRHeadSHA:              pr.HeadSHA,
+		PRLabels:               pr.Labels,
 		Diff:                   diff,
 		ReviewMode:             string(plan.Coverage.ReviewMode),
 		ChunkIndex:             chunkIndex,
@@ -225,6 +227,8 @@ type reviewCmdPromptData struct {
 	PRURL                  string
 	PRBaseBranch           string
 	PRHeadBranch           string
+	PRHeadSHA              string
+	PRLabels               []string
 	Diff                   string
 	ReviewMode             string
 	ChunkIndex             int

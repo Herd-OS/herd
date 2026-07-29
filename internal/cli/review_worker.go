@@ -15,6 +15,7 @@ import (
 	"github.com/herd-os/herd/internal/config"
 	cpclient "github.com/herd-os/herd/internal/controlplane/client"
 	"github.com/herd-os/herd/internal/integrator"
+	"github.com/herd-os/herd/internal/platform"
 	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
 )
@@ -131,6 +132,20 @@ func runHostedReviewReadOnly(ctx context.Context, input reviewInputServices, ag 
 	if err != nil {
 		return hostedReviewWorkflowResult{}, err
 	}
+	batchNumber, err := integrator.ParseBatchBranchMilestone(data.PRHeadBranch)
+	if err != nil {
+		return hostedReviewWorkflowResult{}, fmt.Errorf("parsing milestone from branch %s: %w", data.PRHeadBranch, err)
+	}
+	if decision := integrator.HostedReviewReadOnlySkipDecision(integrator.HostedReviewSkipInput{
+		PRNumber:    data.PRNumber,
+		BatchNumber: batchNumber,
+		HeadSHA:     data.PRHeadSHA,
+		Labels:      data.PRLabels,
+		Comments:    hostedReviewPlatformComments(data.Comments),
+		Manual:      params.Manual,
+	}); decision.Skip {
+		return hostedReviewWorkflowResult{Status: decision.Status, Summary: decision.Reason}, nil
+	}
 	metadata := strings.Join([]string{
 		fmt.Sprintf("PR #%d: %s", data.PRNumber, data.PRTitle),
 		fmt.Sprintf("URL: %s", data.PRURL),
@@ -172,6 +187,14 @@ func runHostedReviewReadOnly(ctx context.Context, input reviewInputServices, ag 
 		return hostedReviewWorkflowResult{Status: "approved", Summary: summary}, nil
 	}
 	return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary}, nil
+}
+
+func hostedReviewPlatformComments(comments []reviewCmdComment) []*platform.Comment {
+	out := make([]*platform.Comment, 0, len(comments))
+	for _, comment := range comments {
+		out = append(out, &platform.Comment{AuthorLogin: comment.Author, Body: comment.Body})
+	}
+	return out
 }
 
 func reviewCommentBodies(comments []reviewCmdComment) []string {

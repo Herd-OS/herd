@@ -541,7 +541,7 @@ func TestHandlerStartedCallbackDoesNotProcessAgain(t *testing.T) {
 	assert.Empty(t, st.results)
 }
 
-func TestHandlerFailedCallbackRetriesProcessing(t *testing.T) {
+func TestHandlerFailedCallbackDoesNotProcessAgain(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
 	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
@@ -568,8 +568,9 @@ func TestHandlerFailedCallbackRetriesProcessing(t *testing.T) {
 	handler.ServeHTTP(rec, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
-	assert.Len(t, processor.calls, 1)
-	assert.Len(t, st.results, 1)
+	assert.Contains(t, rec.Body.String(), `"created":false`)
+	assert.Empty(t, processor.calls)
+	assert.Empty(t, st.results)
 }
 
 func TestHandlerRejectsReviewCompletedPRNumberMismatch(t *testing.T) {
@@ -1238,8 +1239,8 @@ func TestHandlerDoesNotRetryWorkerPatchAfterPushFailure(t *testing.T) {
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusConflict, first.Code)
-	require.Equal(t, http.StatusConflict, second.Code)
-	assert.Contains(t, second.Body.String(), "unknown outcome")
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Contains(t, second.Body.String(), `"created":false`)
 	assert.Len(t, applier.requests, 1)
 	assert.Equal(t, 1, applier.pushes)
 	assert.Empty(t, st.results)
@@ -1375,10 +1376,10 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureDoesNotReapplyPatch(t *test
 
 	require.Equal(t, http.StatusConflict, first.Code)
 	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Contains(t, second.Body.String(), `"created":false`)
 	assert.Len(t, applier.requests, 1)
-	assert.Len(t, st.results, 1)
-	assert.Equal(t, "completed", st.idem[patchApplyKeyForTest(t, payload, job)].Status)
-	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("a", 40))
+	assert.Empty(t, st.results)
+	assert.Equal(t, "intent_recorded", st.idem[patchApplyKeyForTest(t, payload, job)].Status)
 }
 
 func TestHandlerRetryAfterPatchApplyCompletionFailureWithoutMutationReaderDoesNotReapplyPatch(t *testing.T) {
@@ -1407,8 +1408,8 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureWithoutMutationReaderDoesNo
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusInternalServerError, second.Code)
-	assert.Contains(t, second.Body.String(), "mutation reader is not configured")
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Contains(t, second.Body.String(), `"created":false`)
 	assert.Empty(t, applier.requests)
 	assert.Empty(t, inner.results)
 }
@@ -1467,14 +1468,13 @@ func TestHandlerRetryAfterPatchMutationCompletionFailureDoesNotReapplyPatch(t *t
 
 	require.Equal(t, http.StatusConflict, first.Code)
 	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Contains(t, second.Body.String(), `"created":false`)
 	assert.Len(t, applier.requests, 1)
-	assert.Len(t, st.results, 1)
+	assert.Empty(t, st.results)
 	require.Equal(t, "completed", st.idem[patchKey].Status)
-	assert.Contains(t, st.idem[patchKey].ResultRef, strings.Repeat("a", 40))
-	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("a", 40))
 	attempt, err := st.GetGitHubMutationAttempt(context.Background(), patchKey)
 	require.NoError(t, err)
-	assert.Equal(t, "completed", attempt.Status)
+	assert.Equal(t, mutationspkg.PhaseCallStarted, attempt.Status)
 }
 
 func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.T) {
@@ -1669,7 +1669,8 @@ func TestHandlerDoesNotRetryReviewResultAfterProcessorFailure(t *testing.T) {
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusInternalServerError, second.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Contains(t, second.Body.String(), `"created":false`)
 	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.mutationCompletions, 2)
 	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[0].status)
@@ -1822,13 +1823,14 @@ func TestHandlerReviewResultCompletionPersistenceFailureDoesNotResubmit(t *testi
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusInternalServerError, second.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Contains(t, second.Body.String(), `"created":false`)
 	assert.Len(t, processor.calls, 1)
 	assert.Empty(t, st.results)
 	key := reviewResultMutationKey(mustParseReviewPayload(t, payload), st.jobs["job-1"])
 	require.Contains(t, st.idem, key)
-	assert.Equal(t, "failed", st.idem[key].Status)
-	assert.Equal(t, mutationspkg.PhaseRepairRequired, st.idem[key].ResultRef)
+	assert.Equal(t, "completed", st.idem[key].Status)
+	assert.Equal(t, "review_result:processed", st.idem[key].ResultRef)
 }
 
 func TestHandlerRejectsReviewResultWhenProcessorMissing(t *testing.T) {
@@ -2003,11 +2005,20 @@ func (s *resultStore) FailIdempotencyKey(_ context.Context, key string, errorMes
 		return store.ErrNotFound
 	}
 	now := time.Now().UTC()
-	record.Status = "failed"
-	record.ResultRef = errorMessage
+	record.Status, record.ResultRef = normalizeFailedIdempotencyForTest(errorMessage)
 	record.CompletedAt = &now
 	s.idem[key] = record
 	return nil
+}
+
+func normalizeFailedIdempotencyForTest(errorMessage string) (string, string) {
+	if rest, ok := strings.CutPrefix(errorMessage, mutationspkg.PhaseFailedPreCall+":"); ok {
+		return mutationspkg.PhaseFailedPreCall, rest
+	}
+	if rest, ok := strings.CutPrefix(errorMessage, mutationspkg.PhaseRepairRequired+":"); ok {
+		return mutationspkg.PhaseRepairRequired, rest
+	}
+	return mutationspkg.LegacyFailed, errorMessage
 }
 
 func (s *resultStore) RecordGitHubMutationAttempt(_ context.Context, attempt store.GitHubMutationAttempt) error {

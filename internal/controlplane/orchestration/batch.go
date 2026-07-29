@@ -185,16 +185,19 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			ControlPlaneURL: cfg.EffectiveControlPlaneURL(),
 			Reason:          req.Reason,
 		}
-		if status != issues.StatusReady && status != issues.StatusBlocked {
-			recovered, ok := s.recoverWorkflowDispatchIntent(ctx, dispatchReq)
-			if !ok {
-				continue
-			}
-			dispatchReq = recovered
+		recovered, recoveredOK := s.recoverWorkflowDispatchIntent(ctx, dispatchReq)
+		if status != issues.StatusReady && status != issues.StatusBlocked && !recoveredOK {
+			continue
 		}
-		result, err := s.Dispatcher.Dispatch(ctx, dispatchReq)
-		if err != nil {
-			return dispatched, fmt.Errorf("dispatch worker for issue #%d: %w", issueNumber, err)
+		var result cpdispatch.DispatchResult
+		if recoveredOK {
+			result = recovered.Result
+		} else {
+			var err error
+			result, err = s.Dispatcher.Dispatch(ctx, dispatchReq)
+			if err != nil {
+				return dispatched, fmt.Errorf("dispatch worker for issue #%d: %w", issueNumber, err)
+			}
 		}
 		transitionID := issueStatusTransitionID(result, batchHeadSHA)
 		if status == issues.StatusBlocked {
@@ -223,21 +226,29 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 	return dispatched, nil
 }
 
-func (s Service) workflowDispatchIntentExists(ctx context.Context, req cpdispatch.DispatchRequest) bool {
-	_, err := s.Store.GetIdempotencyKey(ctx, cpdispatch.IdempotencyKey(req))
-	return err == nil
+func (s Service) workflowDispatchIntentRecord(ctx context.Context, req cpdispatch.DispatchRequest) (store.IdempotencyKey, bool) {
+	record, err := s.Store.GetIdempotencyKey(ctx, cpdispatch.IdempotencyKey(req))
+	return record, err == nil
 }
 
-func (s Service) recoverWorkflowDispatchIntent(ctx context.Context, req cpdispatch.DispatchRequest) (cpdispatch.DispatchRequest, bool) {
-	if s.workflowDispatchIntentExists(ctx, req) {
-		return req, true
+type recoveredWorkflowDispatch struct {
+	Request cpdispatch.DispatchRequest
+	Result  cpdispatch.DispatchResult
+}
+
+func (s Service) recoverWorkflowDispatchIntent(ctx context.Context, req cpdispatch.DispatchRequest) (recoveredWorkflowDispatch, bool) {
+	if record, ok := s.workflowDispatchIntentRecord(ctx, req); ok {
+		status := mutations.Normalize(record.Status)
+		if status == mutations.PhaseCallStarted || status == mutations.PhaseCompleted {
+			return recoveredWorkflowDispatchFromRecord(req, record)
+		}
 	}
 	if req.IssueNumber <= 0 || req.BatchNumber <= 0 {
-		return cpdispatch.DispatchRequest{}, false
+		return recoveredWorkflowDispatch{}, false
 	}
 	records, err := s.Store.ListIdempotencyKeys(ctx, "workflow_dispatch", 500)
 	if err != nil {
-		return cpdispatch.DispatchRequest{}, false
+		return recoveredWorkflowDispatch{}, false
 	}
 	var candidates []store.IdempotencyKey
 	for _, record := range records {
@@ -270,26 +281,34 @@ func (s Service) recoverWorkflowDispatchIntent(ctx context.Context, req cpdispat
 		}
 	}
 	if len(candidates) == 0 {
-		return cpdispatch.DispatchRequest{}, false
+		return recoveredWorkflowDispatch{}, false
 	}
 	slices.SortFunc(candidates, func(a, b store.IdempotencyKey) int {
 		return b.CreatedAt.Compare(a.CreatedAt)
 	})
 	selected, ok := uniqueLatestWorkflowDispatchRecovery(candidates)
 	if !ok {
-		return cpdispatch.DispatchRequest{}, false
+		return recoveredWorkflowDispatch{}, false
 	}
+	return recoveredWorkflowDispatchFromRecord(req, selected)
+}
+
+func recoveredWorkflowDispatchFromRecord(req cpdispatch.DispatchRequest, record store.IdempotencyKey) (recoveredWorkflowDispatch, bool) {
 	var metadata struct {
 		HeadSHA string `json:"head_sha"`
+		JobID   string `json:"job_id"`
 	}
-	if json.Unmarshal(selected.Metadata, &metadata) != nil || strings.TrimSpace(metadata.HeadSHA) == "" {
-		return cpdispatch.DispatchRequest{}, false
+	if json.Unmarshal(record.Metadata, &metadata) != nil || strings.TrimSpace(metadata.HeadSHA) == "" {
+		return recoveredWorkflowDispatch{}, false
 	}
 	recovered := req
 	recovered.BaseSHA = metadata.HeadSHA
 	recovered.HeadSHA = metadata.HeadSHA
 	recovered.ExpectedHeadSHA = metadata.HeadSHA
-	return recovered, true
+	return recoveredWorkflowDispatch{
+		Request: recovered,
+		Result:  cpdispatch.DispatchResult{JobID: strings.TrimSpace(metadata.JobID), Created: false},
+	}, true
 }
 
 func uniqueLatestWorkflowDispatchRecovery(candidates []store.IdempotencyKey) (store.IdempotencyKey, bool) {

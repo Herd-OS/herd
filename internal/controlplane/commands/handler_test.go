@@ -74,6 +74,8 @@ func TestEnqueueIssueCommentCommand(t *testing.T) {
 			return e
 		}()},
 		{name: "unknown mention command ignored durably", event: validComment("OWNER", "@herd-os nope"), wantCount: 1, wantKey: "unknown", wantStatus: StatusIgnored},
+		{name: "invalid dispatch issue number ignored durably", event: validComment("OWNER", "@herd-os dispatch abc"), wantCount: 1, wantKey: "dispatch", wantStatus: StatusIgnored},
+		{name: "invalid retry issue number ignored durably", event: validComment("OWNER", "@herd-os retry abc"), wantCount: 1, wantKey: "retry", wantStatus: StatusIgnored},
 		{name: "edited command accepted", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "edited"; return e }(), wantCount: 1, wantKey: "fix", wantStatus: StatusQueued},
 		{name: "deleted command ignored", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "deleted"; return e }()},
 	}
@@ -95,6 +97,51 @@ func TestEnqueueIssueCommentCommand(t *testing.T) {
 				assert.Equal(t, tt.wantKey, st.commandRecords[0].CommandKey)
 				assert.Equal(t, tt.wantStatus, st.commandRecords[0].Status)
 			}
+		})
+	}
+}
+
+func TestEnqueueIssueCommentCommandInvalidRecoveryCommandDuplicateIsDurableIgnored(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		key  string
+	}{
+		{name: "dispatch", body: "@herd-os dispatch abc", key: "dispatch"},
+		{name: "retry", body: "@herd-os retry abc", key: "retry"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := store.NewMemoryStore()
+			repo, err := st.UpsertRepository(ctx, store.Repository{InstallationID: 77, Owner: "octo-org", Name: "herd"})
+			require.NoError(t, err)
+			event := validComment("OWNER", tt.body)
+
+			require.NoError(t, EnqueueIssueCommentCommand(ctx, st, "herd-os", event))
+			require.NoError(t, EnqueueIssueCommentCommand(ctx, st, "herd-os", event))
+
+			record, err := st.GetCommandRecord(ctx, repo.ID, event.CommentID, tt.key)
+			require.NoError(t, err)
+			assert.Equal(t, StatusIgnored, record.Status)
+			assert.Contains(t, string(record.Metadata), "positive numeric issue number")
+			dispatcher := &fakeDispatcher{}
+			processor := QueueProcessor{
+				Store: st,
+				Handler: Handler{
+					AppLogin:   "herd-os",
+					Store:      st,
+					GitHub:     &fakeGitHub{},
+					Dispatcher: dispatcher,
+				},
+				Now: func() time.Time { return time.Now().UTC().Add(time.Hour) },
+			}
+
+			processed, err := processor.ProcessOnce(ctx)
+
+			require.NoError(t, err)
+			assert.Equal(t, 0, processed)
+			assert.Empty(t, dispatcher.dispatched)
 		})
 	}
 }

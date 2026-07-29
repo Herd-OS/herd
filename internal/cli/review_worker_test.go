@@ -12,6 +12,7 @@ import (
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,7 +74,7 @@ func TestReviewWorkerCommandAcceptsPromptAndManualFlags(t *testing.T) {
 
 func TestRunHostedReviewReadOnlyUsesReadServices(t *testing.T) {
 	prs := hostedReviewTestPRReader{
-		pr:   &platform.PullRequest{Number: 42, Title: "Batch", URL: "https://github.test/pr/42", Base: "main", Head: "feature"},
+		pr:   &platform.PullRequest{Number: 42, Title: "Batch", URL: "https://github.test/pr/42", Base: "main", Head: "herd/batch/7-demo", HeadSHA: "head"},
 		diff: "diff --git a/a.go b/a.go\n+change\n",
 	}
 	issues := hostedReviewTestIssueReader{comments: []*platform.Comment{{AuthorLogin: "mona", Body: "please check auth"}}}
@@ -111,7 +112,7 @@ func TestRunHostedReviewReadOnlyPassesPromptAndManualOptions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			prs := hostedReviewTestPRReader{
-				pr:   &platform.PullRequest{Number: 42, Title: "Batch", URL: "https://github.test/pr/42", Base: "main", Head: "feature"},
+				pr:   &platform.PullRequest{Number: 42, Title: "Batch", URL: "https://github.test/pr/42", Base: "main", Head: "herd/batch/7-demo", HeadSHA: "head"},
 				diff: "diff --git a/a.go b/a.go\n+change\n",
 			}
 			ag := &hostedReviewTestAgent{result: &agent.ReviewResult{Approved: true, Summary: "approved"}}
@@ -132,6 +133,77 @@ func TestRunHostedReviewReadOnlyPassesPromptAndManualOptions(t *testing.T) {
 			assert.Equal(t, tt.wantManual, ag.reviewOpts[0].Manual)
 		})
 	}
+}
+
+func TestRunHostedReviewReadOnlyAppliesAutomaticSafeguards(t *testing.T) {
+	approvedMarker := `<!-- herd:review-result {"version":1,"pr_number":42,"batch_number":7,"head_sha":"head","status":"approved","created_at":"2026-07-12T12:00:00Z"} -->`
+	tests := []struct {
+		name       string
+		pr         *platform.PullRequest
+		comments   []*platform.Comment
+		wantStatus string
+		wantReason string
+	}{
+		{
+			name:       "duplicate approved head",
+			pr:         &platform.PullRequest{Number: 42, Title: "Batch", URL: "https://github.test/pr/42", Base: "main", Head: "herd/batch/7-demo", HeadSHA: "head"},
+			comments:   []*platform.Comment{{AuthorLogin: "herd-os[bot]", Body: approvedMarker}},
+			wantStatus: "approved",
+			wantReason: "already has an approved",
+		},
+		{
+			name:       "stable disagreement",
+			pr:         &platform.PullRequest{Number: 42, Title: "Batch", URL: "https://github.test/pr/42", Base: "main", Head: "herd/batch/7-demo", HeadSHA: "head", Labels: []string{issues.StableDisagreement}},
+			wantStatus: "failed",
+			wantReason: issues.StableDisagreement,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ag := &hostedReviewTestAgent{result: &agent.ReviewResult{Approved: true, Summary: "approved"}}
+			cfg := config.Default()
+			cfg.Platform.Owner = "octo"
+			cfg.Platform.Repo = "widgets"
+
+			result, err := runHostedReviewReadOnly(t.Context(), reviewInputServices{
+				Issues: hostedReviewTestIssueReader{comments: tt.comments},
+				PullRequests: hostedReviewTestPRReader{
+					pr:   tt.pr,
+					diff: "diff --git a/a.go b/a.go\n+change\n",
+				},
+				Checks: hostedReviewTestCheckReader{status: "success"},
+			}, ag, cfg, reviewWorkerParams(42, t.TempDir(), "", false))
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, result.Status)
+			assert.Contains(t, result.Summary, tt.wantReason)
+			assert.Empty(t, ag.reviewOpts)
+		})
+	}
+}
+
+func TestRunHostedReviewReadOnlyManualBypassesAutomaticSafeguards(t *testing.T) {
+	approvedMarker := `<!-- herd:review-result {"version":1,"pr_number":42,"batch_number":7,"head_sha":"head","status":"approved","created_at":"2026-07-12T12:00:00Z"} -->`
+	ag := &hostedReviewTestAgent{result: &agent.ReviewResult{Approved: true, Summary: "manual approved"}}
+	cfg := config.Default()
+	cfg.Platform.Owner = "octo"
+	cfg.Platform.Repo = "widgets"
+	prompt := "focus on auth\n\nand session expiry"
+
+	result, err := runHostedReviewReadOnly(t.Context(), reviewInputServices{
+		Issues: hostedReviewTestIssueReader{comments: []*platform.Comment{{AuthorLogin: "herd-os[bot]", Body: approvedMarker}}},
+		PullRequests: hostedReviewTestPRReader{
+			pr:   &platform.PullRequest{Number: 42, Title: "Batch", URL: "https://github.test/pr/42", Base: "main", Head: "herd/batch/7-demo", HeadSHA: "head", Labels: []string{issues.StableDisagreement}},
+			diff: "diff --git a/a.go b/a.go\n+change\n",
+		},
+		Checks: hostedReviewTestCheckReader{status: "success"},
+	}, ag, cfg, reviewWorkerParams(42, t.TempDir(), prompt, true))
+
+	require.NoError(t, err)
+	assert.Equal(t, "approved", result.Status)
+	require.Len(t, ag.reviewOpts, 1)
+	assert.True(t, ag.reviewOpts[0].Manual)
+	assert.Contains(t, ag.reviewOpts[0].SystemPrompt, prompt)
 }
 
 func TestHostedReviewReadTokenUsesControlPlaneWithoutLegacyGitHubToken(t *testing.T) {
