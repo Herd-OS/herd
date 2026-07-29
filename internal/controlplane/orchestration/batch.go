@@ -178,12 +178,14 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			ControlPlaneURL: cfg.EffectiveControlPlaneURL(),
 			Reason:          req.Reason,
 		}
-		recovered, recoveredOK := s.recoverWorkflowDispatchIntent(ctx, dispatchReq)
-		if status != issues.StatusReady && status != issues.StatusBlocked && !recoveredOK {
-			continue
-		}
 		batchHeadSHA := ""
-		if recoveredOK {
+		var recovered recoveredWorkflowDispatch
+		recoveredOK := false
+		if status == "" {
+			recovered, recoveredOK = s.recoverWorkflowDispatchIntent(ctx, dispatchReq)
+			if !recoveredOK {
+				continue
+			}
 			batchHeadSHA = recovered.Request.HeadSHA
 			dispatchReq = recovered.Request
 		} else {
@@ -195,6 +197,7 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			dispatchReq.BaseSHA = batchHeadSHA
 			dispatchReq.HeadSHA = batchHeadSHA
 			dispatchReq.ExpectedHeadSHA = batchHeadSHA
+			recovered, recoveredOK = s.recoverExactWorkflowDispatchIntent(ctx, dispatchReq)
 		}
 		var result cpdispatch.DispatchResult
 		if recoveredOK {
@@ -244,11 +247,8 @@ type recoveredWorkflowDispatch struct {
 }
 
 func (s Service) recoverWorkflowDispatchIntent(ctx context.Context, req cpdispatch.DispatchRequest) (recoveredWorkflowDispatch, bool) {
-	if record, ok := s.workflowDispatchIntentRecord(ctx, req); ok {
-		status := mutations.Normalize(record.Status)
-		if status == mutations.PhaseCompleted {
-			return recoveredWorkflowDispatchFromRecord(req, record)
-		}
+	if recovered, ok := s.recoverExactWorkflowDispatchIntent(ctx, req); ok {
+		return recovered, true
 	}
 	if req.IssueNumber <= 0 || req.BatchNumber <= 0 {
 		return recoveredWorkflowDispatch{}, false
@@ -298,6 +298,16 @@ func (s Service) recoverWorkflowDispatchIntent(ctx context.Context, req cpdispat
 		return recoveredWorkflowDispatch{}, false
 	}
 	return recoveredWorkflowDispatchFromRecord(req, selected)
+}
+
+func (s Service) recoverExactWorkflowDispatchIntent(ctx context.Context, req cpdispatch.DispatchRequest) (recoveredWorkflowDispatch, bool) {
+	if record, ok := s.workflowDispatchIntentRecord(ctx, req); ok {
+		status := mutations.Normalize(record.Status)
+		if status == mutations.PhaseCompleted {
+			return recoveredWorkflowDispatchFromRecord(req, record)
+		}
+	}
+	return recoveredWorkflowDispatch{}, false
 }
 
 func recoveredWorkflowDispatchFromRecord(req cpdispatch.DispatchRequest, record store.IdempotencyKey) (recoveredWorkflowDispatch, bool) {

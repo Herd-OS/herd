@@ -1012,6 +1012,12 @@ func validateResultAgainstJob(result Result, job store.Job) error {
 		if job.PRNumber == 0 {
 			return fmt.Errorf("job PR number is missing")
 		}
+		if strings.TrimSpace(job.HeadSHA) == "" {
+			return fmt.Errorf("job head SHA is missing")
+		}
+		if review.HeadSHA != job.HeadSHA {
+			return fmt.Errorf("stale head SHA: expected %s, got %s", job.HeadSHA, review.HeadSHA)
+		}
 		if review.PRNumber != job.PRNumber {
 			return fmt.Errorf("result pr_number does not match job: expected %d, got %d", job.PRNumber, review.PRNumber)
 		}

@@ -123,11 +123,6 @@ func runInitWithOptions(opts initOptions) error {
 	if err != nil {
 		return err
 	}
-	registration, err := registerRepositoryForInit(context.Background(), owner, repo, opts)
-	if err != nil {
-		return err
-	}
-
 	cfg := existingConfig
 
 	// 2. Create config
@@ -197,12 +192,23 @@ func runInitWithOptions(opts initOptions) error {
 		fmt.Println(display.Warning("Skipped workflow installation"))
 	}
 
-	// 6. Create runner files
-	responseControlPlaneURL, err := validatedEffectiveResponseControlPlaneURL(opts.ControlPlaneURL, registration.ControlPlaneURL)
-	if err != nil {
-		return err
+	// 6. Create runner files. Repository registration is only needed when
+	// provisioning hosted runner bootstrap state; local refreshes can render
+	// managed files without gh/auth/control-plane access.
+	bootstrapToken := ""
+	responseControlPlaneURL := opts.ControlPlaneURL
+	if initRequiresHostedRegistration(opts) {
+		registration, err := registerRepositoryForInit(context.Background(), owner, repo, opts)
+		if err != nil {
+			return err
+		}
+		responseControlPlaneURL, err = validatedEffectiveResponseControlPlaneURL(opts.ControlPlaneURL, registration.ControlPlaneURL)
+		if err != nil {
+			return err
+		}
+		bootstrapToken = registration.RunnerBootstrapToken
 	}
-	if err := createRunnerFilesWithBootstrap(dir, owner, repo, registration.RunnerBootstrapToken, responseControlPlaneURL); err != nil {
+	if err := createRunnerFilesWithBootstrap(dir, owner, repo, bootstrapToken, responseControlPlaneURL); err != nil {
 		return err
 	}
 
@@ -216,6 +222,10 @@ func runInitWithOptions(opts initOptions) error {
 	printNextSteps(owner, repo)
 
 	return nil
+}
+
+func initRequiresHostedRegistration(opts initOptions) bool {
+	return !opts.SkipLabels || !opts.SkipWorkflows
 }
 
 func checkPrerequisites(dir string) error {
@@ -974,6 +984,7 @@ func writeRunnerEnv(dir string, bootstrapToken string, controlPlaneURL string) e
 	wroteControlPlane := false
 	for _, line := range strings.Split(string(existing), "\n") {
 		if line == "" {
+			out.WriteString("\n")
 			continue
 		}
 		key, ok := envLineKey(line)
@@ -1029,7 +1040,9 @@ func parseEnvLines(content string) map[string]string {
 		if !ok {
 			continue
 		}
-		parts := strings.SplitN(line, "=", 2)
+		trimmed := strings.TrimSpace(line)
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "export "))
+		parts := strings.SplitN(trimmed, "=", 2)
 		if len(parts) == 2 {
 			values[key] = parts[1]
 		}
@@ -1041,6 +1054,9 @@ func envLineKey(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, "=") {
 		return "", false
+	}
+	if strings.HasPrefix(trimmed, "export ") {
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "export "))
 	}
 	key := strings.TrimSpace(strings.SplitN(trimmed, "=", 2)[0])
 	if key == "" {

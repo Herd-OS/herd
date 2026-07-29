@@ -134,6 +134,43 @@ func TestDispatcherDuplicateDispatchIsIdempotent(t *testing.T) {
 	assert.Len(t, st.idempotencyKeys, 1)
 }
 
+func TestDispatcherCompletedDuplicateRepairsWithNilGitHubClient(t *testing.T) {
+	st := newFakeStore()
+	req := validRequest()
+	require.NoError(t, (Dispatcher{Store: st}).RecordIntent(context.Background(), req))
+	key := IdempotencyKey(req)
+	resultBytes, err := json.Marshal(DispatchResult{JobID: "job-1", URL: "https://github.com/octo/herd/actions", Created: true})
+	require.NoError(t, err)
+	resultJSON := string(resultBytes)
+	record := st.idempotencyKeys[key]
+	record.Status = "completed"
+	record.ResultRef = resultJSON
+	st.idempotencyKeys[key] = record
+	st.jobs["job-1"] = store.Job{JobID: "job-1"}
+	st.mutationAttempts = append(st.mutationAttempts, store.GitHubMutationAttempt{
+		IdempotencyKey: key,
+		Status:         mutations.PhaseCallStarted,
+	})
+
+	result, err := Dispatcher{Store: st, GitHub: nil}.Dispatch(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.False(t, result.Created)
+	assert.Equal(t, "job-1", result.JobID)
+	attempt, err := st.GetGitHubMutationAttempt(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, mutations.PhaseCompleted, attempt.Status)
+}
+
+func TestDispatcherFreshDispatchRequiresGitHubClient(t *testing.T) {
+	st := newFakeStore()
+
+	_, err := Dispatcher{Store: st, GitHub: nil}.Dispatch(context.Background(), validRequest())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GitHub client is required")
+}
+
 func TestDispatcherConcurrentDuplicateDispatchesWorkflowOnce(t *testing.T) {
 	st := store.NewMemoryStore()
 	gh := &blockingWorkflowClient{entered: make(chan struct{}), release: make(chan struct{})}

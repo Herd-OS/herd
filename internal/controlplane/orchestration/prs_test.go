@@ -178,6 +178,22 @@ func TestApplyBranchOperationCreateIdentityIncludesFromSHA(t *testing.T) {
 	assert.Equal(t, "base-a", fake.repo.branches[first.BranchName])
 }
 
+func TestApplyBranchOperationUpdateIdentityIncludesNewSHA(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branches["herd/worker/1-task"] = "old"
+	svc := newTestService(fake, newFakeStore(), nil)
+	first := BranchOperationRequest{OperationKind: "update", BranchName: "herd/worker/1-task", ExpectedHeadSHA: "old", NewSHA: "new-a"}
+	second := BranchOperationRequest{OperationKind: "update", BranchName: "herd/worker/1-task", ExpectedHeadSHA: "old", NewSHA: "new-b"}
+
+	require.NoError(t, svc.ApplyBranchOperation(ctx, first))
+	err := svc.ApplyBranchOperation(ctx, second)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "head mismatch")
+	assert.Equal(t, "new-a", fake.repo.branches[first.BranchName])
+}
+
 func TestApplyBranchOperationCreateRejectsExistingWrongSHARecovery(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
@@ -329,7 +345,11 @@ func TestApplyBranchOperationRepairsPostCallUnknownBranchMutations(t *testing.T)
 			if tt.req.OperationKind == "create" {
 				identitySHA = tt.req.FromSHA
 			}
-			key := idempotencyKey("branch", "repo", svc.Repo.ID, tt.req.BranchName, identitySHA, tt.req.OperationKind)
+			keyParts := []any{"branch", "repo", svc.Repo.ID, tt.req.BranchName, identitySHA, tt.req.OperationKind}
+			if tt.req.OperationKind == "update" {
+				keyParts = append(keyParts, tt.req.NewSHA)
+			}
+			key := idempotencyKey(keyParts...)
 			st.completeMutationErrs[key] = []error{assert.AnError}
 			st.completeErrs[key] = []error{assert.AnError}
 

@@ -190,6 +190,40 @@ func TestGitEnvStripsSuppliedCommandScopedConfig(t *testing.T) {
 	assert.Contains(t, captured, "GIT_CONFIG_VALUE_0=HerdOS")
 }
 
+func TestGitEnvStripsTokenShapedCommandScopedConfigValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		secret string
+	}{
+		{name: "classic token in url userinfo", config: "url.https://ghp_secretsecret@github.com/.insteadOf=https://github.com/", secret: "ghp_secretsecret"},
+		{name: "fine grained token in helper", config: "credential.helper=!f() { echo github_pat_secretsecret; }; f", secret: "github_pat_secretsecret"},
+		{name: "token bearing url userinfo", config: "url.https://user:pass@github.com/.insteadOf=https://github.com/", secret: "user:pass"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			capturePath := filepath.Join(t.TempDir(), "env.txt")
+			fakeGit := filepath.Join(binDir, "git")
+			script := "#!/bin/sh\n" +
+				"env | sort | grep -E '^(GIT_CONFIG|HERD_GIT)_' > \"$HERD_GIT_ARGV_CAPTURE\"\n" +
+				"exit 1\n"
+			require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0700))
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("HERD_GIT_ARGV_CAPTURE", capturePath)
+
+			err := CloneWithConfig("https://github.com/acme/widgets.git", filepath.Join(t.TempDir(), "repo"), "user.name=HerdOS", tt.config)
+
+			require.Error(t, err)
+			captured := string(mustReadFile(t, capturePath))
+			assert.NotContains(t, captured, tt.secret)
+			assert.NotContains(t, captured, "GIT_CONFIG_KEY_1")
+			assert.Contains(t, captured, "GIT_CONFIG_COUNT=1")
+			assert.Contains(t, captured, "GIT_CONFIG_KEY_0=user.name")
+		})
+	}
+}
+
 func TestGitEnvStripsConfigControlEnv(t *testing.T) {
 	tests := []struct {
 		name string

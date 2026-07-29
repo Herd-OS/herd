@@ -156,25 +156,55 @@ func (s *PostgresStore) UpsertInstallation(ctx context.Context, i Installation) 
 }
 
 func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Repository, error) {
-	conflictTarget := "(owner, name)"
-	if r.GitHubID != 0 {
-		conflictTarget = "(github_id) WHERE github_id IS NOT NULL"
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Repository{}, err
 	}
-	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+	defer func() { _ = tx.Rollback() }()
+	args := []any{nullableInt64(r.GitHubID), r.InstallationID, r.Owner, r.Name, r.DefaultBranch, r.Private, timeOrNow(r.RegisteredAt), timeOrNow(r.UpdatedAt), metadataOrEmpty(r.Metadata)}
+	if r.GitHubID != 0 {
+		err = tx.QueryRowContext(ctx, `
+			UPDATE repositories SET
+				installation_id = $2,
+				owner = $3,
+				name = $4,
+				default_branch = $5,
+				private = $6,
+				updated_at = $8,
+				metadata = $9
+			WHERE github_id = $1
+			RETURNING id`, args...).Scan(&r.ID)
+		if err == nil {
+			return r, tx.Commit()
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Repository{}, err
+		}
+	}
+	err = tx.QueryRowContext(ctx, `
+		UPDATE repositories SET
+			github_id = $1,
+			installation_id = $2,
+			default_branch = $5,
+			private = $6,
+			updated_at = $8,
+			metadata = $9
+		WHERE owner = $3 AND name = $4
+		RETURNING id`, args...).Scan(&r.ID)
+	if err == nil {
+		return r, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Repository{}, err
+	}
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO repositories (github_id, installation_id, owner, name, default_branch, private, registered_at, updated_at, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT %s DO UPDATE SET
-			github_id = EXCLUDED.github_id,
-			installation_id = EXCLUDED.installation_id,
-			owner = EXCLUDED.owner,
-			name = EXCLUDED.name,
-			default_branch = EXCLUDED.default_branch,
-			private = EXCLUDED.private,
-			updated_at = EXCLUDED.updated_at,
-			metadata = EXCLUDED.metadata
-		RETURNING id`, conflictTarget),
-		nullableInt64(r.GitHubID), r.InstallationID, r.Owner, r.Name, r.DefaultBranch, r.Private, timeOrNow(r.RegisteredAt), timeOrNow(r.UpdatedAt), metadataOrEmpty(r.Metadata)).Scan(&r.ID)
+		RETURNING id`, args...).Scan(&r.ID)
 	if err != nil {
+		return Repository{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return Repository{}, err
 	}
 	return r, nil

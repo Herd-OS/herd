@@ -271,6 +271,40 @@ func TestValidateResultAgainstJobRequiresDurableReviewPRNumber(t *testing.T) {
 	}
 }
 
+func TestValidateResultAgainstJobRequiresDurableReviewHeadSHA(t *testing.T) {
+	result := ReviewCompletedResult{
+		Version:     1,
+		Kind:        KindReviewCompleted,
+		Repository:  "acme/widgets",
+		JobID:       "job-1",
+		BatchNumber: 106,
+		PRNumber:    12,
+		HeadSHA:     "head",
+		Status:      StatusApproved,
+		Summary:     "looks good",
+	}
+
+	tests := []struct {
+		name string
+		job  store.Job
+		head string
+		want string
+	}{
+		{name: "missing durable head", job: store.Job{JobID: "job-1", PRNumber: 12}, head: "head", want: "job head SHA is missing"},
+		{name: "missing result head", job: store.Job{JobID: "job-1", PRNumber: 12, HeadSHA: "head"}, head: "", want: "stale head SHA"},
+		{name: "mismatched result head", job: store.Job{JobID: "job-1", PRNumber: 12, HeadSHA: "head"}, head: "other", want: "stale head SHA"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result.HeadSHA = tt.head
+			err := validateResultAgainstJob(result, tt.job)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 func TestValidateResultAgainstJobRequiresDurableWorkerSuccessSHAs(t *testing.T) {
 	result := WorkerCompletedResult{
 		Version:         1,

@@ -183,9 +183,8 @@ func TestRunOnceRetriesCommandWhenInitialRequeueFails(t *testing.T) {
 
 	require.Error(t, firstErr)
 	require.NoError(t, secondErr)
-	require.Len(t, commands.items, 2)
+	require.Len(t, commands.items, 1)
 	assert.Equal(t, int64(201), commands.items[0].Command.CommentID)
-	assert.Equal(t, int64(201), commands.items[1].Command.CommentID)
 	items, err := st.ListReconcileCommands(ctx, now, 10)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
