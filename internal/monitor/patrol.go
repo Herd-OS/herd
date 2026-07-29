@@ -211,7 +211,7 @@ func PatrolWithGit(ctx context.Context, p platform.Platform, g *git.Git, cfg *co
 				} else if _, err := integrator.CheckCI(ctx, p, cfg, integrator.CheckCIParams{BatchNumber: batchNumber}); err != nil {
 					fmt.Printf("Warning: failed to resume CI check for PR #%d after pending worker recovery: %v\n", pr.Number, err)
 				}
-				if err := p.Issues().AddComment(ctx, pr.Number, "/herd review"); err != nil {
+				if err := p.PullRequests().AddComment(ctx, pr.Number, "/herd review"); err != nil {
 					fmt.Printf("Warning: failed to enqueue review for PR #%d after pending worker recovery: %v\n", pr.Number, err)
 				}
 			}

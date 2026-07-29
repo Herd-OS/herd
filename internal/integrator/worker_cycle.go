@@ -57,7 +57,7 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 	}
 	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
 
-	lockedCtx := withHeldBatchLock(ctx, ms.Number, runCtx.BatchBranch)
+	lockedCtx := withHeldBatchLock(ctx, ms.Number, runCtx.BatchBranch, batchLock)
 	result := &WorkerCompletionCycleResult{}
 
 	consolidateResult, err := Consolidate(lockedCtx, p, g, cfg, ConsolidateParams(params))
@@ -105,23 +105,7 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 		}
 
 		if advanceResult != nil && advanceResult.AllComplete && advanceResult.BatchPRNumber > 0 {
-			reviewResult, err := Review(lockedCtx, p, ag, g, cfg, ReviewParams{
-				RunID:    params.RunID,
-				RepoRoot: params.RepoRoot,
-			})
-			if err != nil {
-				return nil, err
-			}
-			result.Review = reviewResult
-
-			checkCIResult, err := CheckCI(lockedCtx, p, cfg, CheckCIParams{
-				RunID:    params.RunID,
-				RepoRoot: params.RepoRoot,
-			})
-			if err != nil {
-				return nil, err
-			}
-			result.CheckCI = checkCIResult
+			result.SideEffectsDeferred = true
 		}
 		return result, nil
 	}
@@ -132,6 +116,9 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 func markWorkerCompletionPending(ctx context.Context, p platform.Platform, runCtx *WorkerRunContext) error {
 	if runCtx == nil || runCtx.IssueNumber == 0 {
 		return nil
+	}
+	if err := publishPendingWorkerCompletion(ctx, p.Repository(), runCtx.issue.Milestone.Number, runCtx.BatchBranch); err != nil {
+		return err
 	}
 	if err := p.Issues().AddLabels(ctx, runCtx.IssueNumber, []string{issues.IntegratorPending}); err != nil {
 		return fmt.Errorf("marking issue #%d pending integrator recovery: %w", runCtx.IssueNumber, err)
@@ -155,7 +142,97 @@ func drainPendingWorkerCompletions(ctx context.Context, p platform.Platform, g *
 	if err := clearResolvedPendingWorkerCompletions(ctx, p, batchNumber); err != nil {
 		return false, err
 	}
+	if err := clearHeldBatchLockPendingCompletions(ctx, p.Repository(), batchNumber); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+func publishPendingWorkerCompletion(ctx context.Context, repoSvc platform.RepositoryService, batchNumber int, batchBranch string) error {
+	repo, ok := repoSvc.(reviewLockRepository)
+	if !ok {
+		return fmt.Errorf("repository service does not support append-only batch locks")
+	}
+	lockBranch := BatchLockBranch(batchNumber)
+	for attempt := 0; attempt < batchLockMaxAttempts; attempt++ {
+		headSHA, state, stateOK, err := readBatchLockHead(ctx, repoSvc, repo, lockBranch)
+		if err != nil {
+			return err
+		}
+		if !stateOK || state.Status != "locked" || state.BatchNumber != batchNumber || state.BatchBranch != batchBranch || state.LockID == "" {
+			return nil
+		}
+		state.PendingCompletions++
+		message, err := buildBatchLockCommitMessage(state)
+		if err != nil {
+			return err
+		}
+		commitSHA, err := repo.CreateCommit(ctx, headSHA, message)
+		if err != nil {
+			return fmt.Errorf("creating pending worker completion marker for %s: %w", lockBranch, err)
+		}
+		if err := repo.UpdateBranchToCommit(ctx, lockBranch, commitSHA, false); err != nil {
+			if platform.IsRefUpdateConflict(err) {
+				continue
+			}
+			return fmt.Errorf("updating pending worker completion marker %s: %w", lockBranch, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("publishing pending worker completion for batch #%d: exceeded retry attempts", batchNumber)
+}
+
+func hasHeldBatchLockPendingCompletions(ctx context.Context, p platform.Platform, batchNumber int) (bool, error) {
+	if pending, err := hasPendingWorkerCompletions(ctx, p, batchNumber); err != nil || pending {
+		return pending, err
+	}
+	held, ok := ctx.Value(heldBatchLockContextKey{}).(heldBatchLockContext)
+	if !ok || held.lockID == "" {
+		return false, nil
+	}
+	state, ok, err := DescribeBatchLock(ctx, p.Repository(), batchNumber)
+	if err != nil || !ok {
+		return false, err
+	}
+	return state.Status == "locked" && state.LockID == held.lockID && state.PendingCompletions > 0, nil
+}
+
+func clearHeldBatchLockPendingCompletions(ctx context.Context, repoSvc platform.RepositoryService, batchNumber int) error {
+	held, ok := ctx.Value(heldBatchLockContextKey{}).(heldBatchLockContext)
+	if !ok || held.lockID == "" {
+		return nil
+	}
+	repo, ok := repoSvc.(reviewLockRepository)
+	if !ok {
+		return fmt.Errorf("repository service does not support append-only batch locks")
+	}
+	lockBranch := BatchLockBranch(batchNumber)
+	for attempt := 0; attempt < batchLockMaxAttempts; attempt++ {
+		headSHA, state, stateOK, err := readBatchLockHead(ctx, repoSvc, repo, lockBranch)
+		if err != nil {
+			return err
+		}
+		if !stateOK || state.Status != "locked" || state.LockID != held.lockID || state.PendingCompletions == 0 {
+			return nil
+		}
+		state.PendingCompletions = 0
+		message, err := buildBatchLockCommitMessage(state)
+		if err != nil {
+			return err
+		}
+		commitSHA, err := repo.CreateCommit(ctx, headSHA, message)
+		if err != nil {
+			return fmt.Errorf("creating pending worker completion clear marker for %s: %w", lockBranch, err)
+		}
+		if err := repo.UpdateBranchToCommit(ctx, lockBranch, commitSHA, false); err != nil {
+			if platform.IsRefUpdateConflict(err) {
+				continue
+			}
+			return fmt.Errorf("updating pending worker completion clear marker %s: %w", lockBranch, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("clearing pending worker completions for batch #%d: exceeded retry attempts", batchNumber)
 }
 
 func hasPendingWorkerCompletions(ctx context.Context, p platform.Platform, batchNumber int) (bool, error) {

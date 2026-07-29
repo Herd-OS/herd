@@ -408,6 +408,9 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		}, nil
 	}
 	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
+	if batchLock != nil {
+		ctx = withHeldBatchLock(ctx, ms.Number, batchBranch, batchLock)
+	}
 
 	// List all issues in the milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
@@ -805,7 +808,7 @@ func RecoverStrandedCompletedBatch(ctx context.Context, p platform.Platform, g *
 	}
 	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
 
-	lockedCtx := withHeldBatchLock(ctx, ms.Number, batchBranch)
+	lockedCtx := withHeldBatchLock(ctx, ms.Number, batchBranch, batchLock)
 	if g != nil {
 		if _, err := recoverPendingWorkerCompletionsLocked(lockedCtx, p, g, cfg, ms, batchBranch); err != nil {
 			return nil, false, err
@@ -856,7 +859,7 @@ func RecoverPendingWorkerCompletionsForBatchPR(ctx context.Context, p platform.P
 	}
 	defer releaseBatchLockDeferred(p, batchLock, batchNumber)
 
-	return recoverPendingWorkerCompletionsLocked(withHeldBatchLock(ctx, batchNumber, pr.Head), p, g, cfg, ms, pr.Head)
+	return recoverPendingWorkerCompletionsLocked(withHeldBatchLock(ctx, batchNumber, pr.Head, batchLock), p, g, cfg, ms, pr.Head)
 }
 
 func recoverPendingWorkerCompletionsLocked(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, ms *platform.Milestone, batchBranch string) (*PendingWorkerCompletionRecoveryResult, error) {
@@ -931,6 +934,9 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 		}, nil
 	}
 	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
+	if batchLock != nil {
+		ctx = withHeldBatchLock(ctx, ms.Number, batchBranch, batchLock)
+	}
 
 	// List all issues in the milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
@@ -1537,6 +1543,15 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	// Build PR title and body
 	title := fmt.Sprintf("[herd] %s (%d tasks)", ms.Title, len(allIssues))
 	body := buildBatchPRBody(ms, allIssues, tiers)
+
+	pending, err := hasHeldBatchLockPendingCompletions(ctx, p, ms.Number)
+	if err != nil {
+		return 0, err
+	}
+	if pending {
+		fmt.Printf("Pending worker completion published for batch #%d before PR creation; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
+		return 0, nil
+	}
 
 	pr, err := p.PullRequests().Create(ctx, title, body, batchBranch, defaultBranch)
 	if err != nil {

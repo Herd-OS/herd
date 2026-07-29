@@ -16,18 +16,19 @@ const batchLockExpiry = 2 * time.Hour
 const batchLockMaxAttempts = 6
 
 type BatchLockState struct {
-	Kind           string     `json:"kind"`
-	Version        int        `json:"version"`
-	Status         string     `json:"status"`
-	LockID         string     `json:"lock_id,omitempty"`
-	BatchNumber    int        `json:"batch_number"`
-	BatchBranch    string     `json:"batch_branch,omitempty"`
-	RunID          int64      `json:"run_id,omitempty"`
-	Owner          string     `json:"owner,omitempty"`
-	AcquiredAt     *time.Time `json:"acquired_at,omitempty"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
-	ReleasedLockID string     `json:"released_lock_id,omitempty"`
-	ReleasedAt     *time.Time `json:"released_at,omitempty"`
+	Kind               string     `json:"kind"`
+	Version            int        `json:"version"`
+	Status             string     `json:"status"`
+	LockID             string     `json:"lock_id,omitempty"`
+	BatchNumber        int        `json:"batch_number"`
+	BatchBranch        string     `json:"batch_branch,omitempty"`
+	RunID              int64      `json:"run_id,omitempty"`
+	Owner              string     `json:"owner,omitempty"`
+	AcquiredAt         *time.Time `json:"acquired_at,omitempty"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	PendingCompletions int        `json:"pending_completions,omitempty"`
+	ReleasedLockID     string     `json:"released_lock_id,omitempty"`
+	ReleasedAt         *time.Time `json:"released_at,omitempty"`
 }
 
 type BatchLockHandle struct {
@@ -40,6 +41,7 @@ type heldBatchLockContextKey struct{}
 type heldBatchLockContext struct {
 	batchNumber int
 	batchBranch string
+	lockID      string
 }
 
 func BatchLockBranch(batchNumber int) string {
@@ -92,10 +94,15 @@ func AcquireBatchLock(ctx context.Context, repoSvc platform.RepositoryService, b
 	return nil, false, fmt.Errorf("acquiring batch lock %s: exceeded retry attempts", lockBranch)
 }
 
-func withHeldBatchLock(ctx context.Context, batchNumber int, batchBranch string) context.Context {
+func withHeldBatchLock(ctx context.Context, batchNumber int, batchBranch string, handle *BatchLockHandle) context.Context {
+	lockID := ""
+	if handle != nil {
+		lockID = handle.state.LockID
+	}
 	return context.WithValue(ctx, heldBatchLockContextKey{}, heldBatchLockContext{
 		batchNumber: batchNumber,
 		batchBranch: batchBranch,
+		lockID:      lockID,
 	})
 }
 

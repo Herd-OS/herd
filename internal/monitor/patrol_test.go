@@ -561,7 +561,7 @@ func TestPatrolWithGit_RecoversPendingWorkerBranchForExistingBatchPR(t *testing.
 	assert.Equal(t, 1, result.PendingWorkerBranchesRecovered)
 	assert.Equal(t, 0, result.PendingWorkerBranchesSkippedLocked)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
-	assert.Contains(t, issueSvc.comments[100], "/herd review")
+	assert.Contains(t, prSvc.comments[100], "/herd review")
 	assert.Contains(t, checkSvc.checkedRefs, batchBranch)
 	assert.False(t, mock.repo.branchExists[workerBranch])
 	runMonitorGit(t, g.WorkDir, "fetch", "origin", batchBranch)
