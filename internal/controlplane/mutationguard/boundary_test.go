@@ -53,7 +53,11 @@ func TestRunMutationBoundaryConverges(t *testing.T) {
 		{
 			name: "does not repeat unknown post-call mutation",
 			setup: func(st *fakeBoundaryStore) {
-				st.attempts["k"] = store.GitHubMutationAttempt{IdempotencyKey: "k", Status: mutations.PhaseCallStarted}
+				st.attempts["k"] = store.GitHubMutationAttempt{
+					IdempotencyKey: "k",
+					Status:         mutations.PhaseCallStarted,
+					Error:          "github response was lost",
+				}
 			},
 			wantErr:    "repair required before retry",
 			wantStatus: mutations.PhaseRepairRequired,
@@ -109,6 +113,11 @@ func TestRunMutationBoundaryConverges(t *testing.T) {
 			assert.Equal(t, tt.wantResult, result.ResultRef)
 			assert.Equal(t, tt.wantReplay, result.Replayed)
 			assert.Equal(t, tt.wantStatus, st.attempts["k"].Status)
+			if tt.wantStatus == mutations.PhaseRepairRequired {
+				assert.Equal(t, "github response was lost", st.attempts["k"].Error)
+				assert.Equal(t, mutations.PhaseRepairRequired, st.idem["k"].Status)
+				assert.Equal(t, "github response was lost", st.idem["k"].ResultRef)
+			}
 		})
 	}
 }

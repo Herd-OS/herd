@@ -193,16 +193,26 @@ func TestHostedReviewResultFromIntegratorPreservesFindings(t *testing.T) {
 
 	got := hostedReviewResultFromIntegrator(&integrator.ReviewResult{Findings: findings})
 
-	assert.Equal(t, findings, got.Findings)
+	require.Len(t, got.Findings, 2)
+	assert.NotEmpty(t, got.Findings[0].Fingerprint)
+	assert.Equal(t, "high", got.Findings[0].Severity)
+	assert.Equal(t, findings[0].Description, got.Findings[0].Description)
+	assert.NotEmpty(t, got.Findings[1].Fingerprint)
+	assert.Equal(t, "medium", got.Findings[1].Severity)
+	assert.Equal(t, findings[1].Description, got.Findings[1].Description)
 }
 
 func TestWriteHostedReviewResult(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "result.json")
 
 	require.NoError(t, writeHostedReviewResult(path, hostedReviewWorkflowResult{
-		Status:   "changes_requested",
-		Summary:  "needs work",
-		Findings: []agent.ReviewFinding{{Severity: "HIGH", Description: "internal/a.go:12 fix mutation ordering"}},
+		Status:  "changes_requested",
+		Summary: "needs work",
+		Findings: []hostedReviewFinding{{
+			Fingerprint: "finding-1",
+			Severity:    "high",
+			Description: "internal/a.go:12 fix mutation ordering",
+		}},
 	}))
 
 	data, err := os.ReadFile(path)
@@ -212,8 +222,25 @@ func TestWriteHostedReviewResult(t *testing.T) {
 	assert.Equal(t, "changes_requested", got.Status)
 	assert.Equal(t, "needs work", got.Summary)
 	require.Len(t, got.Findings, 1)
-	assert.Equal(t, "HIGH", got.Findings[0].Severity)
+	assert.Equal(t, "finding-1", got.Findings[0].Fingerprint)
+	assert.Equal(t, "high", got.Findings[0].Severity)
 	assert.Contains(t, got.Findings[0].Description, "internal/a.go:12")
+}
+
+func TestHostedReviewFindingsFiltersEmptyDescriptionsAndUsesStableIdentity(t *testing.T) {
+	findings := []agent.ReviewFinding{
+		{Severity: " HIGH ", Description: " auth.go: reject expired token "},
+		{Severity: "medium", Description: "   "},
+	}
+
+	first := hostedReviewFindings(findings)
+	second := hostedReviewFindings(findings)
+
+	require.Len(t, first, 1)
+	assert.Equal(t, first, second)
+	assert.Equal(t, "high", first[0].Severity)
+	assert.Equal(t, "auth.go: reject expired token", first[0].Description)
+	assert.Len(t, first[0].Fingerprint, 64)
 }
 
 func TestIntegratorReviewCmd_DuplicateSkipReasonPrintedOnce(t *testing.T) {

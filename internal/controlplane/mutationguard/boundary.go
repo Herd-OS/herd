@@ -21,6 +21,7 @@ import (
 //   - intent_recorded: durable intent exists, no GitHub-visible call has begun.
 //   - call_started: the GitHub-visible call may have happened; this is the
 //     post-call-unknown boundary if the process crashes or persistence fails.
+//   - post_call_unknown: the call returned without a durable, conclusive result.
 //   - completed: the visible effect is known and exact redelivery can replay it.
 //   - failed_pre_call: setup failed before a visible call and may be retried.
 //   - repair_required: a non-pre-call failure needs operation-specific lookup.
@@ -104,6 +105,7 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 		if result, repaired, err := repairUnknown(ctx, st, req); repaired || err != nil {
 			return result, err
 		}
+		markRepairRequired(ctx, st, req.Key, start.Attempt, "started mutation has no conclusive result", req.Now)
 		return RunResult{}, fmt.Errorf("mutation attempt %q is %s; repair required before retry", req.Key, mutations.Normalize(start.Attempt.Status))
 	}
 	resultRef, err := req.Mutate()
@@ -181,9 +183,16 @@ func convergeExisting(ctx context.Context, st Store, req RunRequest, attempt sto
 	if result, repaired, err := repairUnknown(ctx, st, req); repaired || err != nil {
 		return result, true, err
 	}
-	_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseRepairRequired, attempt.Response, attempt.Error, now(req.Now))
-	_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseRepairRequired)
+	markRepairRequired(ctx, st, req.Key, attempt, "unknown mutation outcome requires repair", req.Now)
 	return RunResult{}, true, fmt.Errorf("mutation attempt %q is %s; repair required before retry", req.Key, mutations.Normalize(attempt.Status))
+}
+
+func markRepairRequired(ctx context.Context, st Store, key string, attempt store.GitHubMutationAttempt, reason string, nowFn func() time.Time) {
+	if strings.TrimSpace(attempt.Error) != "" {
+		reason = attempt.Error
+	}
+	_ = st.CompleteGitHubMutationAttempt(ctx, key, mutations.PhaseRepairRequired, attempt.Response, reason, now(nowFn))
+	_ = st.FailIdempotencyKey(ctx, key, mutations.PhaseRepairRequired+":"+reason)
 }
 
 func repairUnknown(ctx context.Context, st Store, req RunRequest) (RunResult, bool, error) {

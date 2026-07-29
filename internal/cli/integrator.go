@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -311,7 +312,17 @@ func newIntegratorReviewCmd() *cobra.Command {
 type hostedReviewWorkflowResult struct {
 	Status   string                `json:"status"`
 	Summary  string                `json:"summary"`
-	Findings []agent.ReviewFinding `json:"findings,omitempty"`
+	Findings []hostedReviewFinding `json:"findings,omitempty"`
+}
+
+// hostedReviewFinding is the durable worker-to-control-plane representation of
+// an actionable review finding. The hosted worker remains read-only: it emits
+// the complete structured result and lets the control plane own all
+// GitHub-visible review, comment, issue, and dispatch mutations.
+type hostedReviewFinding struct {
+	Fingerprint string `json:"fingerprint"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
 }
 
 func hostedReviewResultFromIntegrator(result *integrator.ReviewResult) hostedReviewWorkflowResult {
@@ -324,22 +335,40 @@ func hostedReviewResultFromIntegrator(result *integrator.ReviewResult) hostedRev
 		if summary == "" {
 			summary = "Herd Review approved this head."
 		}
-		return hostedReviewWorkflowResult{Status: "approved", Summary: summary, Findings: result.Findings}
+		return hostedReviewWorkflowResult{Status: "approved", Summary: summary, Findings: hostedReviewFindings(result.Findings)}
 	case result.MaxCyclesHit:
-		return hostedReviewWorkflowResult{Status: "failed", Summary: "Herd Review reached the maximum fix cycle count.", Findings: result.Findings}
+		return hostedReviewWorkflowResult{Status: "failed", Summary: "Herd Review reached the maximum fix cycle count.", Findings: hostedReviewFindings(result.Findings)}
 	case result.ManualInterventionNeeded, result.StableDisagreement, result.AllCreatesFailed:
 		summary := reviewResultMessage(result)
 		if summary == "" {
 			summary = "Herd Review requires manual intervention."
 		}
-		return hostedReviewWorkflowResult{Status: "failed", Summary: summary, Findings: result.Findings}
+		return hostedReviewWorkflowResult{Status: "failed", Summary: summary, Findings: hostedReviewFindings(result.Findings)}
 	default:
 		summary := reviewResultMessage(result)
 		if summary == "" {
 			summary = "Herd Review requested changes."
 		}
-		return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary, Findings: result.Findings}
+		return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary, Findings: hostedReviewFindings(result.Findings)}
 	}
+}
+
+func hostedReviewFindings(findings []agent.ReviewFinding) []hostedReviewFinding {
+	out := make([]hostedReviewFinding, 0, len(findings))
+	for _, finding := range findings {
+		description := strings.TrimSpace(finding.Description)
+		if description == "" {
+			continue
+		}
+		severity := strings.ToLower(strings.TrimSpace(finding.Severity))
+		fingerprint := sha256.Sum256([]byte(severity + "\x00" + description))
+		out = append(out, hostedReviewFinding{
+			Fingerprint: fmt.Sprintf("%x", fingerprint),
+			Severity:    severity,
+			Description: description,
+		})
+	}
+	return out
 }
 
 func writeHostedReviewResult(path string, result hostedReviewWorkflowResult) error {

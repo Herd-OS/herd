@@ -181,12 +181,12 @@ func runHostedReviewReadOnly(ctx context.Context, input reviewInputServices, ag 
 		summary = "Herd Review completed."
 	}
 	if review.IsUnparseable {
-		return hostedReviewWorkflowResult{Status: "unparseable", Summary: summary, Findings: review.Findings}, nil
+		return hostedReviewWorkflowResult{Status: "unparseable", Summary: summary, Findings: hostedReviewFindings(review.Findings)}, nil
 	}
 	if review.Approved {
-		return hostedReviewWorkflowResult{Status: "approved", Summary: summary, Findings: review.Findings}, nil
+		return hostedReviewWorkflowResult{Status: "approved", Summary: summary, Findings: hostedReviewFindings(review.Findings)}, nil
 	}
-	return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary, Findings: review.Findings}, nil
+	return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary, Findings: hostedReviewFindings(review.Findings)}, nil
 }
 
 func hostedReviewPlatformComments(comments []reviewCmdComment) []*platform.Comment {
