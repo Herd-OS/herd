@@ -217,7 +217,18 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	patchArtifact, applyMetadata, applyErr := h.validateWorkerPatch(r.Context(), result, job)
+	var applyMetadata map[string]any
+	patchReplayed, replayMetadata, replayErr := h.replayCompletedWorkerPatch(r.Context(), result, job)
+	if replayErr != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, replayErr.Error())
+		writeJSON(w, http.StatusConflict, map[string]string{"error": replayErr.Error()})
+		return
+	}
+	applyMetadata = replayMetadata
+	patchArtifact, validationMetadata, applyErr := h.validateWorkerPatch(r.Context(), result, job, patchReplayed)
+	if validationMetadata != nil && !patchReplayed {
+		applyMetadata = validationMetadata
+	}
 	if applyErr != nil {
 		if workerPatchConfigurationError(applyErr) {
 			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
@@ -255,10 +266,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
 		return
 	}
-	if applyErr := h.processWorkerPatch(r.Context(), result, job, patchArtifact, applyMetadata); applyErr != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
-		writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
-		return
+	if !patchReplayed {
+		if applyErr := h.processWorkerPatch(r.Context(), result, job, patchArtifact, applyMetadata); applyErr != nil {
+			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
+			writeJSON(w, http.StatusConflict, map[string]string{"error": applyErr.Error()})
+			return
+		}
 	}
 	if err := h.processReviewResult(r.Context(), result, job); err != nil {
 		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
@@ -592,10 +605,13 @@ func validateResultAgainstJob(result Result, job store.Job) error {
 	return nil
 }
 
-func (h Handler) validateWorkerPatch(ctx context.Context, result Result, job store.Job) (*artifacts.ValidatedArtifact, map[string]any, error) {
+func (h Handler) validateWorkerPatch(ctx context.Context, result Result, job store.Job, alreadyApplied bool) (*artifacts.ValidatedArtifact, map[string]any, error) {
 	worker, ok := result.(WorkerCompletedResult)
 	if !ok || worker.Status != StatusSuccess {
 		return nil, nil, nil
+	}
+	metadata := map[string]any{
+		"patch_artifact": worker.PatchArtifact,
 	}
 	if h.artifactStore == nil {
 		return nil, nil, fmt.Errorf("worker patch artifact store is not configured")
@@ -612,8 +628,8 @@ func (h Handler) validateWorkerPatch(ctx context.Context, result Result, job sto
 	if _, ok := h.store.(MutationReader); !ok {
 		return nil, nil, fmt.Errorf("worker patch mutation reader is not configured")
 	}
-	metadata := map[string]any{
-		"patch_artifact": worker.PatchArtifact,
+	if alreadyApplied {
+		return nil, metadata, nil
 	}
 	artifactCtx := artifacts.ContextWithWorkflowRunArtifactRepository(ctx, worker.Repository, job.InstallationID, metadataWorkflowRunID(job.Metadata))
 	artifact, err := artifacts.Validate(artifactCtx, h.artifactStore, artifacts.ValidationRequest{
@@ -633,6 +649,45 @@ func (h Handler) validateWorkerPatch(ctx context.Context, result Result, job sto
 		metadata["empty"] = true
 	}
 	return &artifact, metadata, nil
+}
+
+func (h Handler) replayCompletedWorkerPatch(ctx context.Context, result Result, job store.Job) (bool, map[string]any, error) {
+	worker, ok := result.(WorkerCompletedResult)
+	if !ok || worker.Status != StatusSuccess {
+		return false, nil, nil
+	}
+	metadata := map[string]any{
+		"patch_artifact": worker.PatchArtifact,
+	}
+	if _, ok := h.store.(MutationReader); !ok {
+		return false, metadata, nil
+	}
+	idempotencyKey := PatchApplyIdempotencyKey(worker, job)
+	record, err := h.store.GetIdempotencyKey(ctx, idempotencyKey)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, metadata, fmt.Errorf("get patch apply idempotency: %w", err)
+	}
+	if err == nil && record.Status == "completed" {
+		completed, response, err := h.repairCompletedPatchApply(ctx, idempotencyKey, json.RawMessage(record.ResultRef))
+		if err != nil {
+			return false, metadata, err
+		}
+		if completed {
+			mergePatchApplyMetadata(metadata, response)
+			return true, metadata, nil
+		}
+		mergePatchApplyMetadata(metadata, json.RawMessage(record.ResultRef))
+		return true, metadata, nil
+	}
+	completed, response, err := h.repairCompletedPatchApply(ctx, idempotencyKey, nil)
+	if err != nil {
+		return false, metadata, err
+	}
+	if completed {
+		mergePatchApplyMetadata(metadata, response)
+		return true, metadata, nil
+	}
+	return false, metadata, nil
 }
 
 func metadataWorkflowRunID(metadata json.RawMessage) int64 {

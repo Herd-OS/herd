@@ -227,6 +227,54 @@ func TestEnsureReviewFixIssuePreCallIdempotencyIsRetryable(t *testing.T) {
 	assert.Len(t, fake.issues.created, 1)
 }
 
+func TestEnsureReviewFixIssueNestedPreCreateFailureRetriesAndDispatchesOnce(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	dispatcher := &fakeDispatcher{}
+	svc := newTestService(fake, st, dispatcher)
+	repo := review.Repository{ID: 123, InstallationID: 456, Owner: "owner", Name: "repo", DefaultBranch: "main"}
+	result := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 42, BatchBranch: "herd/batch/9-demo", HeadSHA: "head", FixCycle: 1}
+	finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
+	reviewFixKey := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
+	title := "Review fix: " + finding.Fingerprint
+	body := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: result.BatchNumber, Type: "fix", FixCycle: result.FixCycle + 1, BatchPR: result.PRNumber},
+		Task:        "Fix review finding `" + finding.Fingerprint + "`.\n\nSeverity: " + finding.Severity + "\n\n" + finding.Description + "\n",
+		Context:     "Found during Herd Review of PR #42 at head head.",
+	}) + reviewFixIssueMarker(reviewFixKey)
+	req := TaskIssueRequest{
+		BatchNumber: result.BatchNumber,
+		Title:       title,
+		Body:        body,
+		Labels:      []string{issues.TypeFix, issues.StatusInProgress},
+		Milestone:   result.BatchNumber,
+	}
+	taskIssueKey := idempotencyKey("task-issue", "repo", svc.Repo.ID, "batch", req.BatchNumber, "create", req.Title, taskIssueFingerprint(req, body, ""))
+	st.recordMutationErrs = map[string][]error{taskIssueKey: {assert.AnError, nil}}
+
+	firstIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "record mutation attempt")
+	assert.Zero(t, firstIssue)
+	assert.False(t, created)
+	assert.Empty(t, fake.issues.created)
+	assert.Equal(t, mutationStatusIntentRecorded, st.keys[reviewFixKey].Status)
+
+	secondIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+	require.NoError(t, err)
+	dispatched, err := svc.DispatchReviewFixWorker(ctx, repo, result, secondIssue)
+	require.NoError(t, err)
+
+	assert.True(t, created)
+	assert.True(t, dispatched)
+	assert.Equal(t, 1, secondIssue)
+	assert.Len(t, fake.issues.created, 1)
+	assert.Len(t, dispatcher.requests, 1)
+	assert.Equal(t, mutationStatusCompleted, st.keys[reviewFixKey].Status)
+	assert.Equal(t, "issue:1", st.keys[reviewFixKey].ResultRef)
+}
+
 func TestEnsureReviewFixIssueCreatedIntentWithoutMutationAttemptCreatesOnce(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()

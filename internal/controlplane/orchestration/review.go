@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
-	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
@@ -81,34 +80,15 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 }
 
 func (s Service) createReviewFixIssueFromIntent(ctx context.Context, key string, req TaskIssueRequest) (int, bool, error) {
-	result, err := mutationguard.Run(ctx, s.Store, mutationguard.RunRequest{
-		Key:          key,
-		RepositoryID: s.Repo.ID,
-		MutationType: "review_fix_issue_create",
-		Mutate: func() (string, error) {
-			issue, err := s.EnsureTaskIssue(ctx, req)
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("issue:%d", issue.Number), nil
-		},
-		Repair: func() (string, bool, error) {
-			issueNumber, recovered, err := s.recoverReviewFixIssue(ctx, req, key)
-			if err != nil || !recovered {
-				return "", recovered, err
-			}
-			return fmt.Sprintf("issue:%d", issueNumber), true, nil
-		},
-		Now: s.now,
-	})
+	issue, err := s.EnsureTaskIssue(ctx, req)
 	if err != nil {
 		return 0, false, err
 	}
-	issueNumber, ok := parseIssueResult(result.ResultRef)
-	if !ok {
-		return 0, false, fmt.Errorf("invalid review fix issue result ref %q", result.ResultRef)
+	resultRef := fmt.Sprintf("issue:%d", issue.Number)
+	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+		return 0, false, fmt.Errorf("complete idempotency key for review fix issue: %w", err)
 	}
-	return issueNumber, !result.Replayed, nil
+	return issue.Number, true, nil
 }
 
 func (s Service) recoverReviewFixIssue(ctx context.Context, req TaskIssueRequest, key string) (int, bool, error) {

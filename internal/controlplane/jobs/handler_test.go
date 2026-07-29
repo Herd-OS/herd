@@ -1077,11 +1077,12 @@ func TestHandlerRetryAfterRecordJobResultFailureDoesNotReapplyPatch(t *testing.T
 	st := newResultStore()
 	st.recordJobResultErrs = []error{assert.AnError, nil}
 	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	artifactStore := &flakyArtifactStore{store: artifactMap(t, metadata, patch), errs: []error{nil, nil, fmt.Errorf("artifact expired")}}
 	handler := NewHandler(HandlerOptions{
 		Store:          st,
 		Validator:      fixedOIDCValidator(validClaims(now)),
 		Now:            func() time.Time { return now },
-		ArtifactStore:  artifactMap(t, metadata, patch),
+		ArtifactStore:  artifactStore,
 		PatchApplier:   applier,
 		AppTokenSource: fakeAppTokenSource{},
 	})
@@ -1095,6 +1096,7 @@ func TestHandlerRetryAfterRecordJobResultFailureDoesNotReapplyPatch(t *testing.T
 	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, applier.requests, 1)
+	assert.Len(t, artifactStore.errs, 1, "redelivery should replay the completed patch apply without fetching the expired artifact")
 	assert.Len(t, st.results, 1)
 	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("f", 40))
 }

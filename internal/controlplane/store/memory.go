@@ -420,7 +420,7 @@ func (s *MemoryStore) RecordGitHubMutationAttempt(_ context.Context, a GitHubMut
 		return ErrAlreadyExists
 	}
 	if a.Status == "" {
-		a.Status = "started"
+		return fmt.Errorf("github mutation attempt status is required")
 	}
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = time.Now().UTC()

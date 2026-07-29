@@ -445,6 +445,21 @@ func TestMemoryStore(t *testing.T) {
 	require.Error(t, s.Health(ctx))
 }
 
+func TestMemoryStoreRecordGitHubMutationAttemptRejectsEmptyStatus(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+
+	err := s.RecordGitHubMutationAttempt(ctx, GitHubMutationAttempt{
+		IdempotencyKey: "mutation-empty-status",
+		MutationType:   "workflow_dispatch",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status is required")
+	_, getErr := s.GetGitHubMutationAttempt(ctx, "mutation-empty-status")
+	require.ErrorIs(t, getErr, ErrNotFound)
+}
+
 func TestContainerErrorClassification(t *testing.T) {
 	tests := []struct {
 		name          string
