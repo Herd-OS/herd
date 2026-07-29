@@ -207,12 +207,13 @@ func TestSubmitPRReviewOnceChangedSummaryUsesDurableSubmissionIdentity(t *testin
 	require.NoError(t, firstErr)
 	require.NoError(t, secondErr)
 	require.NoError(t, duplicateErr)
-	require.Len(t, gh.reviews, 1)
+	require.Len(t, gh.reviews, 2)
 	assert.Equal(t, "summary", gh.reviews[0].body)
-	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewApprove), reviewSubmissionKey(repo, second, platform.ReviewApprove))
+	assert.Equal(t, "corrected summary", gh.reviews[1].body)
+	assert.NotEqual(t, reviewSubmissionKey(repo, first, platform.ReviewApprove), reviewSubmissionKey(repo, second, platform.ReviewApprove))
 }
 
-func TestReviewSubmissionKeyUsesDurableJobIdentity(t *testing.T) {
+func TestReviewSubmissionKeyUsesCanonicalVisibleContentIdentity(t *testing.T) {
 	repo := testRepo(true)
 	first := reviewResult(ResultStatusChangesRequested, "head")
 	first.Findings = []Finding{{Fingerprint: "b", Severity: "high", Description: "second"}, {Fingerprint: "a", Severity: "medium", Description: "first"}}
@@ -220,8 +221,15 @@ func TestReviewSubmissionKeyUsesDurableJobIdentity(t *testing.T) {
 
 	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
 
-	second.Summary = "updated summary"
+	second.Findings = []Finding{{Fingerprint: "a", Severity: "medium", Description: "first"}, {Fingerprint: "b", Severity: "high", Description: "second"}}
 	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
+
+	second.Findings[0].Description = "updated first"
+	assert.NotEqual(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
+
+	second = first
+	second.Summary = "updated summary"
+	assert.NotEqual(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
 }
 
 func TestSubmitPRReviewOnceStartedRecordDoesNotCreateReview(t *testing.T) {

@@ -270,7 +270,7 @@ func TestHandlerProcessedAndPendingMarkerFailuresDoNotCompleteIdempotency(t *tes
 	}
 }
 
-func TestHandlerCallStartedRedeliveryDoesNotMarkAcknowledgedCommandProcessed(t *testing.T) {
+func TestHandlerCallStartedRedeliveryWithAcknowledgedCommandRetriesProcessing(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	claims := validEventClaims(now)
 	payload := []byte(validEventPayload())
@@ -305,13 +305,14 @@ func TestHandlerCallStartedRedeliveryDoesNotMarkAcknowledgedCommandProcessed(t *
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, eventRequest(string(payload)))
 
-	require.Equal(t, http.StatusConflict, rec.Code)
-	assert.Contains(t, rec.Body.String(), "unknown")
-	assert.Empty(t, processor.calls)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"created":false`)
+	require.Len(t, processor.calls, 1)
+	assert.Equal(t, "worker_completed", processor.calls[0].event.Action)
 	require.Len(t, st.commands, 1)
-	assert.Equal(t, "repair_required", st.commands[0].Status)
-	assert.Equal(t, "repair_required", st.idem[processKey].Status)
-	assert.Contains(t, st.idem[processKey].ResultRef, "unknown before processor success marker")
+	assert.Equal(t, "processed", st.commands[0].Status)
+	assert.Equal(t, "completed", st.idem[processKey].Status)
+	assert.Equal(t, commandKey, st.idem[processKey].ResultRef)
 }
 
 func TestHandlerProcessingMarkerRedeliveryBlocksDuplicateProcessing(t *testing.T) {

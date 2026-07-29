@@ -133,6 +133,7 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		opts.WorkflowEventProcessor = productionWorkflowEventProcessor{
 			Store:             st,
 			TokenSource:       tokenSource,
+			AppLogin:          appLogin,
 			Dispatcher:        workflowDispatcher,
 			Config:            workflowCfg,
 			ControlPlaneURL:   cfg.PublicURL,
@@ -191,14 +192,24 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 }
 
 type productionWorkflowEventProcessor struct {
-	Store             orchestration.Store
+	Store             productionWorkflowEventStore
 	TokenSource       appauth.TokenSource
+	AppLogin          string
 	Dispatcher        cpdispatch.Dispatcher
 	Config            config.Config
 	ControlPlaneURL   string
 	DefaultRunner     string
 	DefaultTimeoutMin int
 	PlatformFactory   func(context.Context, store.Repository) (platform.Platform, error)
+}
+
+type productionWorkflowEventStore interface {
+	orchestration.Store
+	review.StatusStore
+	review.StatusIdempotencyStore
+	review.StatusMutationStore
+	review.ReviewMutationStore
+	review.LockStore
 }
 
 func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Context, repo store.Repository, event workflowevents.Event) error {
@@ -230,7 +241,7 @@ func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Conte
 			_, err := svc.MergeApprovedBatchPR(ctx, event.PRNumber, event.HeadSHA, p.workflowConfig())
 			return err
 		}
-		return nil
+		return p.dispatchReviewForSubmittedReview(ctx, repo, pl, event)
 	case "pull_request_closed":
 		if event.PRNumber <= 0 {
 			return fmt.Errorf("workflow event pr_number is required for pull_request_closed")
@@ -240,6 +251,69 @@ func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Conte
 	default:
 		return fmt.Errorf("unsupported production workflow event action %q", event.Action)
 	}
+}
+
+func (p productionWorkflowEventProcessor) dispatchReviewForSubmittedReview(ctx context.Context, repo store.Repository, pl platform.Platform, event workflowevents.Event) error {
+	if event.PRNumber <= 0 {
+		return fmt.Errorf("workflow event pr_number is required for review_submitted")
+	}
+	pr, err := pl.PullRequests().Get(ctx, event.PRNumber)
+	if err != nil {
+		return fmt.Errorf("get reviewed batch PR: %w", err)
+	}
+	batchNumber := event.BatchNumber
+	if batchNumber <= 0 {
+		batchNumber, err = orchestration.ParseBatchBranchMilestone(pr.Head)
+		if err != nil {
+			return fmt.Errorf("review_submitted PR head is not a batch branch: %w", err)
+		}
+	}
+	headSHA := strings.TrimSpace(event.HeadSHA)
+	if headSHA == "" {
+		headSHA = pr.HeadSHA
+	}
+	cfg := p.workflowConfig()
+	reviewSvc := review.ReviewService{
+		Status: review.StatusService{
+			Store:  p.Store,
+			GitHub: review.AppGitHubClient{TokenSource: p.TokenSource, AppLogin: p.AppLogin},
+		},
+		GitHub:     review.AppGitHubClient{TokenSource: p.TokenSource, AppLogin: p.AppLogin},
+		Mutations:  p.Store,
+		Locks:      p.Store,
+		Dispatcher: p.Dispatcher,
+	}
+	_, err = reviewSvc.DispatchReview(ctx, review.Repository{
+		ID:                 repo.ID,
+		InstallationID:     repo.InstallationID,
+		Owner:              repo.Owner,
+		Name:               repo.Name,
+		DefaultBranch:      repo.DefaultBranch,
+		ReviewEnabled:      cfg.Integrator.Review,
+		ReviewMaxFixCycles: cfg.Integrator.ReviewMaxFixCycles,
+		ReviewFixSeverity:  cfg.Integrator.ReviewFixSeverity,
+	}, review.DispatchReviewRequest{
+		BatchNumber:     batchNumber,
+		PRNumber:        event.PRNumber,
+		BatchBranch:     pr.Head,
+		HeadSHA:         headSHA,
+		WorkflowFile:    "herd-review.yml",
+		Ref:             firstNonEmptyString(repo.DefaultBranch, "main"),
+		RunnerLabel:     cfg.Workers.RunnerLabel,
+		TimeoutMinutes:  cfg.Workers.TimeoutMinutes,
+		ControlPlaneURL: cfg.ControlPlaneURL,
+		Reason:          "review submitted " + strings.TrimSpace(event.ReviewState),
+	})
+	return err
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (p productionWorkflowEventProcessor) runMonitorPatrol(ctx context.Context) error {
@@ -382,10 +456,13 @@ func (d productionCommandDispatcher) dispatchWorkflowCommand(ctx context.Context
 
 func transientWorkflowDispatchReplayError(err error) bool {
 	msg := err.Error()
+	if strings.Contains(msg, "already in progress") {
+		return true
+	}
 	if strings.Contains(msg, "outcome is unknown") || strings.Contains(msg, "repair required") {
 		return false
 	}
-	return strings.Contains(msg, "get existing dispatch job:") || strings.Contains(msg, "already in progress")
+	return strings.Contains(msg, "get existing dispatch job:")
 }
 
 func dispatchIssueStatusAllowsDispatch(status string, recoveredRemovedStatus string, recoveredInProgress bool) bool {

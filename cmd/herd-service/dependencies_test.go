@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"log"
@@ -97,6 +98,53 @@ func TestProductionWorkflowEventProcessorMonitorPatrolRunsReconciler(t *testing.
 	job, err := st.GetJob(ctx, "job-timeout")
 	require.NoError(t, err)
 	assert.Equal(t, "failed", job.Status)
+}
+
+func TestProductionWorkflowEventProcessorDispatchesReviewForChangesRequested(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	repo, err := st.UpsertRepository(ctx, store.Repository{
+		GitHubID:       3003,
+		InstallationID: 9,
+		Owner:          "octo",
+		Name:           "herd",
+		DefaultBranch:  "main",
+	})
+	require.NoError(t, err)
+	workflows := &recordingWorkflowClient{}
+	pl := newFakeCommandPlatform([]*platform.PullRequest{{
+		Number:  849,
+		Head:    "herd/batch/106-review-strategy",
+		HeadSHA: "head",
+	}})
+	processor := productionWorkflowEventProcessor{
+		Store:      st,
+		Dispatcher: cpdispatch.Dispatcher{Store: st, GitHub: workflows},
+		Config:     *config.Default(),
+		PlatformFactory: func(context.Context, store.Repository) (platform.Platform, error) {
+			return pl, nil
+		},
+	}
+
+	err = processor.ProcessWorkflowEvent(ctx, repo, workflowevents.Event{
+		Kind:        workflowevents.KindIntegratorEvent,
+		Action:      "review_submitted",
+		PRNumber:    849,
+		HeadSHA:     "head",
+		ReviewState: "changes_requested",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GitHub App")
+	require.Len(t, workflows.dispatches, 1)
+	assert.Equal(t, "herd-review.yml", workflows.dispatches[0].workflowFile)
+	assert.Equal(t, "main", workflows.dispatches[0].ref)
+	assert.Equal(t, "849", workflows.dispatches[0].inputs["pr_number"])
+	assert.Equal(t, "head", workflows.dispatches[0].inputs["head_sha"])
+	jobs, err := st.ListReconcileJobs(ctx, time.Now().Add(time.Hour), 10)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "review", stringFromMetadata(jobs[0].Job.Metadata, "kind"))
 }
 
 func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
@@ -1051,6 +1099,15 @@ func batchPR(state string, mergeableKnown bool, mergeable bool) *platform.PullRe
 		MergeableKnown:   mergeableKnown,
 		Mergeable:        mergeable,
 	}
+}
+
+func stringFromMetadata(raw []byte, key string) string {
+	values := map[string]any{}
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return ""
+	}
+	value, _ := values[key].(string)
+	return value
 }
 
 func resolveConflictsCommand() commands.DispatchCommand {

@@ -220,6 +220,46 @@ func TestStrictExpectedIdentityFromJobRequiresHostedMetadata(t *testing.T) {
 	}
 }
 
+func TestReadTokenExpectedIdentityFromJobDoesNotRequireRunID(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata json.RawMessage
+		wantErr  string
+	}{
+		{
+			name:     "missing run ID accepted",
+			metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"main","workflow_file":"worker.yml"}`),
+		},
+		{
+			name:     "missing ref rejected",
+			metadata: json.RawMessage(`{"repository":"acme/widgets","workflow_file":"worker.yml"}`),
+			wantErr:  "ref",
+		},
+		{
+			name:     "missing workflow rejected",
+			metadata: json.RawMessage(`{"repository":"acme/widgets","ref":"main"}`),
+			wantErr:  "workflow",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ReadTokenExpectedIdentityFromJob(store.Job{Metadata: tt.metadata})
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, ExpectedOIDCIdentity{
+				Repository: "acme/widgets",
+				Ref:        "refs/heads/main",
+				Workflow:   "worker.yml",
+			}, got)
+		})
+	}
+}
+
 func TestJWKSValidatorValidateWithLocalKey(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)

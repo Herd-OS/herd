@@ -2,10 +2,13 @@ package review
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -551,7 +554,40 @@ func reviewBody(result ReviewCompletedResult) string {
 }
 
 func reviewSubmissionKey(repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) string {
-	return fmt.Sprintf("review_submission:%d:%d:%s:%s:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.Status, event, result.JobID)
+	// Review submissions are GitHub-visible mutations. The durable job/head
+	// tuple identifies the callback boundary, while the canonical content hash
+	// keeps materially different review output from being replayed as an exact
+	// duplicate.
+	return fmt.Sprintf("review_submission:%d:%d:%s:%s:%s:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.Status, event, result.JobID, reviewSubmissionContentHash(result))
+}
+
+func reviewSubmissionContentHash(result ReviewCompletedResult) string {
+	findings := append([]Finding(nil), result.Findings...)
+	sort.Slice(findings, func(i, j int) bool {
+		left := findings[i]
+		right := findings[j]
+		for _, less := range []int{
+			strings.Compare(left.Fingerprint, right.Fingerprint),
+			strings.Compare(left.Severity, right.Severity),
+			strings.Compare(left.Description, right.Description),
+		} {
+			if less != 0 {
+				return less < 0
+			}
+		}
+		return false
+	})
+	payload, _ := json.Marshal(struct {
+		Body     string    `json:"body"`
+		Summary  string    `json:"summary"`
+		Findings []Finding `json:"findings"`
+	}{
+		Body:     reviewBody(result),
+		Summary:  strings.TrimSpace(result.Summary),
+		Findings: findings,
+	})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func reviewSubmissionFailureCommentKey(repo Repository, result ReviewCompletedResult) string {
