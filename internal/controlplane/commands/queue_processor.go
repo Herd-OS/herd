@@ -56,7 +56,7 @@ func (p QueueProcessor) ProcessOnce(ctx context.Context) (int, error) {
 		}
 		if _, err := p.Handler.HandleIssueComment(ctx, event); err != nil {
 			errs = append(errs, err)
-			_ = p.markQueuedCommandRepairRequired(ctx, item, err)
+			_ = p.markQueuedCommandRetryNeeded(ctx, item, err)
 			continue
 		}
 		processed++
@@ -64,19 +64,48 @@ func (p QueueProcessor) ProcessOnce(ctx context.Context) (int, error) {
 	return processed, errors.Join(errs...)
 }
 
+func (p QueueProcessor) markQueuedCommandRetryNeeded(ctx context.Context, item store.ReconcileCommand, cause error) error {
+	updater, ok := p.Store.(commandStatusUpdater)
+	if !ok {
+		return nil
+	}
+	metadata, err := queuedCommandMetadataWithError(item.Command.Metadata, "last_error", cause)
+	if err != nil {
+		return err
+	}
+	return updater.UpdateCommandStatus(ctx, item.Command.RepositoryID, item.Command.CommentID, item.Command.CommandKey, "retry_needed", metadata)
+}
+
 func (p QueueProcessor) markQueuedCommandRepairRequired(ctx context.Context, item store.ReconcileCommand, cause error) error {
 	updater, ok := p.Store.(commandStatusUpdater)
 	if !ok {
 		return nil
 	}
-	metadata, err := json.Marshal(map[string]any{
-		"error":      cause.Error(),
-		"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
-	})
+	metadata, err := queuedCommandMetadataWithError(item.Command.Metadata, "repair_error", cause)
 	if err != nil {
 		return err
 	}
 	return updater.UpdateCommandStatus(ctx, item.Command.RepositoryID, item.Command.CommentID, item.Command.CommandKey, "repair_required", metadata)
+}
+
+func queuedCommandMetadataWithError(raw json.RawMessage, field string, cause error) (json.RawMessage, error) {
+	// Queue redelivery depends on raw/prompt/issue/pr metadata remaining durable.
+	// Handler failures are retryable command-processing failures, not proof that
+	// the queued command is unreconstructable. Preserve the original metadata and
+	// add diagnostics so the next pass can rebuild the IssueComment and let the
+	// mutationguard state machine decide whether a GitHub-visible call is safe.
+	body := map[string]any{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &body); err != nil {
+			body["raw_metadata"] = string(raw)
+		}
+	}
+	if field == "" {
+		field = "error"
+	}
+	body[field] = cause.Error()
+	body["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	return json.Marshal(body)
 }
 
 func queuedCommandTerminal(item store.ReconcileCommand) bool {
