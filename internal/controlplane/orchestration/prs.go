@@ -41,7 +41,7 @@ func (s Service) OpenBatchPR(ctx context.Context, req OpenBatchPRRequest) (*plat
 		var err error
 		existing, err = s.Platform.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: req.Head})
 		return err
-	}, func() (string, error) {
+	}, nil, func() (string, error) {
 		if len(existing) > 0 {
 			title := req.Title
 			body := req.Body
@@ -153,7 +153,7 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 		}
 		return nil
 	}
-	_, err := s.withIdempotencyPhased(ctx, key, "branch_"+req.OperationKind, preflight, func() (string, error) {
+	_, err := s.withIdempotencyPhased(ctx, key, "branch_"+req.OperationKind, preflight, nil, func() (string, error) {
 		switch req.OperationKind {
 		case "create":
 			if req.FromSHA == "" {
@@ -238,7 +238,7 @@ func (s Service) MergePR(ctx context.Context, req MergePRRequest) (*platform.Mer
 			method = platform.MergeMethodMerge
 		}
 		return nil
-	}, func() (string, error) {
+	}, nil, func() (string, error) {
 		merged, err := s.Platform.PullRequests().Merge(ctx, req.PRNumber, method)
 		if err != nil {
 			return "", err

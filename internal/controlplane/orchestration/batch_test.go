@@ -128,10 +128,11 @@ func TestDispatchReadyWorkers_RedeliveryRepairsLabelsAfterDispatchBeforeInProgre
 	assert.Contains(t, fake.issues.removed[1], issues.StatusReady)
 	assert.Empty(t, fake.issues.added[1])
 	st.keys[cpdispatch.IdempotencyKey(disp.requests[0])] = store.IdempotencyKey{
-		Key:      cpdispatch.IdempotencyKey(disp.requests[0]),
-		Scope:    "workflow_dispatch",
-		Status:   "completed",
-		Metadata: json.RawMessage(`{"repo_id":123,"job_kind":"worker","batch_number":7,"issue_number":1,"head_sha":"batch-head-a"}`),
+		Key:       cpdispatch.IdempotencyKey(disp.requests[0]),
+		Scope:     "workflow_dispatch",
+		Status:    "completed",
+		Metadata:  workflowDispatchMetadata(t, disp.requests[0]),
+		CreatedAt: fixedClock(),
 	}
 	fake.repo.branches["herd/batch/7-demo"] = "batch-head-b"
 
@@ -148,6 +149,60 @@ func TestDispatchReadyWorkers_RedeliveryRepairsLabelsAfterDispatchBeforeInProgre
 	assert.Len(t, disp.requests, 1)
 	assert.Contains(t, fake.issues.removed[1], issues.StatusReady)
 	assert.Contains(t, fake.issues.added[1], issues.StatusInProgress)
+}
+
+func TestRecoverWorkflowDispatchIntentChoosesLatestCompletedMatchingDispatch(t *testing.T) {
+	st := newFakeStore()
+	svc := newTestService(newFakePlatform(), st, &fakeDispatcher{})
+	req := cpdispatch.DispatchRequest{
+		RepoID:       svc.Repo.ID,
+		Kind:         cpdispatch.JobKindWorker,
+		WorkflowFile: "herd-worker.yml",
+		Ref:          "main",
+		BatchNumber:  7,
+		IssueNumber:  1,
+		BatchBranch:  "herd/batch/7-demo",
+		HeadSHA:      "current-head",
+	}
+	oldReq := req
+	oldReq.HeadSHA = "old-head"
+	newReq := req
+	newReq.HeadSHA = "new-head"
+	st.keys["old"] = store.IdempotencyKey{Key: "old", Scope: "workflow_dispatch", Status: "completed", Metadata: workflowDispatchMetadata(t, oldReq), CreatedAt: fixedClock().Add(-time.Hour)}
+	st.keys["new"] = store.IdempotencyKey{Key: "new", Scope: "workflow_dispatch", Status: "completed", Metadata: workflowDispatchMetadata(t, newReq), CreatedAt: fixedClock()}
+	st.keys["failed"] = store.IdempotencyKey{Key: "failed", Scope: "workflow_dispatch", Status: "failed_pre_call", Metadata: workflowDispatchMetadata(t, req), CreatedAt: fixedClock().Add(time.Hour)}
+
+	recovered, ok := svc.recoverWorkflowDispatchIntent(context.Background(), req)
+
+	require.True(t, ok)
+	assert.Equal(t, "new-head", recovered.HeadSHA)
+	assert.Equal(t, "new-head", recovered.BaseSHA)
+	assert.Equal(t, "new-head", recovered.ExpectedHeadSHA)
+}
+
+func TestRecoverWorkflowDispatchIntentRefusesAmbiguousDispatches(t *testing.T) {
+	st := newFakeStore()
+	svc := newTestService(newFakePlatform(), st, &fakeDispatcher{})
+	req := cpdispatch.DispatchRequest{
+		RepoID:       svc.Repo.ID,
+		Kind:         cpdispatch.JobKindWorker,
+		WorkflowFile: "herd-worker.yml",
+		Ref:          "main",
+		BatchNumber:  7,
+		IssueNumber:  1,
+		BatchBranch:  "herd/batch/7-demo",
+		HeadSHA:      "current-head",
+	}
+	first := req
+	first.HeadSHA = "head-a"
+	second := req
+	second.HeadSHA = "head-b"
+	st.keys["first"] = store.IdempotencyKey{Key: "first", Scope: "workflow_dispatch", Status: "completed", Metadata: workflowDispatchMetadata(t, first), CreatedAt: fixedClock()}
+	st.keys["second"] = store.IdempotencyKey{Key: "second", Scope: "workflow_dispatch", Status: "completed", Metadata: workflowDispatchMetadata(t, second), CreatedAt: fixedClock()}
+
+	_, ok := svc.recoverWorkflowDispatchIntent(context.Background(), req)
+
+	assert.False(t, ok)
 }
 
 func TestDispatchReadyWorkers_StatusTransitionKeysArePerDispatchIdentity(t *testing.T) {
@@ -182,6 +237,22 @@ func TestDispatchReadyWorkers_StatusTransitionKeysArePerDispatchIdentity(t *test
 	assert.Len(t, disp.requests, 2)
 	assert.Equal(t, []string{issues.StatusReady, issues.StatusReady}, fake.issues.removed[1])
 	assert.Equal(t, []string{issues.StatusInProgress, issues.StatusInProgress}, fake.issues.added[1])
+}
+
+func workflowDispatchMetadata(t *testing.T, req cpdispatch.DispatchRequest) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"repo_id":       req.RepoID,
+		"job_kind":      req.Kind,
+		"workflow_file": req.WorkflowFile,
+		"ref":           req.Ref,
+		"batch_number":  req.BatchNumber,
+		"issue_number":  req.IssueNumber,
+		"batch_branch":  req.BatchBranch,
+		"head_sha":      req.HeadSHA,
+	})
+	require.NoError(t, err)
+	return data
 }
 
 func TestDispatchReadyWorkers_SkipsIneligibleIssuesBeforeResolvingBatchHead(t *testing.T) {
@@ -408,6 +479,59 @@ func TestEnsureTaskIssueStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
 	assert.Empty(t, fake.issues.created)
 }
 
+func TestEnsureTaskIssueRepairsCreatedIssueAfterCompletionFailures(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	req := TaskIssueRequest{
+		BatchNumber: 4,
+		Title:       "Task",
+		Body:        "body",
+		Labels:      []string{issues.StatusReady},
+		Milestone:   4,
+	}
+	body, overflow := issues.TruncateIssueBody(req.Body)
+	key := idempotencyKey("task-issue", "repo", svc.Repo.ID, "batch", 4, "create", "Task", taskIssueFingerprint(req, body, overflow))
+	st.completeMutationErrs[key] = []error{assert.AnError}
+	st.completeErrs[key] = []error{assert.AnError}
+
+	first, firstErr := svc.EnsureTaskIssue(ctx, req)
+	second, secondErr := svc.EnsureTaskIssue(ctx, req)
+
+	require.Error(t, firstErr)
+	assert.Nil(t, first)
+	require.NoError(t, secondErr)
+	require.NotNil(t, second)
+	assert.Equal(t, 1, second.Number)
+	assert.Len(t, fake.issues.created, 1)
+	assert.Contains(t, fake.issues.created[0].Body, taskIssueCreateMarker(key))
+	assert.Equal(t, "completed", st.keys[key].Status)
+	assert.Equal(t, "issue:1", st.keys[key].ResultRef)
+	assert.Equal(t, "completed", st.mutations[key].Status)
+}
+
+func TestEnsureOverflowCommentsRepairsCommentAfterCompletionFailures(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("task-issue-overflow-comment", "repo", svc.Repo.ID, "issue", 9, "create", 0, taskIssueTextFingerprint("overflow"))
+	st.completeMutationErrs[key] = []error{assert.AnError}
+	st.completeErrs[key] = []error{assert.AnError}
+
+	firstErr := svc.ensureOverflowComments(ctx, 9, "create", "overflow")
+	secondErr := svc.ensureOverflowComments(ctx, 9, "create", "overflow")
+
+	require.Error(t, firstErr)
+	require.NoError(t, secondErr)
+	assert.Len(t, fake.issues.comments[9], 1)
+	assert.Contains(t, fake.issues.comments[9][0].Body, taskIssueOverflowCommentMarker(key))
+	assert.Equal(t, "completed", st.keys[key].Status)
+	assert.Equal(t, "issue_comment:1", st.keys[key].ResultRef)
+	assert.Equal(t, "completed", st.mutations[key].Status)
+}
+
 func TestMutateVoidLabelCompletedIdempotencyDoesNotCallGitHubAgain(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
@@ -531,6 +655,9 @@ func (s *fakeStore) RecordGitHubMutationAttempt(_ context.Context, a store.GitHu
 			return err
 		}
 	}
+	if _, ok := s.mutations[a.IdempotencyKey]; ok {
+		return store.ErrAlreadyExists
+	}
 	s.mutations[a.IdempotencyKey] = a
 	return nil
 }
@@ -649,14 +776,15 @@ func (p *fakePlatform) Repository() platform.RepositoryService    { return p.rep
 func (p *fakePlatform) Checks() platform.CheckService             { return p.checks }
 
 type fakeIssueService struct {
-	items      map[int]*platform.Issue
-	listResult []*platform.Issue
-	created    []*platform.Issue
-	comments   map[int][]string
-	added      map[int][]string
-	removed    map[int][]string
-	updateErr  error
-	next       int
+	items       map[int]*platform.Issue
+	listResult  []*platform.Issue
+	created     []*platform.Issue
+	comments    map[int][]*platform.Comment
+	added       map[int][]string
+	removed     map[int][]string
+	updateErr   error
+	next        int
+	nextComment int64
 }
 
 func (s *fakeIssueService) Create(_ context.Context, title, body string, labels []string, milestone *int) (*platform.Issue, error) {
@@ -725,21 +853,27 @@ func (s *fakeIssueService) RemoveLabels(_ context.Context, number int, labels []
 }
 
 func (s *fakeIssueService) AddComment(_ context.Context, number int, body string) error {
-	if s.comments == nil {
-		s.comments = map[int][]string{}
-	}
-	s.comments[number] = append(s.comments[number], body)
-	return nil
+	_, err := s.AddCommentReturningID(context.Background(), number, body)
+	return err
 }
 
 func (s *fakeIssueService) AddCommentReturningID(ctx context.Context, number int, body string) (int64, error) {
-	return 1, s.AddComment(ctx, number, body)
+	if s.comments == nil {
+		s.comments = map[int][]*platform.Comment{}
+	}
+	s.nextComment++
+	if s.nextComment == 0 {
+		s.nextComment = 1
+	}
+	comment := &platform.Comment{ID: s.nextComment, Body: body}
+	s.comments[number] = append(s.comments[number], comment)
+	return comment.ID, nil
 }
 
 func (s *fakeIssueService) UpdateComment(context.Context, int64, string) error { return nil }
 func (s *fakeIssueService) DeleteComment(context.Context, int64) error         { return nil }
-func (s *fakeIssueService) ListComments(context.Context, int) ([]*platform.Comment, error) {
-	return nil, nil
+func (s *fakeIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	return append([]*platform.Comment(nil), s.comments[number]...), nil
 }
 func (s *fakeIssueService) CreateCommentReaction(context.Context, int64, string) error { return nil }
 

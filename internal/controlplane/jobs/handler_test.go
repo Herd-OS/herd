@@ -62,7 +62,7 @@ func validJobMetadata() json.RawMessage {
 }
 
 func validReviewJobMetadata() json.RawMessage {
-	return json.RawMessage(`{"repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"worker.yml","workflow_run_id":"12345","workflow_run_url":"https://example.test/run"}`)
+	return json.RawMessage(`{"kind":"review","repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"herd-review.yml","workflow_run_id":"12345","workflow_run_url":"https://example.test/run"}`)
 }
 
 func validJobMetadataWith(extra map[string]any) json.RawMessage {
@@ -163,7 +163,7 @@ func TestHandlerProcessesReviewCompletedResult(t *testing.T) {
 	processor := &capturingReviewProcessor{}
 	handler := NewHandler(HandlerOptions{
 		Store:           st,
-		Validator:       fixedOIDCValidator(validClaims(now)),
+		Validator:       fixedOIDCValidator(validReviewClaims(now)),
 		Audience:        "herd-control-plane",
 		Now:             func() time.Time { return now },
 		ReviewProcessor: processor,
@@ -201,7 +201,7 @@ func TestHandlerMintsHostedReviewReadToken(t *testing.T) {
 	}
 	handler := NewHandler(HandlerOptions{
 		Store:          st,
-		Validator:      fixedOIDCValidator(validClaims(now)),
+		Validator:      fixedOIDCValidator(validReviewClaims(now)),
 		Audience:       "herd-control-plane",
 		Now:            func() time.Time { return now },
 		AppTokenSource: source,
@@ -237,7 +237,7 @@ func TestHandlerRejectsHostedReviewReadTokenWithoutRepositoryScope(t *testing.T)
 	source := &fakeAppTokenSource{}
 	handler := NewHandler(HandlerOptions{
 		Store:          st,
-		Validator:      fixedOIDCValidator(validClaims(now)),
+		Validator:      fixedOIDCValidator(validReviewClaims(now)),
 		Audience:       "herd-control-plane",
 		Now:            func() time.Time { return now },
 		AppTokenSource: source,
@@ -275,6 +275,51 @@ func TestHandlerRejectsHostedReviewReadTokenWithoutEligibleJob(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), "not eligible")
+}
+
+func TestHandlerRejectsHostedReviewReadTokenForNonReviewJobs(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata json.RawMessage
+	}{
+		{name: "worker job", metadata: validJobMetadataWith(map[string]any{"kind": "worker"})},
+		{name: "integrator job", metadata: validJobMetadataWith(map[string]any{"kind": "integrator"})},
+		{name: "monitor job", metadata: validJobMetadataWith(map[string]any{"kind": "monitor"})},
+		{name: "review kind wrong workflow", metadata: validJobMetadataWith(map[string]any{"kind": "review"})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+			st := newResultStore()
+			source := &fakeAppTokenSource{}
+			st.jobs["job-1"] = store.Job{
+				JobID:          "job-1",
+				RepositoryID:   7,
+				InstallationID: 9,
+				PRNumber:       42,
+				HeadSHA:        "head",
+				WorkerBranch:   "herd/worker/837",
+				Metadata:       tt.metadata,
+			}
+			handler := NewHandler(HandlerOptions{
+				Store:          st,
+				Validator:      fixedOIDCValidator(validClaims(now)),
+				Audience:       "herd-control-plane",
+				Now:            func() time.Time { return now },
+				AppTokenSource: source,
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/job-1/review-read-token", nil)
+			req.SetPathValue("job_id", "job-1")
+			req.Header.Set("Authorization", "Bearer oidc")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusConflict, rec.Code)
+			assert.Zero(t, source.installationID)
+			assert.Empty(t, source.repositoryIDs)
+		})
+	}
 }
 
 func TestHandlerDuplicateReviewCallbackUsesStableIdentityAcrossJSONFormatting(t *testing.T) {
@@ -1984,6 +2029,13 @@ func validClaims(now time.Time) OIDCClaims {
 		RunID:       "12345",
 		ExpiresAt:   now.Add(time.Hour),
 	}
+}
+
+func validReviewClaims(now time.Time) OIDCClaims {
+	claims := validClaims(now)
+	claims.Workflow = "herd-review.yml"
+	claims.WorkflowRef = "acme/widgets/.github/workflows/herd-review.yml@refs/heads/herd/worker/837"
+	return claims
 }
 
 func resultRequest(jobID string, payload string) *http.Request {

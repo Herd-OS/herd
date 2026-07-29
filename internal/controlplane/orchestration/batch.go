@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -237,29 +238,73 @@ func (s Service) recoverWorkflowDispatchIntent(ctx context.Context, req cpdispat
 	if err != nil {
 		return cpdispatch.DispatchRequest{}, false
 	}
+	var candidates []store.IdempotencyKey
 	for _, record := range records {
 		var metadata struct {
-			RepoID      int64              `json:"repo_id"`
-			JobKind     cpdispatch.JobKind `json:"job_kind"`
-			BatchNumber int                `json:"batch_number"`
-			IssueNumber int                `json:"issue_number"`
-			HeadSHA     string             `json:"head_sha"`
+			RepoID       int64              `json:"repo_id"`
+			JobKind      cpdispatch.JobKind `json:"job_kind"`
+			WorkflowFile string             `json:"workflow_file"`
+			Ref          string             `json:"ref"`
+			BatchNumber  int                `json:"batch_number"`
+			IssueNumber  int                `json:"issue_number"`
+			BatchBranch  string             `json:"batch_branch"`
+			HeadSHA      string             `json:"head_sha"`
 		}
 		if len(record.Metadata) > 0 &&
 			json.Unmarshal(record.Metadata, &metadata) == nil &&
 			metadata.RepoID == req.RepoID &&
 			metadata.JobKind == req.Kind &&
+			metadata.WorkflowFile == req.WorkflowFile &&
+			metadata.Ref == req.Ref &&
 			metadata.BatchNumber == req.BatchNumber &&
 			metadata.IssueNumber == req.IssueNumber &&
+			metadata.BatchBranch == req.BatchBranch &&
+			(metadata.HeadSHA == req.HeadSHA || mutations.IsCompleted(record.Status)) &&
 			strings.TrimSpace(metadata.HeadSHA) != "" {
-			recovered := req
-			recovered.BaseSHA = metadata.HeadSHA
-			recovered.HeadSHA = metadata.HeadSHA
-			recovered.ExpectedHeadSHA = metadata.HeadSHA
-			return recovered, true
+			status := mutations.Normalize(record.Status)
+			if status != mutations.PhaseCallStarted && status != mutations.PhaseCompleted {
+				continue
+			}
+			candidates = append(candidates, record)
 		}
 	}
-	return cpdispatch.DispatchRequest{}, false
+	if len(candidates) == 0 {
+		return cpdispatch.DispatchRequest{}, false
+	}
+	slices.SortFunc(candidates, func(a, b store.IdempotencyKey) int {
+		return b.CreatedAt.Compare(a.CreatedAt)
+	})
+	selected, ok := uniqueLatestWorkflowDispatchRecovery(candidates)
+	if !ok {
+		return cpdispatch.DispatchRequest{}, false
+	}
+	var metadata struct {
+		HeadSHA string `json:"head_sha"`
+	}
+	if json.Unmarshal(selected.Metadata, &metadata) != nil || strings.TrimSpace(metadata.HeadSHA) == "" {
+		return cpdispatch.DispatchRequest{}, false
+	}
+	recovered := req
+	recovered.BaseSHA = metadata.HeadSHA
+	recovered.HeadSHA = metadata.HeadSHA
+	recovered.ExpectedHeadSHA = metadata.HeadSHA
+	return recovered, true
+}
+
+func uniqueLatestWorkflowDispatchRecovery(candidates []store.IdempotencyKey) (store.IdempotencyKey, bool) {
+	if len(candidates) == 0 {
+		return store.IdempotencyKey{}, false
+	}
+	latest := candidates[0]
+	if len(candidates) == 1 {
+		return latest, true
+	}
+	for _, candidate := range candidates[1:] {
+		if candidate.CreatedAt.Equal(latest.CreatedAt) {
+			return store.IdempotencyKey{}, false
+		}
+	}
+	return latest, true
 }
 
 type DispatchReadyWorkersRequest struct {
@@ -356,10 +401,14 @@ func (s Service) mutate(ctx context.Context, key string, mutationType string, fn
 }
 
 func (s Service) withIdempotency(ctx context.Context, key string, mutationType string, fn func() (string, error)) (string, error) {
-	return s.withIdempotencyPhased(ctx, key, mutationType, nil, fn)
+	return s.withIdempotencyPhased(ctx, key, mutationType, nil, nil, fn)
 }
 
-func (s Service) withIdempotencyPhased(ctx context.Context, key string, mutationType string, preflight func() error, fn func() (string, error)) (string, error) {
+func (s Service) withIdempotencyRepair(ctx context.Context, key string, mutationType string, repair func() (string, bool, error), fn func() (string, error)) (string, error) {
+	return s.withIdempotencyPhased(ctx, key, mutationType, nil, repair, fn)
+}
+
+func (s Service) withIdempotencyPhased(ctx context.Context, key string, mutationType string, preflight func() error, repair func() (string, bool, error), fn func() (string, error)) (string, error) {
 	created, err := s.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       key,
 		Scope:     mutationType,
@@ -389,30 +438,31 @@ func (s Service) withIdempotencyPhased(ctx context.Context, key string, mutation
 		status := strings.TrimSpace(record.Status)
 		if status == "failed" || status == mutationStatusFailedPreCall {
 			if attempt, err := s.Store.GetGitHubMutationAttempt(ctx, key); errors.Is(err, store.ErrNotFound) {
-				return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, fn)
+				return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, repair, fn)
 			} else if err != nil {
 				return "", fmt.Errorf("get mutation attempt: %w", err)
 			} else if mutations.IsPreCallRetryable(attempt.Status) {
-				return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, fn)
+				return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, repair, fn)
 			}
 		}
 		if mutations.IsPreCallRetryable(status) {
-			return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, fn)
+			return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, repair, fn)
 		}
 		if status == "" {
 			status = "unknown"
 		}
 		return "", fmt.Errorf("idempotency key %q for %s is %s without a completed result; retry after reconciliation", key, mutationType, status)
 	}
-	return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, fn)
+	return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, repair, fn)
 }
 
-func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutationType string, preflight func() error, fn func() (string, error)) (string, error) {
+func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutationType string, preflight func() error, repair func() (string, bool, error), fn func() (string, error)) (string, error) {
 	result, err := mutationguard.Run(ctx, s.Store, mutationguard.RunRequest{
 		Key:          key,
 		RepositoryID: s.Repo.ID,
 		MutationType: mutationType,
 		Preflight:    preflight,
+		Repair:       repair,
 		Mutate:       fn,
 		Now:          s.now,
 	})

@@ -386,6 +386,10 @@ func (h Handler) serveReadToken(w http.ResponseWriter, r *http.Request, jobID st
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job is not eligible for hosted review read token"})
 		return
 	}
+	if err := validateHostedReviewReadTokenJob(job); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
 	expected, err := StrictExpectedIdentityFromJob(job)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -431,6 +435,18 @@ func (h Handler) serveReadToken(w http.ResponseWriter, r *http.Request, jobID st
 		ExpiresAt:   minted.ExpiresAt,
 		Permissions: minted.Permissions,
 	})
+}
+
+func validateHostedReviewReadTokenJob(job store.Job) error {
+	metadata := metadataMap(job.Metadata)
+	if firstMetadataString(metadata, "kind", "job_kind") != "review" {
+		return fmt.Errorf("job is not a hosted review job")
+	}
+	workflow := strings.TrimSpace(firstMetadataString(metadata, "workflow_file", "workflow"))
+	if workflow != "herd-review.yml" && workflow != ".github/workflows/herd-review.yml" {
+		return fmt.Errorf("job is not from the hosted review workflow")
+	}
+	return nil
 }
 
 func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, resultKey string) (bool, error) {

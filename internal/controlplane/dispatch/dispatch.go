@@ -158,13 +158,16 @@ func (d Dispatcher) recordIntent(ctx context.Context, req DispatchRequest) (stri
 	jobID := "job_" + uuid.NewString()
 	now := time.Now().UTC()
 	keyMetadataValues := map[string]any{
-		"job_id":       jobID,
-		"repo_id":      req.RepoID,
-		"job_kind":     req.Kind,
-		"batch_number": req.BatchNumber,
-		"issue_number": req.IssueNumber,
-		"pr_number":    req.PRNumber,
-		"head_sha":     req.HeadSHA,
+		"job_id":        jobID,
+		"repo_id":       req.RepoID,
+		"job_kind":      req.Kind,
+		"workflow_file": req.WorkflowFile,
+		"ref":           req.Ref,
+		"batch_number":  req.BatchNumber,
+		"issue_number":  req.IssueNumber,
+		"pr_number":     req.PRNumber,
+		"batch_branch":  req.BatchBranch,
+		"head_sha":      req.HeadSHA,
 	}
 	if req.ReviewPrompt != "" {
 		keyMetadataValues["review_prompt"] = req.ReviewPrompt

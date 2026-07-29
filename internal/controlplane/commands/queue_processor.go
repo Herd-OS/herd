@@ -39,7 +39,7 @@ func (p QueueProcessor) ProcessOnce(ctx context.Context) (int, error) {
 	}
 	processed := 0
 	for _, item := range items {
-		if item.IdempotencySeen && item.Idempotency.Status == "completed" {
+		if queuedCommandTerminal(item) {
 			continue
 		}
 		event, err := queuedIssueCommentEvent(item)
@@ -52,6 +52,15 @@ func (p QueueProcessor) ProcessOnce(ctx context.Context) (int, error) {
 		processed++
 	}
 	return processed, nil
+}
+
+func queuedCommandTerminal(item store.ReconcileCommand) bool {
+	switch strings.TrimSpace(item.Command.Status) {
+	case "dispatched", StatusIgnored:
+		return true
+	default:
+		return false
+	}
 }
 
 func queuedIssueCommentEvent(item store.ReconcileCommand) (IssueComment, error) {

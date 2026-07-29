@@ -45,8 +45,16 @@ func (s Service) EnsureTaskIssue(ctx context.Context, req TaskIssueRequest) (*pl
 
 func (s Service) createTaskIssue(ctx context.Context, req TaskIssueRequest, body, overflow string) (*platform.Issue, error) {
 	key := idempotencyKey("task-issue", "repo", s.Repo.ID, "batch", req.BatchNumber, "create", req.Title, taskIssueFingerprint(req, body, overflow))
-	resultRef, err := s.withIdempotency(ctx, key, "issue_create", func() (string, error) {
-		created, err := s.Platform.Issues().Create(ctx, req.Title, body, req.Labels, &req.Milestone)
+	marker := taskIssueCreateMarker(key)
+	markedBody := bodyWithMarker(body, marker)
+	resultRef, err := s.withIdempotencyRepair(ctx, key, "issue_create", func() (string, bool, error) {
+		found, err := s.findTaskIssueByMarker(ctx, req, marker)
+		if err != nil || found == nil {
+			return "", false, err
+		}
+		return fmt.Sprintf("issue:%d", found.Number), true, nil
+	}, func() (string, error) {
+		created, err := s.Platform.Issues().Create(ctx, req.Title, markedBody, req.Labels, &req.Milestone)
 		if err != nil {
 			return "", err
 		}
@@ -145,13 +153,66 @@ func (s Service) ensureOverflowComments(ctx context.Context, issueNumber int, ph
 	for idx, comment := range issues.SplitOverflowComments(overflow) {
 		comment := comment
 		key := idempotencyKey("task-issue-overflow-comment", "repo", s.Repo.ID, "issue", issueNumber, phase, idx, taskIssueTextFingerprint(comment))
-		if err := s.mutate(ctx, key, "issue_comment_create", func() (string, error) {
-			return "", s.Platform.Issues().AddComment(ctx, issueNumber, comment)
+		marker := taskIssueOverflowCommentMarker(key)
+		body := bodyWithMarker(comment, marker)
+		if _, err := s.withIdempotencyRepair(ctx, key, "issue_comment_create", func() (string, bool, error) {
+			found, err := s.findIssueCommentByMarker(ctx, issueNumber, marker)
+			if err != nil || found == nil {
+				return "", false, err
+			}
+			return fmt.Sprintf("issue_comment:%d", found.ID), true, nil
+		}, func() (string, error) {
+			commentID, err := s.Platform.Issues().AddCommentReturningID(ctx, issueNumber, body)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("issue_comment:%d", commentID), nil
 		}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s Service) findTaskIssueByMarker(ctx context.Context, req TaskIssueRequest, marker string) (*platform.Issue, error) {
+	issues, err := s.Platform.Issues().List(ctx, platform.IssueFilters{State: "all", Milestone: &req.Milestone})
+	if err != nil {
+		return nil, fmt.Errorf("repair task issue lookup: %w", err)
+	}
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		if issue.Title == req.Title && strings.Contains(issue.Body, marker) {
+			return issue, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s Service) findIssueCommentByMarker(ctx context.Context, issueNumber int, marker string) (*platform.Comment, error) {
+	comments, err := s.Platform.Issues().ListComments(ctx, issueNumber)
+	if err != nil {
+		return nil, fmt.Errorf("repair issue comment lookup: %w", err)
+	}
+	for _, comment := range comments {
+		if comment != nil && strings.Contains(comment.Body, marker) {
+			return comment, nil
+		}
+	}
+	return nil, nil
+}
+
+func taskIssueCreateMarker(key string) string {
+	return "herd:task-issue-create " + key
+}
+
+func taskIssueOverflowCommentMarker(key string) string {
+	return "herd:task-issue-overflow-comment " + key
+}
+
+func bodyWithMarker(body string, marker string) string {
+	return strings.TrimRight(body, "\n") + "\n\n<!-- " + marker + " -->"
 }
 
 func taskIssueFingerprint(req TaskIssueRequest, body, overflow string) string {

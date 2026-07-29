@@ -158,6 +158,50 @@ func TestQueueProcessorProcessesQueuedCommandOnce(t *testing.T) {
 	assert.Equal(t, "dispatched", record.Status)
 }
 
+func TestQueueProcessorReplaysAcknowledgedCommandWithCompletedAckIdempotency(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	repo, err := st.UpsertRepository(ctx, store.Repository{InstallationID: 77, Owner: "octo-org", Name: "herd"})
+	require.NoError(t, err)
+	event := validComment("OWNER", "@herd-os review")
+	require.NoError(t, EnqueueIssueCommentCommand(ctx, st, "herd-os", event))
+	key := fmt.Sprintf("repo:%d:comment:%d:command:%s", repo.ID, event.CommentID, "review")
+	created, err := st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "issue_comment_command",
+		Status:    "completed",
+		ResultRef: "issue_comment:9001",
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	dispatcher := &fakeDispatcher{}
+	processor := QueueProcessor{
+		Store: st,
+		Handler: Handler{
+			AppLogin:   "herd-os",
+			Store:      st,
+			GitHub:     &fakeGitHub{},
+			Dispatcher: dispatcher,
+		},
+		Now: func() time.Time { return time.Now().UTC().Add(time.Hour) },
+	}
+
+	processed, err := processor.ProcessOnce(ctx)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, processed)
+	assert.Len(t, dispatcher.dispatched, 1)
+	record, err := st.GetCommandRecord(ctx, repo.ID, event.CommentID, "review")
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", record.Status)
+	idem, err := st.GetIdempotencyKey(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", idem.Status)
+	assert.Equal(t, "dispatch:completed", idem.ResultRef)
+}
+
 func TestHandlerIgnoresBotAuthoredComments(t *testing.T) {
 	tests := []IssueComment{
 		func() IssueComment {
