@@ -6,7 +6,8 @@ platform:
 agent:
     provider: codex
     binary: ""
-    model: "gpt-5.5"
+    model: "gpt-5.6-sol"
+    codex_reasoning_effort: "medium"
 workers:
     max_concurrent: 3
     runner_label: herd-worker
