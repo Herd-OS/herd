@@ -658,11 +658,28 @@ func TestEvaluateReviewSynthesisSafetyGates(t *testing.T) {
 			r.RecurringSymptoms = r.RecurringSymptoms[:1]
 			return &r
 		}, want: "need at least 2"},
+		{name: "one clean symptom and one noisy metadata symptom", result: func() *agent.ReviewSynthesisResult {
+			r := *base
+			r.RecurringSymptoms = []agent.ReviewSynthesisSymptom{
+				{Description: "Started workflow retry can dispatch twice before the durable record is repaired.", Cycles: []int{38, 39}, AffectedFiles: []string{"internal/controlplane/dispatch/retry.go"}},
+				{Description: "Chunk 1/9", Cycles: []int{39}, AffectedFiles: []string{"internal/controlplane/dispatch/review.go"}},
+			}
+			return &r
+		}, want: "1 sanitized recurring symptom"},
 		{name: "missing cycles and attempts", result: func() *agent.ReviewSynthesisResult {
 			r := *base
 			r.RecurringSymptoms = []agent.ReviewSynthesisSymptom{
 				{Description: "one", Cycles: []int{39}, AffectedFiles: []string{"a.go"}},
 				{Description: "two", Cycles: []int{39}, AffectedFiles: []string{"b.go"}},
+			}
+			return &r
+		}, want: "do not span two cycles"},
+		{name: "noisy symptoms do not contribute cycles", result: func() *agent.ReviewSynthesisResult {
+			r := *base
+			r.RecurringSymptoms = []agent.ReviewSynthesisSymptom{
+				{Description: "Started workflow retry can dispatch twice before the durable record is repaired.", Cycles: []int{38}, AffectedFiles: []string{"internal/controlplane/dispatch/retry.go"}},
+				{Description: "Unknown-state repair paths update labels before converging on one dispatch outcome.", Cycles: []int{38}, AffectedFiles: []string{"internal/controlplane/dispatch/repair.go"}},
+				{Description: "Chunk 1/9", Cycles: []int{39}, AffectedFiles: []string{"internal/controlplane/dispatch/review.go"}},
 			}
 			return &r
 		}, want: "do not span two cycles"},
@@ -678,12 +695,21 @@ func TestEvaluateReviewSynthesisSafetyGates(t *testing.T) {
 				{Description: "Diff Coverage", Cycles: []int{39}, AffectedFiles: []string{"1/9", "Files reviewed"}},
 			}
 			return &r
-		}, want: "descriptions are unsafe/noisy metadata"},
+		}, want: "0 sanitized recurring symptom"},
+		{name: "noisy symptoms do not contribute files", result: func() *agent.ReviewSynthesisResult {
+			r := *base
+			r.RecurringSymptoms = []agent.ReviewSynthesisSymptom{
+				{Description: "Started workflow retry can dispatch twice before the durable record is repaired.", Cycles: []int{38, 39}, AffectedFiles: []string{"internal/controlplane/dispatch/retry.go"}},
+				{Description: "Unknown-state repair paths update labels before converging on one dispatch outcome.", Cycles: []int{38, 39}, AffectedFiles: []string{"Diff Coverage"}},
+				{Description: "Chunk 1/9", Cycles: []int{38, 39}, AffectedFiles: []string{"internal/controlplane/dispatch/review.go"}},
+			}
+			return &r
+		}, want: "1 sanitized recurring symptom"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, reason := evaluateReviewSynthesis(tt.result(), 0.75, func() reviewConvergenceAnalysis {
-				if tt.name == "missing cycles and attempts" {
+				if tt.name == "missing cycles and attempts" || tt.name == "noisy symptoms do not contribute cycles" {
 					return reviewConvergenceAnalysis{CompletedFixIssues: []int{951}}
 				}
 				return analysis
@@ -869,6 +895,35 @@ func TestBuildSynthesizedStrategyFixIssueBodySanitizesMixedRecurringSymptoms(t *
 			AffectedFiles: []string{"internal/controlplane/dispatch/retry.go"},
 		},
 	}
+	decision, reason := evaluateReviewSynthesis(result, 0.75, reviewConvergenceAnalysis{CompletedFixIssues: []int{951, 952}})
+	require.Equal(t, reviewSynthesisDecisionFallback, decision)
+	assert.Contains(t, reason, "1 sanitized recurring symptom")
+}
+
+func TestBuildSynthesizedStrategyFixIssueBodyAllowsTwoCleanSanitizedSymptoms(t *testing.T) {
+	result := highConfidenceReviewSynthesisResult()
+	result.RecurringSymptoms = []agent.ReviewSynthesisSymptom{
+		{
+			Description:   "Review dispatch retries bypass the shared durable idempotency decision.",
+			Cycles:        []int{39, 38, 39},
+			AffectedFiles: []string{"Diff Coverage", "internal/controlplane/dispatch/review.go", "1/9"},
+		},
+		{
+			Description:   "Unknown-state repair paths update labels before converging on one dispatch outcome.",
+			Cycles:        []int{38, 39},
+			AffectedFiles: []string{"Chunk 1/9", "internal/controlplane/dispatch/repair.go"},
+		},
+		{
+			Description:   "Chunk 1/9",
+			Cycles:        []int{38},
+			AffectedFiles: []string{"internal/controlplane/dispatch/noise.go", "Diff Coverage"},
+		},
+		{
+			Description:   "1/9",
+			Cycles:        []int{39},
+			AffectedFiles: []string{"internal/controlplane/dispatch/retry.go"},
+		},
+	}
 	input := agent.ReviewSynthesisInput{
 		PRNumber:      849,
 		BatchNumber:   111,
@@ -882,11 +937,18 @@ func TestBuildSynthesizedStrategyFixIssueBodySanitizesMixedRecurringSymptoms(t *
 	assert.Contains(t, reason, "passed")
 
 	clean := *result
-	clean.RecurringSymptoms = []agent.ReviewSynthesisSymptom{{
-		Description:   "Review dispatch retries bypass the shared durable idempotency decision.",
-		Cycles:        []int{38, 39},
-		AffectedFiles: []string{"internal/controlplane/dispatch/review.go"},
-	}}
+	clean.RecurringSymptoms = []agent.ReviewSynthesisSymptom{
+		{
+			Description:   "Review dispatch retries bypass the shared durable idempotency decision.",
+			Cycles:        []int{38, 39},
+			AffectedFiles: []string{"internal/controlplane/dispatch/review.go"},
+		},
+		{
+			Description:   "Unknown-state repair paths update labels before converging on one dispatch outcome.",
+			Cycles:        []int{38, 39},
+			AffectedFiles: []string{"internal/controlplane/dispatch/repair.go"},
+		},
+	}
 	fingerprint := synthesizedReviewStrategyFingerprint(result)
 	require.NotEmpty(t, fingerprint)
 	assert.Equal(t, synthesizedReviewStrategyFingerprint(&clean), fingerprint)
@@ -897,11 +959,13 @@ func TestBuildSynthesizedStrategyFixIssueBodySanitizesMixedRecurringSymptoms(t *
 	require.NoError(t, err)
 
 	assert.Equal(t, "Review strategy fix (cycle 40): Dispatch idempotency boundary is split across review paths", title)
-	assert.ElementsMatch(t, []string{"internal/controlplane/dispatch/review.go"}, parsed.FrontMatter.Scope)
+	assert.ElementsMatch(t, []string{"internal/controlplane/dispatch/repair.go", "internal/controlplane/dispatch/review.go"}, parsed.FrontMatter.Scope)
 	assert.Contains(t, parsed.ImplementationDetails, "Review dispatch retries bypass the shared durable idempotency decision.")
 	assert.Contains(t, parsed.ImplementationDetails, "internal/controlplane/dispatch/review.go")
-	assert.NotContains(t, parsed.ImplementationDetails, "internal/controlplane/dispatch/repair.go")
+	assert.Contains(t, parsed.ImplementationDetails, "Unknown-state repair paths update labels before converging on one dispatch outcome.")
+	assert.Contains(t, parsed.ImplementationDetails, "internal/controlplane/dispatch/repair.go")
 	assert.NotContains(t, parsed.ImplementationDetails, "internal/controlplane/dispatch/retry.go")
+	assert.NotContains(t, parsed.ImplementationDetails, "internal/controlplane/dispatch/noise.go")
 	assert.NotContains(t, parsed.Context, "Chunk 1/9")
 	assert.NotContains(t, parsed.Context, "Diff Coverage")
 	assert.Contains(t, parsed.Context, "internal/controlplane/dispatch/fallback.go")

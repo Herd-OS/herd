@@ -564,10 +564,11 @@ func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence 
 	if result.Confidence < minConfidence {
 		return reviewSynthesisDecisionFallback, fmt.Sprintf("synthesis confidence %.2f below threshold %.2f", result.Confidence, minConfidence)
 	}
-	if len(result.RecurringSymptoms) < 2 {
-		return reviewSynthesisDecisionFallback, fmt.Sprintf("synthesis reported %d recurring symptom(s); need at least 2", len(result.RecurringSymptoms))
+	sanitizedSymptoms := sanitizedReviewSynthesisSymptoms(result.RecurringSymptoms)
+	if len(sanitizedSymptoms) < 2 {
+		return reviewSynthesisDecisionFallback, fmt.Sprintf("synthesis reported %d sanitized recurring symptom(s); need at least 2", len(sanitizedSymptoms))
 	}
-	if countReviewSynthesisSymptomCycles(result.RecurringSymptoms) < 2 && len(analysis.CompletedFixIssues) < 2 {
+	if countReviewSynthesisSymptomCycles(sanitizedSymptoms) < 2 && len(analysis.CompletedFixIssues) < 2 {
 		return reviewSynthesisDecisionFallback, "synthesis symptoms do not span two cycles and fewer than two completed fix attempts exist"
 	}
 	if strings.TrimSpace(result.RootCauseTitle) == "" {
@@ -579,10 +580,10 @@ func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence 
 	if len(trimBlankStrings(result.AcceptanceCriteria)) == 0 {
 		return reviewSynthesisDecisionFallback, "synthesis acceptance criteria are empty"
 	}
-	if !hasValidReviewSynthesisSymptomDescription(result.RecurringSymptoms) {
+	if !hasValidReviewSynthesisSymptomDescription(sanitizedSymptoms) {
 		return reviewSynthesisDecisionFallback, "synthesis recurring symptom descriptions are unsafe/noisy metadata"
 	}
-	if !hasValidReviewSynthesisAffectedFile(result.RecurringSymptoms) {
+	if !hasValidReviewSynthesisAffectedFile(sanitizedSymptoms) {
 		return reviewSynthesisDecisionFallback, "synthesis recurring symptom affected files are empty or unsafe/noisy"
 	}
 	if synthesizedReviewStrategyFingerprint(result) == "" {
@@ -1442,10 +1443,10 @@ func buildStrategyFixIssueContext(analysis reviewConvergenceAnalysis) string {
 
 func buildDeterministicStrategyImplementationDetails(analysis reviewConvergenceAnalysis) string {
 	sections := []string{
-		"### ## Repeated Pattern\n\n" + formatRepeatedReviewPattern(analysis.Cluster),
-		"### ## Representative Findings\n\n" + formatRepresentativeReviewFindings(representativeReviewFindings(analysis.Cycles, 5)),
-		"### ## Prior Fix Attempts\n\n" + formatCombinedPriorReviewFixAttempts(analysis),
-		"### ## Strategy Guidance\n\nFix the shared invariant or state transition that lets the same review pattern recur. Treat endpoint-level findings as symptoms: repair the common boundary first, migrate affected packages to it, then add regression coverage that proves retries, redeliveries, and unknown-state repairs converge without duplicate observable effects.",
+		"### Repeated Pattern\n\n" + formatRepeatedReviewPattern(analysis.Cluster),
+		"### Representative Findings\n\n" + formatRepresentativeReviewFindings(representativeReviewFindings(analysis.Cycles, 5)),
+		"### Prior Fix Attempts\n\n" + formatCombinedPriorReviewFixAttempts(analysis),
+		"### Strategy Guidance\n\nFix the shared invariant or state transition that lets the same review pattern recur. Treat endpoint-level findings as symptoms: repair the common boundary first, migrate affected packages to it, then add regression coverage that proves retries, redeliveries, and unknown-state repairs converge without duplicate observable effects.",
 	}
 	return strings.Join(sections, "\n\n")
 }
