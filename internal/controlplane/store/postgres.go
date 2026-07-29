@@ -136,6 +136,10 @@ func (s *PostgresStore) TryStartWebhookDeliveryProcessing(ctx context.Context, d
 }
 
 func (s *PostgresStore) UpsertInstallation(ctx context.Context, i Installation) error {
+	events := i.Events
+	if events == nil {
+		events = []string{}
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO app_installations (id, account_login, account_id, target_type, permissions, events, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -146,7 +150,7 @@ func (s *PostgresStore) UpsertInstallation(ctx context.Context, i Installation) 
 			permissions = EXCLUDED.permissions,
 			events = EXCLUDED.events,
 			updated_at = EXCLUDED.updated_at`,
-		i.ID, i.AccountLogin, i.AccountID, i.TargetType, metadataOrEmpty(i.Permissions), pq.Array(i.Events), timeOrNow(i.CreatedAt), timeOrNow(i.UpdatedAt))
+		i.ID, i.AccountLogin, i.AccountID, i.TargetType, metadataOrEmpty(i.Permissions), pq.Array(events), timeOrNow(i.CreatedAt), timeOrNow(i.UpdatedAt))
 	return err
 }
 

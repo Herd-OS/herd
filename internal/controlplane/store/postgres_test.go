@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -326,6 +327,24 @@ func TestPostgresHealthFailure(t *testing.T) {
 
 	err = store.Health(ctx)
 	require.Error(t, err)
+}
+
+func TestPostgresUpsertInstallationStoresEmptyEventsWhenOmitted(t *testing.T) {
+	ctx := context.Background()
+	db := newMigratedPostgresDB(t, ctx)
+	store, err := NewPostgresStore(ctx, db)
+	require.NoError(t, err)
+
+	require.NoError(t, store.UpsertInstallation(ctx, Installation{
+		ID:           1001,
+		AccountLogin: "octo",
+		AccountID:    2002,
+		TargetType:   "Organization",
+	}))
+
+	var events []string
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT events FROM app_installations WHERE id = $1", 1001).Scan(pq.Array(&events)))
+	assert.Empty(t, events)
 }
 
 func TestMemoryStore(t *testing.T) {
