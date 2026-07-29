@@ -2331,6 +2331,82 @@ func TestExecStandalone_PushesToTargetBranch(t *testing.T) {
 	assert.NotContains(t, issueSvc.addedLabels, issues.StatusFailed)
 }
 
+func TestExecStandalone_ScrubsReviewFixArtifactsBeforeNormalPush(t *testing.T) {
+	targetBranch := "feature/standalone-scrub"
+	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "command %v failed: %s", args, string(out))
+	}
+
+	prSvc := &mockPRService{}
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 591,
+			Title:  "Fix bug",
+			Body:   standaloneIssueBody(targetBranch, 124),
+		},
+		updatedIssues: make(map[int]platform.IssueUpdate),
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main"},
+	}
+
+	ag := &commitAgent{
+		commitFunc: func() {
+			require.NoError(t, os.MkdirAll(filepath.Join(work, ".herd"), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(work, "fix.txt"), []byte("fixed"), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(work, ".herd", "worker.md"), []byte("legitimate worker report"), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(work, ".herd", "review-fixes-591.md"), []byte("temporary review notes"), 0644))
+			run(work, "git", "add", "fix.txt", ".herd/worker.md", ".herd/review-fixes-591.md")
+			run(work, "git", "-c", "user.email=h@h.com", "-c", "user.name=h", "commit", "-m", "fix: do the thing")
+		},
+		execResult: &agent.ExecResult{Summary: "Fixed the bug"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 591,
+		RepoRoot:    work,
+		Mode:        "standalone",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.NoOp)
+
+	run(work, "git", "fetch", "origin")
+	tree := gitOutputT(t, work, "git", "ls-tree", "-r", "--name-only", "origin/"+targetBranch)
+	assert.Contains(t, tree, "fix.txt")
+	assert.Contains(t, tree, ".herd/worker.md")
+	assert.NotContains(t, tree, ".herd/review-fixes-591.md")
+
+	history := gitOutputT(t, work, "git", "log", "--name-status", "--oneline", "origin/main..origin/"+targetBranch)
+	assert.Contains(t, history, "fix: do the thing")
+	assert.Contains(t, history, "Remove transient Herd artifacts for #591")
+	assert.Contains(t, history, "A\tfix.txt")
+	assert.Contains(t, history, "A\t.herd/worker.md")
+	assert.Contains(t, history, "D\t.herd/review-fixes-591.md")
+
+	foundCleanupComment := false
+	foundReport := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Removed transient Herd artifact(s)") && strings.Contains(c, ".herd/review-fixes-591.md") {
+			foundCleanupComment = true
+		}
+		if strings.Contains(c, "**Worker Report**") && strings.Contains(c, "Fixed the bug") {
+			foundReport = true
+		}
+	}
+	assert.True(t, foundCleanupComment, "standalone finalization should report scrubbed transient artifacts")
+	assert.True(t, foundReport, "standalone finalization should post the final worker report")
+}
+
 func TestExecStandalone_TimeoutWithUncommittedWork(t *testing.T) {
 	targetBranch := "feature/timeout-checkpoint"
 	work, _ := initTestRepoWithTargetBranch(t, targetBranch)
