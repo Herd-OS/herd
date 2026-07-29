@@ -105,7 +105,23 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 		}
 
 		if advanceResult != nil && advanceResult.AllComplete && advanceResult.BatchPRNumber > 0 {
-			result.SideEffectsDeferred = true
+			reviewResult, err := Review(lockedCtx, p, ag, g, cfg, ReviewParams{
+				RunID:    params.RunID,
+				RepoRoot: params.RepoRoot,
+			})
+			if err != nil {
+				return nil, err
+			}
+			result.Review = reviewResult
+
+			checkResult, err := CheckCI(lockedCtx, p, cfg, CheckCIParams{
+				RunID:    params.RunID,
+				RepoRoot: params.RepoRoot,
+			})
+			if err != nil {
+				return nil, err
+			}
+			result.CheckCI = checkResult
 		}
 		return result, nil
 	}

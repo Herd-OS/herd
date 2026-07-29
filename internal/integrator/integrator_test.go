@@ -718,7 +718,7 @@ func TestRunWorkerCompletionCycle_ActiveBatchLockReturnsErrorWhenPendingMarkerFa
 	assert.True(t, repoSvc.branchExists["herd/worker/42-task-a"], "retry recovery can still discover the unmerged worker branch")
 }
 
-func TestRunWorkerCompletionCycle_CleanAllCompleteOpensPRAndDefersReviewAndCI(t *testing.T) {
+func TestRunWorkerCompletionCycle_CleanAllCompleteOpensPRReviewsAndChecksCI(t *testing.T) {
 	ms := &platform.Milestone{Number: 1, Title: "Batch", State: "open", ClosedIssues: 1}
 	batchBranch := "herd/batch/1-batch"
 	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
@@ -774,11 +774,13 @@ func TestRunWorkerCompletionCycle_CleanAllCompleteOpensPRAndDefersReviewAndCI(t 
 	require.NotNil(t, result)
 	require.NotNil(t, result.Advance)
 	assert.True(t, result.Advance.AllComplete)
-	assert.Nil(t, result.Review)
-	assert.Nil(t, result.CheckCI)
-	assert.Equal(t, 0, ag.calls)
+	require.NotNil(t, result.Review)
+	require.NotNil(t, result.CheckCI)
+	assert.Equal(t, 1, ag.calls)
+	assert.True(t, result.Review.Approved)
+	assert.Equal(t, "success", result.CheckCI.Status)
 	assert.NotNil(t, prInner.created)
-	assert.True(t, result.SideEffectsDeferred)
+	assert.False(t, result.SideEffectsDeferred)
 }
 
 func TestRunWorkerCompletionCycle_DrainsPendingWorkerPublishedAfterAdvanceScanBeforeOpeningPR(t *testing.T) {
@@ -876,10 +878,11 @@ func TestRunWorkerCompletionCycle_DrainsPendingWorkerPublishedAfterAdvanceScanBe
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.PendingDrained)
-	assert.True(t, result.SideEffectsDeferred)
-	assert.Nil(t, result.Review)
-	assert.Nil(t, result.CheckCI)
-	assert.Equal(t, 0, ag.calls)
+	assert.False(t, result.SideEffectsDeferred)
+	require.NotNil(t, result.Review)
+	require.NotNil(t, result.CheckCI)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, "success", result.CheckCI.Status)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-task-a")
@@ -975,16 +978,19 @@ func TestRunWorkerCompletionCycle_DrainsPendingWorkerPublishedImmediatelyBeforeP
 		issueB.Labels = append(issueB.Labels, issues.IntegratorPending)
 	}
 
-	result, err := RunWorkerCompletionCycle(context.Background(), mock, &mockReviewAgent{}, g, &config.Config{
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	result, err := RunWorkerCompletionCycle(context.Background(), mock, ag, g, &config.Config{
 		Integrator: config.Integrator{Review: true, RequireCI: true},
 	}, WorkerCompletionCycleParams{RunID: 100, RepoRoot: dir})
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.PendingDrained)
-	assert.True(t, result.SideEffectsDeferred)
-	assert.Nil(t, result.Review)
-	assert.Nil(t, result.CheckCI)
+	assert.False(t, result.SideEffectsDeferred)
+	require.NotNil(t, result.Review)
+	require.NotNil(t, result.CheckCI)
+	assert.Equal(t, 1, ag.calls)
+	assert.Equal(t, "success", result.CheckCI.Status)
 	assert.Equal(t, 1, prInner.createCalls)
 	assert.NotNil(t, prInner.created)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
@@ -992,7 +998,114 @@ func TestRunWorkerCompletionCycle_DrainsPendingWorkerPublishedImmediatelyBeforeP
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
 }
 
-func TestRunWorkerCompletionCycle_FinalUnlockPendingDefersReviewAndCI(t *testing.T) {
+func TestRunWorkerCompletionCycle_PendingAfterHeldLockGuardSkipsPRUntilConsolidated(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch", ClosedIssues: 1}
+	batchBranch := "herd/batch/1-batch"
+	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
+		num  int
+		slug string
+	}{
+		{42, "task-a"},
+		{43, "task-b"},
+	})
+
+	issueA := &platform.Issue{
+		Number:    42,
+		Title:     "Task A",
+		State:     "closed",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nA\n",
+	}
+	issueB := &platform.Issue{
+		Number:    43,
+		Title:     "Task B",
+		State:     "closed",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nB\n",
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = issueA
+	issueSvc.getResult[43] = issueB
+	issueSvc.onList = func(platform.IssueFilters) []*platform.Issue {
+		if issues.HasLabel(issueB.Labels, issues.IntegratorPending) {
+			return []*platform.Issue{issueA, issueB}
+		}
+		return []*platform.Issue{issueA}
+	}
+
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			batchBranch:             true,
+			"herd/worker/42-task-a": true,
+		},
+		branchSHAs: map[string]string{
+			batchBranch:             "batch-sha",
+			"herd/worker/42-task-a": "worker-a-sha",
+		},
+	}
+	prInner := &mockPRService{}
+	prInner.onCreate = func() {
+		assert.False(t, repoSvc.branchExists["herd/worker/43-task-b"], "batch PR must not be created before pending worker B is consolidated")
+	}
+	prSvc := &createdVisiblePRService{mockPRService: prInner}
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+				101: {ID: 101, Conclusion: "success", Inputs: map[string]string{"issue_number": "43"}},
+			},
+		},
+		repo:       repoSvc,
+		milestones: &mockMilestoneService{getResult: map[int]*platform.Milestone{1: ms}},
+		checks:     &mockCheckService{status: "success"},
+	}
+
+	lockReads := 0
+	lateWorkerTriggered := false
+	repoSvc.onGetBranchSHA = func(name string) {
+		if name != BatchLockBranch(1) {
+			return
+		}
+		lockReads++
+		if lateWorkerTriggered || lockReads < 4 {
+			return
+		}
+		lateWorkerTriggered = true
+		ms.ClosedIssues = 2
+		repoSvc.branchExists["herd/worker/43-task-b"] = true
+		repoSvc.branchSHAs["herd/worker/43-task-b"] = "worker-b-sha"
+
+		lateResult, err := RunWorkerCompletionCycle(context.Background(), mock, &mockReviewAgent{}, g, &config.Config{}, WorkerCompletionCycleParams{
+			RunID:    101,
+			RepoRoot: dir,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, lateResult)
+		require.True(t, lateResult.BatchLockSkipped)
+		issueB.Labels = append(issueB.Labels, issues.IntegratorPending)
+	}
+
+	result, err := RunWorkerCompletionCycle(context.Background(), mock, &mockReviewAgent{}, g, &config.Config{
+		Integrator: config.Integrator{Review: true, RequireCI: true},
+	}, WorkerCompletionCycleParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.PendingDrained)
+	assert.Equal(t, 1, prInner.createCalls)
+	assert.NotNil(t, prInner.created)
+	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
+	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
+	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
+}
+
+func TestRunWorkerCompletionCycle_FinalUnlockPendingOccursAfterHeldLockSideEffects(t *testing.T) {
 	ms := &platform.Milestone{Number: 1, Title: "Batch", ClosedIssues: 2}
 	batchBranch := "herd/batch/1-batch"
 	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
@@ -1083,15 +1196,15 @@ func TestRunWorkerCompletionCycle_FinalUnlockPendingDefersReviewAndCI(t *testing
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.True(t, result.SideEffectsDeferred)
-	assert.Nil(t, result.Review)
-	assert.Nil(t, result.CheckCI)
-	assert.Equal(t, 0, ag.calls)
+	assert.False(t, result.SideEffectsDeferred)
+	require.NotNil(t, result.Review)
+	require.NotNil(t, result.CheckCI)
+	assert.Equal(t, 1, ag.calls)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-task-a")
 	assert.NotContains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
 	assert.True(t, repoSvc.branchExists["herd/worker/43-task-b"])
-	assert.Empty(t, prSvc.reviews)
+	assert.NotEmpty(t, prSvc.reviews)
 }
 
 func TestRecoverStrandedCompletedBatch_DrainsPendingWorkerBeforeOpeningPR(t *testing.T) {

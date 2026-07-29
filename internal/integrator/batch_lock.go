@@ -114,6 +114,28 @@ func acquireBatchLockForOperation(ctx context.Context, repoSvc platform.Reposito
 	return AcquireBatchLock(ctx, repoSvc, batchNumber, batchBranch, runID, timeNowUTC())
 }
 
+func validateHeldBatchLockNoPending(ctx context.Context, repoSvc platform.RepositoryService, batchNumber int, batchBranch string) (bool, error) {
+	held, ok := ctx.Value(heldBatchLockContextKey{}).(heldBatchLockContext)
+	if !ok || held.batchNumber != batchNumber || held.batchBranch != batchBranch || held.lockID == "" {
+		return true, nil
+	}
+	repo, ok := repoSvc.(reviewLockRepository)
+	if !ok {
+		return false, fmt.Errorf("repository service does not support append-only batch locks")
+	}
+	_, state, stateOK, err := readBatchLockHead(ctx, repoSvc, repo, BatchLockBranch(batchNumber))
+	if err != nil {
+		return false, err
+	}
+	if !stateOK {
+		return false, fmt.Errorf("batch lock branch %s has malformed state", BatchLockBranch(batchNumber))
+	}
+	if state.Status != "locked" || state.LockID != held.lockID || state.BatchNumber != batchNumber || state.BatchBranch != batchBranch {
+		return false, nil
+	}
+	return state.PendingCompletions == 0, nil
+}
+
 func ReleaseBatchLock(ctx context.Context, repoSvc platform.RepositoryService, h *BatchLockHandle) error {
 	if h == nil || h.branch == "" || h.state.LockID == "" {
 		return nil
