@@ -910,12 +910,14 @@ func TestIssueNumberFromRun(t *testing.T) {
 		name    string
 		run     *platform.Run
 		runErr  error
+		issue   *platform.Issue
 		wantNum int
 		wantErr string
 	}{
 		{
-			name:    "extracts issue number from run inputs",
+			name:    "extracts issue number from resolved run context",
 			run:     &platform.Run{ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+			issue:   &platform.Issue{Number: 42, Title: "Task", Milestone: &platform.Milestone{Number: 1, Title: "Batch"}},
 			wantNum: 42,
 		},
 		{
@@ -931,12 +933,18 @@ func TestIssueNumberFromRun(t *testing.T) {
 		{
 			name:    "returns error when issue_number is not a number",
 			run:     &platform.Run{ID: 100, Inputs: map[string]string{"issue_number": "abc"}},
-			wantErr: "strconv.Atoi",
+			wantErr: `invalid issue_number "abc" in run 100`,
 		},
 		{
 			name:    "returns error when inputs map is nil",
 			run:     &platform.Run{ID: 100, Inputs: nil},
 			wantErr: "run 100 has no issue_number input",
+		},
+		{
+			name:    "returns resolver error when issue has no milestone",
+			run:     &platform.Run{ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+			issue:   &platform.Issue{Number: 42, Title: "Task"},
+			wantErr: "issue #42 for run 100 has no milestone",
 		},
 	}
 
@@ -951,6 +959,9 @@ func TestIssueNumberFromRun(t *testing.T) {
 			// Override GetRun to return error if needed
 			mock := &mockFailurePlatform{
 				wf: &mockIntegratorWorkflowService{run: tt.run},
+				issues: &mockCommentIssueService{mockDispatchIssueService: mockDispatchIssueService{
+					getResult: tt.issue,
+				}},
 			}
 			if tt.runErr != nil {
 				mock.wf = &mockIntegratorWorkflowService{run: nil}

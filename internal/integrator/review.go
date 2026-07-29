@@ -126,27 +126,14 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		pr = prs[0]
 	} else {
 		// Run-based lookup — used by workflow_run trigger
-		run, err := p.Workflows().GetRun(ctx, params.RunID)
+		runCtx, err := ResolveWorkerRunContext(ctx, p, params.RunID)
 		if err != nil {
-			return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
+			return nil, err
 		}
+		logWorkerRunContext("Review", runCtx)
 
-		issueNumStr := run.Inputs["issue_number"]
-		issueNumber, err := strconv.Atoi(issueNumStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid issue_number: %w", err)
-		}
-
-		issue, err := p.Issues().Get(ctx, issueNumber)
-		if err != nil {
-			return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
-		}
-		if issue.Milestone == nil {
-			return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
-		}
-
-		ms = issue.Milestone
-		batchBranch = fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+		ms = runCtx.issue.Milestone
+		batchBranch = runCtx.BatchBranch
 
 		// Find batch PR
 		prs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open", Head: batchBranch})

@@ -47,6 +47,7 @@ func (m *mockPlatform) AuthenticatedLogin(_ context.Context) (string, error) {
 
 type mockIssueService struct {
 	getResult              map[int]*platform.Issue
+	getErr                 error
 	listResult             []*platform.Issue
 	addedLabels            map[int][]string
 	removedLabels          map[int][]string
@@ -102,6 +103,9 @@ func (m *mockIssueService) Create(ctx context.Context, title, body string, label
 	return &platform.Issue{Number: 999}, nil
 }
 func (m *mockIssueService) Get(_ context.Context, number int) (*platform.Issue, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	if i, ok := m.getResult[number]; ok {
 		return i, nil
 	}

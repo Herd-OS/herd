@@ -110,38 +110,25 @@ type ReviewStandaloneResult struct {
 // The returned *ConsolidateResult reflects the TRIGGERING issue's outcome;
 // other workers in the milestone are processed for side effects only.
 func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, params ConsolidateParams) (*ConsolidateResult, error) {
-	run, err := p.Workflows().GetRun(ctx, params.RunID)
+	runCtx, err := ResolveWorkerRunContext(ctx, p, params.RunID)
 	if err != nil {
-		return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
+		return nil, err
 	}
+	logWorkerRunContext("Consolidate", runCtx)
 
-	issueNumStr, ok := run.Inputs["issue_number"]
-	if !ok {
-		return nil, fmt.Errorf("run %d has no issue_number input", params.RunID)
-	}
-	issueNumber, err := strconv.Atoi(issueNumStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid issue_number %q in run %d: %w", issueNumStr, params.RunID, err)
-	}
-
-	issue, err := p.Issues().Get(ctx, issueNumber)
-	if err != nil {
-		return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
-	}
-	if issue.Milestone == nil {
-		return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
-	}
+	issueNumber := runCtx.IssueNumber
+	issue := runCtx.issue
 	if isBatchComplete(issue.Milestone) {
 		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", issue.Milestone.Number)
 		return &ConsolidateResult{IssueNumber: issueNumber, NoOp: true}, nil
 	}
 
-	triggerWorkerBranch := fmt.Sprintf("herd/worker/%d-%s", issueNumber, planner.Slugify(issue.Title))
-	batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
+	triggerWorkerBranch := runCtx.WorkerBranch
+	batchBranch := runCtx.BatchBranch
 
 	// Failure/cancellation: relabel the trigger and return — do NOT scan other
 	// candidates in this case (preserves the trigger semantics for failed runs).
-	if run.Conclusion == "failure" || run.Conclusion == "cancelled" {
+	if runCtx.Conclusion == "failure" || runCtx.Conclusion == "cancelled" {
 		status := issues.StatusLabel(issue.Labels)
 		if status != issues.StatusFailed {
 			_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{status})
@@ -355,25 +342,14 @@ func consolidateWorkerBranch(ctx context.Context, p platform.Platform, g *git.Gi
 // Advance checks if the current tier is complete and dispatches the next tier.
 // If all tiers are complete, it opens the batch PR.
 func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, params AdvanceParams) (*AdvanceResult, error) {
-	// Get the run to find the issue and milestone
-	run, err := p.Workflows().GetRun(ctx, params.RunID)
+	runCtx, err := ResolveWorkerRunContext(ctx, p, params.RunID)
 	if err != nil {
-		return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
+		return nil, err
 	}
+	logWorkerRunContext("Advance", runCtx)
 
-	issueNumStr := run.Inputs["issue_number"]
-	issueNumber, err := strconv.Atoi(issueNumStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid issue_number: %w", err)
-	}
-
-	issue, err := p.Issues().Get(ctx, issueNumber)
-	if err != nil {
-		return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
-	}
-	if issue.Milestone == nil {
-		return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
-	}
+	issueNumber := runCtx.IssueNumber
+	issue := runCtx.issue
 
 	ms := issue.Milestone
 	if isBatchComplete(ms) {
@@ -381,7 +357,7 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		return &AdvanceResult{}, nil
 	}
 
-	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	batchBranch := runCtx.BatchBranch
 
 	// List all issues in the milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{

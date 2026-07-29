@@ -672,15 +672,11 @@ func postIntegratorFailure(ctx context.Context, issueSvc platform.IssueService, 
 }
 
 func issueNumberFromRun(ctx context.Context, client platform.Platform, runID int64) (int, error) {
-	run, err := client.Workflows().GetRun(ctx, runID)
+	runCtx, err := integrator.ResolveWorkerRunContext(ctx, client, runID)
 	if err != nil {
 		return 0, err
 	}
-	numStr, ok := run.Inputs["issue_number"]
-	if !ok {
-		return 0, fmt.Errorf("run %d has no issue_number input", runID)
-	}
-	return strconv.Atoi(numStr)
+	return runCtx.IssueNumber, nil
 }
 
 func batchPRNumber(ctx context.Context, client platform.Platform, batchNum int) (int, error) {
