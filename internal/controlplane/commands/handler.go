@@ -16,6 +16,7 @@ import (
 
 const (
 	StatusIgnored      = "ignored"
+	StatusQueued       = "queued"
 	StatusAcknowledged = "acknowledged"
 )
 
@@ -319,7 +320,7 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 }
 
 func recordQueuedCommand(ctx context.Context, st QueueStore, event IssueComment, commandKey, commandName string, metadata json.RawMessage) error {
-	return recordQueuedCommandWithStatus(ctx, st, event, commandKey, commandName, StatusAcknowledged, metadata)
+	return recordQueuedCommandWithStatus(ctx, st, event, commandKey, commandName, StatusQueued, metadata)
 }
 
 func recordQueuedCommandWithStatus(ctx context.Context, st QueueStore, event IssueComment, commandKey, commandName, status string, metadata json.RawMessage) error {

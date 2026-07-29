@@ -62,7 +62,7 @@ func validJobMetadata() json.RawMessage {
 }
 
 func validReviewJobMetadata() json.RawMessage {
-	return json.RawMessage(`{"kind":"review","repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"herd-review.yml","workflow_run_id":"12345","workflow_run_url":"https://example.test/run"}`)
+	return json.RawMessage(`{"kind":"review","repository":"acme/widgets","github_repository_id":3003,"ref":"refs/heads/herd/worker/837","workflow_file":"herd-review.yml","workflow_run_id":"12345","workflow_run_url":"https://example.test/run"}`)
 }
 
 func validJobMetadataWith(extra map[string]any) json.RawMessage {
@@ -215,7 +215,7 @@ func TestHandlerMintsHostedReviewReadToken(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, int64(9), source.installationID)
-	assert.Equal(t, []int64{7}, source.repositoryIDs)
+	assert.Equal(t, []int64{3003}, source.repositoryIDs)
 	require.NotNil(t, source.permissions)
 	assert.Equal(t, "read", source.permissions.GetContents())
 	assert.Equal(t, "read", source.permissions.GetPullRequests())
@@ -232,7 +232,7 @@ func TestHandlerRejectsHostedReviewReadTokenWithoutRepositoryScope(t *testing.T)
 		PRNumber:       42,
 		HeadSHA:        "head",
 		WorkerBranch:   "herd/worker/837",
-		Metadata:       validReviewJobMetadata(),
+		Metadata:       json.RawMessage(`{"kind":"review","repository":"acme/widgets","ref":"refs/heads/herd/worker/837","workflow_file":"herd-review.yml","workflow_run_id":"12345"}`),
 	}
 	source := &fakeAppTokenSource{}
 	handler := NewHandler(HandlerOptions{
@@ -777,6 +777,46 @@ func TestHandlerDuplicateSuccessDoesNotFetchExpiredPatchArtifact(t *testing.T) {
 	assert.Len(t, applier.requests, 1)
 	assert.Len(t, st.results, 1)
 	assert.Len(t, artifactStore.errs, 1, "duplicate should return before artifact fetch")
+}
+
+func TestHandlerRejectsChangedWorkerPatchArtifactAfterAcceptance(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		RepositoryID:   7,
+		InstallationID: 9,
+		HeadSHA:        "head",
+		BaseSHA:        "base",
+		WorkerBranch:   "herd/worker/837",
+	}
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	firstMetadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+	secondMetadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "alternate.diff", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactStore{"patches/job.diff": patchMetadataArtifact(t, firstMetadata), "patch.diff": patch, "patches/alternate.diff": patchMetadataArtifact(t, secondMetadata), "alternate.diff": patch},
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+		AppLogin:       "herd-os[bot]",
+		AppEmail:       "herd@example.com",
+	})
+	secondPayload := strings.Replace(validWorkerPayload("job-1", "head"), `"patch_artifact":"patches/job.diff"`, `"patch_artifact":"patches/alternate.diff"`, 1)
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", validWorkerPayload("job-1", "head")))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", secondPayload))
+
+	require.Equal(t, http.StatusAccepted, first.Code)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "conflicting worker result")
+	assert.Len(t, applier.requests, 1)
+	assert.Len(t, st.results, 1)
 }
 
 func TestHandlerAppliesBundledWorkerBranchArtifactAndRecordsCommitSHA(t *testing.T) {
@@ -1868,12 +1908,17 @@ type artifactStore map[string][]byte
 
 func artifactMap(t *testing.T, metadata artifacts.PatchMetadata, patch []byte) artifactStore {
 	t.Helper()
-	metadataBytes, err := json.Marshal(metadata)
-	require.NoError(t, err)
 	return artifactStore{
-		"patches/job.diff":    metadataBytes,
+		"patches/job.diff":    patchMetadataArtifact(t, metadata),
 		metadata.ArtifactName: patch,
 	}
+}
+
+func patchMetadataArtifact(t *testing.T, metadata artifacts.PatchMetadata) []byte {
+	t.Helper()
+	metadataBytes, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	return metadataBytes
 }
 
 func (s artifactStore) OpenArtifact(_ context.Context, name string) (io.ReadCloser, error) {

@@ -37,6 +37,7 @@ const (
 
 type DispatchRequest struct {
 	RepoID            int64
+	GitHubRepoID      int64
 	Owner             string
 	Repo              string
 	InstallationID    int64
@@ -158,16 +159,17 @@ func (d Dispatcher) recordIntent(ctx context.Context, req DispatchRequest) (stri
 	jobID := "job_" + uuid.NewString()
 	now := time.Now().UTC()
 	keyMetadataValues := map[string]any{
-		"job_id":        jobID,
-		"repo_id":       req.RepoID,
-		"job_kind":      req.Kind,
-		"workflow_file": req.WorkflowFile,
-		"ref":           req.Ref,
-		"batch_number":  req.BatchNumber,
-		"issue_number":  req.IssueNumber,
-		"pr_number":     req.PRNumber,
-		"batch_branch":  req.BatchBranch,
-		"head_sha":      req.HeadSHA,
+		"job_id":         jobID,
+		"repo_id":        req.RepoID,
+		"github_repo_id": req.GitHubRepoID,
+		"job_kind":       req.Kind,
+		"workflow_file":  req.WorkflowFile,
+		"ref":            req.Ref,
+		"batch_number":   req.BatchNumber,
+		"issue_number":   req.IssueNumber,
+		"pr_number":      req.PRNumber,
+		"batch_branch":   req.BatchBranch,
+		"head_sha":       req.HeadSHA,
 	}
 	if req.ReviewPrompt != "" {
 		keyMetadataValues["review_prompt"] = req.ReviewPrompt
@@ -210,6 +212,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		"batch_branch":      req.BatchBranch,
 		"base_sha":          dispatchBaseSHA(req),
 		"repository":        req.Owner + "/" + req.Repo,
+		"github_repo_id":    req.GitHubRepoID,
 		"owner":             req.Owner,
 		"repo":              req.Repo,
 		"expected_head_sha": req.ExpectedHeadSHA,

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/cli"
+	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
 	"github.com/herd-os/herd/internal/controlplane/commands"
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
@@ -52,6 +53,50 @@ func TestBuildServiceDependenciesProductionWiresDefaultWorkflowProcessor(t *test
 	require.NoError(t, err)
 	require.NotNil(t, deps.WorkflowEventProcessor)
 	require.NotNil(t, deps.WorkflowEventsRoute)
+}
+
+func TestProductionWorkflowEventProcessorConfigPreservesHerdDefaults(t *testing.T) {
+	base := *config.Default()
+	processor := productionWorkflowEventProcessor{
+		Config: config.Config{ControlPlaneURL: "https://control.example.test"},
+	}
+
+	got := processor.workflowConfig()
+
+	assert.Equal(t, "https://control.example.test", got.ControlPlaneURL)
+	assert.Equal(t, base.Integrator.Strategy, got.Integrator.Strategy)
+	assert.Equal(t, base.Integrator.OnConflict, got.Integrator.OnConflict)
+	assert.Equal(t, base.Integrator.RequireCI, got.Integrator.RequireCI)
+	assert.Equal(t, base.Integrator.Review, got.Integrator.Review)
+	assert.Equal(t, base.Integrator.ReviewDiff, got.Integrator.ReviewDiff)
+}
+
+func TestProductionWorkflowEventProcessorMonitorPatrolRunsReconciler(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	st := store.NewMemoryStore()
+	repo, err := st.UpsertRepository(ctx, store.Repository{GitHubID: 3003, InstallationID: 9, Owner: "octo", Name: "herd", DefaultBranch: "main"})
+	require.NoError(t, err)
+	require.NoError(t, st.CreateJob(ctx, store.Job{
+		JobID:          "job-timeout",
+		RepositoryID:   repo.ID,
+		InstallationID: repo.InstallationID,
+		PRNumber:       42,
+		HeadSHA:        "head",
+		Status:         "dispatching",
+		UpdatedAt:      now.Add(-3 * time.Hour),
+	}))
+	processor := productionWorkflowEventProcessor{Store: st}
+
+	err = processor.ProcessWorkflowEvent(ctx, repo, workflowevents.Event{
+		Kind:   workflowevents.KindMonitorEvent,
+		Action: "patrol",
+	})
+
+	require.NoError(t, err)
+	job, err := st.GetJob(ctx, "job-timeout")
+	require.NoError(t, err)
+	assert.Equal(t, "failed", job.Status)
 }
 
 func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {

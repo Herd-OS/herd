@@ -585,7 +585,7 @@ func (s *MemoryStore) ListReconcileCommands(_ context.Context, createdBefore tim
 		if limit > 0 && len(out) >= limit {
 			break
 		}
-		if command.Status != "acknowledged" && command.Status != "retry_needed" {
+		if command.Status != "queued" && command.Status != "acknowledged" && command.Status != "retry_needed" {
 			continue
 		}
 		if !command.CreatedAt.IsZero() && !command.CreatedAt.Before(createdBefore) {

@@ -217,6 +217,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	acceptedWorkerKey, err := h.acquireWorkerResultAcceptance(r.Context(), result, job, idempotencyKey)
+	if err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
 	var applyMetadata map[string]any
 	patchReplayed, replayMetadata, replayErr := h.replayCompletedWorkerPatch(r.Context(), result, job)
 	if replayErr != nil {
@@ -314,6 +320,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if acceptedWorkerKey != "" {
+		if err := h.store.CompleteIdempotencyKey(r.Context(), acceptedWorkerKey, idempotencyKey); err != nil {
+			_ = h.store.FailIdempotencyKey(r.Context(), acceptedWorkerKey, err.Error())
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete worker result acceptance"})
+			return
+		}
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":          "accepted",
 		"created":         created,
@@ -321,6 +334,44 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"kind":            envelope.Kind,
 		"idempotency_key": idempotencyKey,
 	})
+}
+
+func (h Handler) acquireWorkerResultAcceptance(ctx context.Context, result Result, job store.Job, resultKey string) (string, error) {
+	worker, ok := result.(WorkerCompletedResult)
+	if !ok || worker.Status != StatusSuccess {
+		return "", nil
+	}
+	// Worker success is accepted once per durable job/head/branch boundary.
+	// Payload-specific callback keys still replay exact redeliveries, but a
+	// changed artifact name must not create a second GitHub-visible patch push.
+	key := workerResultAcceptanceKey(job)
+	created, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "worker_result_acceptance",
+		Status:    mutationspkg.PhaseIntentRecorded,
+		ResultRef: resultKey,
+		CreatedAt: h.now(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("acquire worker result acceptance: %w", err)
+	}
+	if created {
+		return key, nil
+	}
+	record, err := h.store.GetIdempotencyKey(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("get worker result acceptance: %w", err)
+	}
+	if record.ResultRef == resultKey {
+		return "", nil
+	}
+	if record.Status == mutationspkg.PhaseCompleted || record.Status == "completed" {
+		return "", fmt.Errorf("conflicting worker result already accepted for job %q", job.JobID)
+	}
+	if mutationspkg.IsPostCallUnknown(record.Status) {
+		return "", fmt.Errorf("worker result acceptance for job %q is pending repair", job.JobID)
+	}
+	return "", fmt.Errorf("conflicting worker result is already pending for job %q", job.JobID)
 }
 
 func (h Handler) acquireReviewResultAcceptance(ctx context.Context, result Result, job store.Job, resultKey string) (string, error) {
@@ -410,11 +461,12 @@ func (h Handler) serveReadToken(w http.ResponseWriter, r *http.Request, jobID st
 		return
 	}
 	read := "read"
-	if job.RepositoryID == 0 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "job repository ID is missing"})
+	githubRepositoryID := hostedReviewGitHubRepositoryID(job)
+	if githubRepositoryID == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job GitHub repository ID is missing"})
 		return
 	}
-	minted, err := source.InstallationTokenWithPermissions(r.Context(), job.InstallationID, []int64{job.RepositoryID}, gh.InstallationPermissions{
+	minted, err := source.InstallationTokenWithPermissions(r.Context(), job.InstallationID, []int64{githubRepositoryID}, gh.InstallationPermissions{
 		Actions:      &read,
 		Checks:       &read,
 		Contents:     &read,
@@ -447,6 +499,25 @@ func validateHostedReviewReadTokenJob(job store.Job) error {
 		return fmt.Errorf("job is not from the hosted review workflow")
 	}
 	return nil
+}
+
+func hostedReviewGitHubRepositoryID(job store.Job) int64 {
+	metadata := metadataMap(job.Metadata)
+	for _, key := range []string{"github_repository_id", "github_repo_id", "repository_github_id"} {
+		switch v := metadata[key].(type) {
+		case float64:
+			return int64(v)
+		case int64:
+			return v
+		case json.Number:
+			id, _ := v.Int64()
+			return id
+		case string:
+			id, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			return id
+		}
+	}
+	return 0
 }
 
 func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, resultKey string) (bool, error) {
@@ -569,6 +640,18 @@ func reviewResultAcceptanceKey(job store.Job) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return "review_result_acceptance:" + hex.EncodeToString(sum[:])
+}
+
+func workerResultAcceptanceKey(job store.Job) string {
+	parts := []string{
+		job.JobID,
+		fmt.Sprint(job.RepositoryID),
+		job.WorkerBranch,
+		job.BaseSHA,
+		job.HeadSHA,
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "worker_result_acceptance:" + hex.EncodeToString(sum[:])
 }
 
 func reviewRepositoryFromJob(job store.Job, fullName string) review.Repository {
@@ -874,7 +957,6 @@ func PatchApplyIdempotencyKey(worker WorkerCompletedResult, job store.Job) strin
 		worker.Repository,
 		worker.JobID,
 		worker.TargetBranch,
-		worker.PatchArtifact,
 		job.BaseSHA,
 		job.HeadSHA,
 	}

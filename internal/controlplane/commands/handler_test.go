@@ -64,8 +64,8 @@ func TestEnqueueIssueCommentCommand(t *testing.T) {
 		wantStatus string
 		wantErr    string
 	}{
-		{name: "valid command", event: validComment("OWNER", "@herd-os review"), wantCount: 1, wantKey: "review", wantStatus: StatusAcknowledged},
-		{name: "legacy migration command", event: validComment("OWNER", "/herd review"), wantCount: 1, wantKey: "migration", wantStatus: StatusAcknowledged},
+		{name: "valid command", event: validComment("OWNER", "@herd-os review"), wantCount: 1, wantKey: "review", wantStatus: StatusQueued},
+		{name: "legacy migration command", event: validComment("OWNER", "/herd review"), wantCount: 1, wantKey: "migration", wantStatus: StatusQueued},
 		{name: "unauthorized ignored", event: validComment("CONTRIBUTOR", "@herd-os review")},
 		{name: "non command ignored", event: validComment("OWNER", "hello")},
 		{name: "bot ignored", event: func() IssueComment {
@@ -74,7 +74,7 @@ func TestEnqueueIssueCommentCommand(t *testing.T) {
 			return e
 		}()},
 		{name: "unknown mention command ignored durably", event: validComment("OWNER", "@herd-os nope"), wantCount: 1, wantKey: "unknown", wantStatus: StatusIgnored},
-		{name: "edited command accepted", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "edited"; return e }(), wantCount: 1, wantKey: "fix", wantStatus: StatusAcknowledged},
+		{name: "edited command accepted", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "edited"; return e }(), wantCount: 1, wantKey: "fix", wantStatus: StatusQueued},
 		{name: "deleted command ignored", event: func() IssueComment { e := validComment("OWNER", "@herd-os fix"); e.Action = "deleted"; return e }()},
 	}
 

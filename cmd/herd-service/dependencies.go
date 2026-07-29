@@ -128,11 +128,13 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		}
 	}
 	if opts.WorkflowEventProcessor == nil {
+		workflowCfg := *config.Default()
+		workflowCfg.ControlPlaneURL = cfg.PublicURL
 		opts.WorkflowEventProcessor = productionWorkflowEventProcessor{
 			Store:             st,
 			TokenSource:       tokenSource,
 			Dispatcher:        workflowDispatcher,
-			Config:            config.Config{ControlPlaneURL: cfg.PublicURL},
+			Config:            workflowCfg,
 			ControlPlaneURL:   cfg.PublicURL,
 			DefaultRunner:     config.Default().Workers.RunnerLabel,
 			DefaultTimeoutMin: config.Default().Workers.TimeoutMinutes,
@@ -201,7 +203,7 @@ type productionWorkflowEventProcessor struct {
 
 func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Context, repo store.Repository, event workflowevents.Event) error {
 	if event.Kind == workflowevents.KindMonitorEvent && event.Action == "patrol" {
-		return nil
+		return p.runMonitorPatrol(ctx)
 	}
 	if event.Kind != workflowevents.KindIntegratorEvent {
 		return fmt.Errorf("unsupported production workflow event kind %q", event.Kind)
@@ -240,8 +242,23 @@ func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Conte
 	}
 }
 
+func (p productionWorkflowEventProcessor) runMonitorPatrol(ctx context.Context) error {
+	reconcileStore, ok := any(p.Store).(reconciler.Store)
+	if !ok || reconcileStore == nil {
+		return fmt.Errorf("production monitor patrol requires durable reconciler store")
+	}
+	_, err := (&reconciler.Reconciler{Store: reconcileStore}).RunOnce(ctx)
+	return err
+}
+
 func (p productionWorkflowEventProcessor) workflowConfig() *config.Config {
 	cfg := p.Config
+	if cfg.Integrator.Strategy == "" {
+		cfg.Integrator = config.Default().Integrator
+	}
+	if cfg.Monitor.PatrolIntervalMinutes == 0 {
+		cfg.Monitor = config.Default().Monitor
+	}
 	if cfg.ControlPlaneURL == "" {
 		cfg.ControlPlaneURL = p.ControlPlaneURL
 	}

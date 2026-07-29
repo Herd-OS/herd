@@ -287,7 +287,7 @@ func TestHandlerIssueCommentQueuesCommandWithoutInlineExecution(t *testing.T) {
 	assert.Equal(t, int64(123), command.CommentID)
 	assert.Equal(t, "review", command.CommandKey)
 	assert.Equal(t, "review", command.CommandName)
-	assert.Equal(t, commands.StatusAcknowledged, command.Status)
+	assert.Equal(t, commands.StatusQueued, command.Status)
 	assert.Equal(t, "mona", command.Actor)
 }
 

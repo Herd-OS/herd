@@ -167,6 +167,7 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		}
 		dispatchReq := cpdispatch.DispatchRequest{
 			RepoID:          s.Repo.ID,
+			GitHubRepoID:    s.Repo.GitHubID,
 			Owner:           s.Repo.Owner,
 			Repo:            s.Repo.Name,
 			InstallationID:  s.Repo.InstallationID,

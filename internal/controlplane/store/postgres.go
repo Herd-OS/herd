@@ -748,7 +748,7 @@ func (s *PostgresStore) ListReconcileCommands(ctx context.Context, createdBefore
 		FROM command_records c
 		JOIN repositories r ON r.id = c.repository_id
 		LEFT JOIN idempotency_keys ik ON ik.key = ('repo:' || c.repository_id || ':comment:' || c.comment_id || ':command:' || c.command_key)
-		WHERE c.status IN ('acknowledged', 'retry_needed') AND c.created_at < $1
+		WHERE c.status IN ('queued', 'acknowledged', 'retry_needed') AND c.created_at < $1
 		ORDER BY c.created_at ASC
 		LIMIT $2`, createdBefore, limit)
 	if err != nil {
