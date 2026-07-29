@@ -239,7 +239,7 @@ type recoveredWorkflowDispatch struct {
 func (s Service) recoverWorkflowDispatchIntent(ctx context.Context, req cpdispatch.DispatchRequest) (recoveredWorkflowDispatch, bool) {
 	if record, ok := s.workflowDispatchIntentRecord(ctx, req); ok {
 		status := mutations.Normalize(record.Status)
-		if status == mutations.PhaseCallStarted || status == mutations.PhaseCompleted {
+		if status == mutations.PhaseCompleted {
 			return recoveredWorkflowDispatchFromRecord(req, record)
 		}
 	}
@@ -274,7 +274,7 @@ func (s Service) recoverWorkflowDispatchIntent(ctx context.Context, req cpdispat
 			(metadata.HeadSHA == req.HeadSHA || mutations.IsCompleted(record.Status)) &&
 			strings.TrimSpace(metadata.HeadSHA) != "" {
 			status := mutations.Normalize(record.Status)
-			if status != mutations.PhaseCallStarted && status != mutations.PhaseCompleted {
+			if status != mutations.PhaseCompleted {
 				continue
 			}
 			candidates = append(candidates, record)

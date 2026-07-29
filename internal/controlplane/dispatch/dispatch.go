@@ -639,10 +639,11 @@ func IdempotencyKey(req DispatchRequest) string {
 		"job", string(req.Kind),
 		"batch", strconv.Itoa(req.BatchNumber),
 		"target", strconv.Itoa(issueOrPR),
-		"head", req.HeadSHA,
 	}
 	if req.ManualDispatchKey != "" {
 		parts = append(parts, "manual", req.ManualDispatchKey)
+	} else {
+		parts = append(parts, "head", req.HeadSHA)
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, ":")))
 	return "workflow_dispatch:" + hex.EncodeToString(sum[:])

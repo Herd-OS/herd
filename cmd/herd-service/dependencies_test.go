@@ -609,6 +609,44 @@ func TestProductionDispatchCommandRedeliveryAfterInProgressLabelDispatchesOnce(t
 	assert.NotContains(t, p.issues.byNumber[42].Labels, issues.StatusFailed)
 }
 
+func TestProductionDispatchCommandRedeliveryAfterResultCommentFailureAndHeadAdvanceDispatchesOnce(t *testing.T) {
+	p := newFakeCommandPlatform([]*platform.PullRequest{})
+	p.issues.byNumber[42] = &platform.Issue{
+		Number:    42,
+		Title:     "Do work",
+		Labels:    []string{issues.StatusReady},
+		Milestone: &platform.Milestone{Number: 7, Title: "Command Surface"},
+	}
+	p.issues.addCommentErrs = []error{assert.AnError, nil}
+	p.repo.branchSHAs["herd/batch/7-command-surface"] = "batch-sha-a"
+	workflow := &recordingWorkflowClient{}
+	st := store.NewMemoryStore()
+	d := productionCommandDispatcher{
+		Dispatcher:      cpdispatch.Dispatcher{Store: st, GitHub: workflow},
+		ControlPlaneURL: "https://control.example.test",
+		DefaultRunner:   "herd-worker",
+		TimeoutMinutes:  30,
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) {
+			return p, nil
+		},
+	}
+	cmd := resolveConflictsCommand()
+	cmd.IssueNumber = 7
+	cmd.PRNumber = 7
+	cmd.Command = commands.ParsedCommand{Kind: commands.CommandDispatch, Args: []string{"42"}}
+
+	firstErr := d.DispatchCommand(context.Background(), cmd)
+	p.repo.branchSHAs["herd/batch/7-command-surface"] = "batch-sha-b"
+	secondErr := d.DispatchCommand(context.Background(), cmd)
+
+	require.Error(t, firstErr)
+	require.NoError(t, secondErr)
+	require.Len(t, workflow.dispatches, 1)
+	assert.Equal(t, "42", workflow.dispatches[0].inputs["issue_number"])
+	assert.Contains(t, p.issues.byNumber[42].Labels, issues.StatusInProgress)
+	assert.Contains(t, strings.Join(p.issues.comments[7], "\n"), "Dispatched worker for issue #42")
+}
+
 func TestProductionDispatchCommandRedeliveryAfterIntentAndInProgressLabelDispatchesOnce(t *testing.T) {
 	p := newFakeCommandPlatform([]*platform.PullRequest{})
 	p.issues.byNumber[42] = &platform.Issue{
@@ -720,8 +758,7 @@ func TestProductionDispatchCommandResultCommentRedeliveryDoesNotDuplicateAfterUn
 	secondErr := d.DispatchCommand(context.Background(), cmd)
 
 	require.Error(t, firstErr)
-	require.Error(t, secondErr)
-	assert.Contains(t, secondErr.Error(), "repair required")
+	require.NoError(t, secondErr)
 	assert.Len(t, p.issues.comments[7], 1)
 }
 
@@ -1349,8 +1386,14 @@ func (s *fakeCommandIssueService) Update(context.Context, int, platform.IssueUpd
 }
 func (s *fakeCommandIssueService) UpdateComment(context.Context, int64, string) error { return nil }
 func (s *fakeCommandIssueService) DeleteComment(context.Context, int64) error         { return nil }
-func (s *fakeCommandIssueService) ListComments(context.Context, int) ([]*platform.Comment, error) {
-	return nil, nil
+func (s *fakeCommandIssueService) ListComments(_ context.Context, number int) ([]*platform.Comment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*platform.Comment
+	for _, body := range s.comments[number] {
+		out = append(out, &platform.Comment{Body: body})
+	}
+	return out, nil
 }
 func (s *fakeCommandIssueService) CreateCommentReaction(context.Context, int64, string) error {
 	return nil

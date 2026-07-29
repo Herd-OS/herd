@@ -180,6 +180,26 @@ func TestRecoverWorkflowDispatchIntentChoosesLatestCompletedMatchingDispatch(t *
 	assert.Equal(t, "new-head", recovered.Request.ExpectedHeadSHA)
 }
 
+func TestRecoverWorkflowDispatchIntentDoesNotRecoverCallStartedWithoutProof(t *testing.T) {
+	st := newFakeStore()
+	svc := newTestService(newFakePlatform(), st, &fakeDispatcher{})
+	req := cpdispatch.DispatchRequest{
+		RepoID:       svc.Repo.ID,
+		Kind:         cpdispatch.JobKindWorker,
+		WorkflowFile: "herd-worker.yml",
+		Ref:          "main",
+		BatchNumber:  7,
+		IssueNumber:  1,
+		BatchBranch:  "herd/batch/7-demo",
+		HeadSHA:      "current-head",
+	}
+	st.keys["started"] = store.IdempotencyKey{Key: "started", Scope: "workflow_dispatch", Status: "call_started", Metadata: workflowDispatchMetadata(t, req), CreatedAt: fixedClock()}
+
+	_, ok := svc.recoverWorkflowDispatchIntent(context.Background(), req)
+
+	assert.False(t, ok)
+}
+
 func TestRecoverWorkflowDispatchIntentRefusesAmbiguousDispatches(t *testing.T) {
 	st := newFakeStore()
 	svc := newTestService(newFakePlatform(), st, &fakeDispatcher{})
@@ -203,6 +223,45 @@ func TestRecoverWorkflowDispatchIntentRefusesAmbiguousDispatches(t *testing.T) {
 	_, ok := svc.recoverWorkflowDispatchIntent(context.Background(), req)
 
 	assert.False(t, ok)
+}
+
+func TestDispatchReadyWorkersCallStartedDispatchDoesNotMarkInProgressOrRedispatch(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branches["herd/batch/7-demo"] = "batch-head"
+	disp := &fakeDispatcher{err: errors.New("workflow dispatch \"started\" is already in progress")}
+	st := newFakeStore()
+	svc := newTestService(fake, st, disp)
+	req := DispatchReadyWorkersRequest{
+		BatchNumber: 7,
+		BatchBranch: "herd/batch/7-demo",
+		TierIssues:  []int{1},
+		AllIssues: []*platform.Issue{{
+			Number: 1,
+			Title:  "Task",
+			Labels: []string{issues.StatusReady},
+			Body:   "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n",
+		}},
+	}
+	dispatchReq := cpdispatch.DispatchRequest{
+		RepoID:       svc.Repo.ID,
+		Kind:         cpdispatch.JobKindWorker,
+		WorkflowFile: "herd-worker.yml",
+		Ref:          "main",
+		BatchNumber:  7,
+		IssueNumber:  1,
+		BatchBranch:  "herd/batch/7-demo",
+		HeadSHA:      "batch-head",
+	}
+	st.keys[cpdispatch.IdempotencyKey(dispatchReq)] = store.IdempotencyKey{Key: cpdispatch.IdempotencyKey(dispatchReq), Scope: "workflow_dispatch", Status: "call_started", Metadata: workflowDispatchMetadata(t, dispatchReq), CreatedAt: fixedClock()}
+
+	count, err := svc.DispatchReadyWorkers(ctx, req)
+
+	require.Error(t, err)
+	assert.Equal(t, 0, count)
+	assert.Len(t, disp.requests, 1)
+	assert.Empty(t, fake.issues.removed[1])
+	assert.Empty(t, fake.issues.added[1])
 }
 
 func TestDispatchReadyWorkers_SuppressesDuplicateWhenHeadAdvancesAfterDispatchBeforeStatusTransition(t *testing.T) {

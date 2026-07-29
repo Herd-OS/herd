@@ -101,6 +101,19 @@ func TestIdempotencyKeySeparatesManualReviewCommands(t *testing.T) {
 	assert.NotEqual(t, IdempotencyKey(first), IdempotencyKey(second))
 }
 
+func TestIdempotencyKeyKeepsManualCommandReplayStableAcrossHeadChanges(t *testing.T) {
+	first := validRequest()
+	first.Kind = JobKindWorker
+	first.BatchNumber = 7
+	first.IssueNumber = 42
+	first.HeadSHA = "head-a"
+	first.ManualDispatchKey = "comment:123:command:dispatch:issue:42"
+	second := first
+	second.HeadSHA = "head-b"
+
+	assert.Equal(t, IdempotencyKey(first), IdempotencyKey(second))
+}
+
 func TestDispatcherDuplicateDispatchIsIdempotent(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeWorkflowClient{}

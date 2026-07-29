@@ -99,6 +99,31 @@ func TestSubmitReviewResultStaleApprovedCallbackDoesNotMutateNewerHeadStatus(t *
 	assert.Contains(t, locks.locks, lockKey(repo.ID, 42, "new-head"))
 }
 
+func TestPreparedSubmitReviewResultRevalidatesHeadImmediatelyBeforeMutation(t *testing.T) {
+	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "old-head", URL: "https://github.test/pr/42"}}
+	statusGH := &fakeStatusGitHub{}
+	locks := newFakeLockStore()
+	repo := testRepo(true)
+	locks.locks[lockKey(repo.ID, 42, "old-head")] = store.ReviewLock{
+		RepositoryID: repo.ID,
+		PRNumber:     42,
+		HeadSHA:      "old-head",
+		Holder:       reviewLockHolder(repo.ID, 42, "old-head"),
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Locks: locks, Mutations: newFakeReviewMutationStore()}
+
+	submission, err := svc.PrepareSubmitReviewResult(context.Background(), repo, reviewResult(ResultStatusApproved, "old-head"))
+	require.NoError(t, err)
+	gh.pr = &platform.PullRequest{Number: 42, HeadSHA: "new-head", URL: "https://github.test/pr/42"}
+	err = submission.Submit(context.Background())
+
+	require.NoError(t, err)
+	assert.Empty(t, gh.reviews)
+	assert.Empty(t, statusGH.statuses)
+	assert.NotContains(t, locks.locks, lockKey(repo.ID, 42, "old-head"))
+}
+
 func TestSubmitReviewResultDisabledReviewDoesNothing(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head"}}
 	statusGH := &fakeStatusGitHub{}

@@ -292,11 +292,8 @@ func (h RegistrationTokenHandler) acquireOrReplay(w http.ResponseWriter, ctx con
 		if strings.HasPrefix(record.ResultRef, mutationspkg.PhaseFailedPreCall) {
 			return RegistrationTokenResponse{}, false, true
 		}
-		if strings.HasPrefix(record.ResultRef, mutationspkg.PhaseCallStarted) || strings.HasPrefix(record.ResultRef, mutationspkg.PhaseRepairRequired) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
-			return RegistrationTokenResponse{}, false, false
-		}
-		return RegistrationTokenResponse{}, false, true
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "runner registration request outcome is unknown; retry with a new nonce after the current request expires or reconciliation completes"})
+		return RegistrationTokenResponse{}, false, false
 	}
 	if record.Status == idempotencyStatusStarted && strings.TrimSpace(record.ResultRef) == "" {
 		return RegistrationTokenResponse{}, false, true

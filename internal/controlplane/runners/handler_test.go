@@ -364,6 +364,31 @@ func TestRegistrationTokenHandlerRetriesAfterPreCallMinterFailure(t *testing.T) 
 	require.NotNil(t, st.tokens[token.ID].UsedAt)
 }
 
+func TestRegistrationTokenHandlerDoesNotRetryGenericLegacyFailedRecord(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st, plain, token := newHandlerTestStore(t, now)
+	minter := &fakeMinter{response: RegistrationTokenResponse{Token: "github-runner-token", ExpiresAt: now.Add(time.Hour)}}
+	handler := NewRegistrationTokenHandler(HandlerOptions{Store: st, Minter: minter, Now: func() time.Time { return now }})
+	req := RegistrationTokenRequest{Owner: "octo", Name: "repo", RunnerName: "runner-1", BootstrapToken: plain, RequestNonce: "nonce-legacy-failed"}
+	key := registrationIDKey(st.repository.ID, token.ID, req.RequestNonce)
+	metadata, err := runnerRequestMetadata(st.repository.ID, req, token)
+	require.NoError(t, err)
+	st.idempotency[key] = store.IdempotencyKey{
+		Key:       key,
+		Scope:     idempotencyScope,
+		Status:    mutationspkg.LegacyFailed,
+		ResultRef: "github timeout after request",
+		Metadata:  metadata,
+		CreatedAt: now,
+	}
+
+	rec := serveRegistrationRequest(t, handler, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, 0, minter.calls)
+	assert.Nil(t, st.tokens[token.ID].UsedAt)
+}
+
 func TestRegistrationTokenHandlerMintsWhenFirstCallStartedTransitionFails(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st, plain, token := newHandlerTestStore(t, now)

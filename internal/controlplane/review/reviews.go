@@ -227,12 +227,12 @@ func (s ReviewService) PrepareSubmitReviewResult(ctx context.Context, repo Repos
 	if err := validateReviewResult(result); err != nil {
 		return nil, err
 	}
-	current, err := s.GitHub.GetPullRequest(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber)
-	if err != nil {
-		return nil, fmt.Errorf("get pull request head before Herd Review submission: %w", err)
-	}
 	return preparedReviewResultSubmissionFunc(func(ctx context.Context) error {
 		defer s.releaseReviewLock(ctx, repo, result.PRNumber, result.HeadSHA)
+		current, err := s.GitHub.GetPullRequest(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber)
+		if err != nil {
+			return fmt.Errorf("get pull request head immediately before Herd Review submission: %w", err)
+		}
 		if current.HeadSHA != "" && current.HeadSHA != result.HeadSHA {
 			return nil
 		}

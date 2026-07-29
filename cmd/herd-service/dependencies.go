@@ -853,24 +853,25 @@ func (d productionCommandDispatcher) dispatchIssueCommand(ctx context.Context, c
 		return fmt.Errorf("getting %s SHA: %w", batchBranch, err)
 	}
 	dispatchReq := cpdispatch.DispatchRequest{
-		RepoID:          cmd.RepositoryID,
-		Owner:           cmd.Owner,
-		Repo:            cmd.Repo,
-		InstallationID:  cmd.InstallationID,
-		Kind:            cpdispatch.JobKindWorker,
-		WorkflowFile:    "herd-worker.yml",
-		Ref:             defaultBranch,
-		BatchNumber:     issue.Milestone.Number,
-		IssueNumber:     issueNumber,
-		PRNumber:        cmd.PRNumber,
-		BatchBranch:     batchBranch,
-		BaseSHA:         headSHA,
-		HeadSHA:         headSHA,
-		ExpectedHeadSHA: headSHA,
-		RunnerLabel:     d.DefaultRunner,
-		TimeoutMinutes:  d.TimeoutMinutes,
-		ControlPlaneURL: d.ControlPlaneURL,
-		Reason:          fmt.Sprintf("@herd-os dispatch comment %d by %s", cmd.CommentID, cmd.Actor),
+		RepoID:            cmd.RepositoryID,
+		Owner:             cmd.Owner,
+		Repo:              cmd.Repo,
+		InstallationID:    cmd.InstallationID,
+		Kind:              cpdispatch.JobKindWorker,
+		WorkflowFile:      "herd-worker.yml",
+		Ref:               defaultBranch,
+		BatchNumber:       issue.Milestone.Number,
+		IssueNumber:       issueNumber,
+		PRNumber:          cmd.PRNumber,
+		BatchBranch:       batchBranch,
+		BaseSHA:           headSHA,
+		HeadSHA:           headSHA,
+		ExpectedHeadSHA:   headSHA,
+		RunnerLabel:       d.DefaultRunner,
+		TimeoutMinutes:    d.TimeoutMinutes,
+		ControlPlaneURL:   d.ControlPlaneURL,
+		Reason:            fmt.Sprintf("@herd-os dispatch comment %d by %s", cmd.CommentID, cmd.Actor),
+		ManualDispatchKey: dispatchIssueManualDispatchKey(cmd, issueNumber),
 	}
 	if err := d.Dispatcher.RecordIntent(ctx, dispatchReq); err != nil {
 		return fmt.Errorf("recording issue #%d worker dispatch intent: %w", issueNumber, err)
@@ -974,10 +975,16 @@ func (d productionCommandDispatcher) addIssueCommandResult(ctx context.Context, 
 			return "issue_comment:unknown:" + purpose, nil
 		}
 		return fmt.Sprintf("issue_comment:%d", commentID), nil
+	}, func() (string, bool, error) {
+		found, err := issueHasCommentBody(ctx, p.Issues(), issueNumber, body)
+		if err != nil || !found {
+			return "", found, err
+		}
+		return "issue_comment:repaired:" + purpose, true, nil
 	})
 }
 
-func (d productionCommandDispatcher) commandResultCommentMutation(ctx context.Context, cmd commands.DispatchCommand, targetKind string, targetNumber int, purpose string, body string, fn func() (string, error)) error {
+func (d productionCommandDispatcher) commandResultCommentMutation(ctx context.Context, cmd commands.DispatchCommand, targetKind string, targetNumber int, purpose string, body string, fn func() (string, error), repair ...func() (string, bool, error)) error {
 	if d.Dispatcher.Store == nil {
 		return fmt.Errorf("durable dispatcher store is required")
 	}
@@ -1015,9 +1022,28 @@ func (d productionCommandDispatcher) commandResultCommentMutation(ctx context.Co
 		MutationType: "command_result_comment",
 		Request:      request,
 		Mutate:       fn,
-		Now:          time.Now,
+		Repair: func() (string, bool, error) {
+			if len(repair) == 0 || repair[0] == nil {
+				return "", false, nil
+			}
+			return repair[0]()
+		},
+		Now: time.Now,
 	})
 	return err
+}
+
+func issueHasCommentBody(ctx context.Context, issues platform.IssueService, issueNumber int, body string) (bool, error) {
+	comments, err := issues.ListComments(ctx, issueNumber)
+	if err != nil {
+		return false, fmt.Errorf("list issue comments for command result repair: %w", err)
+	}
+	for _, comment := range comments {
+		if comment != nil && strings.TrimSpace(comment.Body) == strings.TrimSpace(body) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func latestPRWithKnownMergeabilityFrom(ctx context.Context, prs platform.PullRequestService, prNumber int, initial *platform.PullRequest) (*platform.PullRequest, bool, error) {
@@ -1491,6 +1517,10 @@ func commandFixIssueKey(cmd commands.DispatchCommand) string {
 
 func dispatchIssueLabelKey(cmd commands.DispatchCommand, issueNumber int, label string, action string, reason string) string {
 	return commandStableKey("dispatch-issue-label", cmd.RepositoryID, cmd.CommentID, string(cmd.Command.Kind), issueNumber, label, action, reason)
+}
+
+func dispatchIssueManualDispatchKey(cmd commands.DispatchCommand, issueNumber int) string {
+	return fmt.Sprintf("%s:issue:%d", commandManualDispatchKey(cmd), issueNumber)
 }
 
 func commandStableKey(parts ...any) string {
