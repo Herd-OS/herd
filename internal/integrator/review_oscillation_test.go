@@ -107,6 +107,21 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 			}
 			return c
 		}, minCycles: 3, enabled: true},
+		{name: "alternating unrelated behaviors in one package", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			values := [][]string{
+				{"internal/integrator/review.go: ownership boundary publishes an external side effect before authority is recorded"},
+				{"internal/integrator/review.go: lifecycle transition races synchronization during cleanup"},
+				{"internal/integrator/review.go: ownership boundary publishes an external side effect before authority is recorded"},
+				{
+					"internal/integrator/review.go: lifecycle transition races synchronization during cleanup",
+					"internal/worker/run.go: retry fixture detail remains stale",
+				},
+			}
+			for i := range c {
+				c[i].FindingsBySeverity["MEDIUM"] = values[i]
+			}
+			return c
+		}, minCycles: 3, enabled: true},
 		{name: "subsystem and architecture split across findings", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			for i := range c {
 				c[i].FindingsBySeverity["MEDIUM"] = []string{
@@ -131,6 +146,28 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 				assert.True(t, got.CompletedFixChainConfirmed)
 				assert.Len(t, got.EvidenceCycles, 3)
 			}
+		})
+	}
+}
+
+func TestAnalyzeLowVolumeReviewOscillation_AlternatingBehavioralClusters(t *testing.T) {
+	tests := []struct {
+		name             string
+		findingsPerCycle int
+	}{
+		{name: "two findings per review", findingsPerCycle: 2},
+		{name: "three findings per review", findingsPerCycle: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			eligibility := analyzeLowVolumeReviewOscillation(alternatingLowVolumeOscillationCycles(test.findingsPerCycle), 3, true)
+
+			require.True(t, eligibility.Eligible)
+			assert.Equal(t, []string{"internal/integrator"}, eligibility.RecurringSubsystems)
+			assert.Subset(t, eligibility.RecurringArchitecturalTerms, []string{"durability-recovery", "ownership-boundary", "side-effect-publication"})
+			assert.Equal(t, []int{1, 2, 3}, reviewHistoryCycleNumbers(eligibility.EvidenceCycles))
+			assert.True(t, eligibility.DistinctHeadSHAsConfirmed)
+			assert.True(t, eligibility.CompletedFixChainConfirmed)
 		})
 	}
 }
@@ -295,6 +332,36 @@ func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 	}
 }
 
+func TestValidateReviewRequirementReinterpretation_AcceptsTraceableSafetyVocabulary(t *testing.T) {
+	tests := []struct {
+		name     string
+		property string
+	}{
+		{name: "revoked grants", property: "revoked grants cannot be used"},
+		{name: "deletion non resurrection", property: "deleted records never reappear after recovery"},
+		{name: "stale authorization", property: "stale authorization is rejected before access"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := validReviewSynthesisInput()
+			input.OriginalRequirements[0].AcceptanceCriteria = []string{test.property}
+			result := lowVolumeSynthesisResult()
+			result.RequirementReinterpretation = validReviewReinterpretation()
+			result.RequirementReinterpretation.PreservedSafetyProperty = test.property
+			result.RequirementReinterpretation.CorrectedInvariant = "the corrected transition guarantees that " + test.property
+			result.AcceptanceCriteria = []string{
+				"The corrected transition enforces that " + test.property + ".",
+				"Recovery tests verify that " + test.property + ".",
+			}
+
+			ok, reason := validateReviewRequirementReinterpretation(result, input)
+
+			assert.True(t, ok, reason)
+			assert.Empty(t, reason)
+		})
+	}
+}
+
 func TestLowVolumeTitleBodyAndFingerprint(t *testing.T) {
 	result := lowVolumeSynthesisResult()
 	assert.Equal(t, "Review strategy fix: state machine publication invariant", buildLowVolumeSynthesizedStrategyFixIssueTitle(result))
@@ -359,6 +426,39 @@ func lowVolumeOscillationCycles() []reviewHistoryCycle {
 		cycles = append(cycles, cycle)
 	}
 	return cycles
+}
+
+func alternatingLowVolumeOscillationCycles(findingsPerCycle int) []reviewHistoryCycle {
+	aspects := []string{
+		"ownership boundary publishes an external side effect before authority is recorded",
+		"durable recovery repair loses the crash marker for the attempted transition",
+		"ownership boundary publishes an external side effect before authority is recorded",
+		"durable recovery repair loses the crash marker for the attempted transition",
+	}
+	var cycles []reviewHistoryCycle
+	for i, aspect := range aspects {
+		findings := []string{"internal/integrator/review.go: " + aspect}
+		for j := 1; j < findingsPerCycle; j++ {
+			findings = append(findings, "internal/worker/run.go: retry fixture detail "+string(rune('a'+i))+string(rune('a'+j)))
+		}
+		cycle := reviewHistoryCycle{
+			Cycle: i + 1, HeadSHA: "alternating-head-" + string(rune('a'+i)),
+			FindingsAfterDedupe: len(findings), FindingsBySeverity: map[string][]string{"MEDIUM": findings},
+		}
+		if i < len(aspects)-1 {
+			cycle.FixIssues = []reviewHistoryFixIssue{{Number: 200 + i, StatusLabel: issues.StatusDone}}
+		}
+		cycles = append(cycles, cycle)
+	}
+	return cycles
+}
+
+func reviewHistoryCycleNumbers(cycles []reviewHistoryCycle) []int {
+	out := make([]int, 0, len(cycles))
+	for _, cycle := range cycles {
+		out = append(out, cycle.Cycle)
+	}
+	return out
 }
 
 func cloneReviewHistoryCycles(in []reviewHistoryCycle) []reviewHistoryCycle {

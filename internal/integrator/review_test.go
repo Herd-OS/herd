@@ -7490,6 +7490,61 @@ func TestReview_NonConvergenceConcreteRepeatedClusterStillEscalates(t *testing.T
 	require.Len(t, fx.wf.dispatched, 1)
 }
 
+func TestReview_LowVolumeAlternatingOscillationCreatesOneStrategyFixAndDispatch(t *testing.T) {
+	currentFindings := []agent.ReviewFinding{
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/recovery.go: durable recovery repair loses the crash marker for the attempted transition"},
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/state.go: durable recovery can repeat after a crash because the attempt marker is missing"},
+	}
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	fx.setHistoryWithFindingsAndHeadSHAs(t,
+		[]int{2, 2, 2, 2, 2},
+		[]string{
+			"internal/controlplane/dispatch/ownership.go: ownership boundary publishes an external side effect before authority is recorded",
+			"internal/controlplane/dispatch/recovery.go: durable recovery repair loses the crash marker for the attempted transition",
+			"internal/controlplane/dispatch/ownership.go: ownership boundary publishes an external side effect before authority is recorded",
+			"internal/controlplane/dispatch/recovery.go: durable recovery repair loses the crash marker for the attempted transition",
+			"internal/controlplane/dispatch/ownership.go: ownership boundary publishes an external side effect before authority is recorded",
+		},
+		[]string{"review-head-34", "review-head-35", "review-head-36", "review-head-37", "review-head-38"},
+	)
+	fx.ag.synthesisResult = &agent.ReviewSynthesisResult{
+		ShouldEscalate:   true,
+		Confidence:       0.95,
+		RootCauseTitle:   "publication durability ordering gap",
+		RootCauseSummary: "Ownership publication and durable recovery alternate because the dispatch transition has no single commit boundary.",
+		RecurringSymptoms: []agent.ReviewSynthesisSymptom{
+			{
+				Description:   "Ownership publication precedes the durable state.",
+				Cycles:        []int{36, 37, 38},
+				AffectedFiles: []string{"internal/controlplane/dispatch/ownership.go"},
+			},
+			{
+				Description:   "Recovery repairs the missing publication state.",
+				Cycles:        []int{36, 37, 38},
+				AffectedFiles: []string{"internal/controlplane/dispatch/recovery.go"},
+			},
+		},
+		WhyIndividualFixesAreNotConverging: "Each fix moves the boundary between ownership publication and durable recovery.",
+		ProposedStrategy:                   "Define one durable ownership and publication transition with an explicit recovery boundary.",
+		AcceptanceCriteria: []string{
+			"Ownership publication occurs at one durable transition.",
+			"Recovery preserves the publication invariant after a crash.",
+		},
+	}
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, fx.ag.synthesisCalls)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Equal(t, "Review strategy fix: publication durability ordering gap", fx.createdIssues[0].title)
+	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	assert.Equal(t, []int{9601}, result.FixIssues)
+}
+
 func TestReview_NonConvergenceSynthesisDisabledPreservesDeterministicBehavior(t *testing.T) {
 	fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
 	fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false

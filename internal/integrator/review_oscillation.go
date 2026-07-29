@@ -123,7 +123,16 @@ func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompleted
 	out.RecurringSubsystems = sortedStringSet(subsystemSet)
 	out.RecurringArchitecturalTerms = sortedStringSet(termSet)
 	if len(out.RecurringSubsystems) == 0 {
-		return fail("no same-finding subsystem and architectural behavior cluster recurs in the latest review and three completed evidence cycles")
+		evidence, subsystem, terms, ok := reviewAlternatingBehavioralCluster(completed, latest)
+		if !ok {
+			return fail("no same-finding or alternating compatible architectural behavior cluster recurs in one subsystem across the latest review and three completed evidence cycles")
+		}
+		out.EvidenceCycles = evidence
+		out.RecurringSubsystems = []string{subsystem}
+		out.RecurringArchitecturalTerms = terms
+		out.Eligible = true
+		out.Rationale = "low-volume findings alternate between compatible architectural behaviors in one subsystem across distinct reviewed heads after a completed fix chain"
+		return out
 	}
 
 	for _, cycle := range completed {
@@ -197,17 +206,18 @@ func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResu
 	if len(concreteReviewBoundaries(value.DurabilityBoundaries)) == 0 {
 		return false, "requirement reinterpretation has no concrete durability boundary"
 	}
-	if !isClearlyPreservedSafetyProperty(value.PreservedSafetyProperty) {
-		return false, "requirement reinterpretation does not preserve a clear user-visible safety property"
-	}
 	originalEvidence := reviewOriginalRequirementEvidence(input.OriginalRequirements)
+	acceptanceCriteriaEvidence := reviewOriginalAcceptanceCriteriaEvidence(input.OriginalRequirements)
+	if !isClearlyPreservedSafetyProperty(value.PreservedSafetyProperty, acceptanceCriteriaEvidence) {
+		return false, "requirement reinterpretation does not preserve a clear user-visible safety property traceable to the original requirements"
+	}
 	if !reviewTextAlignsWithEvidence(value.ConflictingRequirement, originalEvidence) {
 		return false, "conflicting requirement is not traceable to an original requirement"
 	}
 	if !reviewTextAlignsWithEvidence(value.PreservedSafetyProperty, originalEvidence) {
 		return false, "preserved safety property is not traceable to an original requirement"
 	}
-	if !reviewSafetyPropertyAlignsAffirmatively(value.PreservedSafetyProperty, originalEvidence) {
+	if !reviewSafetyPropertyAlignsAffirmatively(value.PreservedSafetyProperty, acceptanceCriteriaEvidence) {
 		return false, "preserved safety property is not affirmatively aligned with an original user-visible safety property"
 	}
 	if !reviewTextAlignsWithEvidence(value.PlatformConsistencyConstraint, reviewPlatformConstraintEvidence(input)) {
@@ -356,11 +366,134 @@ func reviewFindingEvidenceClusters(findings []string) map[string]reviewFindingEv
 	return out
 }
 
+type reviewBehavioralConceptSet struct {
+	subsystem string
+	terms     []string
+}
+
+func reviewAlternatingBehavioralCluster(completed []reviewHistoryCycle, latest reviewHistoryCycle) ([]reviewHistoryCycle, string, []string, bool) {
+	if len(completed) < reviewOscillationMinEvidenceCycles {
+		return nil, "", nil, false
+	}
+	evidence := append([]reviewHistoryCycle(nil), completed[len(completed)-reviewOscillationMinEvidenceCycles:]...)
+	chain := append(append([]reviewHistoryCycle(nil), evidence...), latest)
+	setsByCycle := make([]map[string]reviewBehavioralConceptSet, len(chain))
+	for i, cycle := range chain {
+		setsByCycle[i] = reviewFindingBehavioralConceptSets(sanitizedDistinctReviewFindings(cycle))
+		if len(setsByCycle[i]) == 0 {
+			return nil, "", nil, false
+		}
+	}
+
+	for _, firstKey := range sortedReviewBehavioralConceptSetKeys(setsByCycle[0]) {
+		first := setsByCycle[0][firstKey]
+		for _, secondKey := range sortedReviewBehavioralConceptSetKeys(setsByCycle[1]) {
+			second := setsByCycle[1][secondKey]
+			if firstKey == secondKey || first.subsystem != second.subsystem || !reviewBehavioralConceptSetsCompatible(first.terms, second.terms) {
+				continue
+			}
+			matches := true
+			for i := 2; i < len(setsByCycle); i++ {
+				wanted := firstKey
+				if i%2 == 1 {
+					wanted = secondKey
+				}
+				if _, ok := setsByCycle[i][wanted]; !ok {
+					matches = false
+					break
+				}
+			}
+			if matches {
+				terms := sliceStringSet(first.terms)
+				for _, term := range second.terms {
+					terms[term] = struct{}{}
+				}
+				return evidence, first.subsystem, sortedStringSet(terms), true
+			}
+		}
+	}
+	return nil, "", nil, false
+}
+
+func sortedReviewBehavioralConceptSetKeys(values map[string]reviewBehavioralConceptSet) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func reviewFindingBehavioralConceptSets(findings []string) map[string]reviewBehavioralConceptSet {
+	out := map[string]reviewBehavioralConceptSet{}
+	for _, finding := range findings {
+		if !reviewFindingHasConcreteArchitecturalDescription(finding) {
+			continue
+		}
+		subsystems := reviewFindingSubsystemSet([]string{finding})
+		terms := sortedStringSet(reviewFindingArchitecturalTermSet([]string{finding}))
+		var conceptSets [][]string
+		for i := 0; i < len(terms)-1; i++ {
+			for j := i + 1; j < len(terms); j++ {
+				conceptSets = append(conceptSets, []string{terms[i], terms[j]})
+			}
+		}
+		if reviewFindingMatchesMultipleFamilyKeywords(finding, "durability-recovery") {
+			conceptSets = append(conceptSets, []string{"durability-recovery"})
+		}
+		for subsystem := range subsystems {
+			for _, conceptTerms := range conceptSets {
+				key := subsystem + "\x00" + strings.Join(conceptTerms, "\x00")
+				out[key] = reviewBehavioralConceptSet{subsystem: subsystem, terms: conceptTerms}
+			}
+		}
+	}
+	return out
+}
+
+func reviewFindingMatchesMultipleFamilyKeywords(finding, family string) bool {
+	normalized := " " + normalizeReviewSynthesisFingerprintText(finding) + " "
+	matches := 0
+	for _, keyword := range reviewArchitecturalConceptKeywords[family] {
+		if strings.Contains(normalized, " "+normalizeReviewSynthesisFingerprintText(keyword)+" ") {
+			matches++
+		}
+	}
+	return matches >= 2
+}
+
+func reviewBehavioralConceptSetsCompatible(left, right []string) bool {
+	leftSet := sliceStringSet(left)
+	rightSet := sliceStringSet(right)
+	union := sliceStringSet(left)
+	for _, term := range right {
+		union[term] = struct{}{}
+	}
+	for term := range union {
+		switch term {
+		case "consistency-linearization", "durability-recovery", "invariant", "lifecycle-state", "ownership-boundary", "side-effect-publication":
+		default:
+			return false
+		}
+	}
+	if stringSetIntersects(leftSet, rightSet) {
+		return true
+	}
+	_, ownership := union["ownership-boundary"]
+	_, publication := union["side-effect-publication"]
+	_, durability := union["durability-recovery"]
+	return ownership && publication && durability
+}
+
 func concreteReviewFindingArchitecturalTerms(finding string) map[string]struct{} {
 	terms := reviewFindingArchitecturalTermSet([]string{finding})
-	if len(terms) < 2 {
+	if len(terms) < 2 || !reviewFindingHasConcreteArchitecturalDescription(finding) {
 		return nil
 	}
+	return terms
+}
+
+func reviewFindingHasConcreteArchitecturalDescription(finding string) bool {
 	description := finding
 	for _, file := range reviewFilePathsFromText(finding) {
 		description = strings.ReplaceAll(description, file, " ")
@@ -384,10 +517,10 @@ func concreteReviewFindingArchitecturalTerms(finding string) map[string]struct{}
 		case "finding", "issue", "problem", "review":
 			continue
 		default:
-			return terms
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 func completedFixNumbers(cycles []reviewHistoryCycle) []int {
@@ -566,26 +699,31 @@ func canonicalReviewRequirementWords(value string) map[string]struct{} {
 	return out
 }
 
-func isClearlyPreservedSafetyProperty(value string) bool {
+func isClearlyPreservedSafetyProperty(value string, originalEvidence []string) bool {
 	normalized := normalizeReviewSynthesisFingerprintText(value)
-	if reviewSafetyTextIsWeakened(normalized) {
+	if reviewSafetyTextIsWeakened(normalized) || !isConcreteReviewReinterpretationText(value) ||
+		!reviewSafetyTextIsAffirmative(normalized) || !reviewTextAlignsWithEvidence(value, originalEvidence) {
 		return false
 	}
-	return len(reviewSafetyPhrases(normalized)) > 0
-}
-
-func reviewSafetyPhrases(value string) []string {
-	normalized := normalizeReviewSynthesisFingerprintText(value)
-	var matched []string
-	for _, term := range []string{
-		"exclusive ownership", "exactly once", "no duplicate", "without duplicate", "data loss", "without loss",
-		"never lose", "corrupt", "unauthorized", "user visible", "externally visible", "committed data",
-	} {
-		if strings.Contains(normalized, term) {
-			matched = append(matched, term)
+	for _, source := range originalEvidence {
+		if !reviewSafetyTextIsWeakened(source) && reviewRequirementsMateriallyOverlap(source, value) {
+			return true
 		}
 	}
-	return matched
+	return false
+}
+
+func reviewSafetyTextIsAffirmative(value string) bool {
+	normalized := normalizeReviewSynthesisFingerprintText(value)
+	for _, phrase := range []string{
+		" cannot ", " must ", " never ", " no ", " only ", " always ", " exactly once", " without ",
+		"prevent", "reject", "deny", "remain", "preserv", "protect", "retain", "surviv", "visible",
+	} {
+		if strings.Contains(" "+normalized+" ", phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func reviewSafetyTextIsWeakened(value string) bool {
@@ -594,7 +732,7 @@ func reviewSafetyTextIsWeakened(value string) bool {
 		"not guaranteed", "not required", "need not", "does not ensure", "do not ensure", "cannot ensure",
 		"may not", "might not", "can fail", "may fail", "might fail", "can be violated", "may be violated",
 		"best effort", "when possible", "where possible", "if possible", "to the extent possible",
-		"subject to", "not always", "does not", "do not", "is not", "are not", "will not",
+		"subject to", "not always",
 	} {
 		if strings.Contains(normalized, phrase) {
 			return true
@@ -610,7 +748,7 @@ func reviewSafetyTextIsWeakened(value string) bool {
 }
 
 func reviewSafetyPropertyAlignsAffirmatively(property string, evidence []string) bool {
-	if !isClearlyPreservedSafetyProperty(property) {
+	if !isClearlyPreservedSafetyProperty(property, evidence) {
 		return false
 	}
 	for _, source := range evidence {
@@ -628,6 +766,14 @@ func reviewOriginalRequirementEvidence(requirements []agent.ReviewSynthesisRequi
 	var out []string
 	for _, requirement := range requirements {
 		out = append(out, requirement.Title, requirement.Task, requirement.ImplementationDetails, requirement.Context)
+		out = append(out, requirement.AcceptanceCriteria...)
+	}
+	return trimBlankStrings(out)
+}
+
+func reviewOriginalAcceptanceCriteriaEvidence(requirements []agent.ReviewSynthesisRequirement) []string {
+	var out []string
+	for _, requirement := range requirements {
 		out = append(out, requirement.AcceptanceCriteria...)
 	}
 	return trimBlankStrings(out)
@@ -680,16 +826,6 @@ func reviewTextAlignsWithEvidence(value string, evidence []string) bool {
 func reviewRequirementsMateriallyOverlap(left, right string) bool {
 	if reviewSafetyTextIsWeakened(left) || reviewSafetyTextIsWeakened(right) {
 		return false
-	}
-	leftNormalized := normalizeReviewSynthesisFingerprintText(left)
-	rightPhrases := reviewSafetyPhrases(right)
-	if len(rightPhrases) > 0 {
-		for _, phrase := range rightPhrases {
-			if !strings.Contains(leftNormalized, phrase) {
-				return false
-			}
-		}
-		return true
 	}
 	leftWords := traceableReviewRequirementWords(left)
 	matches := 0
