@@ -66,8 +66,12 @@ func (s *GitHubTokenSource) InstallationToken(ctx context.Context, installationI
 	return s.installationToken(ctx, installationID, nil)
 }
 
-func (s *GitHubTokenSource) InstallationTokenWithPermissions(ctx context.Context, installationID int64, permissions github.InstallationPermissions) (InstallationToken, error) {
-	return s.installationToken(ctx, installationID, &github.InstallationTokenOptions{Permissions: &permissions})
+func (s *GitHubTokenSource) InstallationTokenWithPermissions(ctx context.Context, installationID int64, repositoryIDs []int64, permissions github.InstallationPermissions) (InstallationToken, error) {
+	opts := &github.InstallationTokenOptions{Permissions: &permissions}
+	if len(repositoryIDs) > 0 {
+		opts.RepositoryIDs = repositoryIDs
+	}
+	return s.installationToken(ctx, installationID, opts)
 }
 
 func (s *GitHubTokenSource) installationToken(ctx context.Context, installationID int64, opts *github.InstallationTokenOptions) (InstallationToken, error) {

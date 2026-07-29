@@ -116,6 +116,29 @@ func TestSubmitReviewResultFailureCommentRedactsSensitiveError(t *testing.T) {
 	assert.NotContains(t, gh.comments[0], "ghp_1234567890abcdef")
 }
 
+func TestSubmitReviewFailureCommentRepairsAfterAmbiguousPost(t *testing.T) {
+	gh := &fakeReviewGitHub{
+		pr:          &platform.PullRequest{Number: 42, HeadSHA: "head"},
+		commentErrs: []error{errors.New("timeout after creating comment")},
+	}
+	statusGH := &fakeStatusGitHub{}
+	mutations := newFakeReviewMutationStore()
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Mutations: mutations}
+	result := reviewResult(ResultStatusApproved, "head")
+
+	firstErr := svc.submitReviewFailureCommentOnce(context.Background(), testRepo(true), result, errors.New("secondary rate limit"))
+	secondErr := svc.submitReviewFailureCommentOnce(context.Background(), testRepo(true), result, errors.New("secondary rate limit"))
+
+	require.Error(t, firstErr)
+	require.NoError(t, secondErr)
+	require.Len(t, gh.comments, 1)
+	assert.Contains(t, gh.comments[0], "herd:review-submission-failure-comment")
+	key := reviewSubmissionFailureCommentKey(testRepo(true), result)
+	record, err := mutations.GetIdempotencyKey(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", record.Status)
+}
+
 func TestSubmitReviewResultRetryAfterStatusFailureDoesNotDuplicateReview(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{errs: []error{errors.New("status down"), nil}}
@@ -418,11 +441,12 @@ func TestSubmitReviewResultMaxFixCyclesSetsFailureWithoutDispatch(t *testing.T) 
 }
 
 type fakeReviewGitHub struct {
-	mu        sync.Mutex
-	pr        *platform.PullRequest
-	reviewErr error
-	reviews   []capturedReview
-	comments  []string
+	mu          sync.Mutex
+	pr          *platform.PullRequest
+	reviewErr   error
+	commentErrs []error
+	reviews     []capturedReview
+	comments    []string
 }
 
 type fakeReviewMutationStore struct {
@@ -650,8 +674,26 @@ func (g *fakeReviewGitHub) FindReviewForCommit(_ context.Context, _ int64, _, _ 
 }
 
 func (g *fakeReviewGitHub) AddPullRequestComment(_ context.Context, _ int64, _, _ string, _ int, body string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.comments = append(g.comments, body)
+	if len(g.commentErrs) > 0 {
+		err := g.commentErrs[0]
+		g.commentErrs = g.commentErrs[1:]
+		return err
+	}
 	return nil
+}
+
+func (g *fakeReviewGitHub) FindPullRequestComment(_ context.Context, _ int64, _, _ string, _ int, marker string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, comment := range g.comments {
+		if strings.Contains(comment, marker) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func reviewResult(status, headSHA string) ReviewCompletedResult {

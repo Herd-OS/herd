@@ -47,7 +47,7 @@ type MutationReader interface {
 }
 
 type ReadTokenSource interface {
-	InstallationTokenWithPermissions(ctx context.Context, installationID int64, permissions gh.InstallationPermissions) (appauth.InstallationToken, error)
+	InstallationTokenWithPermissions(ctx context.Context, installationID int64, repositoryIDs []int64, permissions gh.InstallationPermissions) (appauth.InstallationToken, error)
 }
 
 type PatchApplier interface {
@@ -345,7 +345,11 @@ func (h Handler) serveReadToken(w http.ResponseWriter, r *http.Request, jobID st
 		return
 	}
 	read := "read"
-	minted, err := source.InstallationTokenWithPermissions(r.Context(), job.InstallationID, gh.InstallationPermissions{
+	if job.RepositoryID == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job repository ID is missing"})
+		return
+	}
+	minted, err := source.InstallationTokenWithPermissions(r.Context(), job.InstallationID, []int64{job.RepositoryID}, gh.InstallationPermissions{
 		Actions:      &read,
 		Checks:       &read,
 		Contents:     &read,

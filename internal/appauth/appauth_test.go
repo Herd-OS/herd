@@ -131,9 +131,11 @@ func TestGitHubTokenSourceInstallationTokenWithPermissions(t *testing.T) {
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		assert.Equal(t, http.MethodPost, req.Method)
 		var body struct {
-			Permissions map[string]string `json:"permissions"`
+			RepositoryIDs []int64           `json:"repository_ids"`
+			Permissions   map[string]string `json:"permissions"`
 		}
 		require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+		assert.Equal(t, []int64{7}, body.RepositoryIDs)
 		assert.Equal(t, map[string]string{"contents": "read", "pull_requests": "read"}, body.Permissions)
 		return jsonResponse(http.StatusCreated, `{"token":"installation-token","expires_at":"`+expiresAt.Format(time.RFC3339)+`"}`), nil
 	})
@@ -150,7 +152,7 @@ func TestGitHubTokenSourceInstallationTokenWithPermissions(t *testing.T) {
 	require.NoError(t, err)
 	read := "read"
 
-	token, err := source.InstallationTokenWithPermissions(context.Background(), 99, github.InstallationPermissions{
+	token, err := source.InstallationTokenWithPermissions(context.Background(), 99, []int64{7}, github.InstallationPermissions{
 		Contents:     &read,
 		PullRequests: &read,
 	})

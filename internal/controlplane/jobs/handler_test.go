@@ -201,11 +201,44 @@ func TestHandlerMintsHostedReviewReadToken(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, int64(9), source.installationID)
+	assert.Equal(t, []int64{7}, source.repositoryIDs)
 	require.NotNil(t, source.permissions)
 	assert.Equal(t, "read", source.permissions.GetContents())
 	assert.Equal(t, "read", source.permissions.GetPullRequests())
 	assert.Equal(t, "read", source.permissions.GetIssues())
 	assert.JSONEq(t, `{"token":"ghs_read_token","expires_at":"2026-07-11T13:00:00Z","permissions":{"contents":"read","pull_requests":"read"}}`, rec.Body.String())
+}
+
+func TestHandlerRejectsHostedReviewReadTokenWithoutRepositoryScope(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		InstallationID: 9,
+		PRNumber:       42,
+		HeadSHA:        "head",
+		WorkerBranch:   "herd/worker/837",
+		Metadata:       validReviewJobMetadata(),
+	}
+	source := &fakeAppTokenSource{}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		AppTokenSource: source,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/job-1/review-read-token", nil)
+	req.SetPathValue("job_id", "job-1")
+	req.Header.Set("Authorization", "Bearer oidc")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "repository ID")
+	assert.Zero(t, source.installationID)
+	assert.Empty(t, source.repositoryIDs)
 }
 
 func TestHandlerRejectsHostedReviewReadTokenWithoutEligibleJob(t *testing.T) {
@@ -1615,6 +1648,7 @@ type fixedPatchApplier struct {
 type fakeAppTokenSource struct {
 	token          appauth.InstallationToken
 	installationID int64
+	repositoryIDs  []int64
 	permissions    *gh.InstallationPermissions
 }
 
@@ -1625,8 +1659,9 @@ func (s fakeAppTokenSource) InstallationToken(context.Context, int64) (appauth.I
 	return appauth.InstallationToken{Token: "token"}, nil
 }
 
-func (s *fakeAppTokenSource) InstallationTokenWithPermissions(_ context.Context, installationID int64, permissions gh.InstallationPermissions) (appauth.InstallationToken, error) {
+func (s *fakeAppTokenSource) InstallationTokenWithPermissions(_ context.Context, installationID int64, repositoryIDs []int64, permissions gh.InstallationPermissions) (appauth.InstallationToken, error) {
 	s.installationID = installationID
+	s.repositoryIDs = append([]int64(nil), repositoryIDs...)
 	s.permissions = &permissions
 	if strings.TrimSpace(s.token.Token) != "" {
 		return s.token, nil

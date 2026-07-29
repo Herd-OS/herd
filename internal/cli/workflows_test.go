@@ -134,6 +134,64 @@ func TestWorkersExtraEnv_NilSlice(t *testing.T) {
 		"nil ExtraEnv must render the same as empty ExtraEnv")
 }
 
+func TestHostedWorkerAndReviewCheckoutsDoNotPersistCredentials(t *testing.T) {
+	cfg := config.Default()
+	tests := []struct {
+		name string
+		wf   workflowFile
+		path string
+	}{
+		{
+			name: "worker rendered",
+			wf:   workflowFile{SrcName: "herd-worker.yml.tmpl", DestName: "herd-worker.yml", Template: true},
+		},
+		{
+			name: "review rendered",
+			wf:   workflowFile{SrcName: "herd-review.yml.tmpl", DestName: "herd-review.yml", Template: true},
+		},
+		{
+			name: "worker committed",
+			path: filepath.Join("..", "..", ".github", "workflows", "herd-worker.yml"),
+		},
+		{
+			name: "review committed",
+			path: filepath.Join("..", "..", ".github", "workflows", "herd-review.yml"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var data []byte
+			var err error
+			if tt.path != "" {
+				data, err = os.ReadFile(tt.path)
+			} else {
+				data, err = RenderWorkflow(tt.wf, cfg)
+			}
+			require.NoError(t, err)
+			assertCheckoutStepsDisablePersistedCredentials(t, data)
+		})
+	}
+}
+
+func assertCheckoutStepsDisablePersistedCredentials(t *testing.T, data []byte) {
+	t.Helper()
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(data, &workflow))
+	checkouts := 0
+	for jobName, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses != "actions/checkout@v4" {
+				continue
+			}
+			checkouts++
+			require.Contains(t, step.With, "persist-credentials", "checkout step in job %s must set persist-credentials", jobName)
+			assert.Equal(t, false, step.With["persist-credentials"], "checkout step in job %s must not persist GitHub token into git config", jobName)
+		}
+	}
+	require.NotZero(t, checkouts, "workflow must contain at least one checkout step")
+}
+
 func TestIntegratorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {
 	cfg := config.Default()
 	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}

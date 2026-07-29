@@ -172,6 +172,32 @@ func (c AppGitHubClient) AddPullRequestComment(ctx context.Context, installation
 	return nil
 }
 
+func (c AppGitHubClient) FindPullRequestComment(ctx context.Context, installationID int64, owner, repo string, number int, marker string) (bool, error) {
+	if strings.TrimSpace(c.AppLogin) == "" {
+		return false, fmt.Errorf("herd GitHub App login is required for comment repair")
+	}
+	client, err := c.installationClient(ctx, installationID)
+	if err != nil {
+		return false, mutationspkg.PreCallError{Op: "create installation GitHub client", Err: err}
+	}
+	opts := &gh.IssueListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
+	for {
+		comments, resp, err := client.Issues.ListComments(ctx, owner, repo, number, opts)
+		if err != nil {
+			return false, fmt.Errorf("listing comments on pull request #%d: %w", number, err)
+		}
+		for _, comment := range comments {
+			if strings.Contains(comment.GetBody(), marker) && c.matchesAppActor(comment.GetUser().GetLogin()) {
+				return true, nil
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			return false, nil
+		}
+		opts.Page = resp.NextPage
+	}
+}
+
 func (c AppGitHubClient) installationClient(ctx context.Context, installationID int64) (*gh.Client, error) {
 	if c.NewClient != nil {
 		return c.NewClient(ctx, installationID)

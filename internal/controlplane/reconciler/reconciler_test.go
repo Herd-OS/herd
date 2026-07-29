@@ -46,10 +46,10 @@ func TestRunOnceRepairsRecoverableWork(t *testing.T) {
 	require.NoError(t, err)
 	counts := report.CountsByClassification()
 	assert.Equal(t, 1, counts[ClassificationFailedSurfaced])
-	assert.Equal(t, 2, counts[ClassificationSafeToRetry])
+	assert.Equal(t, 3, counts[ClassificationSafeToRetry])
 	assert.Equal(t, 1, counts[ClassificationComplete])
 	assert.Equal(t, 1, counts[ClassificationStaleAbandoned])
-	assert.Equal(t, 2, counts[ClassificationStillNeeded])
+	assert.Equal(t, 1, counts[ClassificationStillNeeded])
 
 	failedJob, err := st.GetJob(ctx, "job-timeout")
 	require.NoError(t, err)
@@ -171,7 +171,7 @@ func TestRunOnceRetriesCommandWhenInitialRequeueFails(t *testing.T) {
 	_, err = st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       "repo:1:comment:201:command:review",
 		Scope:     "issue_comment_command",
-		Status:    "started",
+		Status:    mutations.PhaseIntentRecorded,
 		CreatedAt: now.Add(-time.Hour),
 	})
 	require.NoError(t, err)
@@ -210,8 +210,18 @@ func TestRunOnceClassifiesCommandIdempotencyByMutationPhase(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			st := store.NewMemoryStore()
-			_ = seedRepo(t, st, ctx)
-			_, err := st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+			repo := seedRepo(t, st, ctx)
+			_, err := st.RecordCommand(ctx, store.CommandRecord{
+				RepositoryID: repo.ID,
+				CommentID:    202,
+				CommandKey:   "review",
+				CommandName:  "review",
+				Actor:        "octo",
+				Status:       "acknowledged",
+				CreatedAt:    now.Add(-time.Hour),
+			})
+			require.NoError(t, err)
+			_, err = st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 				Key:       "repo:1:comment:202:command:review",
 				Scope:     "issue_comment_command",
 				Status:    tt.status,
@@ -219,13 +229,31 @@ func TestRunOnceClassifiesCommandIdempotencyByMutationPhase(t *testing.T) {
 			})
 			require.NoError(t, err)
 			r := &Reconciler{Store: st, Now: func() time.Time { return now }, Config: Config{CommandTimeout: time.Minute}}
+			commands := &fakeCommandRequeuer{}
+			r.Commands = commands
 
 			report, err := r.RunOnce(ctx)
 
 			require.NoError(t, err)
-			assert.Equal(t, 1, report.CountsByClassification()[tt.classification])
+			assert.Equal(t, tt.classification, commandDiagnosticClassification(t, report, "repo:1:comment:202:command:review"))
+			if mutations.IsPreCallRetryable(tt.status) {
+				assert.Len(t, commands.items, 1)
+			} else {
+				assert.Empty(t, commands.items)
+			}
 		})
 	}
+}
+
+func commandDiagnosticClassification(t *testing.T, report Report, id string) Classification {
+	t.Helper()
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Kind == "command" && diagnostic.ID == id {
+			return diagnostic.Classification
+		}
+	}
+	require.Failf(t, "missing command diagnostic", "id %s", id)
+	return ""
 }
 
 func TestRunOnceDoesNotFailCompletedIdempotencyForStuckMutationAttempt(t *testing.T) {
@@ -317,7 +345,7 @@ func seedReconcilerStore(t *testing.T, now time.Time) *store.MemoryStore {
 
 	_, err = st.RecordCommand(ctx, store.CommandRecord{RepositoryID: repo.ID, CommentID: 101, CommandKey: "review", CommandName: "review", Actor: "octo", Status: "acknowledged", CreatedAt: now.Add(-time.Hour)})
 	require.NoError(t, err)
-	_, err = st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{Key: "repo:1:comment:101:command:review", Scope: "issue_comment_command", Status: "started", CreatedAt: now.Add(-time.Hour)})
+	_, err = st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{Key: "repo:1:comment:101:command:review", Scope: "issue_comment_command", Status: mutations.PhaseIntentRecorded, CreatedAt: now.Add(-time.Hour)})
 	require.NoError(t, err)
 
 	require.NoError(t, st.SetReviewState(ctx, store.ReviewState{RepositoryID: repo.ID, PRNumber: 10, HeadSHA: "review-sha", Status: "pending", Metadata: json.RawMessage(`{"target_url":"https://runs/1"}`), UpdatedAt: now.Add(-time.Hour)}))

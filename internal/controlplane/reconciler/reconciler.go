@@ -139,12 +139,20 @@ func (r *Reconciler) runCommands(ctx context.Context, cfg Config, now time.Time,
 		return
 	}
 	for _, item := range items {
-		if item.IdempotencySeen && item.Idempotency.Status == "completed" {
+		if item.IdempotencySeen && mutations.IsCompleted(item.Idempotency.Status) {
 			r.add(report, "command", item.IdempotencyKey, ClassificationComplete, "none", "command dispatch completed")
 			continue
 		}
 		if item.Command.Status == "retry_needed" {
 			r.add(report, "command", item.IdempotencyKey, ClassificationStillNeeded, "none", "command already marked for retry")
+			continue
+		}
+		if item.IdempotencySeen && !mutations.IsPreCallRetryable(item.Idempotency.Status) {
+			if mutations.IsPostCallUnknown(item.Idempotency.Status) {
+				r.add(report, "command", item.IdempotencyKey, ClassificationStillNeeded, "inspect_required", "command dispatch may already have reached a GitHub-visible side effect")
+				continue
+			}
+			r.add(report, "command", item.IdempotencyKey, ClassificationStillNeeded, "inspect_required", "command idempotency status is not pre-call retryable")
 			continue
 		}
 		d := r.add(report, "command", item.IdempotencyKey, ClassificationSafeToRetry, "requeue", "acknowledged command did not complete dispatch")

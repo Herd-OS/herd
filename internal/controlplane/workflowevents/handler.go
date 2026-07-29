@@ -174,11 +174,15 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
 				return
 			}
-			if record.Status == "processed" || record.Status == "processed_pending" {
+			if record.Status == "processed" {
 				if err := h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey); err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete workflow event idempotency"})
 					return
 				}
+			} else if record.Status == "processed_pending" {
+				_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseRepairRequired+":workflow event processed status is pending durable finalization")
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing finalization is pending repair"})
+				return
 			} else if record.Status != "processed" {
 				if err := h.markWorkflowEventProcessed(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
@@ -273,10 +277,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
 			return
 		}
-		if err := h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete workflow event idempotency"})
-			return
-		}
+		_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseRepairRequired+":"+err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processed"})
 		return
 	}
@@ -335,7 +336,7 @@ func (h Handler) acquireWorkflowEvent(ctx context.Context, key string, metadata 
 
 func (h Handler) workflowEventProcessedOrRepairable(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
 	record, err := h.store.GetCommandRecord(ctx, repoID, commentID, commandKey)
-	return err == nil && (record.Status == "processed" || record.Status == "processed_pending")
+	return err == nil && record.Status == "processed"
 }
 
 func (h Handler) workflowEventProcessingUnknown(ctx context.Context, repoID int64, commentID int64, commandKey string, processKey string) bool {

@@ -199,10 +199,14 @@ func TestHandlerProcessedMarkerFailureRedeliveryDoesNotProcessAgain(t *testing.T
 	handler.ServeHTTP(second, eventRequest(validEventPayload()))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
+	require.Equal(t, http.StatusConflict, second.Code)
 	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.commands, 1)
 	assert.Equal(t, "processed_pending", st.commands[0].Status)
+	for _, record := range st.idem {
+		assert.Equal(t, "failed", record.Status)
+		assert.Contains(t, record.ResultRef, "repair_required")
+	}
 }
 
 func TestHandlerProcessedMarkerAndCompletionFailureRedeliveryDoesNotProcessAgain(t *testing.T) {
@@ -226,12 +230,13 @@ func TestHandlerProcessedMarkerAndCompletionFailureRedeliveryDoesNotProcessAgain
 	handler.ServeHTTP(second, eventRequest(validEventPayload()))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
+	require.Equal(t, http.StatusConflict, second.Code)
 	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.commands, 1)
 	assert.Equal(t, "processed_pending", st.commands[0].Status)
 	for _, record := range st.idem {
-		assert.Equal(t, "completed", record.Status)
+		assert.Equal(t, "failed", record.Status)
+		assert.Contains(t, record.ResultRef, "repair_required")
 	}
 }
 

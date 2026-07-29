@@ -80,6 +80,10 @@ type ReviewLookupClient interface {
 	FindReviewForCommit(ctx context.Context, installationID int64, owner, repo string, number int, body string, event platform.ReviewEvent, commitID string) (bool, error)
 }
 
+type PullRequestCommentLookupClient interface {
+	FindPullRequestComment(ctx context.Context, installationID int64, owner, repo string, number int, marker string) (bool, error)
+}
+
 type LockStore interface {
 	AcquireReviewLock(ctx context.Context, lock store.ReviewLock) (created bool, err error)
 	ReleaseReviewLock(ctx context.Context, repoID int64, prNumber int, headSHA string, holder string, releasedAt time.Time) error
@@ -225,7 +229,7 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 				return err
 			}
 			statusErr := s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review could not submit a PR review", targetURL(result, current.URL))
-			commentErr := s.GitHub.AddPullRequestComment(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewSubmissionFailureComment(err))
+			commentErr := s.submitReviewFailureCommentOnce(ctx, repo, result, err)
 			if statusErr != nil {
 				return statusErr
 			}
@@ -330,6 +334,85 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
 		}
 		return err
+	}
+	return nil
+}
+
+func (s ReviewService) submitReviewFailureCommentOnce(ctx context.Context, repo Repository, result ReviewCompletedResult, submissionErr error) error {
+	if s.Mutations == nil {
+		return fmt.Errorf("review failure comment mutation store is required")
+	}
+	key := reviewSubmissionFailureCommentKey(repo, result)
+	marker := reviewSubmissionFailureCommentMarker(key)
+	body := reviewSubmissionFailureComment(submissionErr, marker)
+	request, err := json.Marshal(map[string]any{
+		"repository": repo.Owner + "/" + repo.Name,
+		"pr_number":  result.PRNumber,
+		"head_sha":   result.HeadSHA,
+		"job_id":     result.JobID,
+		"marker":     marker,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal review failure comment request: %w", err)
+	}
+	created, err := s.Mutations.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "review_submission_failure_comment",
+		Status:    mutationspkg.PhaseIntentRecorded,
+		Metadata:  request,
+		CreatedAt: s.now(),
+	})
+	if err != nil {
+		return fmt.Errorf("acquire review failure comment idempotency: %w", err)
+	}
+	if !created {
+		record, err := s.Mutations.GetIdempotencyKey(ctx, key)
+		if err != nil {
+			return fmt.Errorf("get review failure comment idempotency: %w", err)
+		}
+		if mutationspkg.IsCompleted(record.Status) {
+			return nil
+		}
+	}
+	_, err = mutationguard.Run(ctx, s.Mutations, mutationguard.RunRequest{
+		Key:          key,
+		RepositoryID: repo.ID,
+		MutationType: "review_submission_failure_comment",
+		Request:      request,
+		ResultRef: func(raw json.RawMessage) string {
+			var response struct {
+				ResultRef string `json:"result_ref"`
+			}
+			if len(raw) == 0 || json.Unmarshal(raw, &response) != nil {
+				return ""
+			}
+			return response.ResultRef
+		},
+		Response: func(resultRef string) json.RawMessage {
+			response, _ := json.Marshal(map[string]string{"result_ref": resultRef, "marker": marker})
+			return response
+		},
+		Mutate: func() (string, error) {
+			if err := s.GitHub.AddPullRequestComment(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, body); err != nil {
+				return "", err
+			}
+			return "pull_request_comment:" + marker, nil
+		},
+		Repair: func() (string, bool, error) {
+			lookup, ok := s.GitHub.(PullRequestCommentLookupClient)
+			if !ok {
+				return "", false, nil
+			}
+			found, err := lookup.FindPullRequestComment(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, marker)
+			if err != nil {
+				return "", false, fmt.Errorf("repair review failure comment lookup: %w", err)
+			}
+			return "pull_request_comment:" + marker, found, nil
+		},
+		Now: s.now,
+	})
+	if err != nil {
+		return fmt.Errorf("submit review failure comment: %w", err)
 	}
 	return nil
 }
@@ -471,8 +554,16 @@ func reviewSubmissionKey(repo Repository, result ReviewCompletedResult, event pl
 	return fmt.Sprintf("review_submission:%d:%d:%s:%s:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.Status, event, result.JobID)
 }
 
-func reviewSubmissionFailureComment(err error) string {
-	return "Herd Review could not submit an App-authored pull request review. The Herd Review commit status has been set to failure.\n\nError: " + sanitizeReviewSubmissionError(err)
+func reviewSubmissionFailureCommentKey(repo Repository, result ReviewCompletedResult) string {
+	return fmt.Sprintf("review_submission_failure_comment:%d:%d:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.JobID)
+}
+
+func reviewSubmissionFailureCommentMarker(key string) string {
+	return "herd:review-submission-failure-comment " + key
+}
+
+func reviewSubmissionFailureComment(err error, marker string) string {
+	return "Herd Review could not submit an App-authored pull request review. The Herd Review commit status has been set to failure.\n\nError: " + sanitizeReviewSubmissionError(err) + "\n\n<!-- " + marker + " -->"
 }
 
 func sanitizeReviewSubmissionError(err error) string {
