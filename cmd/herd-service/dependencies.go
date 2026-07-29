@@ -183,7 +183,6 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		GitHub:     commandGitHub{store: st, tokenSource: tokenSource},
 		Dispatcher: opts.CommandDispatcher,
 	}
-	deps.IssueCommentCommandHandler = commandHandler
 	deps.QueuedCommandProcessor = commands.QueueProcessor{
 		Store:   st,
 		Handler: commandHandler,

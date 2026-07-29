@@ -42,7 +42,7 @@ func TestBuildServiceDependenciesProductionWiresCommandDispatcher(t *testing.T) 
 	})
 
 	require.NoError(t, err)
-	require.NotNil(t, deps.IssueCommentCommandHandler)
+	require.NotNil(t, deps.QueuedCommandProcessor)
 }
 
 func TestBuildServiceDependenciesProductionWiresDefaultWorkflowProcessor(t *testing.T) {
@@ -157,7 +157,7 @@ func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
 		ArtifactStore:          emptyArtifactStore{},
 	})
 	require.NoError(t, err)
-	require.NotNil(t, deps.IssueCommentCommandHandler)
+	require.NotNil(t, deps.QueuedCommandProcessor)
 	require.NotNil(t, deps.JobResultsRoute)
 	require.NotNil(t, deps.WorkflowEventsRoute)
 	require.NotNil(t, deps.RunnerRegistrationTokenRoute)

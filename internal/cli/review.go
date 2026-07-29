@@ -67,7 +67,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
-	data, err := buildReviewPromptData(ctx, client, prNumber, cfg.Platform.Owner, cfg.Platform.Repo, dir, reviewDiffChunkOptions(cfg.Integrator.ReviewDiff))
+	data, err := buildReviewPromptData(ctx, reviewInputFromPlatform(client), prNumber, cfg.Platform.Owner, cfg.Platform.Repo, dir, reviewDiffChunkOptions(cfg.Integrator.ReviewDiff))
 	if err != nil {
 		return err
 	}
@@ -92,8 +92,25 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 	})
 }
 
-func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int, owner, repo, repoRoot string, opts reviewdiff.ChunkOptions) (*reviewCmdPromptData, error) {
-	pr, err := client.PullRequests().Get(ctx, prNumber)
+type reviewInputServices struct {
+	Issues       platform.IssueReader
+	PullRequests platform.PullRequestReader
+	Checks       platform.CheckReader
+}
+
+func reviewInputFromPlatform(client platform.Platform) reviewInputServices {
+	return reviewInputServices{
+		Issues:       client.Issues(),
+		PullRequests: client.PullRequests(),
+		Checks:       client.Checks(),
+	}
+}
+
+func buildReviewPromptData(ctx context.Context, client reviewInputServices, prNumber int, owner, repo, repoRoot string, opts reviewdiff.ChunkOptions) (*reviewCmdPromptData, error) {
+	if client.PullRequests == nil {
+		return nil, fmt.Errorf("pull request reader is required")
+	}
+	pr, err := client.PullRequests.Get(ctx, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("getting PR #%d: %w", prNumber, err)
 	}
@@ -103,7 +120,7 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		HeadRef:      pr.Head,
 		RepoRoot:     repoRoot,
 		Git:          git.New(repoRoot),
-		PullRequests: client.PullRequests(),
+		PullRequests: client.PullRequests,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
@@ -122,16 +139,18 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 	}
 
 	var general []reviewCmdComment
-	if cs, cerr := client.Issues().ListComments(ctx, prNumber); cerr == nil {
-		for _, c := range cs {
-			general = append(general, reviewCmdComment{Author: c.AuthorLogin, Body: c.Body})
+	if client.Issues != nil {
+		if cs, cerr := client.Issues.ListComments(ctx, prNumber); cerr == nil {
+			for _, c := range cs {
+				general = append(general, reviewCmdComment{Author: c.AuthorLogin, Body: c.Body})
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: failed to list PR comments: %v\n", cerr)
 		}
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: failed to list PR comments: %v\n", cerr)
 	}
 
 	var inline []reviewCmdInlineComment
-	if rcs, rerr := client.PullRequests().ListReviewComments(ctx, prNumber); rerr == nil {
+	if rcs, rerr := client.PullRequests.ListReviewComments(ctx, prNumber); rerr == nil {
 		for _, c := range rcs {
 			inline = append(inline, reviewCmdInlineComment{
 				Author:   c.AuthorLogin,
@@ -146,10 +165,12 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 	}
 
 	ciStatus := "unknown"
-	if s, serr := client.Checks().GetCombinedStatus(ctx, pr.Head); serr == nil {
-		ciStatus = s
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: failed to get CI status: %v\n", serr)
+	if client.Checks != nil {
+		if s, serr := client.Checks.GetCombinedStatus(ctx, pr.Head); serr == nil {
+			ciStatus = s
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: failed to get CI status: %v\n", serr)
+		}
 	}
 
 	return &reviewCmdPromptData{

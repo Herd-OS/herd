@@ -23,7 +23,6 @@ type Dependencies struct {
 	RunnerRegistrationTokenRoute http.Handler
 	JobResultsRoute              http.Handler
 	WorkflowEventsRoute          http.Handler
-	IssueCommentCommandHandler   cpgithub.IssueCommentCommandHandler
 	QueuedCommandProcessor       QueuedCommandProcessor
 	Reconciler                   *reconciler.Reconciler
 	WorkflowEventProcessor       workflowevents.Processor
@@ -76,9 +75,6 @@ func validateProductionDependencies(cfg Config, deps Dependencies) error {
 	var errs []error
 	if deps.Store == nil {
 		errs = append(errs, errors.New("production service store is not configured"))
-	}
-	if deps.IssueCommentCommandHandler == nil {
-		errs = append(errs, errors.New("production issue-comment command handler is not configured"))
 	}
 	if deps.QueuedCommandProcessor == nil {
 		errs = append(errs, errors.New("production queued command processor is not configured"))

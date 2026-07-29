@@ -113,11 +113,29 @@ func queuedCommentBody(raw string, prompt string) string {
 		return prompt
 	}
 	firstLine, rest := firstNonEmptyLineWithRest(prompt)
-	if firstLine != "" && strings.HasSuffix(raw, firstLine) {
+	if firstLine != "" && (strings.HasSuffix(raw, firstLine) || rawQuotedPrompt(raw) == firstLine) {
 		if strings.TrimRight(rest, "\r\n") == "" {
 			return raw
 		}
 		return raw + "\n" + strings.TrimRight(rest, "\r\n")
 	}
 	return raw + "\n" + prompt
+}
+
+func rawQuotedPrompt(raw string) string {
+	fields := strings.Fields(raw)
+	if len(fields) < 2 {
+		return ""
+	}
+	afterMention := strings.TrimSpace(raw[len(fields[0]):])
+	afterCommand := strings.TrimSpace(afterMention[len(fields[1]):])
+	if !strings.HasPrefix(afterCommand, "\"") {
+		return ""
+	}
+	quoted := afterCommand[1:]
+	end := strings.Index(quoted, "\"")
+	if end < 0 {
+		return ""
+	}
+	return quoted[:end]
 }

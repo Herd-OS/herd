@@ -26,6 +26,22 @@ type Client struct {
 	authLogin  string
 }
 
+type ReviewInputClient struct {
+	c *Client
+}
+
+type reviewInputIssueService struct {
+	issues *issueService
+}
+
+type reviewInputPullRequestService struct {
+	pullRequests *pullRequestService
+}
+
+type reviewInputCheckService struct {
+	checks *checkService
+}
+
 // Compile-time check that Client implements platform.Platform.
 var _ platform.Platform = (*Client)(nil)
 
@@ -62,6 +78,14 @@ func NewWithToken(owner, repo string, token string) (*Client, error) {
 		repo:       repo,
 		httpClient: httpClient,
 	}, nil
+}
+
+func NewReviewInputWithToken(owner, repo string, token string) (*ReviewInputClient, error) {
+	client, err := NewWithToken(owner, repo, token)
+	if err != nil {
+		return nil, err
+	}
+	return &ReviewInputClient{c: client}, nil
 }
 
 // NewWithClient creates a platform client around an already-authenticated
@@ -128,6 +152,42 @@ func (c *Client) Milestones() platform.MilestoneService     { return &milestoneS
 func (c *Client) Runners() platform.RunnerService           { return &runnerService{c} }
 func (c *Client) Repository() platform.RepositoryService    { return &repositoryService{c} }
 func (c *Client) Checks() platform.CheckService             { return &checkService{c} }
+
+func (c *ReviewInputClient) Issues() platform.IssueReader {
+	return reviewInputIssueService{issues: &issueService{c.c}}
+}
+
+func (c *ReviewInputClient) PullRequests() platform.PullRequestReader {
+	return reviewInputPullRequestService{pullRequests: &pullRequestService{c.c}}
+}
+
+func (c *ReviewInputClient) Checks() platform.CheckReader {
+	return reviewInputCheckService{checks: &checkService{c.c}}
+}
+
+func (s reviewInputIssueService) ListComments(ctx context.Context, number int) ([]*platform.Comment, error) {
+	return s.issues.ListComments(ctx, number)
+}
+
+func (s reviewInputPullRequestService) Get(ctx context.Context, number int) (*platform.PullRequest, error) {
+	return s.pullRequests.Get(ctx, number)
+}
+
+func (s reviewInputPullRequestService) ListReviewComments(ctx context.Context, number int) ([]*platform.ReviewComment, error) {
+	return s.pullRequests.ListReviewComments(ctx, number)
+}
+
+func (s reviewInputPullRequestService) ListFiles(ctx context.Context, number int) ([]*platform.PullRequestFile, error) {
+	return s.pullRequests.ListFiles(ctx, number)
+}
+
+func (s reviewInputPullRequestService) GetDiff(ctx context.Context, number int) (string, error) {
+	return s.pullRequests.GetDiff(ctx, number)
+}
+
+func (s reviewInputCheckService) GetCombinedStatus(ctx context.Context, ref string) (string, error) {
+	return s.checks.GetCombinedStatus(ctx, ref)
+}
 
 // AuthenticatedLogin returns the login for the token used by this client.
 func (c *Client) AuthenticatedLogin(ctx context.Context) (string, error) {

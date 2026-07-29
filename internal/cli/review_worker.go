@@ -10,10 +10,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/factory"
 	"github.com/herd-os/herd/internal/config"
 	cpclient "github.com/herd-os/herd/internal/controlplane/client"
-	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
@@ -60,7 +60,7 @@ func newReviewWorkerCmd() *cobra.Command {
 				})
 				return err
 			}
-			client, err := github.NewWithToken(cfg.Platform.Owner, cfg.Platform.Repo, readToken)
+			client, err := github.NewReviewInputWithToken(cfg.Platform.Owner, cfg.Platform.Repo, readToken)
 			if err != nil {
 				_ = writeHostedReviewResult(resultFile, hostedReviewWorkflowResult{
 					Status:  "failed",
@@ -85,7 +85,11 @@ func newReviewWorkerCmd() *cobra.Command {
 				return fmt.Errorf("getting current directory: %w", err)
 			}
 
-			result, err := integrator.Review(cmd.Context(), client, ag, git.New(cwd), cfg, reviewWorkerParams(prNumber, cwd, reviewPrompt, manual))
+			result, err := runHostedReviewReadOnly(cmd.Context(), reviewInputServices{
+				Issues:       client.Issues(),
+				PullRequests: client.PullRequests(),
+				Checks:       client.Checks(),
+			}, ag, cfg, reviewWorkerParams(prNumber, cwd, reviewPrompt, manual))
 			if err != nil {
 				_ = writeHostedReviewResult(resultFile, hostedReviewWorkflowResult{
 					Status:  "failed",
@@ -93,10 +97,10 @@ func newReviewWorkerCmd() *cobra.Command {
 				})
 				return err
 			}
-			if err := writeHostedReviewResult(resultFile, hostedReviewResultFromIntegrator(result)); err != nil {
+			if err := writeHostedReviewResult(resultFile, result); err != nil {
 				return err
 			}
-			printReviewResultMessage(result)
+			fmt.Println(result.Summary)
 			return nil
 		},
 	}
@@ -114,6 +118,77 @@ func reviewWorkerParams(prNumber int, repoRoot string, reviewPrompt string, manu
 		ExtraInstructions: strings.TrimSpace(reviewPrompt),
 		Manual:            manual,
 	}
+}
+
+func runHostedReviewReadOnly(ctx context.Context, input reviewInputServices, ag agent.Agent, cfg *config.Config, params integrator.ReviewParams) (hostedReviewWorkflowResult, error) {
+	if ag == nil {
+		return hostedReviewWorkflowResult{}, fmt.Errorf("review agent is required")
+	}
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	data, err := buildReviewPromptData(ctx, input, params.PRNumber, cfg.Platform.Owner, cfg.Platform.Repo, params.RepoRoot, reviewDiffChunkOptions(cfg.Integrator.ReviewDiff))
+	if err != nil {
+		return hostedReviewWorkflowResult{}, err
+	}
+	metadata := strings.Join([]string{
+		fmt.Sprintf("PR #%d: %s", data.PRNumber, data.PRTitle),
+		fmt.Sprintf("URL: %s", data.PRURL),
+		fmt.Sprintf("Base: %s", data.PRBaseBranch),
+		fmt.Sprintf("Head: %s", data.PRHeadBranch),
+		fmt.Sprintf("CI status: %s", data.CIStatus),
+	}, "\n")
+	review, err := ag.Review(ctx, data.Diff, agent.ReviewOptions{
+		RepoRoot:               params.RepoRoot,
+		Strictness:             cfg.Integrator.ReviewStrictness,
+		MinFixSeverity:         cfg.Integrator.ReviewFixSeverity,
+		CurrentPRMetadata:      metadata,
+		PriorReviewComments:    reviewCommentBodies(data.Comments),
+		UserFeedbackComments:   append(reviewCommentBodies(data.Comments), inlineReviewCommentBodies(data.InlineComments)...),
+		PartialReview:          data.PartialReview,
+		ChunkIndex:             data.ChunkIndex,
+		TotalChunks:            data.TotalChunks,
+		CoverageSummary:        data.CoverageSummary,
+		ChunkedReview:          data.TotalChunks > 1,
+		ChunkIncludedPathRange: "",
+	})
+	if err != nil {
+		return hostedReviewWorkflowResult{}, err
+	}
+	if review == nil {
+		return hostedReviewWorkflowResult{Status: "failed", Summary: "Herd Review did not produce a result."}, nil
+	}
+	summary := strings.TrimSpace(review.Summary)
+	if summary == "" {
+		summary = "Herd Review completed."
+	}
+	if review.IsUnparseable {
+		return hostedReviewWorkflowResult{Status: "unparseable", Summary: summary}, nil
+	}
+	if review.Approved {
+		return hostedReviewWorkflowResult{Status: "approved", Summary: summary}, nil
+	}
+	return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary}, nil
+}
+
+func reviewCommentBodies(comments []reviewCmdComment) []string {
+	out := make([]string, 0, len(comments))
+	for _, comment := range comments {
+		if body := strings.TrimSpace(comment.Body); body != "" {
+			out = append(out, body)
+		}
+	}
+	return out
+}
+
+func inlineReviewCommentBodies(comments []reviewCmdInlineComment) []string {
+	out := make([]string, 0, len(comments))
+	for _, comment := range comments {
+		if body := strings.TrimSpace(comment.Body); body != "" {
+			out = append(out, body)
+		}
+	}
+	return out
 }
 
 func hostedReviewReadToken(ctx context.Context, cfg *config.Config) (string, error) {

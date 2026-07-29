@@ -308,14 +308,17 @@ func TestSubmitPRReviewOnceRetryAfterMutationCompletionFailureRepairsStartedAtte
 	svc := ReviewService{GitHub: gh, Mutations: mutations}
 	repo := testRepo(true)
 	result := reviewResult(ResultStatusApproved, "head")
+	redelivery := result
+	redelivery.Summary = "corrected summary"
 	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
 
 	firstErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
-	secondErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)
+	secondErr := svc.submitPRReviewOnce(context.Background(), repo, redelivery, platform.ReviewApprove)
 
 	require.Error(t, firstErr)
 	require.NoError(t, secondErr)
 	assert.Len(t, gh.reviews, 1)
+	assert.Equal(t, "summary", gh.reviews[0].body)
 	record, err := mutations.GetIdempotencyKey(context.Background(), key)
 	require.NoError(t, err)
 	assert.Equal(t, "completed", record.Status)

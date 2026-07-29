@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,6 +69,32 @@ func TestReviewWorkerCommandAcceptsPromptAndManualFlags(t *testing.T) {
 	assert.Equal(t, "", promptFlag.DefValue)
 	require.NotNil(t, manualFlag)
 	assert.Equal(t, "false", manualFlag.DefValue)
+}
+
+func TestRunHostedReviewReadOnlyUsesReadServices(t *testing.T) {
+	prs := hostedReviewTestPRReader{
+		pr:   &platform.PullRequest{Number: 42, Title: "Batch", URL: "https://github.test/pr/42", Base: "main", Head: "feature"},
+		diff: "diff --git a/a.go b/a.go\n+change\n",
+	}
+	issues := hostedReviewTestIssueReader{comments: []*platform.Comment{{AuthorLogin: "mona", Body: "please check auth"}}}
+	checks := hostedReviewTestCheckReader{status: "success"}
+	ag := &hostedReviewTestAgent{result: &agent.ReviewResult{Approved: true, Summary: "approved"}}
+	cfg := config.Default()
+	cfg.Platform.Owner = "octo"
+	cfg.Platform.Repo = "widgets"
+
+	result, err := runHostedReviewReadOnly(t.Context(), reviewInputServices{
+		Issues:       issues,
+		PullRequests: prs,
+		Checks:       checks,
+	}, ag, cfg, reviewWorkerParams(42, t.TempDir(), "", false))
+
+	require.NoError(t, err)
+	assert.Equal(t, "approved", result.Status)
+	assert.Equal(t, "approved", result.Summary)
+	require.Len(t, ag.reviewDiffs, 1)
+	assert.Contains(t, ag.reviewDiffs[0], "+change")
+	assert.Equal(t, "success", checks.status)
 }
 
 func TestHostedReviewReadTokenUsesControlPlaneWithoutLegacyGitHubToken(t *testing.T) {
@@ -268,4 +296,68 @@ func (t rewriteOIDCTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	rewritten.URL.Scheme = t.target.Scheme
 	rewritten.URL.Host = t.target.Host
 	return t.base.RoundTrip(rewritten)
+}
+
+type hostedReviewTestIssueReader struct {
+	comments []*platform.Comment
+}
+
+func (r hostedReviewTestIssueReader) ListComments(context.Context, int) ([]*platform.Comment, error) {
+	return r.comments, nil
+}
+
+type hostedReviewTestPRReader struct {
+	pr   *platform.PullRequest
+	diff string
+}
+
+func (r hostedReviewTestPRReader) Get(context.Context, int) (*platform.PullRequest, error) {
+	return r.pr, nil
+}
+
+func (r hostedReviewTestPRReader) ListReviewComments(context.Context, int) ([]*platform.ReviewComment, error) {
+	return nil, nil
+}
+
+func (r hostedReviewTestPRReader) ListFiles(context.Context, int) ([]*platform.PullRequestFile, error) {
+	return nil, nil
+}
+
+func (r hostedReviewTestPRReader) GetDiff(context.Context, int) (string, error) {
+	return r.diff, nil
+}
+
+type hostedReviewTestCheckReader struct {
+	status string
+}
+
+func (r hostedReviewTestCheckReader) GetCombinedStatus(context.Context, string) (string, error) {
+	return r.status, nil
+}
+
+type hostedReviewTestAgent struct {
+	result      *agent.ReviewResult
+	err         error
+	reviewDiffs []string
+}
+
+func (a *hostedReviewTestAgent) Plan(context.Context, string, agent.PlanOptions) (*agent.Plan, error) {
+	return nil, nil
+}
+
+func (a *hostedReviewTestAgent) Execute(context.Context, agent.TaskSpec, agent.ExecOptions) (*agent.ExecResult, error) {
+	return nil, nil
+}
+
+func (a *hostedReviewTestAgent) Review(_ context.Context, diff string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+	a.reviewDiffs = append(a.reviewDiffs, diff)
+	return a.result, a.err
+}
+
+func (a *hostedReviewTestAgent) SynthesizeReviewNonConvergence(context.Context, agent.ReviewSynthesisInput, agent.ReviewSynthesisOptions) (*agent.ReviewSynthesisResult, error) {
+	return nil, nil
+}
+
+func (a *hostedReviewTestAgent) Discuss(context.Context, agent.DiscussOptions) error {
+	return nil
 }

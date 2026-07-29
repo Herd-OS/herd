@@ -713,6 +713,33 @@ func TestHandlerAcknowledgementRecordFailureRedeliveryDoesNotAckAgain(t *testing
 	assert.JSONEq(t, `{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`, string(st.commandRecords[0].Metadata))
 }
 
+func TestHandlerFailedPostCallAcknowledgementRecordDoesNotAckAgain(t *testing.T) {
+	st := newFakeStore()
+	key := "repo:42:comment:123:command:review"
+	st.idempotencyKeys[key] = store.IdempotencyKey{
+		Key:       key,
+		Scope:     "issue_comment_command",
+		Status:    mutations.LegacyFailed,
+		ResultRef: mutations.PhaseRepairRequired + ":unknown outcome after acknowledgement call",
+		CreatedAt: time.Now().UTC(),
+	}
+	gh := &fakeGitHub{comments: []fakeComment{{
+		owner:       "octo",
+		repo:        "widgets",
+		issueNumber: 7,
+		body:        "Acknowledged `@herd-os review`.",
+	}}}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+
+	_, err := h.HandleIssueComment(context.Background(), validComment("OWNER", "@herd-os review"))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repair required")
+	assert.Len(t, gh.comments, 1)
+	assert.Empty(t, dispatcher.dispatched)
+}
+
 func TestHandlerAcknowledgementRecordAndFallbackCompletionFailureDoesNotAckAgain(t *testing.T) {
 	st := newFakeStore()
 	st.updateErrs = []error{errors.New("store down"), nil}
