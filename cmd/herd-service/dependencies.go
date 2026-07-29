@@ -456,10 +456,13 @@ func (d productionCommandDispatcher) dispatchWorkflowCommand(ctx context.Context
 
 func transientWorkflowDispatchReplayError(err error) bool {
 	msg := err.Error()
+	if strings.Contains(msg, "already in progress") {
+		return true
+	}
 	if strings.Contains(msg, "outcome is unknown") || strings.Contains(msg, "repair required") {
 		return false
 	}
-	return strings.Contains(msg, "get existing dispatch job:") || strings.Contains(msg, "already in progress")
+	return strings.Contains(msg, "get existing dispatch job:")
 }
 
 func dispatchIssueStatusAllowsDispatch(status string, recoveredRemovedStatus string, recoveredInProgress bool) bool {
