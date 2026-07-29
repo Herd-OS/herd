@@ -240,7 +240,7 @@ func (g *Git) ScrubTransientArtifacts() (ScrubTransientArtifactsResult, error) {
 	sort.Strings(result.Removed)
 
 	for _, relPath := range result.Removed {
-		if err := g.run("rm", "--cached", "--ignore-unmatch", "--", relPath); err != nil {
+		if err := g.run("rm", "-f", "--cached", "--ignore-unmatch", "--", relPath); err != nil {
 			return result, fmt.Errorf("removing transient artifact from index %q: %w", relPath, err)
 		}
 		err := os.Remove(filepath.Join(g.WorkDir, filepath.FromSlash(relPath)))

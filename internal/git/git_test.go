@@ -546,6 +546,29 @@ func TestScrubTransientArtifacts_Committed(t *testing.T) {
 	assert.Equal(t, "D\t.herd/review-fixes-123.md", gitOutputOK(t, dir, "diff", "--cached", "--name-status"))
 }
 
+func TestScrubTransientArtifacts_CommittedWithStagedAndUnstagedEdits(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd"), 0755))
+
+	artifactPath := filepath.Join(dir, ".herd", "review-fixes-123.md")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("committed notes\n"), 0644))
+	runGit(t, dir, "add", ".herd/review-fixes-123.md")
+	runGit(t, dir, "commit", "-m", "add transient artifact")
+
+	require.NoError(t, os.WriteFile(artifactPath, []byte("staged notes\n"), 0644))
+	runGit(t, dir, "add", ".herd/review-fixes-123.md")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("unstaged notes\n"), 0644))
+
+	result, err := g.ScrubTransientArtifacts()
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{".herd/review-fixes-123.md"}, result.Removed)
+	_, statErr := os.Stat(artifactPath)
+	assert.True(t, os.IsNotExist(statErr))
+	assert.Equal(t, "D\t.herd/review-fixes-123.md", gitOutputOK(t, dir, "diff", "--cached", "--name-status"))
+}
+
 func TestScrubTransientArtifacts_PreservesWorkerFile(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)
