@@ -41,11 +41,17 @@ jobs:
             echo "Skipping HerdOS worker_completed callback for non-batch branch: ${RUN_HEAD_BRANCH}"
             exit 0
           fi
+          case "$RUN_ID" in
+            ''|*[!0-9]*)
+              echo "Invalid GitHub workflow run ID: expected a numeric value." >&2
+              exit 1
+              ;;
+          esac
           jq -n \
             --arg repository "$REPOSITORY" \
             --arg event_name "workflow_run" \
             --arg action "worker_completed" \
-            --arg run_id "$RUN_ID" \
+            --argjson run_id "$RUN_ID" \
             --argjson batch_number "$BATCH" \
             --arg conclusion "$RUN_CONCLUSION" \
             --arg head_branch "$RUN_HEAD_BRANCH" \
@@ -135,11 +141,17 @@ jobs:
             echo "Skipping HerdOS check_run_completed callback for non-batch branch: $HEAD_BRANCH"
             exit 0
           fi
+          case "$CHECK_RUN_ID" in
+            ''|*[!0-9]*)
+              echo "Invalid GitHub check run ID: expected a numeric value." >&2
+              exit 1
+              ;;
+          esac
           jq -n \
             --arg repository "$REPOSITORY" \
             --arg event_name "check_run" \
             --arg action "check_run_completed" \
-            --arg check_run_id "$CHECK_RUN_ID" \
+            --argjson check_run_id "$CHECK_RUN_ID" \
             --argjson batch_number "$BATCH" \
             --arg conclusion "$CHECK_RUN_CONCLUSION" \
             --arg head_branch "$HEAD_BRANCH" \

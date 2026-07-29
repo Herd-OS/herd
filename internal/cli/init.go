@@ -307,6 +307,9 @@ func validatedEffectiveControlPlaneURL(value string) (string, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", fmt.Errorf("control-plane URL must use http or https")
 	}
+	if parsed.Scheme == "http" && !isLocalDevelopmentHost(parsed.Hostname()) {
+		return "", fmt.Errorf("control-plane URL must use https except for loopback development endpoints")
+	}
 	if parsed.User != nil {
 		return "", fmt.Errorf("control-plane URL must not contain userinfo")
 	}
@@ -320,6 +323,15 @@ func validatedEffectiveControlPlaneURL(value string) (string, error) {
 		return "", fmt.Errorf("control-plane URL must not contain double quotes")
 	}
 	return strings.TrimRight(effective, "/"), nil
+}
+
+func isLocalDevelopmentHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func resolvedInitControlPlaneURL(explicit, existing string) (string, error) {
@@ -360,12 +372,16 @@ func validatedEffectiveResponseControlPlaneURL(requested string, returned string
 }
 
 func registerRepositoryForInit(ctx context.Context, owner, repo string, opts initOptions) (cpclient.RegisterRepositoryResponse, error) {
+	controlPlaneURL, err := validatedEffectiveControlPlaneURL(opts.ControlPlaneURL)
+	if err != nil {
+		return cpclient.RegisterRepositoryResponse{}, err
+	}
 	authorizer := newSetupAuthorizer()
 	setupToken, err := authorizer.SetupToken(ctx)
 	if err != nil {
 		return cpclient.RegisterRepositoryResponse{}, err
 	}
-	registrar, err := newRepositoryRegistrar(opts.ControlPlaneURL)
+	registrar, err := newRepositoryRegistrar(controlPlaneURL)
 	if err != nil {
 		return cpclient.RegisterRepositoryResponse{}, err
 	}

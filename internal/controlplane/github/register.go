@@ -20,8 +20,7 @@ import (
 )
 
 const (
-	defaultBootstrapTokenTTL = 24 * time.Hour
-	bootstrapTokenBytes      = 32
+	bootstrapTokenBytes = 32
 )
 
 var (
@@ -34,7 +33,7 @@ type RegistrationStore interface {
 	UpsertInstallation(ctx context.Context, i store.Installation) error
 	UpsertRepository(ctx context.Context, r store.Repository) (store.Repository, error)
 	CreateRegistrationAttempt(ctx context.Context, a store.RegistrationAttempt) error
-	CreateRunnerBootstrapToken(ctx context.Context, t store.RunnerBootstrapToken) error
+	RotateRunnerBootstrapToken(ctx context.Context, repoID int64, tokenHash string) (store.RunnerBootstrapToken, error)
 }
 
 type SetupRepository struct {
@@ -226,12 +225,12 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "generate runner bootstrap token"})
 		return
 	}
-	if err := h.store.CreateRunnerBootstrapToken(r.Context(), store.RunnerBootstrapToken{
-		RepositoryID: repo.ID,
-		TokenHash:    tokenHash,
-		CreatedAt:    now,
-		ExpiresAt:    now.Add(defaultBootstrapTokenTTL),
-	}); err != nil {
+	// Registration retries cross an external-response boundary: storage may
+	// commit even when the caller observes an error, or the response may be
+	// lost. Rotation is the durable invariant at that boundary. It revokes all
+	// prior active credentials and creates exactly one replacement atomically,
+	// so redelivery cannot accumulate independently valid bootstrap tokens.
+	if _, err := h.store.RotateRunnerBootstrapToken(r.Context(), repo.ID, tokenHash); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store runner bootstrap token: storage unavailable"})
 		return
 	}

@@ -305,6 +305,20 @@ func TestPostgresStoreMethods(t *testing.T) {
 	attempt, err := store.GetGitHubMutationAttempt(ctx, "mutation-1")
 	require.NoError(t, err)
 	assert.Equal(t, "completed", attempt.Status)
+	completedAt := time.Now().UTC()
+	require.NoError(t, store.RepairCompletedGitHubMutationAttempt(ctx, GitHubMutationAttempt{
+		IdempotencyKey: "mutation-repaired",
+		RepositoryID:   repoID,
+		MutationType:   "workflow_dispatch",
+		Request:        json.RawMessage(`{"ref":"main"}`),
+		Response:       json.RawMessage(`{"JobID":"job-repaired"}`),
+		CompletedAt:    &completedAt,
+	}))
+	repaired, err := store.GetGitHubMutationAttempt(ctx, "mutation-repaired")
+	require.NoError(t, err)
+	assert.Equal(t, mutations.PhaseCompleted, repaired.Status)
+	assert.JSONEq(t, `{"ref":"main"}`, string(repaired.Request))
+	assert.JSONEq(t, `{"JobID":"job-repaired"}`, string(repaired.Response))
 	assertExpiredIdempotencyReclaimPolicy(t, ctx, store)
 
 	state := ReviewState{RepositoryID: repoID, PRNumber: 7, HeadSHA: "def456", Status: "pending", LastJobID: job.JobID}
@@ -500,6 +514,17 @@ func TestMemoryStore(t *testing.T) {
 	attempt, err := s.GetGitHubMutationAttempt(ctx, "mutation-1")
 	require.NoError(t, err)
 	assert.Equal(t, "completed", attempt.Status)
+	require.NoError(t, s.RepairCompletedGitHubMutationAttempt(ctx, GitHubMutationAttempt{
+		IdempotencyKey: "mutation-repaired",
+		MutationType:   "workflow_dispatch",
+		Request:        json.RawMessage(`{"ref":"main"}`),
+		Response:       json.RawMessage(`{"JobID":"job-repaired"}`),
+	}))
+	repaired, err := s.GetGitHubMutationAttempt(ctx, "mutation-repaired")
+	require.NoError(t, err)
+	assert.Equal(t, mutations.PhaseCompleted, repaired.Status)
+	assert.JSONEq(t, `{"ref":"main"}`, string(repaired.Request))
+	assert.JSONEq(t, `{"JobID":"job-repaired"}`, string(repaired.Response))
 
 	require.NoError(t, s.SetReviewState(ctx, ReviewState{RepositoryID: 2, PRNumber: 3, HeadSHA: "sha", Status: "open"}))
 	state, err := s.GetReviewState(ctx, 2, 3, "sha")
@@ -535,6 +560,36 @@ func TestMemoryStore(t *testing.T) {
 
 	require.NoError(t, s.Close())
 	require.Error(t, s.Health(ctx))
+}
+
+func TestRepairCompletedGitHubMutationAttemptValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		attempt GitHubMutationAttempt
+		wantErr string
+	}{
+		{
+			name:    "missing idempotency key",
+			attempt: GitHubMutationAttempt{MutationType: "workflow_dispatch"},
+			wantErr: "idempotency key",
+		},
+		{
+			name:    "missing mutation type",
+			attempt: GitHubMutationAttempt{IdempotencyKey: "key"},
+			wantErr: "type",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			memoryErr := NewMemoryStore().RepairCompletedGitHubMutationAttempt(context.Background(), tt.attempt)
+			require.Error(t, memoryErr)
+			assert.Contains(t, memoryErr.Error(), tt.wantErr)
+
+			postgresErr := (&PostgresStore{}).RepairCompletedGitHubMutationAttempt(context.Background(), tt.attempt)
+			require.Error(t, postgresErr)
+			assert.Contains(t, postgresErr.Error(), tt.wantErr)
+		})
+	}
 }
 
 func TestMemoryStoreRecordGitHubMutationAttemptRejectsEmptyStatus(t *testing.T) {

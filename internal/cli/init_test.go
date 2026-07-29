@@ -26,6 +26,15 @@ func (a fakeInitAuthorizer) SetupToken(context.Context) (string, error) {
 	return a.token, a.err
 }
 
+type countingInitAuthorizer struct {
+	calls int
+}
+
+func (a *countingInitAuthorizer) SetupToken(context.Context) (string, error) {
+	a.calls++
+	return "gho_human", nil
+}
+
 type fakeInitRegistrar struct {
 	resp cpclient.RegisterRepositoryResponse
 	err  error
@@ -284,6 +293,11 @@ func TestValidatedEffectiveControlPlaneURLRejectsUnsafeValues(t *testing.T) {
 			value:   "https://example.com#frag",
 			wantErr: "fragment",
 		},
+		{
+			name:    "remote cleartext",
+			value:   "http://control.example.com",
+			wantErr: "must use https",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -293,6 +307,52 @@ func TestValidatedEffectiveControlPlaneURLRejectsUnsafeValues(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestValidatedEffectiveControlPlaneURLAllowsSecureAndLocalDevelopmentURLs(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "remote https", value: "https://control.example.com/", want: "https://control.example.com"},
+		{name: "localhost http", value: "http://localhost:8080/", want: "http://localhost:8080"},
+		{name: "ipv4 loopback http", value: "http://127.0.0.2:8080", want: "http://127.0.0.2:8080"},
+		{name: "ipv6 loopback http", value: "http://[::1]:8080", want: "http://[::1]:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validatedEffectiveControlPlaneURL(tt.value)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestRegisterRepositoryForInitRejectsRemoteHTTPBeforeObtainingSetupToken(t *testing.T) {
+	oldAuth := newSetupAuthorizer
+	oldRegistrar := newRepositoryRegistrar
+	auth := &countingInitAuthorizer{}
+	registrarCalls := 0
+	newSetupAuthorizer = func() setupAuthorizer { return auth }
+	newRepositoryRegistrar = func(string) (repositoryRegistrar, error) {
+		registrarCalls++
+		return &fakeInitRegistrar{}, nil
+	}
+	t.Cleanup(func() {
+		newSetupAuthorizer = oldAuth
+		newRepositoryRegistrar = oldRegistrar
+	})
+
+	_, err := registerRepositoryForInit(context.Background(), "octo", "herd", initOptions{
+		ControlPlaneURL: "http://control.example.com",
+		AppLogin:        "herd-os",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must use https")
+	assert.Zero(t, auth.calls)
+	assert.Zero(t, registrarCalls)
 }
 
 func TestResolvedInitControlPlaneURL(t *testing.T) {

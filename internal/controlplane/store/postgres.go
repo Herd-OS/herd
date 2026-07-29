@@ -657,6 +657,37 @@ func (s *PostgresStore) CompleteGitHubMutationAttempt(ctx context.Context, idemp
 	return requireAffected(result)
 }
 
+func (s *PostgresStore) RepairCompletedGitHubMutationAttempt(ctx context.Context, a GitHubMutationAttempt) error {
+	if a.IdempotencyKey == "" {
+		return fmt.Errorf("github mutation attempt idempotency key is required")
+	}
+	if a.MutationType == "" {
+		return fmt.Errorf("github mutation attempt type is required")
+	}
+	completedAt := time.Now().UTC()
+	if a.CompletedAt != nil {
+		completedAt = *a.CompletedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO github_mutation_attempts
+			(idempotency_key, repository_id, mutation_type, status, request, response, error, created_at, completed_at)
+		VALUES ($1, $2, $3, 'completed', $4, $5, '', $6, $7)
+		ON CONFLICT (idempotency_key) DO UPDATE SET
+			repository_id = COALESCE(github_mutation_attempts.repository_id, EXCLUDED.repository_id),
+			mutation_type = EXCLUDED.mutation_type,
+			status = 'completed',
+			request = CASE
+				WHEN github_mutation_attempts.request = '{}'::jsonb THEN EXCLUDED.request
+				ELSE github_mutation_attempts.request
+			END,
+			response = EXCLUDED.response,
+			error = '',
+			completed_at = EXCLUDED.completed_at`,
+		a.IdempotencyKey, nullableInt64(a.RepositoryID), a.MutationType,
+		metadataOrEmpty(a.Request), metadataOrEmpty(a.Response), timeOrNow(a.CreatedAt), completedAt)
+	return err
+}
+
 func (s *PostgresStore) TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (GitHubMutationStartResult, error) {
 	if len(allowedStatuses) == 0 {
 		return GitHubMutationStartResult{}, nil

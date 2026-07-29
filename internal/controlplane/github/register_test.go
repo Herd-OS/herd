@@ -24,6 +24,8 @@ type registerFakeStore struct {
 	attempts      []store.RegistrationAttempt
 	tokens        []store.RunnerBootstrapToken
 	err           error
+	rotateErrs    []error
+	commitOnError bool
 }
 
 func newRegisterFakeStore() *registerFakeStore {
@@ -54,12 +56,37 @@ func (s *registerFakeStore) CreateRegistrationAttempt(_ context.Context, a store
 	return nil
 }
 
-func (s *registerFakeStore) CreateRunnerBootstrapToken(_ context.Context, tok store.RunnerBootstrapToken) error {
+func (s *registerFakeStore) RotateRunnerBootstrapToken(_ context.Context, repoID int64, tokenHash string) (store.RunnerBootstrapToken, error) {
 	if s.err != nil {
-		return s.err
+		return store.RunnerBootstrapToken{}, s.err
+	}
+	now := time.Now().UTC()
+	tok := store.RunnerBootstrapToken{
+		ID:           int64(len(s.tokens) + 1),
+		RepositoryID: repoID,
+		TokenHash:    tokenHash,
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(24 * time.Hour),
+	}
+	var rotateErr error
+	if len(s.rotateErrs) > 0 {
+		rotateErr = s.rotateErrs[0]
+		s.rotateErrs = s.rotateErrs[1:]
+	}
+	if rotateErr != nil && !s.commitOnError {
+		return store.RunnerBootstrapToken{}, rotateErr
+	}
+	for i := range s.tokens {
+		if s.tokens[i].RepositoryID == repoID && s.tokens[i].RevokedAt == nil {
+			s.tokens[i].RevokedAt = &now
+			s.tokens[i].RevokedReason = "rotated"
+		}
 	}
 	s.tokens = append(s.tokens, tok)
-	return nil
+	if rotateErr != nil {
+		return store.RunnerBootstrapToken{}, rotateErr
+	}
+	return tok, nil
 }
 
 type fakeSetupVerifier struct {
@@ -132,6 +159,60 @@ func TestRegisterHandlerValidRegistration(t *testing.T) {
 	for _, attempt := range st.attempts {
 		assert.NotContains(t, attempt.Error, "gho_human")
 		assert.NotContains(t, string(attempt.Metadata), "gho_human")
+	}
+}
+
+func TestRegisterHandlerRetryRotatesBootstrapCredential(t *testing.T) {
+	tests := []struct {
+		name          string
+		rotateErrs    []error
+		commitOnError bool
+		firstStatus   int
+	}{
+		{
+			name:          "token commit followed by reported storage error",
+			rotateErrs:    []error{errors.New("commit result unavailable"), nil},
+			commitOnError: true,
+			firstStatus:   http.StatusInternalServerError,
+		},
+		{
+			name:        "successful response is lost by caller",
+			rotateErrs:  []error{nil, nil},
+			firstStatus: http.StatusCreated,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newRegisterFakeStore()
+			st.rotateErrs = append([]error(nil), tt.rotateErrs...)
+			st.commitOnError = tt.commitOnError
+			handler := NewRegisterHandler(RegisterHandlerOptions{
+				Store:         st,
+				SetupVerifier: &fakeSetupVerifier{repo: validSetupRepository()},
+				AppVerifier:   &fakeAppVerifier{},
+				AppLogin:      "herd-os",
+			})
+			body := `{"repository":"octo/herd","owner":"octo","name":"herd","setup_token":"gho_human"}`
+
+			first := httptest.NewRecorder()
+			handler.ServeHTTP(first, registerRequest(body))
+			assert.Equal(t, tt.firstStatus, first.Code)
+
+			retry := httptest.NewRecorder()
+			handler.ServeHTTP(retry, registerRequest(body))
+			require.Equal(t, http.StatusCreated, retry.Code)
+			assert.NotContains(t, retry.Body.String(), "gho_human")
+			require.Len(t, st.tokens, 2)
+			active := 0
+			for _, token := range st.tokens {
+				if token.RevokedAt == nil {
+					active++
+				}
+			}
+			assert.Equal(t, 1, active)
+			assert.NotNil(t, st.tokens[0].RevokedAt)
+			assert.Equal(t, "rotated", st.tokens[0].RevokedReason)
+		})
 	}
 }
 

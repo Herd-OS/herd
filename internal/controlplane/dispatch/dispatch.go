@@ -90,12 +90,7 @@ type MutationStarter interface {
 	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
 }
 
-type GitHubMutationResult struct {
-	Status      string
-	Response    json.RawMessage
-	Error       string
-	CompletedAt time.Time
-}
+type MutationCompletionRepairer = store.CompletedMutationRepairStore
 
 type WorkflowClient interface {
 	DispatchWorkflow(ctx context.Context, installationID int64, owner, repo, workflowFile, ref string, inputs map[string]string) error
@@ -354,7 +349,9 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 	if record.Status == "completed" && record.ResultRef != "" {
 		var result DispatchResult
 		if err := json.Unmarshal([]byte(record.ResultRef), &result); err == nil && result.JobID != "" {
-			_ = d.repairCompletedMutationAttempt(ctx, idempotencyKey, json.RawMessage(record.ResultRef))
+			if err := d.repairCompletedMutationAttempt(ctx, record, json.RawMessage(record.ResultRef)); err != nil {
+				return DispatchResult{}, err
+			}
 			result.Created = false
 			return result, nil
 		}
@@ -365,11 +362,7 @@ func (d Dispatcher) duplicateResult(ctx context.Context, req DispatchRequest, id
 			if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 				return DispatchResult{}, fmt.Errorf("decode accepted workflow dispatch result: %w", err)
 			}
-			if err := d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-				Status:      "completed",
-				Response:    json.RawMessage(resultJSON),
-				CompletedAt: time.Now().UTC(),
-			}); err != nil {
+			if err := d.repairCompletedMutationAttempt(ctx, record, json.RawMessage(resultJSON)); err != nil {
 				return DispatchResult{}, err
 			}
 			if err := d.Store.CompleteIdempotencyKey(ctx, idempotencyKey, resultJSON); err != nil {
@@ -457,26 +450,55 @@ func (d Dispatcher) preDispatchMutation(ctx context.Context, idempotencyKey stri
 	return mutations.IsPreCallRetryable(attempt.Status), nil
 }
 
-func (d Dispatcher) repairCompletedMutationAttempt(ctx context.Context, idempotencyKey string, resultJSON json.RawMessage) error {
+func (d Dispatcher) repairCompletedMutationAttempt(ctx context.Context, record store.IdempotencyKey, resultJSON json.RawMessage) error {
 	reader, ok := d.Store.(MutationReader)
 	if !ok {
 		return fmt.Errorf("workflow dispatch mutation reader is required")
 	}
-	attempt, err := reader.GetGitHubMutationAttempt(ctx, idempotencyKey)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil
-	}
+	attempt, err := reader.GetGitHubMutationAttempt(ctx, record.Key)
 	if err != nil {
-		return err
+		if !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("get workflow dispatch mutation attempt for repair: %w", err)
+		}
+		var metadata struct {
+			RepoID int64 `json:"repo_id"`
+		}
+		if unmarshalErr := json.Unmarshal(record.Metadata, &metadata); unmarshalErr != nil {
+			return fmt.Errorf("decode workflow dispatch mutation repair metadata: %w", unmarshalErr)
+		}
+		attempt = store.GitHubMutationAttempt{
+			IdempotencyKey: record.Key,
+			RepositoryID:   metadata.RepoID,
+			MutationType:   "workflow_dispatch",
+			Request:        record.Metadata,
+			CreatedAt:      record.CreatedAt,
+		}
 	}
 	if mutations.IsCompleted(attempt.Status) {
 		return nil
 	}
-	return d.completeMutationResult(ctx, idempotencyKey, GitHubMutationResult{
-		Status:      mutations.PhaseCompleted,
-		Response:    resultJSON,
-		CompletedAt: time.Now().UTC(),
-	})
+	if attempt.IdempotencyKey == "" {
+		attempt.IdempotencyKey = record.Key
+	}
+	if attempt.MutationType == "" {
+		attempt.MutationType = "workflow_dispatch"
+	}
+	if len(attempt.Request) == 0 {
+		attempt.Request = record.Metadata
+	}
+	now := time.Now().UTC()
+	attempt.Status = mutations.PhaseCompleted
+	attempt.Response = resultJSON
+	attempt.Error = ""
+	attempt.CompletedAt = &now
+	repairer, ok := d.Store.(MutationCompletionRepairer)
+	if !ok {
+		return fmt.Errorf("workflow dispatch mutation completion repairer is required")
+	}
+	if err := repairer.RepairCompletedGitHubMutationAttempt(ctx, attempt); err != nil {
+		return fmt.Errorf("repair completed workflow dispatch mutation attempt: %w", err)
+	}
+	return nil
 }
 
 func (d Dispatcher) completedDispatchMutation(ctx context.Context, idempotencyKey string) (bool, DispatchResult, error) {
@@ -514,20 +536,6 @@ func (d Dispatcher) completedDispatchMutation(ctx context.Context, idempotencyKe
 	return true, result, nil
 }
 
-func (d Dispatcher) completeMutationResult(ctx context.Context, idempotencyKey string, result GitHubMutationResult) error {
-	recorder, ok := d.Store.(MutationRecorder)
-	if !ok {
-		return fmt.Errorf("workflow dispatch mutation recorder is required")
-	}
-	if err := recorder.CompleteGitHubMutationAttempt(ctx, idempotencyKey, result.Status, result.Response, result.Error, result.CompletedAt); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("complete workflow dispatch mutation attempt: %w", err)
-	}
-	return nil
-}
-
 func (d Dispatcher) requireMutationStore() error {
 	if _, ok := d.Store.(MutationRecorder); !ok {
 		return fmt.Errorf("workflow dispatch mutation recorder is required")
@@ -537,6 +545,9 @@ func (d Dispatcher) requireMutationStore() error {
 	}
 	if _, ok := d.Store.(MutationStarter); !ok {
 		return fmt.Errorf("workflow dispatch mutation starter is required")
+	}
+	if _, ok := d.Store.(MutationCompletionRepairer); !ok {
+		return fmt.Errorf("workflow dispatch mutation completion repairer is required")
 	}
 	return nil
 }

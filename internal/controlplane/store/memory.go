@@ -510,6 +510,44 @@ func (s *MemoryStore) CompleteGitHubMutationAttempt(_ context.Context, idempoten
 	return nil
 }
 
+func (s *MemoryStore) RepairCompletedGitHubMutationAttempt(_ context.Context, a GitHubMutationAttempt) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a.IdempotencyKey == "" {
+		return fmt.Errorf("github mutation attempt idempotency key is required")
+	}
+	now := time.Now().UTC()
+	if a.CompletedAt == nil {
+		a.CompletedAt = &now
+	}
+	a.Status = mutations.PhaseCompleted
+	a.Error = ""
+	if existing, ok := s.mutationAttempts[a.IdempotencyKey]; ok {
+		if len(a.Request) == 0 {
+			a.Request = existing.Request
+		}
+		if a.RepositoryID == 0 {
+			a.RepositoryID = existing.RepositoryID
+		}
+		if a.MutationType == "" {
+			a.MutationType = existing.MutationType
+		}
+		if a.CreatedAt.IsZero() {
+			a.CreatedAt = existing.CreatedAt
+		}
+	}
+	if a.MutationType == "" {
+		return fmt.Errorf("github mutation attempt type is required")
+	}
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = now
+	}
+	a.Request = metadataOrEmpty(a.Request)
+	a.Response = metadataOrEmpty(a.Response)
+	s.mutationAttempts[a.IdempotencyKey] = a
+	return nil
+}
+
 func (s *MemoryStore) TryStartGitHubMutationAttempt(_ context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (GitHubMutationStartResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/controlplane/workflowevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -711,13 +712,109 @@ func TestIntegratorWorkflow_DefaultWorkerCompletionRequestsHostedIntegration(t *
 	assert.Contains(t, step.Run, `BATCH=$(echo "$RUN_HEAD_BRANCH" | sed -n 's#^herd/batch/\([0-9][0-9]*\).*#\1#p')`)
 	assert.Contains(t, step.Run, "Skipping HerdOS worker_completed callback for non-batch branch")
 	assert.Contains(t, step.Run, `--arg action "worker_completed"`)
-	assert.Contains(t, step.Run, `--arg run_id "$RUN_ID"`)
+	assert.Contains(t, step.Run, `--argjson run_id "$RUN_ID"`)
 	assert.Contains(t, step.Run, `--argjson batch_number "$BATCH"`)
 	assert.Contains(t, step.Run, `--arg head_branch "$RUN_HEAD_BRANCH"`)
 	assert.Contains(t, step.Run, `--arg head_sha "$RUN_HEAD_SHA"`)
 	assert.Contains(t, step.Run, `batch_number: $batch_number`)
 	assert.Contains(t, step.Run, `workflow_run: {`)
 	assert.NotContains(t, step.Run, "herd integrator ")
+}
+
+func TestIntegratorWorkflow_CallbackIDsAreNumericAndMalformedValuesFail(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is required to execute rendered workflow payload scripts")
+	}
+	cfg := config.Default()
+	cfg.Integrator.CIWorkflows = []string{"CI"}
+	rendered, err := RenderWorkflow(workflowFile{
+		SrcName:  "herd-integrator.yml.tmpl",
+		DestName: "herd-integrator.yml",
+		Template: true,
+	}, cfg)
+	require.NoError(t, err)
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+
+	tests := []struct {
+		name      string
+		job       string
+		step      string
+		idEnv     string
+		eventName string
+		env       []string
+	}{
+		{
+			name:      "worker workflow run",
+			job:       "integrate",
+			step:      "Request hosted integration",
+			idEnv:     "RUN_ID",
+			eventName: "workflow_run",
+			env:       []string{"RUN_HEAD_BRANCH=herd/batch/106-fix", "RUN_CONCLUSION=success", "RUN_HEAD_SHA=head"},
+		},
+		{
+			name:      "ci workflow run",
+			job:       "check-ci-workflow-completion",
+			step:      "Request hosted CI reconciliation",
+			idEnv:     "RUN_ID",
+			eventName: "workflow_run",
+			env:       []string{"HEAD_BRANCH=herd/batch/106-fix", "RUN_CONCLUSION=success", "RUN_HEAD_SHA=head"},
+		},
+		{
+			name:      "check run",
+			job:       "check-ci-on-completion",
+			step:      "Request hosted CI reconciliation",
+			idEnv:     "CHECK_RUN_ID",
+			eventName: "check_run",
+			env:       []string{"HEAD_BRANCH=herd/batch/106-fix", "CHECK_RUN_CONCLUSION=success", "CHECK_RUN_HEAD_SHA=head"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step := namedStep(t, workflow.Jobs[tt.job], tt.step)
+			dir := t.TempDir()
+			curlPath := filepath.Join(dir, "curl")
+			require.NoError(t, os.WriteFile(curlPath, []byte(`#!/bin/sh
+case "$*" in
+  *audience=herd-control-plane*) printf '{"value":"oidc-token"}\n' ;;
+  *) exit 0 ;;
+esac
+`), 0700))
+			baseEnv := append(os.Environ(),
+				"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"REPOSITORY=octo/herd",
+				"HERD_CONTROL_PLANE_URL=https://api.herd-os.com",
+				"ACTIONS_ID_TOKEN_REQUEST_URL=https://oidc.example.test/token",
+				"ACTIONS_ID_TOKEN_REQUEST_TOKEN=request-token",
+			)
+			baseEnv = append(baseEnv, tt.env...)
+
+			cmd := exec.Command("sh", "-c", step.Run)
+			cmd.Env = append(append([]string(nil), baseEnv...), tt.idEnv+"=123")
+			output, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(output))
+			payload, err := os.ReadFile("/tmp/herd-integrator-event.json")
+			require.NoError(t, err)
+			var event workflowevents.Event
+			require.NoError(t, json.Unmarshal(payload, &event))
+			assert.Equal(t, tt.eventName, event.EventName)
+			raw := event.WorkflowRun
+			if tt.eventName == "check_run" {
+				raw = event.CheckRun
+			}
+			var source struct {
+				ID int64 `json:"id"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &source))
+			assert.Equal(t, int64(123), source.ID)
+
+			cmd = exec.Command("sh", "-c", step.Run)
+			cmd.Env = append(append([]string(nil), baseEnv...), tt.idEnv+"=not-a-number")
+			output, err = cmd.CombinedOutput()
+			require.Error(t, err)
+			assert.Contains(t, string(output), "expected a numeric value")
+		})
+	}
 }
 
 func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T) {

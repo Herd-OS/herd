@@ -51,6 +51,16 @@ type Store interface {
 	ReleaseReviewLock(ctx context.Context, repoID int64, prNumber int, headSHA string, holder string, releasedAt time.Time) error
 }
 
+// CompletedMutationRepairStore is the durable convergence boundary for an
+// external mutation whose completed outcome is proven by another idempotency
+// record. RepairCompletedGitHubMutationAttempt must atomically insert a missing
+// attempt or update an existing one to completed while preserving replayable
+// request and response metadata; callers must not report replay success until
+// this repair succeeds.
+type CompletedMutationRepairStore interface {
+	RepairCompletedGitHubMutationAttempt(ctx context.Context, a GitHubMutationAttempt) error
+}
+
 // ReconcileJob joins a durable job with repository context and callback state.
 type ReconcileJob struct {
 	Job         Job
