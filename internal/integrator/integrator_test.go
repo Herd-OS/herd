@@ -2434,6 +2434,46 @@ func TestFindStrandedCompletedBatches_DetectionSkips(t *testing.T) {
 			issues: []*platform.Issue{{Number: 10, Title: "Task A", State: "open", Labels: []string{issues.StatusBlocked}}},
 		},
 		{
+			name: "closed failed issue",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 1,
+			},
+			issues: []*platform.Issue{{Number: 10, Title: "Task A", State: "closed", Labels: []string{issues.StatusFailed}}},
+		},
+		{
+			name: "closed in-progress issue",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 1,
+			},
+			issues: []*platform.Issue{{Number: 10, Title: "Task A", State: "closed", Labels: []string{issues.StatusInProgress}}},
+		},
+		{
+			name: "closed ready issue",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 1,
+			},
+			issues: []*platform.Issue{{Number: 10, Title: "Task A", State: "closed", Labels: []string{issues.StatusReady}}},
+		},
+		{
+			name: "closed blocked issue",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 1,
+			},
+			issues: []*platform.Issue{{Number: 10, Title: "Task A", State: "closed", Labels: []string{issues.StatusBlocked}}},
+		},
+		{
 			name: "partial issue list",
 			milestone: &platform.Milestone{
 				Number:       1,

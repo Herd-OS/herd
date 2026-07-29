@@ -6,8 +6,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -307,6 +309,60 @@ func TestHandleIntegrate_WithConsolidation(t *testing.T) {
 	// encounter errors. The handler should not fail — it reports issues in summary.
 	require.NoError(t, result.Error)
 	assert.Contains(t, result.Message, "Integrator cycle for batch #1")
+}
+
+func TestHandleIntegrate_ReleasesBatchLockAfterConsolidationFailure(t *testing.T) {
+	dir, g := initHandlerTestRepo(t)
+
+	batchBody := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 1},
+		Task:        "Test",
+	})
+
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Batch", Labels: []string{issues.StatusDone}},
+	}
+
+	repo := &integrateRepoService{
+		defaultBranch: "main",
+		branchSHAs: map[string]string{
+			"herd/worker/10-batch": "abc123",
+		},
+	}
+
+	p := &integratePlatform{
+		issues: issueSvc,
+		prs: &testPRService{
+			listResult: []*platform.PullRequest{},
+		},
+		workflows:  &testWorkflowService{},
+		repo:       repo,
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch", State: "open"}}},
+		checks:     &testCheckService{status: "success"},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Git:         g,
+		Config:      baseConfig(),
+		RepoRoot:    dir,
+		IssueNumber: 5,
+		IsPR:        false,
+		IssueBody:   batchBody,
+	}
+
+	result := handleIntegrate(hctx, Command{Name: "integrate"})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "Consolidation skipped")
+
+	state, ok, err := integrator.DescribeBatchLock(context.Background(), repo, 1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "unlocked", state.Status)
+	assert.False(t, integrator.IsBatchLockActive(state, time.Now().UTC()))
 }
 
 func TestHandleIntegrate_ReviewRunsWithExistingPR(t *testing.T) {

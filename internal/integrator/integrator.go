@@ -685,6 +685,17 @@ func isIssueComplete(issue *platform.Issue) bool {
 	return issue.State == "closed" || issues.HasLabel(issue.Labels, issues.StatusDone)
 }
 
+func isIssueCompleteForStrandedRecovery(issue *platform.Issue) bool {
+	status := issues.StatusLabel(issue.Labels)
+	if status == issues.StatusDone {
+		return true
+	}
+	if status != "" {
+		return false
+	}
+	return issue.State == "closed"
+}
+
 // FindStrandedCompletedBatches finds open milestones where every issue is
 // complete, the expected batch branch exists, and no pull request exists for
 // that exact head branch.
@@ -712,7 +723,7 @@ func FindStrandedCompletedBatches(ctx context.Context, p platform.Platform) ([]S
 		}
 		allComplete := true
 		for _, issue := range allIssues {
-			if !isIssueComplete(issue) {
+			if !isIssueCompleteForStrandedRecovery(issue) {
 				allComplete = false
 				break
 			}
