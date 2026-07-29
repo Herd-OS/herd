@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -18,6 +20,14 @@ type NameStatusEntry struct {
 	Status  string
 	Path    string
 	OldPath string
+}
+
+type ScrubTransientArtifactsResult struct {
+	Removed []string
+}
+
+func (r ScrubTransientArtifactsResult) Changed() bool {
+	return len(r.Removed) > 0
 }
 
 // New creates a new Git instance for the given working directory.
@@ -161,6 +171,35 @@ func (g *Git) Commit(message string) error {
 	return g.run("commit", "-m", message)
 }
 
+// CommitPaths creates a new commit containing changes for the given paths.
+func (g *Git) CommitPaths(message string, paths ...string) error {
+	if len(paths) == 0 {
+		return fmt.Errorf("commit paths: no paths provided")
+	}
+	args := []string{"commit", "-m", message, "--"}
+	args = append(args, paths...)
+	return g.run(args...)
+}
+
+// HasCachedChanges reports whether the given paths have staged changes.
+func (g *Git) HasCachedChanges(paths ...string) (bool, error) {
+	if len(paths) == 0 {
+		return false, fmt.Errorf("checking cached changes: no paths provided")
+	}
+	args := []string{"diff", "--cached", "--quiet", "--"}
+	args = append(args, paths...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = g.WorkDir
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, err
+}
+
 // AmendNoEdit amends the most recent commit without changing its message.
 func (g *Git) AmendNoEdit() error {
 	return g.run("commit", "--amend", "--no-edit")
@@ -190,6 +229,56 @@ func (g *Git) IsDirty() (bool, error) {
 		return false, err
 	}
 	return out != "", nil
+}
+
+func (g *Git) ScrubTransientArtifacts() (ScrubTransientArtifactsResult, error) {
+	result := ScrubTransientArtifactsResult{}
+	matches := map[string]struct{}{}
+
+	out, err := g.output("status", "--porcelain=v1", "--", ".herd")
+	if err != nil {
+		return result, fmt.Errorf("checking transient artifact git status: %w", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		relPath := transientArtifactStatusPath(line)
+		if isTransientArtifactPath(relPath) {
+			matches[relPath] = struct{}{}
+		}
+	}
+
+	glob := filepath.Join(g.WorkDir, ".herd", "review-fixes-*.md")
+	files, err := filepath.Glob(glob)
+	if err != nil {
+		return result, fmt.Errorf("globbing transient artifacts: %w", err)
+	}
+	for _, file := range files {
+		relPath, err := filepath.Rel(g.WorkDir, file)
+		if err != nil {
+			return result, fmt.Errorf("relativizing transient artifact path %q: %w", file, err)
+		}
+		relPath = filepath.ToSlash(relPath)
+		if isTransientArtifactPath(relPath) {
+			matches[relPath] = struct{}{}
+		}
+	}
+
+	result.Removed = make([]string, 0, len(matches))
+	for relPath := range matches {
+		result.Removed = append(result.Removed, relPath)
+	}
+	sort.Strings(result.Removed)
+
+	for _, relPath := range result.Removed {
+		if err := g.run("rm", "-f", "--cached", "--ignore-unmatch", "--", relPath); err != nil {
+			return result, fmt.Errorf("removing transient artifact from index %q: %w", relPath, err)
+		}
+		err := os.Remove(filepath.Join(g.WorkDir, filepath.FromSlash(relPath)))
+		if err != nil && !os.IsNotExist(err) {
+			return result, fmt.Errorf("removing transient artifact file %q: %w", relPath, err)
+		}
+	}
+
+	return result, nil
 }
 
 // BehindCount returns the number of commits HEAD is behind remote/branch.
@@ -304,6 +393,23 @@ func parseNameStatus(out string) []NameStatusEntry {
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+func transientArtifactStatusPath(line string) string {
+	line = strings.TrimRight(line, "\r")
+	if len(line) < 4 {
+		return ""
+	}
+	relPath := line[3:]
+	if idx := strings.LastIndex(relPath, " -> "); idx >= 0 {
+		relPath = relPath[idx+4:]
+	}
+	return filepath.ToSlash(relPath)
+}
+
+func isTransientArtifactPath(relPath string) bool {
+	ok, err := path.Match(".herd/review-fixes-*.md", relPath)
+	return err == nil && ok
 }
 
 func parseNumStat(out string) (map[string][2]int, error) {

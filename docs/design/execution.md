@@ -136,6 +136,9 @@ in a collapsible details block. Additionally, the worker posts a summary comment
 on the batch PR so the reviewer can see why no changes were made. This prevents
 the reviewer from creating fix issues for work that was already determined to be
 unnecessary. Format: **Worker #N (no-op):** No changes needed. <explanation>
+Verification findings and no-op reasoning should stay visible through the
+worker's final output and HerdOS comments, not committed repository-local
+`.herd/review-fixes-*.md` report files.
 
 ### Image Preprocessing
 
@@ -195,6 +198,12 @@ directory, including the worker-written `.herd/progress/<issue-number>.validatio
 marker and `.herd/progress/<issue-number>.validation.errors` files, so none of
 them leak into the final batch PR either. For backward compatibility, legacy
 `WORKER_PROGRESS.md` files at the repo root are also removed.
+
+HerdOS also mechanically scrubs transient worker-local review-fix artifacts
+matching `.herd/review-fixes-*.md` before worker branch finalization, standalone
+fix pushes, validation retry pushes, and timeout checkpoint commits. This guard
+is intentionally narrow: legitimate repository `.herd` role and configuration
+files such as `.herd/worker.md` remain valid and committable.
 
 #### Live Progress Updates
 

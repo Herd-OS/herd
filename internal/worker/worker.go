@@ -337,6 +337,10 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 		}
 	}
 
+	if err = scrubTransientArtifactsForWorker(ctx, p, g, params.IssueNumber); err != nil {
+		return nil, err
+	}
+
 	// Check for no-op (no commits made)
 	diff, diffErr := g.Diff(batchBranch, "HEAD")
 	if diffErr != nil {
@@ -459,6 +463,10 @@ func Exec(ctx context.Context, p platform.Platform, ag agent.Agent, cfg *config.
 			rawSummary += "\n\n--- Retry output ---\n" + retryResult.Summary
 		}
 
+		if err = scrubTransientArtifactsForWorker(ctx, p, g, params.IssueNumber); err != nil {
+			return nil, err
+		}
+
 		// Re-run validation
 		validation = runValidation(ctx, params.RepoRoot)
 		if !validation.allPassed() {
@@ -558,6 +566,16 @@ func remainingAgentTimeout(ctx context.Context, workerTimeoutMinutes int) time.D
 func checkpointTimedOutWork(ctx context.Context, p platform.Platform, g *git.Git, repoRoot string, issueNumber int, branch string, baseRef string, mode string) (summary string, checkpointed bool, err error) {
 	_ = repoRoot
 
+	scrubResult, scrubErr := g.ScrubTransientArtifacts()
+	if scrubErr != nil {
+		return checkpointTimeoutFailure(ctx, p, issueNumber, "removing transient review-fix artifacts", scrubErr)
+	}
+	if scrubResult.Changed() {
+		message := fmt.Sprintf("Removed transient Herd artifact(s) before finalizing worker branch: %s", strings.Join(scrubResult.Removed, ", "))
+		fmt.Println(message)
+		_ = p.Issues().AddComment(ctx, issueNumber, message)
+	}
+
 	diff, diffErr := g.Diff(baseRef, "HEAD")
 	if diffErr != nil {
 		return "", false, fmt.Errorf("checking committed timeout diff: %w", diffErr)
@@ -605,6 +623,59 @@ func checkpointTimeoutFailure(ctx context.Context, p platform.Platform, issueNum
 		fmt.Sprintf("**Worker timed out:** Herd detected uncommitted work, but could not checkpoint it while %s.\n\n```\n%s\n```\n\nThis issue will be retried by the monitor.",
 			action, truncateOutput(err.Error(), 2000)))
 	return "", false, err
+}
+
+func scrubTransientArtifactsForWorker(ctx context.Context, p platform.Platform, g *git.Git, issueNumber int) error {
+	result, err := g.ScrubTransientArtifacts()
+	if err != nil {
+		_ = p.Issues().AddComment(ctx, issueNumber,
+			fmt.Sprintf("**Worker failed:** Herd could not remove transient review-fix artifacts before finalizing the branch.\n\n```\n%s\n```",
+				truncateOutput(err.Error(), 2000)))
+		return fmt.Errorf("removing transient review-fix artifacts before finalizing worker branch: %w", err)
+	}
+	if !result.Changed() {
+		return nil
+	}
+
+	message := fmt.Sprintf("Removed transient Herd artifact(s) before finalizing worker branch: %s", strings.Join(result.Removed, ", "))
+	fmt.Println(message)
+	_ = p.Issues().AddComment(ctx, issueNumber, message)
+
+	staged, stagedErr := g.HasCachedChanges(result.Removed...)
+	if stagedErr != nil {
+		_ = p.Issues().AddComment(ctx, issueNumber,
+			fmt.Sprintf("**Worker failed:** Herd could not inspect transient artifact cleanup before finalizing the branch.\n\n```\n%s\n```",
+				truncateOutput(stagedErr.Error(), 2000)))
+		return fmt.Errorf("inspecting transient artifact cleanup before finalizing worker branch: %w", stagedErr)
+	}
+	if staged {
+		if cfgErr := g.ConfigureIdentity(workerCheckpointGitName, workerCheckpointGitEmail); cfgErr != nil {
+			_ = p.Issues().AddComment(ctx, issueNumber,
+				fmt.Sprintf("**Worker failed:** Herd could not prepare transient artifact cleanup before finalizing the branch.\n\n```\n%s\n```",
+					truncateOutput(cfgErr.Error(), 2000)))
+			return fmt.Errorf("configuring git identity for transient artifact cleanup: %w", cfgErr)
+		}
+		if commitErr := g.CommitPaths(fmt.Sprintf("Remove transient Herd artifacts for #%d", issueNumber), result.Removed...); commitErr != nil {
+			_ = p.Issues().AddComment(ctx, issueNumber,
+				fmt.Sprintf("**Worker failed:** Herd could not commit transient artifact cleanup before finalizing the branch.\n\n```\n%s\n```",
+					truncateOutput(commitErr.Error(), 2000)))
+			return fmt.Errorf("committing transient artifact cleanup before finalizing worker branch: %w", commitErr)
+		}
+	}
+	return nil
+}
+
+func gitHasStagedChanges(g *git.Git) (bool, error) {
+	cmd := exec.Command("git", "diff", "--cached", "--quiet")
+	cmd.Dir = g.WorkDir
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, err
 }
 
 func pushTimeoutCheckpoint(g *git.Git, mode string, branch string) error {
@@ -1188,6 +1259,10 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 		rawSummary = agentResult.Summary
 	}
 
+	if err = scrubTransientArtifactsForWorker(ctx, p, g, params.IssueNumber); err != nil {
+		return nil, err
+	}
+
 	diff, diffErr := g.Diff("origin/"+targetBranch, "HEAD")
 	if diffErr != nil {
 		return nil, fmt.Errorf("checking for changes: %w", diffErr)
@@ -1246,6 +1321,10 @@ func execStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, cf
 		}
 		if retryResult != nil && retryResult.Summary != "" {
 			rawSummary += "\n\n--- Retry output ---\n" + retryResult.Summary
+		}
+
+		if err = scrubTransientArtifactsForWorker(ctx, p, g, params.IssueNumber); err != nil {
+			return nil, err
 		}
 
 		validation = runValidation(ctx, params.RepoRoot)

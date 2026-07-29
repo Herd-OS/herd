@@ -396,6 +396,8 @@ HerdOS gives the agent a shorter inner execution deadline so the worker has time
 to clean up before the outer job is cancelled. The cleanup window is used to stop
 the agent process, inspect git state, create timeout checkpoints when needed,
 report diagnostics, and push resumable checkpoint state.
+Transient review-fix artifacts matching `.herd/review-fixes-*.md` are removed
+before checkpointing and reported in diagnostics.
 
 ```yaml
 workers:
