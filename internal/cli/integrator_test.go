@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/platform"
@@ -184,12 +185,24 @@ func TestHostedReviewResultFromIntegrator(t *testing.T) {
 	}
 }
 
+func TestHostedReviewResultFromIntegratorPreservesFindings(t *testing.T) {
+	findings := []agent.ReviewFinding{
+		{Severity: "HIGH", Description: "internal/a.go:12 first durable boundary gap"},
+		{Severity: "MEDIUM", Description: "internal/b.go:34 second durable boundary gap"},
+	}
+
+	got := hostedReviewResultFromIntegrator(&integrator.ReviewResult{Findings: findings})
+
+	assert.Equal(t, findings, got.Findings)
+}
+
 func TestWriteHostedReviewResult(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "result.json")
 
 	require.NoError(t, writeHostedReviewResult(path, hostedReviewWorkflowResult{
-		Status:  "changes_requested",
-		Summary: "needs work",
+		Status:   "changes_requested",
+		Summary:  "needs work",
+		Findings: []agent.ReviewFinding{{Severity: "HIGH", Description: "internal/a.go:12 fix mutation ordering"}},
 	}))
 
 	data, err := os.ReadFile(path)
@@ -198,6 +211,9 @@ func TestWriteHostedReviewResult(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &got))
 	assert.Equal(t, "changes_requested", got.Status)
 	assert.Equal(t, "needs work", got.Summary)
+	require.Len(t, got.Findings, 1)
+	assert.Equal(t, "HIGH", got.Findings[0].Severity)
+	assert.Contains(t, got.Findings[0].Description, "internal/a.go:12")
 }
 
 func TestIntegratorReviewCmd_DuplicateSkipReasonPrintedOnce(t *testing.T) {

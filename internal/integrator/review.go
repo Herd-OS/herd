@@ -864,6 +864,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		FixIssues:     fixIssueNums,
 		FixCycle:      nextCycle,
 		BatchPRNumber: pr.Number,
+		Findings:      append([]agent.ReviewFinding(nil), actionableFindings...),
 	}, nil
 }
 

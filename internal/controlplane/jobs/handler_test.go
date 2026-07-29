@@ -1736,7 +1736,7 @@ func TestHandlerDoesNotRetryReviewResultAfterProcessorFailure(t *testing.T) {
 	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.mutationCompletions, 2)
 	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[0].status)
-	assert.Equal(t, mutationspkg.PhaseRepairRequired, st.mutationCompletions[1].status)
+	assert.Equal(t, mutationspkg.PhasePostCallUnknown, st.mutationCompletions[1].status)
 	assert.Empty(t, st.results)
 }
 

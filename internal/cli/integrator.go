@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/factory"
 	"github.com/herd-os/herd/internal/commands"
 	"github.com/herd-os/herd/internal/config"
@@ -308,8 +309,9 @@ func newIntegratorReviewCmd() *cobra.Command {
 }
 
 type hostedReviewWorkflowResult struct {
-	Status  string `json:"status"`
-	Summary string `json:"summary"`
+	Status   string                `json:"status"`
+	Summary  string                `json:"summary"`
+	Findings []agent.ReviewFinding `json:"findings,omitempty"`
 }
 
 func hostedReviewResultFromIntegrator(result *integrator.ReviewResult) hostedReviewWorkflowResult {
@@ -322,21 +324,21 @@ func hostedReviewResultFromIntegrator(result *integrator.ReviewResult) hostedRev
 		if summary == "" {
 			summary = "Herd Review approved this head."
 		}
-		return hostedReviewWorkflowResult{Status: "approved", Summary: summary}
+		return hostedReviewWorkflowResult{Status: "approved", Summary: summary, Findings: result.Findings}
 	case result.MaxCyclesHit:
-		return hostedReviewWorkflowResult{Status: "failed", Summary: "Herd Review reached the maximum fix cycle count."}
+		return hostedReviewWorkflowResult{Status: "failed", Summary: "Herd Review reached the maximum fix cycle count.", Findings: result.Findings}
 	case result.ManualInterventionNeeded, result.StableDisagreement, result.AllCreatesFailed:
 		summary := reviewResultMessage(result)
 		if summary == "" {
 			summary = "Herd Review requires manual intervention."
 		}
-		return hostedReviewWorkflowResult{Status: "failed", Summary: summary}
+		return hostedReviewWorkflowResult{Status: "failed", Summary: summary, Findings: result.Findings}
 	default:
 		summary := reviewResultMessage(result)
 		if summary == "" {
 			summary = "Herd Review requested changes."
 		}
-		return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary}
+		return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary, Findings: result.Findings}
 	}
 }
 

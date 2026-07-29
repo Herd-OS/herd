@@ -205,6 +205,29 @@ func TestIntegratorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {
 	assert.NotContains(t, string(rendered), "check-ci-workflow-completion")
 }
 
+func TestHostedWorkflowCurlArgumentsDoNotContainBearerTokens(t *testing.T) {
+	cfg := config.Default()
+	for _, wf := range workflowFiles() {
+		if wf.DestName == "herd-publish-runner.yml" {
+			continue
+		}
+		t.Run(wf.DestName, func(t *testing.T) {
+			rendered, err := RenderWorkflow(wf, cfg)
+			require.NoError(t, err)
+			script := string(rendered)
+			assert.Contains(t, script, `chmod 600 "$AUTH_HEADER_FILE"`)
+			assert.Contains(t, script, `curl -fsSL --config "$AUTH_HEADER_FILE"`)
+			for _, line := range strings.Split(script, "\n") {
+				if !strings.Contains(line, "curl ") {
+					continue
+				}
+				assert.NotContains(t, line, "$ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+				assert.NotContains(t, line, "$OIDC_TOKEN")
+			}
+		})
+	}
+}
+
 func TestIntegratorWorkflow_BatchExtractionIsNonFatal(t *testing.T) {
 	tests := []struct {
 		name             string

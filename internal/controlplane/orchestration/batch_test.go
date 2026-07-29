@@ -352,7 +352,7 @@ func TestDispatchReadyWorkersCallStartedDispatchDoesNotMarkInProgressOrRedispatc
 	assert.Empty(t, fake.issues.added[1])
 }
 
-func TestDispatchReadyWorkersRedispatchesReadyIssueWhenHeadAdvancesAfterDispatchBeforeStatusTransition(t *testing.T) {
+func TestDispatchReadyWorkersRepairsReadyIssueWhenHeadAdvancesAfterDispatchBeforeStatusTransition(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
 	fake.repo.branches["herd/batch/7-demo"] = "batch-head-1"
@@ -387,10 +387,9 @@ func TestDispatchReadyWorkersRedispatchesReadyIssueWhenHeadAdvancesAfterDispatch
 	secondCount, secondErr := svc.DispatchReadyWorkers(ctx, req)
 
 	require.NoError(t, secondErr)
-	assert.Equal(t, 1, secondCount)
-	assert.Len(t, disp.requests, 2)
-	assert.Equal(t, "batch-head-2", disp.requests[1].HeadSHA)
-	assert.Equal(t, []string{issues.StatusReady, issues.StatusReady}, fake.issues.removed[1])
+	assert.Equal(t, 0, secondCount)
+	assert.Len(t, disp.requests, 1)
+	assert.Equal(t, []string{issues.StatusReady}, fake.issues.removed[1])
 	assert.Equal(t, []string{issues.StatusInProgress}, fake.issues.added[1])
 }
 

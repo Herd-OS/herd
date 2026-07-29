@@ -73,6 +73,21 @@ type Reconciler struct {
 }
 
 func (r *Reconciler) RunOnce(ctx context.Context) (Report, error) {
+	return r.runOnce(ctx, 0)
+}
+
+// RunOnceForRepository applies the same durable repair strategy as RunOnce,
+// but confines every candidate to one authenticated repository. Repository
+// workflow callbacks must use this boundary; RunOnce is reserved for the
+// trusted control-plane scheduler.
+func (r *Reconciler) RunOnceForRepository(ctx context.Context, repositoryID int64) (Report, error) {
+	if repositoryID <= 0 {
+		return Report{}, fmt.Errorf("repository ID is required")
+	}
+	return r.runOnce(ctx, repositoryID)
+}
+
+func (r *Reconciler) runOnce(ctx context.Context, repositoryID int64) (Report, error) {
 	if r.Store == nil {
 		return Report{}, fmt.Errorf("reconciler store is required")
 	}
@@ -81,11 +96,11 @@ func (r *Reconciler) RunOnce(ctx context.Context) (Report, error) {
 	report := Report{StartedAt: now}
 	var errs []error
 
-	r.runJobs(ctx, cfg, now, &report, &errs)
-	r.runCommands(ctx, cfg, now, &report, &errs)
-	r.runReviews(ctx, cfg, now, &report, &errs)
-	r.runIdempotency(ctx, cfg, now, &report, &errs)
-	r.runMutationAttempts(ctx, cfg, now, &report, &errs)
+	r.runJobs(ctx, cfg, now, repositoryID, &report, &errs)
+	r.runCommands(ctx, cfg, now, repositoryID, &report, &errs)
+	r.runReviews(ctx, cfg, now, repositoryID, &report, &errs)
+	r.runIdempotency(ctx, cfg, now, repositoryID, &report, &errs)
+	r.runMutationAttempts(ctx, cfg, now, repositoryID, &report, &errs)
 
 	report.CompletedAt = r.now()
 	r.lastMu.Lock()
@@ -119,13 +134,16 @@ func (r *Reconciler) LastReport() Report {
 	return r.lastReport
 }
 
-func (r *Reconciler) runJobs(ctx context.Context, cfg Config, now time.Time, report *Report, errs *[]error) {
+func (r *Reconciler) runJobs(ctx context.Context, cfg Config, now time.Time, repositoryID int64, report *Report, errs *[]error) {
 	items, err := r.Store.ListReconcileJobs(ctx, now.Add(-cfg.JobTimeout), cfg.Limit)
 	if err != nil {
 		*errs = append(*errs, fmt.Errorf("list reconcile jobs: %w", err))
 		return
 	}
 	for _, item := range items {
+		if repositoryID != 0 && item.Repository.ID != repositoryID {
+			continue
+		}
 		if item.ResultCount > 0 {
 			r.add(report, "job", item.Job.JobID, ClassificationComplete, "observed_callback", "job has callback result")
 			continue
@@ -139,13 +157,16 @@ func (r *Reconciler) runJobs(ctx context.Context, cfg Config, now time.Time, rep
 	}
 }
 
-func (r *Reconciler) runCommands(ctx context.Context, cfg Config, now time.Time, report *Report, errs *[]error) {
+func (r *Reconciler) runCommands(ctx context.Context, cfg Config, now time.Time, repositoryID int64, report *Report, errs *[]error) {
 	items, err := r.Store.ListReconcileCommands(ctx, now.Add(-cfg.CommandTimeout), cfg.Limit)
 	if err != nil {
 		*errs = append(*errs, fmt.Errorf("list reconcile commands: %w", err))
 		return
 	}
 	for _, item := range items {
+		if repositoryID != 0 && item.Repository.ID != repositoryID {
+			continue
+		}
 		if item.IdempotencySeen && mutations.IsCompleted(item.Idempotency.Status) {
 			r.add(report, "command", item.IdempotencyKey, ClassificationComplete, "none", "command dispatch completed")
 			continue
@@ -197,13 +218,16 @@ func (r *Reconciler) runCommands(ctx context.Context, cfg Config, now time.Time,
 	}
 }
 
-func (r *Reconciler) runReviews(ctx context.Context, cfg Config, now time.Time, report *Report, errs *[]error) {
+func (r *Reconciler) runReviews(ctx context.Context, cfg Config, now time.Time, repositoryID int64, report *Report, errs *[]error) {
 	items, err := r.Store.ListReconcileReviewStates(ctx, now.Add(-cfg.ReviewStaleAfter), cfg.Limit)
 	if err != nil {
 		*errs = append(*errs, fmt.Errorf("list reconcile review states: %w", err))
 		return
 	}
 	for _, item := range items {
+		if repositoryID != 0 && item.Repository.ID != repositoryID {
+			continue
+		}
 		if r.State == nil {
 			r.add(report, "review", reviewID(item.State), ClassificationStillNeeded, "inspect_skipped", "current GitHub state client is not configured")
 			continue
@@ -251,13 +275,16 @@ func (r *Reconciler) runReviews(ctx context.Context, cfg Config, now time.Time, 
 	}
 }
 
-func (r *Reconciler) runIdempotency(ctx context.Context, cfg Config, now time.Time, report *Report, errs *[]error) {
+func (r *Reconciler) runIdempotency(ctx context.Context, cfg Config, now time.Time, repositoryID int64, report *Report, errs *[]error) {
 	keys, err := r.Store.ListStartedIdempotencyKeys(ctx, "issue_comment_command", now.Add(-cfg.CommandTimeout), cfg.Limit)
 	if err != nil {
 		*errs = append(*errs, fmt.Errorf("list started command idempotency keys: %w", err))
 		return
 	}
 	for _, key := range keys {
+		if repositoryID != 0 && idempotencyRepositoryID(key.Metadata) != repositoryID {
+			continue
+		}
 		if mutations.IsPreCallRetryable(key.Status) {
 			r.add(report, "idempotency_key", key.Key, ClassificationSafeToRetry, "retry", "command idempotency key has not reached a GitHub-visible side effect")
 			continue
@@ -270,13 +297,16 @@ func (r *Reconciler) runIdempotency(ctx context.Context, cfg Config, now time.Ti
 	}
 }
 
-func (r *Reconciler) runMutationAttempts(ctx context.Context, cfg Config, now time.Time, report *Report, errs *[]error) {
+func (r *Reconciler) runMutationAttempts(ctx context.Context, cfg Config, now time.Time, repositoryID int64, report *Report, errs *[]error) {
 	attempts, err := r.Store.ListStartedGitHubMutationAttempts(ctx, now.Add(-cfg.CallbackTimeout), cfg.Limit)
 	if err != nil {
 		*errs = append(*errs, fmt.Errorf("list started mutation attempts: %w", err))
 		return
 	}
 	for _, attempt := range attempts {
+		if repositoryID != 0 && attempt.RepositoryID != repositoryID {
+			continue
+		}
 		idem, err := r.Store.GetIdempotencyKey(ctx, attempt.IdempotencyKey)
 		if err == nil && idem.Status == "completed" {
 			d := r.add(report, "mutation_attempt", attempt.IdempotencyKey, ClassificationComplete, "suppress_duplicate", "idempotency key is already completed")
@@ -297,6 +327,20 @@ func (r *Reconciler) runMutationAttempts(ctx context.Context, cfg Config, now ti
 		}
 		r.add(report, "mutation_attempt", attempt.IdempotencyKey, ClassificationStillNeeded, "inspect_required", "mutation outcome is unknown; current GitHub state must be inspected before retry")
 	}
+}
+
+func idempotencyRepositoryID(metadata json.RawMessage) int64 {
+	var value struct {
+		RepositoryID int64 `json:"repository_id"`
+		RepoID       int64 `json:"repo_id"`
+	}
+	if json.Unmarshal(metadata, &value) != nil {
+		return 0
+	}
+	if value.RepositoryID != 0 {
+		return value.RepositoryID
+	}
+	return value.RepoID
 }
 
 func (r *Reconciler) add(report *Report, kind, id string, classification Classification, action, message string) Diagnostic {

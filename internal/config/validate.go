@@ -225,6 +225,9 @@ func validateHTTPURL(field, value string) error {
 	if parsed.User != nil {
 		return fmt.Errorf("%s must not include userinfo", field)
 	}
+	if parsed.Scheme == "http" && !isLoopbackHostname(parsed.Hostname()) {
+		return fmt.Errorf("%s must use https except for loopback development endpoints", field)
+	}
 	if parsed.RawQuery != "" {
 		return fmt.Errorf("%s must not include a query string", field)
 	}
@@ -232,6 +235,15 @@ func validateHTTPURL(field, value string) error {
 		return fmt.Errorf("%s must not include a fragment", field)
 	}
 	return nil
+}
+
+func isLoopbackHostname(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateAgentRole(ve *ValidationError, path string, role AgentRole, requireProvider bool) {

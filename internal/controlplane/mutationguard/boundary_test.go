@@ -56,7 +56,7 @@ func TestRunMutationBoundaryConverges(t *testing.T) {
 				st.attempts["k"] = store.GitHubMutationAttempt{IdempotencyKey: "k", Status: mutations.PhaseCallStarted}
 			},
 			wantErr:    "repair required before retry",
-			wantStatus: mutations.PhaseCallStarted,
+			wantStatus: mutations.PhaseRepairRequired,
 		},
 		{
 			name: "repairs unknown post-call mutation without repeating call",
@@ -71,11 +71,11 @@ func TestRunMutationBoundaryConverges(t *testing.T) {
 			wantReplay: true,
 		},
 		{
-			name:       "failed API call becomes repair required",
+			name:       "failed API call becomes post-call unknown",
 			mutateErr:  errors.New("github timeout"),
 			wantCalls:  1,
 			wantErr:    "github timeout",
-			wantStatus: mutations.PhaseRepairRequired,
+			wantStatus: mutations.PhasePostCallUnknown,
 		},
 	}
 
@@ -228,7 +228,7 @@ func (s *fakeBoundaryStore) TryStartGitHubMutationAttempt(_ context.Context, key
 }
 
 func fakeIdempotencyFailureStatus(errorMessage string) (string, string) {
-	for _, phase := range []string{mutations.PhaseFailedPreCall, mutations.PhaseRepairRequired} {
+	for _, phase := range []string{mutations.PhaseFailedPreCall, mutations.PhasePostCallUnknown, mutations.PhaseRepairRequired} {
 		prefix := phase + ":"
 		if errorMessage == phase {
 			return phase, ""

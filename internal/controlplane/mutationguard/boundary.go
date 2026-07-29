@@ -114,8 +114,11 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 			_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseFailedPreCall+":"+err.Error())
 			return RunResult{}, err
 		}
-		_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseRepairRequired, nil, err.Error(), now(req.Now))
-		_ = st.FailIdempotencyKey(ctx, req.Key, err.Error())
+		// Once the call has started, an API/transport error does not prove the
+		// observable effect was absent. Persist that uncertainty distinctly;
+		// redelivery may only repair/inspect it, never call Mutate again.
+		_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhasePostCallUnknown, nil, err.Error(), now(req.Now))
+		_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhasePostCallUnknown+":"+err.Error())
 		return RunResult{}, err
 	}
 	response := response(req, resultRef)
@@ -178,6 +181,7 @@ func convergeExisting(ctx context.Context, st Store, req RunRequest, attempt sto
 	if result, repaired, err := repairUnknown(ctx, st, req); repaired || err != nil {
 		return result, true, err
 	}
+	_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseRepairRequired, attempt.Response, attempt.Error, now(req.Now))
 	_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseRepairRequired)
 	return RunResult{}, true, fmt.Errorf("mutation attempt %q is %s; repair required before retry", req.Key, mutations.Normalize(attempt.Status))
 }

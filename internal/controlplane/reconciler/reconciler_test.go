@@ -377,6 +377,41 @@ func TestRunOnceDoesNotFailUnknownStartedMutationAttempts(t *testing.T) {
 	}
 }
 
+func TestRunOnceForRepositoryDoesNotInspectOtherTenantMutations(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := store.NewMemoryStore()
+	require.NoError(t, st.UpsertInstallation(ctx, store.Installation{ID: 99, AccountLogin: "octo", AccountID: 1, TargetType: "Organization"}))
+	repoA, err := st.UpsertRepository(ctx, store.Repository{GitHubID: 123, InstallationID: 99, Owner: "octo", Name: "a"})
+	require.NoError(t, err)
+	repoB, err := st.UpsertRepository(ctx, store.Repository{GitHubID: 124, InstallationID: 99, Owner: "octo", Name: "b"})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		key    string
+		repoID int64
+	}{
+		{key: "mutation-a", repoID: repoA.ID},
+		{key: "mutation-b", repoID: repoB.ID},
+	} {
+		_, err := st.AcquireIdempotencyKey(ctx, store.IdempotencyKey{Key: tc.key, Scope: "workflow_dispatch", Status: mutations.PhaseCallStarted, CreatedAt: now.Add(-time.Hour)})
+		require.NoError(t, err)
+		require.NoError(t, st.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
+			IdempotencyKey: tc.key,
+			RepositoryID:   tc.repoID,
+			MutationType:   "workflow_dispatch",
+			Status:         mutations.PhaseCallStarted,
+			CreatedAt:      now.Add(-time.Hour),
+		}))
+	}
+	r := &Reconciler{Store: st, Now: func() time.Time { return now }, Config: Config{CallbackTimeout: time.Minute}}
+
+	report, err := r.RunOnceForRepository(ctx, repoA.ID)
+
+	require.NoError(t, err)
+	require.Len(t, report.Diagnostics, 1)
+	assert.Equal(t, "mutation-a", report.Diagnostics[0].ID)
+}
+
 func TestLastReportConcurrentAccess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

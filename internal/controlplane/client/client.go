@@ -64,6 +64,9 @@ func New(baseURL string, httpClient *http.Client) (*Client, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return nil, fmt.Errorf("control-plane URL must use http or https")
 	}
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("control-plane URL must use https except for loopback development endpoints")
+	}
 	if parsed.User != nil {
 		return nil, fmt.Errorf("control-plane URL must not include userinfo")
 	}
@@ -77,6 +80,15 @@ func New(baseURL string, httpClient *http.Client) (*Client, error) {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &Client{baseURL: baseURL, httpClient: httpClient}, nil
+}
+
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Client) RegisterRepository(ctx context.Context, req RegisterRepositoryRequest) (RegisterRepositoryResponse, error) {

@@ -213,7 +213,7 @@ type productionWorkflowEventStore interface {
 
 func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Context, repo store.Repository, event workflowevents.Event) error {
 	if event.Kind == workflowevents.KindMonitorEvent && event.Action == "patrol" {
-		return p.runMonitorPatrol(ctx)
+		return p.runMonitorPatrol(ctx, repo)
 	}
 	if event.Kind != workflowevents.KindIntegratorEvent {
 		return fmt.Errorf("unsupported production workflow event kind %q", event.Kind)
@@ -315,12 +315,12 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
-func (p productionWorkflowEventProcessor) runMonitorPatrol(ctx context.Context) error {
+func (p productionWorkflowEventProcessor) runMonitorPatrol(ctx context.Context, repo store.Repository) error {
 	reconcileStore, ok := any(p.Store).(reconciler.Store)
 	if !ok || reconcileStore == nil {
 		return fmt.Errorf("production monitor patrol requires durable reconciler store")
 	}
-	_, err := (&reconciler.Reconciler{Store: reconcileStore}).RunOnce(ctx)
+	_, err := (&reconciler.Reconciler{Store: reconcileStore}).RunOnceForRepository(ctx, repo.ID)
 	return err
 }
 

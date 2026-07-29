@@ -170,12 +170,16 @@ jobs:
             > /tmp/herd-job-result.json
           attempt=1
           delay=1
+          AUTH_HEADER_FILE="$(mktemp)"
+          chmod 600 "$AUTH_HEADER_FILE"
+          trap 'rm -f "$AUTH_HEADER_FILE"' EXIT
           while true; do
             case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
               *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
               *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
             esac
-            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
+            printf 'header = "Authorization: bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" > "$AUTH_HEADER_FILE"
+            if ! OIDC_TOKEN="$(curl -fsSL --config "$AUTH_HEADER_FILE" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
               if [ "$attempt" -ge 4 ]; then
                 echo "Failed to fetch HerdOS job result OIDC token after ${attempt} attempt(s)." >&2
                 exit 1
@@ -189,9 +193,8 @@ jobs:
               fi
               continue
             fi
-            if curl -fsSL -X POST \
-              -H "Authorization: Bearer $OIDC_TOKEN" \
-              -H "Content-Type: application/json" \
+            printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$OIDC_TOKEN" > "$AUTH_HEADER_FILE"
+            if curl -fsSL -X POST --config "$AUTH_HEADER_FILE" \
               --data-binary @/tmp/herd-job-result.json \
               "$HERD_CONTROL_PLANE_URL/api/v1/jobs/$HERD_JOB_ID/results"; then
               echo "Submitted HerdOS job result after ${attempt} attempt(s)."

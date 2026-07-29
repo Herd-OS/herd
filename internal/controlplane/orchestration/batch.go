@@ -197,7 +197,17 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			dispatchReq.BaseSHA = batchHeadSHA
 			dispatchReq.HeadSHA = batchHeadSHA
 			dispatchReq.ExpectedHeadSHA = batchHeadSHA
-			recovered, recoveredOK = s.recoverExactWorkflowDispatchIntent(ctx, dispatchReq)
+			// A ready/blocked label can survive a successful dispatch when the
+			// following label transition fails. Recover by the durable
+			// issue-level identity before considering the new head: the prior
+			// worker remains authoritative until it is explicitly failed or
+			// stale, so a branch advance must not create a second worker.
+			recovered, recoveredOK = s.recoverWorkflowDispatchIntent(ctx, dispatchReq)
+			if recoveredOK &&
+				recovered.Request.HeadSHA != batchHeadSHA &&
+				!s.hasIssueStatusTransitionIntent(ctx, issueNumber, status, recovered.Result, recovered.Request.HeadSHA) {
+				recoveredOK = false
+			}
 		}
 		var result cpdispatch.DispatchResult
 		if recoveredOK {
@@ -234,6 +244,15 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		}
 	}
 	return dispatched, nil
+}
+
+func (s Service) hasIssueStatusTransitionIntent(ctx context.Context, issueNumber int, status string, result cpdispatch.DispatchResult, fallback string) bool {
+	if status != issues.StatusReady && status != issues.StatusBlocked {
+		return false
+	}
+	key := issueStatusTransitionKey(s.Repo.ID, issueNumber, status, "remove", issueStatusTransitionID(result, fallback))
+	_, err := s.Store.GetIdempotencyKey(ctx, key)
+	return err == nil
 }
 
 func (s Service) workflowDispatchIntentRecord(ctx context.Context, req cpdispatch.DispatchRequest) (store.IdempotencyKey, bool) {

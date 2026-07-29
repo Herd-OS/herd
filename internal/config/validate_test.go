@@ -46,6 +46,8 @@ func TestValidate_ControlPlaneURL(t *testing.T) {
 	}{
 		{"empty uses hosted default", "", false, ""},
 		{"http valid", "http://localhost:8080", false, ""},
+		{"loopback ipv4 http valid", "http://127.0.0.1:8080", false, ""},
+		{"remote http invalid", "http://cp.example.com", true, "must use https except for loopback"},
 		{"https valid", "https://cp.example.com", false, ""},
 		{"userinfo invalid", "https://user:pass@cp.example.com", true, "control_plane_url must not include userinfo"},
 		{"relative invalid", "/api", true, "control_plane_url must use http or https"},

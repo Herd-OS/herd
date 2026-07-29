@@ -32,7 +32,7 @@ const (
 
 	mutationStatusPreDispatch = mutations.PhaseIntentRecorded
 	mutationStatusDispatching = mutations.PhaseCallStarted
-	mutationStatusUnknown     = mutations.PhaseRepairRequired
+	mutationStatusUnknown     = mutations.PhasePostCallUnknown
 )
 
 type DispatchRequest struct {

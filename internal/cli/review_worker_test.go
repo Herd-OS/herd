@@ -105,7 +105,11 @@ func TestRunHostedReviewReadOnlyStandalonePRRunsAgent(t *testing.T) {
 		pr:   &platform.PullRequest{Number: 42, Title: "Standalone", URL: "https://github.test/pr/42", Base: "main", Head: "feature/auth", HeadSHA: "head"},
 		diff: "diff --git a/auth.go b/auth.go\n+change\n",
 	}
-	ag := &hostedReviewTestAgent{result: &agent.ReviewResult{Summary: "needs auth fix"}}
+	findings := []agent.ReviewFinding{
+		{Severity: "HIGH", Description: "auth.go:12 validates after the mutation"},
+		{Severity: "MEDIUM", Description: "auth_test.go:40 misses the retry case"},
+	}
+	ag := &hostedReviewTestAgent{result: &agent.ReviewResult{Summary: "needs auth fix", Findings: findings}}
 	cfg := config.Default()
 	cfg.Platform.Owner = "octo"
 	cfg.Platform.Repo = "widgets"
@@ -119,6 +123,7 @@ func TestRunHostedReviewReadOnlyStandalonePRRunsAgent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "changes_requested", result.Status)
 	assert.Equal(t, "needs auth fix", result.Summary)
+	assert.Equal(t, findings, result.Findings)
 	require.Len(t, ag.reviewOpts, 1)
 	assert.Contains(t, ag.reviewOpts[0].CurrentPRMetadata, "Head: feature/auth")
 }

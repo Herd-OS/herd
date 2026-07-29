@@ -215,6 +215,7 @@ func TestNewRejectsInvalidURL(t *testing.T) {
 		"",
 		"://bad",
 		"ftp://example.com",
+		"http://example.com",
 		"https://user:pass@example.com",
 		"https://example.com?token=x",
 		"https://example.com#frag",
