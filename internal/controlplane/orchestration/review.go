@@ -6,9 +6,7 @@ import (
 	"strings"
 
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
-	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/review"
-	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 )
@@ -38,89 +36,72 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 		Context: fmt.Sprintf("Found during Herd Review of PR #%d at head %s.", result.PRNumber, result.HeadSHA),
 	})
 	key := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
-	body += reviewFixIssueMarker(key)
-	req := TaskIssueRequest{
+	body, overflow := issues.TruncateIssueBody(body)
+	body = bodyWithMarker(body, reviewFixIssueCreateMarker(key))
+	req := reviewFixIssueRequest{
 		BatchNumber: result.BatchNumber,
 		Title:       title,
 		Body:        body,
+		Overflow:    overflow,
 		Labels:      []string{issues.TypeFix, issues.StatusInProgress},
 		Milestone:   result.BatchNumber,
 	}
-	created, err := s.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
-		Key:       key,
-		Scope:     "review_fix_issue_create",
-		Status:    mutationStatusIntentRecorded,
-		CreatedAt: s.now(),
-	})
-	if err != nil {
-		return 0, false, fmt.Errorf("acquire review fix issue idempotency key: %w", err)
-	}
-	if !created {
-		record, err := s.Store.GetIdempotencyKey(ctx, key)
+	created := false
+	resultRef, err := s.withIdempotencyRepair(ctx, key, "review_fix_issue_create", func() (string, bool, error) {
+		return s.repairReviewFixIssue(ctx, req, key)
+	}, func() (string, error) {
+		createdIssue, err := s.Platform.Issues().Create(ctx, req.Title, req.Body, req.Labels, &req.Milestone)
 		if err != nil {
-			return 0, false, err
+			return "", err
 		}
-		if record.Status != mutationStatusCompleted || strings.TrimSpace(record.ResultRef) == "" {
-			if issueNumber, recovered, recoverErr := s.recoverReviewFixIssue(ctx, req, key); recovered || recoverErr != nil {
-				return issueNumber, false, recoverErr
-			}
-			if mutations.IsPreCallRetryable(record.Status) {
-				return s.createReviewFixIssueFromIntent(ctx, key, req)
-			}
-			status := strings.TrimSpace(record.Status)
-			if status == "" {
-				status = "unknown"
-			}
-			return 0, false, fmt.Errorf("idempotency key %q for review_fix_issue_create is %s without a completed issue result; retry after reconciliation", key, status)
-		}
-		issueNumber, ok := parseIssueResult(record.ResultRef)
-		if !ok {
-			return 0, false, fmt.Errorf("invalid review fix issue result ref %q", record.ResultRef)
-		}
-		return issueNumber, false, nil
-	}
-	return s.createReviewFixIssueFromIntent(ctx, key, req)
-}
-
-func (s Service) createReviewFixIssueFromIntent(ctx context.Context, key string, req TaskIssueRequest) (int, bool, error) {
-	issue, err := s.EnsureTaskIssue(ctx, req)
+		created = true
+		return fmt.Sprintf("issue:%d", createdIssue.Number), nil
+	})
 	if err != nil {
 		return 0, false, err
 	}
-	resultRef := fmt.Sprintf("issue:%d", issue.Number)
-	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
-		return 0, false, fmt.Errorf("complete idempotency key for review fix issue: %w", err)
+	issueNumber, ok := parseIssueResult(resultRef)
+	if !ok {
+		return 0, false, fmt.Errorf("invalid review fix issue result ref %q", resultRef)
 	}
-	return issue.Number, true, nil
+	if err := s.ensureOverflowComments(ctx, issueNumber, "review-fix-create", req.Overflow); err != nil {
+		return 0, false, err
+	}
+	return issueNumber, created, nil
 }
 
-func (s Service) recoverReviewFixIssue(ctx context.Context, req TaskIssueRequest, key string) (int, bool, error) {
+type reviewFixIssueRequest struct {
+	BatchNumber int
+	Title       string
+	Body        string
+	Overflow    string
+	Labels      []string
+	Milestone   int
+}
+
+func (s Service) repairReviewFixIssue(ctx context.Context, req reviewFixIssueRequest, key string) (string, bool, error) {
 	issuesFound, err := s.Platform.Issues().List(ctx, platformIssueFilters(req.BatchNumber))
 	if err != nil {
-		return 0, false, fmt.Errorf("list review fix issues for recovery: %w", err)
+		return "", false, fmt.Errorf("list review fix issues for recovery: %w", err)
 	}
 	for _, issue := range issuesFound {
 		if issue == nil || issue.Title != req.Title {
 			continue
 		}
-		if !strings.Contains(issue.Body, reviewFixIssueMarker(key)) {
+		if !strings.Contains(issue.Body, reviewFixIssueCreateMarker(key)) {
 			continue
 		}
-		resultRef := fmt.Sprintf("issue:%d", issue.Number)
-		if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
-			return 0, false, fmt.Errorf("complete recovered review fix issue idempotency key: %w", err)
-		}
-		return issue.Number, true, nil
+		return fmt.Sprintf("issue:%d", issue.Number), true, nil
 	}
-	return 0, false, nil
+	return "", false, nil
 }
 
 func platformIssueFilters(batchNumber int) platform.IssueFilters {
 	return platform.IssueFilters{State: "all", Milestone: &batchNumber}
 }
 
-func reviewFixIssueMarker(key string) string {
-	return fmt.Sprintf("\n\n<!-- herd:review-fix-issue %s -->\n", key)
+func reviewFixIssueCreateMarker(key string) string {
+	return "herd:review-fix-issue " + key
 }
 
 // DispatchReviewFixWorker dispatches a fix worker for a review fix issue.

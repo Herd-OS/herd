@@ -463,6 +463,11 @@ func (s Service) withIdempotencyPhased(ctx context.Context, key string, mutation
 			return resultRef, err
 		}
 		status := strings.TrimSpace(record.Status)
+		if repair != nil && !mutations.IsPreCallRetryable(status) {
+			if resultRef, repaired, err := s.repairExistingUnknownMutation(ctx, key, repair); repaired || err != nil {
+				return resultRef, err
+			}
+		}
 		if status == mutationStatusFailedPreCall {
 			if attempt, err := s.Store.GetGitHubMutationAttempt(ctx, key); errors.Is(err, store.ErrNotFound) {
 				return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, repair, fn)
@@ -494,6 +499,25 @@ func (s Service) withAcquiredIdempotency(ctx context.Context, key string, mutati
 		Now:          s.now,
 	})
 	return result.ResultRef, err
+}
+
+// repairExistingUnknownMutation is the convergence path for durable
+// post-call-unknown states. Redeliveries may not repeat the GitHub-visible
+// call; they must prove the prior effect with operation-specific lookup and
+// then complete both durable records.
+func (s Service) repairExistingUnknownMutation(ctx context.Context, key string, repair func() (string, bool, error)) (string, bool, error) {
+	resultRef, repaired, err := repair()
+	if err != nil || !repaired {
+		return "", repaired, err
+	}
+	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
+		return "", true, fmt.Errorf("repair idempotency key: %w", err)
+	}
+	response, _ := json.Marshal(map[string]string{"result_ref": resultRef})
+	if err := s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusCompleted, response, "", s.now()); err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", true, fmt.Errorf("repair mutation attempt: %w", err)
+	}
+	return resultRef, true, nil
 }
 
 func (s Service) repairCompletedMutationAttempt(ctx context.Context, key string, resultRef string) error {
