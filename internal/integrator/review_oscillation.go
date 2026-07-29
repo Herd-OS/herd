@@ -442,6 +442,11 @@ func boundedReviewVerificationInput(input agent.ReviewSynthesisInput, synthesis 
 	for reference := range cited {
 		mandatory[reference] = struct{}{}
 	}
+	if !highVolume {
+		for _, source := range completeLowVolumeReviewVerificationEvidence(eligible) {
+			mandatory[source.ID] = struct{}{}
+		}
+	}
 	if synthesis.RequirementReinterpretation != nil {
 		for _, source := range eligible {
 			if strings.HasPrefix(source.Kind, "requirement_") ||
@@ -485,6 +490,16 @@ func boundedReviewVerificationInput(input agent.ReviewSynthesisInput, synthesis 
 		base = candidate
 	}
 	return base, nil
+}
+
+func completeLowVolumeReviewVerificationEvidence(sources []agent.ReviewEvidenceSource) []agent.ReviewEvidenceSource {
+	out := make([]agent.ReviewEvidenceSource, 0, len(sources))
+	for _, source := range sources {
+		if source.Kind != "truncation_marker" {
+			out = append(out, source)
+		}
+	}
+	return out
 }
 
 func representativeReviewVerificationEvidence(sources []agent.ReviewEvidenceSource, selected map[string]struct{}) []agent.ReviewEvidenceSource {

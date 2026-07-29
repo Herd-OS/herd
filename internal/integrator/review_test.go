@@ -7515,45 +7515,45 @@ func TestReview_NonConvergenceConcreteRepeatedClusterStillEscalates(t *testing.T
 
 func TestReview_LowVolumeAlternatingOscillationCreatesOneStrategyFixAndDispatch(t *testing.T) {
 	currentFindings := []agent.ReviewFinding{
-		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/recovery.go: durable recovery repair loses the crash marker for the attempted transition"},
-		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/state.go: durable recovery can repeat after a crash because the attempt marker is missing"},
+		{Severity: "MEDIUM", Description: "internal/integrator/review_state.go: review completion loses the persisted fix-cycle transition before advancing state"},
+		{Severity: "MEDIUM", Description: "internal/integrator/state_machine.go: review recovery can repeat a completed fix because the cycle marker is missing"},
 	}
 	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
 	fx.setHistoryWithFindingsAndHeadSHAs(t,
 		[]int{2, 2, 2, 2, 2},
 		[]string{
-			"internal/controlplane/dispatch/ownership.go: ownership boundary publishes an external side effect before authority is recorded",
-			"internal/controlplane/dispatch/recovery.go: durable recovery repair loses the crash marker for the attempted transition",
-			"internal/controlplane/dispatch/ownership.go: ownership boundary publishes an external side effect before authority is recorded",
-			"internal/controlplane/dispatch/recovery.go: durable recovery repair loses the crash marker for the attempted transition",
-			"internal/controlplane/dispatch/ownership.go: ownership boundary publishes an external side effect before authority is recorded",
+			"internal/integrator/state_machine.go: review state advances before the completed fix cycle is recorded",
+			"internal/integrator/review_state.go: recovery repeats the review transition when the completed fix marker is absent",
+			"internal/integrator/state_machine.go: review state advances before the completed fix cycle is recorded",
+			"internal/integrator/review_state.go: recovery repeats the review transition when the completed fix marker is absent",
+			"internal/integrator/state_machine.go: review state advances before the completed fix cycle is recorded",
 		},
 		[]string{"review-head-34", "review-head-35", "review-head-36", "review-head-37", "review-head-38"},
 	)
 	fx.ag.synthesisResult = &agent.ReviewSynthesisResult{
 		ShouldEscalate:   true,
 		Confidence:       0.95,
-		RootCauseTitle:   "publication durability ordering gap",
-		RootCauseSummary: "Ownership publication and durable recovery alternate because the dispatch transition has no single commit boundary.",
+		RootCauseTitle:   "review fix-cycle transition ordering gap",
+		RootCauseSummary: "Review advancement and recovery alternate because the integrator state machine has no single persisted fix-cycle boundary.",
 		RecurringSymptoms: []agent.ReviewSynthesisSymptom{
 			{
-				Description:        "Ownership publication precedes the durable state.",
+				Description:        "Review state advances before the completed fix cycle is persisted.",
 				Cycles:             []int{36, 37, 38},
-				AffectedFiles:      []string{"internal/controlplane/dispatch/ownership.go"},
+				AffectedFiles:      []string{"internal/integrator/state_machine.go"},
 				EvidenceReferences: []string{"cycle:36:finding:0", "cycle:37:finding:0", "cycle:38:finding:0"},
 			},
 			{
-				Description:        "Recovery repairs the missing publication state.",
+				Description:        "Review recovery repeats the transition when the fix-cycle marker is absent.",
 				Cycles:             []int{36, 37, 38, 39},
-				AffectedFiles:      []string{"internal/controlplane/dispatch/recovery.go"},
+				AffectedFiles:      []string{"internal/integrator/review_state.go", "internal/integrator/state_machine.go"},
 				EvidenceReferences: []string{"cycle:36:finding:0", "cycle:37:finding:0", "cycle:38:finding:0", "cycle:39:finding:0"},
 			},
 		},
-		WhyIndividualFixesAreNotConverging: "Each fix moves the boundary between ownership publication and durable recovery.",
-		ProposedStrategy:                   "Define one durable ownership and publication transition with an explicit recovery boundary.",
+		WhyIndividualFixesAreNotConverging: "Each fix moves the boundary between review advancement and fix-cycle recovery.",
+		ProposedStrategy:                   "Define one persisted integrator review transition with an explicit recovery boundary.",
 		AcceptanceCriteria: []string{
-			"Ownership publication occurs at one durable transition.",
-			"Recovery preserves the publication invariant after a crash.",
+			"Review advancement and fix-cycle completion occur at one persisted state-machine transition.",
+			"Recovery preserves the completed fix-cycle invariant after a crash.",
 		},
 	}
 
@@ -7563,7 +7563,7 @@ func TestReview_LowVolumeAlternatingOscillationCreatesOneStrategyFixAndDispatch(
 	require.NotNil(t, result)
 	assert.Equal(t, 1, fx.ag.synthesisCalls)
 	require.Len(t, fx.createdIssues, 1)
-	assert.Equal(t, "Review strategy fix: publication durability ordering gap", fx.createdIssues[0].title)
+	assert.Equal(t, "Review strategy fix: review fix-cycle transition ordering gap", fx.createdIssues[0].title)
 	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
 	require.Len(t, fx.wf.dispatched, 1)
 	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
@@ -7588,6 +7588,96 @@ func TestReview_LowVolumeAlternatingOscillationCreatesOneStrategyFixAndDispatch(
 	assert.Len(t, fx.wf.dispatched, 1)
 	assert.Len(t, fx.prSvc.comments, commentsBefore)
 	assert.Len(t, fx.prSvc.reviews, reviewsBefore)
+}
+
+func TestReview_LowVolumeVerificationRequiresAllRetainedEvidence(t *testing.T) {
+	tests := []struct {
+		name             string
+		contradiction    string
+		configure        func(*reviewNonConvergenceIntegrationFixture)
+		wantVerification int
+	}{
+		{
+			name:          "uncited latest contradiction reaches verifier and is rejected",
+			contradiction: "internal/integrator/state_machine.go: the current review proves fix-cycle persistence is atomic and contradicts the proposed recurring ordering gap",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.onVerification = func(context.Context) {
+					contradictionPresent := false
+					for _, source := range fx.ag.verificationInput.EvidenceSources {
+						if strings.Contains(source.Excerpt, "contradicts the proposed recurring ordering gap") {
+							contradictionPresent = true
+							break
+						}
+					}
+					if contradictionPresent {
+						fx.ag.verificationResult = &agent.ReviewVerificationResult{
+							Approved: false, Confidence: .99, Reason: "the uncited latest finding contradicts the synthesized root cause",
+						}
+					}
+				}
+			},
+			wantVerification: 1,
+		},
+		{
+			name:          "complete synthesis and retained evidence exceed verification budget",
+			contradiction: "internal/integrator/state_machine.go: a second current review finding exercises the independent recovery boundary",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult.ProposedStrategy = strings.Repeat("persist the complete integrator state-machine transition λ ", 1600)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			currentFindings := []agent.ReviewFinding{
+				{Severity: "MEDIUM", Description: "internal/integrator/review_state.go: review completion advances before the fix-cycle transition is persisted"},
+				{Severity: "MEDIUM", Description: test.contradiction},
+			}
+			fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+			fx.setHistoryWithFindingsAndHeadSHAs(t,
+				[]int{2, 2, 2, 2, 2},
+				[]string{
+					"internal/integrator/state_machine.go: review advancement precedes durable fix-cycle state",
+					"internal/integrator/review_state.go: recovery repeats a review whose fix-cycle marker was lost",
+					"internal/integrator/state_machine.go: review advancement precedes durable fix-cycle state",
+					"internal/integrator/review_state.go: recovery repeats a review whose fix-cycle marker was lost",
+					"internal/integrator/state_machine.go: review advancement precedes durable fix-cycle state",
+				},
+				[]string{"complete-head-34", "complete-head-35", "complete-head-36", "complete-head-37", "complete-head-38"},
+			)
+			fx.ag.synthesisResult = &agent.ReviewSynthesisResult{
+				ShouldEscalate:   true,
+				Confidence:       .97,
+				RootCauseTitle:   "integrator review transition ordering gap",
+				RootCauseSummary: "Review advancement and recovery lack one persisted fix-cycle boundary.",
+				RecurringSymptoms: []agent.ReviewSynthesisSymptom{{
+					Description:        "Review advancement can precede durable fix-cycle state.",
+					Cycles:             []int{36, 37, 38, 39},
+					AffectedFiles:      []string{"internal/integrator/review_state.go", "internal/integrator/state_machine.go"},
+					EvidenceReferences: []string{"cycle:36:finding:0", "cycle:37:finding:0", "cycle:38:finding:0", "cycle:39:finding:0"},
+				}},
+				WhyIndividualFixesAreNotConverging: "Fixes alternate between advancement and recovery without one state transition.",
+				ProposedStrategy:                   "Persist review advancement and fix-cycle completion as one recoverable transition.",
+				AcceptanceCriteria:                 []string{"Recovery cannot repeat a completed fix cycle."},
+			}
+			test.configure(fx)
+
+			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, 1, fx.ag.synthesisCalls)
+			assert.Equal(t, test.wantVerification, fx.ag.verificationCalls)
+			require.Len(t, fx.createdIssues, 1)
+			assert.Equal(t, "Review fixes (cycle 39)", fx.createdIssues[0].title)
+			assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+			assert.NotContains(t, fx.createdIssues[0].body, "Requirement reinterpretation")
+			assert.NotContains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+			require.Len(t, fx.wf.dispatched, 1)
+			assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+			assert.Equal(t, []int{9601}, result.FixIssues)
+		})
+	}
 }
 
 func TestReview_LowVolumeSynthesisAndVerificationFallbacks(t *testing.T) {
@@ -7972,6 +8062,70 @@ func TestReview_HighVolumeRequirementReinterpretationVerification(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestReview_HighVolumeVerificationRetainsUncitedCurrentHeadContradictionUnderOptionalEvidencePressure(t *testing.T) {
+	currentFindings := reviewNonConvergenceCurrentFindings(28)
+	const contradiction = "the current-head implementation enforces one atomic boundary and contradicts the proposed reinterpretation"
+	currentFindings[len(currentFindings)-1].Description = "internal/controlplane/dispatch/zz_contradiction.go: " + contradiction
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	largeHistory := make([]string, 5)
+	for i := range largeHistory {
+		largeHistory[i] = fmt.Sprintf(
+			"internal/controlplane/dispatch/history_%d.go: %s",
+			i, strings.Repeat("historical retry and repair evidence remains individually optional λ ", 90),
+		)
+	}
+	fx.setHistoryWithFindingsAndHeadSHAs(t,
+		[]int{14, 20, 21, 24, 28},
+		largeHistory,
+		[]string{"pressure-head-34", "pressure-head-35", "pressure-head-36", "pressure-head-37", "pressure-head-38"},
+	)
+	fx.issueSvc.listResult[0].Title = "Preserve revoked grant safety"
+	fx.issueSvc.listResult[0].Body = "---\nherd:\n  version: 1\n  batch: 111\n---\n\n## Task\nUse an intent record across independent stores.\n\n## Acceptance Criteria\n\n- [ ] Revoked grants cannot be used.\n"
+	for number := 100; number < 112; number++ {
+		fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
+			Number: number,
+			Title:  fmt.Sprintf("Additional batch requirement %d", number),
+			Body: fmt.Sprintf("---\nherd:\n  version: 1\n  batch: 111\n---\n\n## Task\n%s\n",
+				strings.Repeat(fmt.Sprintf("optional requirement context %d λ ", number), 55)),
+		})
+	}
+	fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+	fx.ag.synthesisResult.RequirementReinterpretation = validReviewReinterpretation()
+	fx.ag.synthesisResult.RequirementReinterpretation.EvidenceReferences = []string{
+		"issue:42:criterion:0", "cycle:35:finding:0",
+	}
+	fx.ag.onVerification = func(context.Context) {
+		receivedContradiction := false
+		for _, source := range fx.ag.verificationInput.EvidenceSources {
+			if source.HeadSHA == fx.headSHA && strings.Contains(source.Excerpt, contradiction) {
+				receivedContradiction = true
+				break
+			}
+		}
+		if receivedContradiction {
+			fx.ag.verificationResult = &agent.ReviewVerificationResult{
+				Approved: false, Confidence: .99, Reason: "the uncited current-head finding contradicts the proposed requirement reinterpretation",
+			}
+		}
+	}
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, fx.ag.synthesisCalls)
+	assert.Equal(t, 1, fx.ag.verificationCalls)
+	assert.NotContains(t, fx.ag.verificationInput.CitedEvidenceReferences, "cycle:39:finding:27")
+	assert.Contains(t, fx.ag.verificationResult.Reason, "uncited current-head finding")
+	require.Len(t, fx.createdIssues, 1)
+	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+	assert.NotContains(t, fx.createdIssues[0].body, "Requirement reinterpretation")
+	assert.NotContains(t, fx.createdIssues[0].body, "Corrected invariant")
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	assert.Equal(t, []int{9601}, result.FixIssues)
 }
 
 func TestReview_NonConvergenceSynthesisGroupsDifferentlyWordedFindingsByRootCause(t *testing.T) {

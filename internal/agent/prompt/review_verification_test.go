@@ -63,6 +63,26 @@ func TestRenderReviewVerificationPrompt_RejectsOversizedCompletePrompt(t *testin
 	assert.Empty(t, rendered)
 }
 
+func TestRenderReviewVerificationPrompt_CompleteEvidenceCallsOutUncitedContradiction(t *testing.T) {
+	input := agent.ReviewVerificationInput{
+		HeadSHA: "current-head",
+		EvidenceSources: []agent.ReviewEvidenceSource{
+			{ID: "cycle:4:finding:0", Kind: "review_finding", Cycle: 4, HeadSHA: "current-head", Excerpt: "The cited finding supports the synthesis."},
+			{ID: "cycle:4:finding:1", Kind: "review_finding", Cycle: 4, HeadSHA: "current-head", Excerpt: "The uncited finding contradicts the synthesis."},
+		},
+		CitedEvidenceReferences: []string{"cycle:4:finding:0"},
+		Synthesis:               agent.ReviewSynthesisResult{ShouldEscalate: true},
+	}
+
+	rendered, err := RenderReviewVerificationPrompt(input)
+
+	require.NoError(t, err)
+	assert.Contains(t, rendered, "Compare cited evidence with all uncited eligible evidence")
+	assert.Contains(t, rendered, "All eligible evidence is included.")
+	assert.Contains(t, rendered, "cycle:4:finding:1")
+	assert.Contains(t, rendered, "uncited finding contradicts")
+}
+
 func TestParseReviewVerificationOutput_Strict(t *testing.T) {
 	tests := []struct {
 		name    string

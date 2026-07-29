@@ -498,6 +498,75 @@ func TestBoundedReviewVerificationInputRejectsOversizedMandatoryEvidence(t *test
 	assert.Empty(t, bounded.EvidenceSources)
 }
 
+func TestBoundedReviewVerificationInputLowVolumeRequiresCompleteRetainedEvidence(t *testing.T) {
+	input := agent.ReviewSynthesisInput{
+		HeadSHA: "current-head",
+		EvidenceSources: []agent.ReviewEvidenceSource{
+			{ID: "issue:7:criterion:0", Kind: "requirement_criterion", Excerpt: "Preserve publication safety."},
+			{ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1, HeadSHA: "head-1", Excerpt: "A historical transition publishes too early."},
+			{ID: "cycle:2:finding:0", Kind: "review_finding", Cycle: 2, HeadSHA: "current-head", Excerpt: "The cited current finding supports the proposed ordering gap."},
+			{ID: "cycle:2:finding:1", Kind: "review_finding", Cycle: 2, HeadSHA: "current-head", Excerpt: "The uncited current finding contradicts the proposed root cause."},
+			{ID: "truncation:finding", Kind: "truncation_marker", Excerpt: "[TRUNCATED]"},
+		},
+	}
+	synthesis := agent.ReviewSynthesisResult{
+		ShouldEscalate: true,
+		RecurringSymptoms: []agent.ReviewSynthesisSymptom{{
+			EvidenceReferences: []string{"cycle:1:finding:0", "cycle:2:finding:0"},
+		}},
+	}
+
+	bounded, err := boundedReviewVerificationInput(input, synthesis,
+		[]string{"cycle:1:finding:0", "cycle:2:finding:0"}, false)
+
+	require.NoError(t, err)
+	assert.Zero(t, bounded.OmittedEvidenceCount)
+	assert.ElementsMatch(t, completeLowVolumeReviewVerificationEvidence(input.EvidenceSources), bounded.EvidenceSources)
+	assert.Contains(t, bounded.EvidenceSources, input.EvidenceSources[3])
+	assert.NotContains(t, bounded.EvidenceSources, input.EvidenceSources[4])
+	rendered, err := prompt.RenderReviewVerificationPrompt(bounded)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, "All eligible evidence is included.")
+	assert.Contains(t, rendered, "uncited current finding contradicts")
+}
+
+func TestBoundedReviewVerificationInputLowVolumeRejectsOversizedUncitedEvidence(t *testing.T) {
+	input := agent.ReviewSynthesisInput{
+		HeadSHA: "current-head",
+		EvidenceSources: []agent.ReviewEvidenceSource{
+			{ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1, Excerpt: "cited historical evidence"},
+			{ID: "cycle:2:finding:0", Kind: "review_finding", Cycle: 2, HeadSHA: "current-head", Excerpt: "cited current evidence"},
+			{
+				ID: "cycle:2:finding:1", Kind: "review_finding", Cycle: 2, HeadSHA: "current-head",
+				Excerpt: strings.Repeat("uncited contradictory current evidence λ ", 4000),
+			},
+		},
+	}
+	synthesis := agent.ReviewSynthesisResult{
+		ShouldEscalate: true,
+		RecurringSymptoms: []agent.ReviewSynthesisSymptom{{
+			EvidenceReferences: []string{"cycle:1:finding:0", "cycle:2:finding:0"},
+		}},
+	}
+
+	bounded, err := boundedReviewVerificationInput(input, synthesis,
+		[]string{"cycle:1:finding:0", "cycle:2:finding:0"}, false)
+
+	assert.ErrorContains(t, err, "mandatory review verification evidence exceeds")
+	assert.Empty(t, bounded.EvidenceSources)
+}
+
+func TestCompleteLowVolumeReviewVerificationEvidence(t *testing.T) {
+	sources := []agent.ReviewEvidenceSource{
+		{ID: "requirement", Kind: "requirement_task"},
+		{ID: "finding", Kind: "review_finding"},
+		{ID: "marker", Kind: "truncation_marker"},
+	}
+
+	assert.Equal(t, sources[:2], completeLowVolumeReviewVerificationEvidence(sources))
+	assert.Empty(t, completeLowVolumeReviewVerificationEvidence(nil))
+}
+
 func TestRepresentativeReviewVerificationEvidenceUsesCycleBreadth(t *testing.T) {
 	sources := []agent.ReviewEvidenceSource{
 		{ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1},
