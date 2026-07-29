@@ -106,6 +106,60 @@ func TestHandlerDuplicateCallbacksAreIdempotent(t *testing.T) {
 	assert.Len(t, st.results, 1)
 }
 
+func TestHandlerPostCallUnknownCallbackRequiresDurableJobResult(t *testing.T) {
+	tests := []struct {
+		name          string
+		status        string
+		seedResult    bool
+		wantCode      int
+		wantCreated   string
+		wantResultLen int
+	}{
+		{name: "call started without result conflicts", status: mutationspkg.PhaseCallStarted, wantCode: http.StatusConflict, wantResultLen: 0},
+		{name: "repair required without result conflicts", status: mutationspkg.PhaseRepairRequired, wantCode: http.StatusConflict, wantResultLen: 0},
+		{name: "legacy started without result conflicts", status: mutationspkg.LegacyStarted, wantCode: http.StatusConflict, wantResultLen: 0},
+		{name: "call started with stored result replays", status: mutationspkg.PhaseCallStarted, seedResult: true, wantCode: http.StatusAccepted, wantCreated: `"created":false`, wantResultLen: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+			st := newResultStore()
+			patch := []byte{}
+			metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+			st.jobs["job-1"] = store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837", Metadata: validJobMetadata()}
+			payload := validWorkerPayload("job-1", "head")
+			resultKey := ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload))
+			callbackKey := "job_result:" + resultKey
+			st.idem[callbackKey] = store.IdempotencyKey{Key: callbackKey, Scope: "job_result_callback", Status: tt.status, ResultRef: resultKey, CreatedAt: now}
+			if tt.seedResult {
+				st.results = append(st.results, store.JobResult{JobID: "job-1", IdempotencyKey: resultKey, Status: StatusSuccess, ResultRef: ResultPayloadHash([]byte(payload)), CreatedAt: now})
+				st.seen["job-1\x00"+resultKey] = struct{}{}
+			}
+			handler := NewHandler(HandlerOptions{
+				Store:          st,
+				Validator:      fixedOIDCValidator(validClaims(now)),
+				Audience:       "herd-control-plane",
+				Now:            func() time.Time { return now },
+				ArtifactStore:  artifactMap(t, metadata, patch),
+				PatchApplier:   fixedPatchApplier{},
+				AppTokenSource: fakeAppTokenSource{},
+			})
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+			require.Equal(t, tt.wantCode, rec.Code)
+			if tt.wantCreated != "" {
+				assert.Contains(t, rec.Body.String(), tt.wantCreated)
+			} else {
+				assert.Contains(t, rec.Body.String(), "repair required")
+			}
+			assert.Len(t, st.results, tt.wantResultLen)
+		})
+	}
+}
+
 func TestHandlerDuplicateWorkerCallbackUsesStableIdentityAcrossJSONFormatting(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -535,8 +589,8 @@ func TestHandlerStartedCallbackDoesNotProcessAgain(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, resultRequest("job-1", payload))
 
-	require.Equal(t, http.StatusAccepted, rec.Code)
-	assert.Contains(t, rec.Body.String(), `"created":false`)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "repair required")
 	assert.Empty(t, processor.calls)
 	assert.Empty(t, st.results)
 }
@@ -567,8 +621,8 @@ func TestHandlerFailedCallbackDoesNotProcessAgain(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, resultRequest("job-1", payload))
 
-	require.Equal(t, http.StatusAccepted, rec.Code)
-	assert.Contains(t, rec.Body.String(), `"created":false`)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "repair required")
 	assert.Empty(t, processor.calls)
 	assert.Empty(t, st.results)
 }
@@ -1239,8 +1293,8 @@ func TestHandlerDoesNotRetryWorkerPatchAfterPushFailure(t *testing.T) {
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusConflict, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	assert.Contains(t, second.Body.String(), `"created":false`)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "repair required")
 	assert.Len(t, applier.requests, 1)
 	assert.Equal(t, 1, applier.pushes)
 	assert.Empty(t, st.results)
@@ -1375,8 +1429,8 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureDoesNotReapplyPatch(t *test
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusConflict, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	assert.Contains(t, second.Body.String(), `"created":false`)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "repair required")
 	assert.Len(t, applier.requests, 1)
 	assert.Empty(t, st.results)
 	assert.Equal(t, "intent_recorded", st.idem[patchApplyKeyForTest(t, payload, job)].Status)
@@ -1408,8 +1462,8 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureWithoutMutationReaderDoesNo
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	assert.Contains(t, second.Body.String(), `"created":false`)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "repair required")
 	assert.Empty(t, applier.requests)
 	assert.Empty(t, inner.results)
 }
@@ -1467,8 +1521,8 @@ func TestHandlerRetryAfterPatchMutationCompletionFailureDoesNotReapplyPatch(t *t
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusConflict, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	assert.Contains(t, second.Body.String(), `"created":false`)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "repair required")
 	assert.Len(t, applier.requests, 1)
 	assert.Empty(t, st.results)
 	require.Equal(t, "completed", st.idem[patchKey].Status)
@@ -1593,6 +1647,10 @@ func (s mutationRecorderOnlyResultStore) RecordJobResult(ctx context.Context, r 
 	return s.inner.RecordJobResult(ctx, r)
 }
 
+func (s mutationRecorderOnlyResultStore) GetJobResult(ctx context.Context, jobID string, idempotencyKey string) (store.JobResult, error) {
+	return s.inner.GetJobResult(ctx, jobID, idempotencyKey)
+}
+
 func (s mutationRecorderOnlyResultStore) AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (bool, error) {
 	return s.inner.AcquireIdempotencyKey(ctx, key)
 }
@@ -1633,6 +1691,10 @@ func (s noMutationResultStore) RecordJobResult(ctx context.Context, r store.JobR
 	return s.inner.RecordJobResult(ctx, r)
 }
 
+func (s noMutationResultStore) GetJobResult(ctx context.Context, jobID string, idempotencyKey string) (store.JobResult, error) {
+	return s.inner.GetJobResult(ctx, jobID, idempotencyKey)
+}
+
 func (s noMutationResultStore) AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (bool, error) {
 	return s.inner.AcquireIdempotencyKey(ctx, key)
 }
@@ -1669,8 +1731,8 @@ func TestHandlerDoesNotRetryReviewResultAfterProcessorFailure(t *testing.T) {
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	assert.Contains(t, second.Body.String(), `"created":false`)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "repair required")
 	assert.Len(t, processor.calls, 1)
 	require.Len(t, st.mutationCompletions, 2)
 	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[0].status)
@@ -1718,7 +1780,7 @@ func TestAcquireResultCallbackRetriesLegacyFailedPreCallMarker(t *testing.T) {
 		wantErrSubstr string
 	}{
 		{name: "legacy failed pre call marker retries", status: mutationspkg.LegacyFailed, resultRef: mutationspkg.PhaseFailedPreCall + ":temporary validation failure", wantProcess: true},
-		{name: "generic failed does not retry", status: mutationspkg.LegacyFailed, resultRef: "github-visible result unknown", wantProcess: false},
+		{name: "generic failed does not retry", status: mutationspkg.LegacyFailed, resultRef: "github-visible result unknown", wantProcess: false, wantErrSubstr: "repair required"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1896,8 +1958,8 @@ func TestHandlerReviewResultCompletionPersistenceFailureDoesNotResubmit(t *testi
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	assert.Contains(t, second.Body.String(), `"created":false`)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "repair required")
 	assert.Len(t, processor.calls, 1)
 	assert.Empty(t, st.results)
 	key := reviewResultMutationKey(mustParseReviewPayload(t, payload), st.jobs["job-1"])
@@ -2056,6 +2118,17 @@ func (s *resultStore) RecordJobResult(_ context.Context, result store.JobResult)
 	s.seen[key] = struct{}{}
 	s.results = append(s.results, result)
 	return true, nil
+}
+
+func (s *resultStore) GetJobResult(_ context.Context, jobID string, idempotencyKey string) (store.JobResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, result := range s.results {
+		if result.JobID == jobID && result.IdempotencyKey == idempotencyKey {
+			return result, nil
+		}
+	}
+	return store.JobResult{}, store.ErrNotFound
 }
 
 func (s *resultStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {

@@ -37,6 +37,7 @@ type Store interface {
 	GetJob(ctx context.Context, jobID string) (Job, error)
 	BindJobWorkflowRunID(ctx context.Context, jobID string, runID string, updatedAt time.Time) (Job, bool, error)
 	RecordJobResult(ctx context.Context, r JobResult) (created bool, err error)
+	GetJobResult(ctx context.Context, jobID string, idempotencyKey string) (JobResult, error)
 	AcquireIdempotencyKey(ctx context.Context, key IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
 	ListIdempotencyKeys(ctx context.Context, scope string, limit int) ([]IdempotencyKey, error)

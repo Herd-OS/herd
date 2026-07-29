@@ -243,7 +243,10 @@ func TestIntegratorWorkflow_BatchExtractionIsNonFatal(t *testing.T) {
 			assert.NotContains(t, s, "ISSUE_BODY: ${{ github.event.issue.body }}")
 			nonFatalIssueCloseParse := "BATCH=$(echo \"$ISSUE_BODY\" | grep -oP '^\\s*batch:\\s*\\K[0-9]+' | head -1 || true)"
 			assert.Contains(t, s, nonFatalIssueCloseParse)
+			assert.Contains(t, s, "BATCH=\"$(jq -r '.issue.milestone.number // \"\"' \"$GITHUB_EVENT_PATH\")\"")
 			assert.NotContains(t, s, "BATCH=$(echo \"$ISSUE_BODY\" | grep -oP '^\\s*batch:\\s*\\K[0-9]+' | head -1)\n")
+			assert.Contains(t, s, "Skipping HerdOS review_submitted callback for non-batch branch")
+			assert.Contains(t, s, "PR_HEAD_REF:")
 			if tt.wantCICompletion {
 				assert.Contains(t, s, "batch_number: (if $batch == \"\" then null else ($batch | tonumber) end)")
 			} else {
@@ -282,11 +285,16 @@ func TestIntegratorWorkflow_IssueCloseReadsBodyFromEventPathAndSkipsNonHerdMulti
 	require.NoError(t, os.Mkdir(binDir, 0700))
 	jqPath := filepath.Join(binDir, "jq")
 	require.NoError(t, os.WriteFile(jqPath, []byte(`#!/bin/sh
-if [ "$1" != "-r" ] || [ "$2" != ".issue.body // \"\"" ] || [ "$3" != "$GITHUB_EVENT_PATH" ]; then
+if [ "$1" = "-r" ] && [ "$2" = ".issue.body // \"\"" ] && [ "$3" = "$GITHUB_EVENT_PATH" ]; then
+  printf '%s\n' 'not herd' 'batch: not-a-number' '${{ github.event.issue.body }}'
+  exit 0
+fi
+if [ "$1" = "-r" ] && [ "$2" = ".issue.milestone.number // \"\"" ] && [ "$3" = "$GITHUB_EVENT_PATH" ]; then
+  printf '\n'
+  exit 0
+fi
   echo "unexpected jq invocation: $*" >&2
   exit 2
-fi
-printf '%s\n' 'not herd' 'batch: not-a-number' '${{ github.event.issue.body }}'
 `), 0700))
 	curlPath := filepath.Join(binDir, "curl")
 	require.NoError(t, os.WriteFile(curlPath, []byte(`#!/bin/sh
@@ -305,6 +313,81 @@ exit 9
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(output))
 	assert.Contains(t, string(output), "Not a herd issue")
+}
+
+func TestIntegratorWorkflow_IssueCloseUsesMilestoneNumberWhenBodyHasNoBatch(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+
+	step := namedStep(t, workflow.Jobs["advance-on-close"], "Request hosted issue-close reconciliation")
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	require.NoError(t, os.WriteFile(eventPath, []byte(`{"issue":{"body":"","milestone":{"number":106}}}`), 0600))
+
+	binDir := filepath.Join(dir, "bin")
+	require.NoError(t, os.Mkdir(binDir, 0700))
+	jqPath := filepath.Join(binDir, "jq")
+	require.NoError(t, os.WriteFile(jqPath, []byte(`#!/bin/sh
+if [ "$1" = "-r" ] && [ "$2" = ".issue.body // \"\"" ] && [ "$3" = "$GITHUB_EVENT_PATH" ]; then
+  printf '\n'
+  exit 0
+fi
+if [ "$1" = "-r" ] && [ "$2" = ".issue.milestone.number // \"\"" ] && [ "$3" = "$GITHUB_EVENT_PATH" ]; then
+  printf '106\n'
+  exit 0
+fi
+if [ "$1" = "-er" ] && [ "$2" = ".value // empty" ]; then
+  printf 'oidc-token\n'
+  exit 0
+fi
+if [ "$1" = "-n" ]; then
+  issue=""
+  batch=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--argjson issue_number" ]; then issue="$arg"; fi
+    if [ "$prev" = "--argjson batch_number" ]; then batch="$arg"; fi
+    prev="$prev $arg"
+    case "$prev" in
+      *"--argjson issue_number") prev="--argjson issue_number" ;;
+      *"--argjson batch_number") prev="--argjson batch_number" ;;
+    esac
+  done
+  printf '{"issue_number":%s,"batch_number":%s}\n' "$issue" "$batch"
+  exit 0
+fi
+echo "unexpected jq invocation: $*" >&2
+exit 2
+`), 0700))
+	curlPath := filepath.Join(binDir, "curl")
+	require.NoError(t, os.WriteFile(curlPath, []byte(`#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "@/tmp/herd-integrator-event.json" ]; then
+    grep -q '"batch_number":106' /tmp/herd-integrator-event.json
+    exit $?
+  fi
+done
+printf '{"value":"oidc-token"}\n'
+`), 0700))
+
+	cmd := exec.Command("sh", "-c", step.Run)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GITHUB_EVENT_PATH="+eventPath,
+		"ISSUE_NUMBER=884",
+		"REPOSITORY=octo/herd",
+		"HERD_CONTROL_PLANE_URL=https://api.herd-os.com",
+		"ACTIONS_ID_TOKEN_REQUEST_URL=https://oidc.example.test/token",
+		"ACTIONS_ID_TOKEN_REQUEST_TOKEN=request-token",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+	assert.Contains(t, string(output), "Submitted HerdOS workflow event")
 }
 
 func TestMonitorWorkflow_DefaultMatchesCommittedWorkflow(t *testing.T) {

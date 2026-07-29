@@ -147,6 +147,47 @@ func TestProductionWorkflowEventProcessorDispatchesReviewForChangesRequested(t *
 	assert.Equal(t, "review", stringFromMetadata(jobs[0].Job.Metadata, "kind"))
 }
 
+func TestProductionWorkflowEventProcessorNoOpsNonBatchReviewSubmitted(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	repo, err := st.UpsertRepository(ctx, store.Repository{
+		GitHubID:       3003,
+		InstallationID: 9,
+		Owner:          "octo",
+		Name:           "herd",
+		DefaultBranch:  "main",
+	})
+	require.NoError(t, err)
+	workflows := &recordingWorkflowClient{}
+	pl := newFakeCommandPlatform([]*platform.PullRequest{{
+		Number:  849,
+		Head:    "feature/auth",
+		HeadSHA: "head",
+	}})
+	processor := productionWorkflowEventProcessor{
+		Store:      st,
+		Dispatcher: cpdispatch.Dispatcher{Store: st, GitHub: workflows},
+		Config:     *config.Default(),
+		PlatformFactory: func(context.Context, store.Repository) (platform.Platform, error) {
+			return pl, nil
+		},
+	}
+
+	err = processor.ProcessWorkflowEvent(ctx, repo, workflowevents.Event{
+		Kind:        workflowevents.KindIntegratorEvent,
+		Action:      "review_submitted",
+		PRNumber:    849,
+		HeadSHA:     "head",
+		ReviewState: "changes_requested",
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, workflows.dispatches)
+	jobs, err := st.ListReconcileJobs(ctx, time.Now().Add(time.Hour), 10)
+	require.NoError(t, err)
+	assert.Empty(t, jobs)
+}
+
 func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()

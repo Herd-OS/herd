@@ -322,6 +322,24 @@ func (s *PostgresStore) RecordJobResult(ctx context.Context, r JobResult) (bool,
 	return createdFromResult(result, err)
 }
 
+func (s *PostgresStore) GetJobResult(ctx context.Context, jobID string, idempotencyKey string) (JobResult, error) {
+	var r JobResult
+	var metadata []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, job_id, idempotency_key, status, result_ref, metadata, created_at
+		FROM job_results
+		WHERE job_id = $1 AND idempotency_key = $2`, jobID, idempotencyKey).Scan(
+		&r.ID, &r.JobID, &r.IdempotencyKey, &r.Status, &r.ResultRef, &metadata, &r.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return JobResult{}, ErrNotFound
+	}
+	if err != nil {
+		return JobResult{}, err
+	}
+	r.Metadata = json.RawMessage(metadata)
+	return r, nil
+}
+
 func (s *PostgresStore) ListReconcileJobs(ctx context.Context, updatedBefore time.Time, limit int) ([]ReconcileJob, error) {
 	if limit <= 0 {
 		limit = 100

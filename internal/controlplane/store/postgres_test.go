@@ -131,6 +131,15 @@ func TestPostgresConstraintBackedIdempotency(t *testing.T) {
 		created, err = store.RecordJobResult(ctx, result)
 		require.NoError(t, err)
 		assert.False(t, created)
+
+		gotResult, err := store.GetJobResult(ctx, "job-1", "callback-1")
+		require.NoError(t, err)
+		assert.Equal(t, result.JobID, gotResult.JobID)
+		assert.Equal(t, result.IdempotencyKey, gotResult.IdempotencyKey)
+		assert.Equal(t, result.Status, gotResult.Status)
+		assert.Equal(t, result.ResultRef, gotResult.ResultRef)
+		_, err = store.GetJobResult(ctx, "job-1", "missing")
+		require.ErrorIs(t, err, ErrNotFound)
 	})
 
 	t.Run("active review lock uniqueness", func(t *testing.T) {

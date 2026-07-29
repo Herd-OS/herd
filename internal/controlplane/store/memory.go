@@ -276,6 +276,16 @@ func (s *MemoryStore) RecordJobResult(_ context.Context, r JobResult) (bool, err
 	return true, nil
 }
 
+func (s *MemoryStore) GetJobResult(_ context.Context, jobID string, idempotencyKey string) (JobResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result, ok := s.jobResults[jobID+"\x00"+idempotencyKey]
+	if !ok {
+		return JobResult{}, ErrNotFound
+	}
+	return result, nil
+}
+
 func (s *MemoryStore) ListReconcileJobs(_ context.Context, updatedBefore time.Time, limit int) ([]ReconcileJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

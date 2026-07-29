@@ -264,7 +264,7 @@ func (p productionWorkflowEventProcessor) dispatchReviewForSubmittedReview(ctx c
 	if batchNumber <= 0 {
 		batchNumber, err = orchestration.ParseBatchBranchMilestone(pr.Head)
 		if err != nil {
-			return fmt.Errorf("review_submitted PR head is not a batch branch: %w", err)
+			return nil
 		}
 	}
 	headSHA := strings.TrimSpace(event.HeadSHA)

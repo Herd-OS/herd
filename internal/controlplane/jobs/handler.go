@@ -28,6 +28,7 @@ const maxResultPayloadBytes = 1 << 20
 type Store interface {
 	GetJob(ctx context.Context, jobID string) (store.Job, error)
 	RecordJobResult(ctx context.Context, r store.JobResult) (created bool, err error)
+	GetJobResult(ctx context.Context, jobID string, idempotencyKey string) (store.JobResult, error)
 	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
@@ -215,6 +216,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	callbackKey := "job_result:" + idempotencyKey
 	shouldProcess, err := h.acquireResultCallback(r.Context(), callbackKey, envelope.JobID, idempotencyKey)
 	if err != nil {
+		if errors.Is(err, errResultCallbackRepairRequired) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "acquire job result idempotency"})
 		return
 	}
@@ -717,11 +722,21 @@ func (h Handler) acquireResultCallback(ctx context.Context, callbackKey, jobID, 
 	case mutationspkg.IsPreCallRetryableRecord(record.Status, record.ResultRef):
 		return true, nil
 	case mutationspkg.IsPostCallUnknown(status):
-		return false, nil
+		if _, err := h.store.GetJobResult(ctx, jobID, resultKey); err == nil {
+			if err := h.store.CompleteIdempotencyKey(ctx, callbackKey, resultKey); err != nil {
+				return false, fmt.Errorf("repair completed job result callback: %w", err)
+			}
+			return false, nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+		return false, fmt.Errorf("%w: job result callback %q is %s with no durable job result", errResultCallbackRepairRequired, callbackKey, status)
 	default:
 		return false, fmt.Errorf("job result callback %q has unknown status %q", callbackKey, record.Status)
 	}
 }
+
+var errResultCallbackRepairRequired = errors.New("job result callback repair required")
 
 func (h Handler) processReviewResult(ctx context.Context, result Result, job store.Job) error {
 	reviewResult, ok := result.(ReviewCompletedResult)
