@@ -1874,6 +1874,50 @@ func TestHandlerChangedReviewResultRepairsPriorAcceptedMutationWithoutResubmit(t
 	assert.Equal(t, firstResultKey, st.idem[acceptanceKey].ResultRef)
 }
 
+func TestHandlerChangedReviewResultRepairsPriorPostCallUnknownMutationWithoutResubmit(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	job := store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	st.jobs["job-1"] = job
+	firstPayload := validReviewPayload()
+	changedPayload := `{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":106,"pr_number":42,"head_sha":"head","status":"approved","summary":"changed review summary"}`
+	firstResult := mustParseReviewPayload(t, firstPayload)
+	firstResultKey := ResultIdempotencyKey(firstResult, []byte(firstPayload))
+	mutationKey := reviewResultMutationKey(firstResult, job)
+	acceptanceKey := reviewResultAcceptanceKey(job)
+	st.mutationCompleteErrs = []error{errors.New("mutation store down"), nil}
+	st.completeIdemErrs = map[string][]error{mutationKey: {errors.New("idempotency store down"), nil}}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", firstPayload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", changedPayload))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "conflicting review result already accepted")
+	assert.Len(t, processor.calls, 1)
+	require.Len(t, processor.repairs, 1)
+	assert.Equal(t, "review summary", processor.repairs[0].result.Summary)
+	require.Len(t, st.results, 1)
+	assert.Equal(t, firstResultKey, st.results[0].IdempotencyKey)
+	assert.Equal(t, ResultPayloadHash([]byte(firstPayload)), st.results[0].ResultRef)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.idem[acceptanceKey].Status)
+	assert.Equal(t, firstResultKey, st.idem[acceptanceKey].ResultRef)
+	attempt, err := st.GetGitHubMutationAttempt(context.Background(), mutationKey)
+	require.NoError(t, err)
+	assert.Equal(t, mutationspkg.PhaseCompleted, attempt.Status)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.idem[mutationKey].Status)
+}
+
 func TestHandlerRepairsDanglingReviewAcceptanceOnCompletedCallbackRedelivery(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()

@@ -459,6 +459,7 @@ type reviewAcceptanceMetadata struct {
 	Status            string          `json:"status"`
 	PayloadHash       string          `json:"payload_hash"`
 	JobResultMetadata json.RawMessage `json:"job_result_metadata"`
+	Submission        json.RawMessage `json:"submission"`
 }
 
 func reviewResultAcceptanceMetadata(result Result, job store.Job, resultKey string, payload []byte, claims OIDCClaims, applyMetadata map[string]any) (json.RawMessage, error) {
@@ -466,17 +467,31 @@ func reviewResultAcceptanceMetadata(result Result, job store.Job, resultKey stri
 	if err != nil {
 		return nil, fmt.Errorf("build review acceptance metadata: %w", err)
 	}
+	submission, err := reviewResultSubmissionMetadata(result, job)
+	if err != nil {
+		return nil, fmt.Errorf("build review acceptance submission metadata: %w", err)
+	}
 	metadata, err := json.Marshal(reviewAcceptanceMetadata{
 		ResultKey:         resultKey,
 		MutationKey:       reviewResultMutationKey(result, job),
 		Status:            result.StatusValue(),
 		PayloadHash:       ResultPayloadHash(payload),
 		JobResultMetadata: jobResultMetadata,
+		Submission:        submission,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal review acceptance metadata: %w", err)
 	}
 	return metadata, nil
+}
+
+func reviewResultSubmissionMetadata(result Result, job store.Job) (json.RawMessage, error) {
+	reviewResult, ok := result.(ReviewCompletedResult)
+	if !ok {
+		return nil, nil
+	}
+	submission := reviewResultSubmission(reviewResult, job)
+	return json.Marshal(submission)
 }
 
 func (h Handler) repairPriorReviewResultAcceptance(ctx context.Context, acceptanceKey string, record store.IdempotencyKey, job store.Job) (bool, error) {
@@ -488,8 +503,72 @@ func (h Handler) repairPriorReviewResultAcceptance(ctx context.Context, acceptan
 		return false, nil
 	}
 	if !h.reviewResultProcessCompleted(ctx, metadata.MutationKey) {
+		repaired, err := h.repairAcceptedReviewResultMutation(ctx, metadata, job)
+		if err != nil || !repaired {
+			return false, err
+		}
+	}
+	if err := h.recordRepairedReviewResult(ctx, metadata, job); err != nil {
+		return false, err
+	}
+	if err := h.store.CompleteIdempotencyKey(ctx, acceptanceKey, metadata.ResultKey); err != nil {
+		return false, fmt.Errorf("complete repaired review result acceptance: %w", err)
+	}
+	return true, nil
+}
+
+func (h Handler) repairAcceptedReviewResultMutation(ctx context.Context, metadata reviewAcceptanceMetadata, job store.Job) (bool, error) {
+	if h.reviewProcessor == nil {
 		return false, nil
 	}
+	mutationStore, ok := h.store.(mutationguard.Store)
+	if !ok {
+		return false, nil
+	}
+	var submission review.ReviewCompletedResult
+	if len(metadata.Submission) == 0 || json.Unmarshal(metadata.Submission, &submission) != nil {
+		return false, nil
+	}
+	if strings.TrimSpace(submission.Repository) == "" {
+		return false, nil
+	}
+	repo := reviewRepositoryFromJob(job, submission.Repository)
+	request := metadata.Submission
+	_, err := mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
+		Key:          metadata.MutationKey,
+		RepositoryID: job.RepositoryID,
+		MutationType: "review_result_process",
+		Request:      request,
+		ResultRef: func(raw json.RawMessage) string {
+			if len(raw) == 0 {
+				return ""
+			}
+			return "review_result:processed"
+		},
+		Response: func(string) json.RawMessage { return request },
+		Mutate: func() (string, error) {
+			return "", fmt.Errorf("prior review result mutation must be repaired before retry")
+		},
+		Repair: func() (string, bool, error) {
+			repairer, ok := h.reviewProcessor.(ReviewResultRepairer)
+			if !ok {
+				return "", false, nil
+			}
+			repaired, err := repairer.RepairSubmittedReviewResult(ctx, repo, submission)
+			if err != nil || !repaired {
+				return "", repaired, err
+			}
+			return "review_result:processed", true, nil
+		},
+		Now: h.now,
+	})
+	if err != nil {
+		return false, err
+	}
+	return h.reviewResultProcessCompleted(ctx, metadata.MutationKey), nil
+}
+
+func (h Handler) recordRepairedReviewResult(ctx context.Context, metadata reviewAcceptanceMetadata, job store.Job) error {
 	if len(metadata.JobResultMetadata) > 0 && strings.TrimSpace(metadata.Status) != "" && strings.TrimSpace(metadata.PayloadHash) != "" {
 		if _, err := h.store.RecordJobResult(ctx, store.JobResult{
 			JobID:          job.JobID,
@@ -499,13 +578,10 @@ func (h Handler) repairPriorReviewResultAcceptance(ctx context.Context, acceptan
 			Metadata:       metadata.JobResultMetadata,
 			CreatedAt:      h.now(),
 		}); err != nil {
-			return false, fmt.Errorf("record repaired review job result: %w", err)
+			return fmt.Errorf("record repaired review job result: %w", err)
 		}
 	}
-	if err := h.store.CompleteIdempotencyKey(ctx, acceptanceKey, metadata.ResultKey); err != nil {
-		return false, fmt.Errorf("complete repaired review result acceptance: %w", err)
-	}
-	return true, nil
+	return nil
 }
 
 func (h Handler) reviewResultProcessCompleted(ctx context.Context, mutationKey string) bool {
@@ -760,20 +836,7 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		return fmt.Errorf("acquire review result mutation idempotency key: %w", err)
 	}
 	repo := reviewRepositoryFromJob(job, reviewResult.Repository)
-	targetURL := firstMetadataString(metadataMap(job.Metadata), "workflow_run_url", "run_url", "target_url", "pr_url")
-	submission := review.ReviewCompletedResult{
-		Repository:  reviewResult.Repository,
-		JobID:       reviewResult.JobID,
-		BatchNumber: reviewResult.BatchNumber,
-		PRNumber:    reviewResult.PRNumber,
-		BatchBranch: job.WorkerBranch,
-		HeadSHA:     reviewResult.HeadSHA,
-		Status:      reviewResult.Status,
-		Summary:     reviewResult.Summary,
-		TargetURL:   targetURL,
-		FixCycle:    reviewResult.FixCycle,
-		Findings:    reviewFindings(reviewResult.Findings),
-	}
+	submission := reviewResultSubmission(reviewResult, job)
 	request, _ := json.Marshal(submission)
 	var prepared review.PreparedReviewResultSubmission
 	_, err := mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
@@ -816,6 +879,23 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		Now: h.now,
 	})
 	return err
+}
+
+func reviewResultSubmission(reviewResult ReviewCompletedResult, job store.Job) review.ReviewCompletedResult {
+	targetURL := firstMetadataString(metadataMap(job.Metadata), "workflow_run_url", "run_url", "target_url", "pr_url")
+	return review.ReviewCompletedResult{
+		Repository:  reviewResult.Repository,
+		JobID:       reviewResult.JobID,
+		BatchNumber: reviewResult.BatchNumber,
+		PRNumber:    reviewResult.PRNumber,
+		BatchBranch: job.WorkerBranch,
+		HeadSHA:     reviewResult.HeadSHA,
+		Status:      reviewResult.Status,
+		Summary:     reviewResult.Summary,
+		TargetURL:   targetURL,
+		FixCycle:    reviewResult.FixCycle,
+		Findings:    reviewFindings(reviewResult.Findings),
+	}
 }
 
 func reviewResultMutationKey(result Result, job store.Job) string {
