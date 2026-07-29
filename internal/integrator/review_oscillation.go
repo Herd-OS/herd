@@ -78,6 +78,19 @@ func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompleted
 	}
 	out.CompletedFixChainConfirmed = true
 
+	headSet := map[string]struct{}{}
+	for _, cycle := range append(completed, latest) {
+		head := strings.TrimSpace(cycle.HeadSHA)
+		if head == "" {
+			return fail(fmt.Sprintf("cycle %d has no reviewed head SHA", cycle.Cycle))
+		}
+		if _, exists := headSet[head]; exists {
+			return fail(fmt.Sprintf("reviewed head SHA %s is reused in the completed review chain", head))
+		}
+		headSet[head] = struct{}{}
+	}
+	out.DistinctHeadSHAsConfirmed = true
+
 	latestClusters := reviewFindingEvidenceClusters(latestFindings)
 	if len(latestClusters) == 0 {
 		return fail("latest review has no concrete package/subsystem or ownership boundary")
@@ -118,20 +131,6 @@ func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompleted
 			out.EvidenceCycles = append(out.EvidenceCycles, evidence)
 		}
 	}
-	evidenceHeads := append([]reviewHistoryCycle(nil), out.EvidenceCycles...)
-	evidenceHeads = append(evidenceHeads, latest)
-	headSet := map[string]struct{}{}
-	for _, cycle := range evidenceHeads {
-		head := strings.TrimSpace(cycle.HeadSHA)
-		if head == "" {
-			return fail(fmt.Sprintf("cycle %d has no reviewed head SHA", cycle.Cycle))
-		}
-		if _, exists := headSet[head]; exists {
-			return fail(fmt.Sprintf("reviewed head SHA %s is reused in the evidence chain", head))
-		}
-		headSet[head] = struct{}{}
-	}
-	out.DistinctHeadSHAsConfirmed = true
 	out.Eligible = true
 	out.Rationale = "low-volume findings recur across distinct reviewed heads after a completed fix chain with matching subsystem and architectural evidence"
 	return out
@@ -149,10 +148,10 @@ func evaluateLowVolumeReviewSynthesis(result *agent.ReviewSynthesisResult, input
 	if !isMeaningfulLowVolumeRootCause(title, result) {
 		return reviewSynthesisDecisionFallback, "synthesis root cause is generic, package-only, or unrelated to the recurring architectural evidence"
 	}
-	symptoms := sanitizedReviewSynthesisSymptoms(result.RecurringSymptoms)
-	if countReviewSynthesisSymptomCycles(symptoms) < reviewOscillationMinEvidenceCycles {
-		return reviewSynthesisDecisionFallback, "synthesis symptoms do not span three evidence cycles"
+	if !synthesisSymptomsReferenceEvidenceCycles(result.RecurringSymptoms, eligibility.EvidenceCycles) {
+		return reviewSynthesisDecisionFallback, "synthesis symptoms contain invalid or duplicate cycle references, or do not span three evidence cycles"
 	}
+	symptoms := sanitizedReviewSynthesisSymptoms(result.RecurringSymptoms)
 	if !synthesisSymptomsAlignWithSubsystems(symptoms, eligibility.RecurringSubsystems) {
 		return reviewSynthesisDecisionFallback, "synthesis affected files do not align with recurring subsystems"
 	}
@@ -208,6 +207,9 @@ func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResu
 	if !reviewTextAlignsWithEvidence(value.PreservedSafetyProperty, originalEvidence) {
 		return false, "preserved safety property is not traceable to an original requirement"
 	}
+	if !reviewSafetyPropertyAlignsAffirmatively(value.PreservedSafetyProperty, originalEvidence) {
+		return false, "preserved safety property is not affirmatively aligned with an original user-visible safety property"
+	}
 	if !reviewTextAlignsWithEvidence(value.PlatformConsistencyConstraint, reviewPlatformConstraintEvidence(input)) {
 		return false, "platform consistency constraint is not supported by supplied specification or review history"
 	}
@@ -218,7 +220,32 @@ func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResu
 	if !reviewTextCoversRequirement(criteria, value.CorrectedInvariant) || !reviewTextCoversRequirement(criteria, value.PreservedSafetyProperty) {
 		return false, "acceptance criteria do not cover both the corrected invariant and preserved safety property"
 	}
+	if !reviewRequirementsMateriallyOverlap(criteria, value.PreservedSafetyProperty) {
+		return false, "acceptance criteria do not affirmatively preserve the original safety property"
+	}
 	return true, ""
+}
+
+func synthesisSymptomsReferenceEvidenceCycles(symptoms []agent.ReviewSynthesisSymptom, evidence []reviewHistoryCycle) bool {
+	allowed := make(map[int]struct{}, len(evidence))
+	for _, cycle := range evidence {
+		allowed[cycle.Cycle] = struct{}{}
+	}
+	represented := map[int]struct{}{}
+	for _, symptom := range symptoms {
+		withinSymptom := map[int]struct{}{}
+		for _, cycle := range symptom.Cycles {
+			if _, ok := allowed[cycle]; !ok {
+				return false
+			}
+			if _, duplicate := withinSymptom[cycle]; duplicate {
+				return false
+			}
+			withinSymptom[cycle] = struct{}{}
+			represented[cycle] = struct{}{}
+		}
+	}
+	return len(represented) >= reviewOscillationMinEvidenceCycles
 }
 
 func buildLowVolumeSynthesizedStrategyFixIssueTitle(result *agent.ReviewSynthesisResult) string {
@@ -541,11 +568,56 @@ func canonicalReviewRequirementWords(value string) map[string]struct{} {
 
 func isClearlyPreservedSafetyProperty(value string) bool {
 	normalized := normalizeReviewSynthesisFingerprintText(value)
+	if reviewSafetyTextIsWeakened(normalized) {
+		return false
+	}
+	return len(reviewSafetyPhrases(normalized)) > 0
+}
+
+func reviewSafetyPhrases(value string) []string {
+	normalized := normalizeReviewSynthesisFingerprintText(value)
+	var matched []string
 	for _, term := range []string{
 		"exclusive ownership", "exactly once", "no duplicate", "without duplicate", "data loss", "without loss",
 		"never lose", "corrupt", "unauthorized", "user visible", "externally visible", "committed data",
 	} {
 		if strings.Contains(normalized, term) {
+			matched = append(matched, term)
+		}
+	}
+	return matched
+}
+
+func reviewSafetyTextIsWeakened(value string) bool {
+	normalized := normalizeReviewSynthesisFingerprintText(value)
+	for _, phrase := range []string{
+		"not guaranteed", "not required", "need not", "does not ensure", "do not ensure", "cannot ensure",
+		"may not", "might not", "can fail", "may fail", "might fail", "can be violated", "may be violated",
+		"best effort", "when possible", "where possible", "if possible", "to the extent possible",
+		"subject to", "not always", "does not", "do not", "is not", "are not", "will not",
+	} {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	for _, word := range strings.Fields(normalized) {
+		switch word {
+		case "can", "could", "may", "might", "should", "sometimes", "usually", "generally", "except", "unless":
+			return true
+		}
+	}
+	return false
+}
+
+func reviewSafetyPropertyAlignsAffirmatively(property string, evidence []string) bool {
+	if !isClearlyPreservedSafetyProperty(property) {
+		return false
+	}
+	for _, source := range evidence {
+		if reviewSafetyTextIsWeakened(source) {
+			continue
+		}
+		if reviewRequirementsMateriallyOverlap(source, property) {
 			return true
 		}
 	}
@@ -606,6 +678,19 @@ func reviewTextAlignsWithEvidence(value string, evidence []string) bool {
 }
 
 func reviewRequirementsMateriallyOverlap(left, right string) bool {
+	if reviewSafetyTextIsWeakened(left) || reviewSafetyTextIsWeakened(right) {
+		return false
+	}
+	leftNormalized := normalizeReviewSynthesisFingerprintText(left)
+	rightPhrases := reviewSafetyPhrases(right)
+	if len(rightPhrases) > 0 {
+		for _, phrase := range rightPhrases {
+			if !strings.Contains(leftNormalized, phrase) {
+				return false
+			}
+		}
+		return true
+	}
 	leftWords := traceableReviewRequirementWords(left)
 	matches := 0
 	for word := range traceableReviewRequirementWords(right) {

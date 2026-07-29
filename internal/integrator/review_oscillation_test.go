@@ -21,6 +21,16 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 		{name: "eligible", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle { return c }, minCycles: 3, enabled: true, want: true},
 		{name: "synthesis disabled", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle { return c }, minCycles: 3},
 		{name: "configured floor", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle { return c }, minCycles: 4, enabled: true},
+		{name: "configured floor includes nonmatching cycle with missing head", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			c = prependCompletedNonmatchingCycle(c)
+			c[0].HeadSHA = ""
+			return c
+		}, minCycles: 4, enabled: true},
+		{name: "configured floor includes nonmatching cycle with reused head", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			c = prependCompletedNonmatchingCycle(c)
+			c[0].HeadSHA = c[1].HeadSHA
+			return c
+		}, minCycles: 4, enabled: true},
 		{name: "fewer than three completed", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle { return c[1:] }, minCycles: 3, enabled: true},
 		{name: "missing fix chain", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			c[1].FixIssues = nil
@@ -148,6 +158,19 @@ func TestEvaluateLowVolumeReviewSynthesis(t *testing.T) {
 				r.RecurringSymptoms[i].Cycles = []int{1, 2}
 			}
 		}, want: reviewSynthesisDecisionFallback},
+		{name: "unknown cycle", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RecurringSymptoms[0].Cycles = []int{1, 2, 99}
+		}, want: reviewSynthesisDecisionFallback},
+		{name: "latest cycle is not historical evidence", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RecurringSymptoms[0].Cycles = []int{1, 2, 4}
+		}, want: reviewSynthesisDecisionFallback},
+		{name: "duplicate cycle within symptom", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RecurringSymptoms[0].Cycles = []int{1, 1, 2, 3}
+		}, want: reviewSynthesisDecisionFallback},
+		{name: "mixed valid and invalid cycles", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RecurringSymptoms[0].Cycles = []int{1, 2, 99}
+			r.RecurringSymptoms[1].Cycles = []int{1, 2, 3}
+		}, want: reviewSynthesisDecisionFallback},
 		{name: "unrelated subsystem", mutate: func(r *agent.ReviewSynthesisResult) {
 			for i := range r.RecurringSymptoms {
 				r.RecurringSymptoms[i].AffectedFiles = []string{"internal/worker/run.go"}
@@ -232,6 +255,31 @@ func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 			r.AcceptanceCriteria = []string{
 				"The corrected workflow prevents unauthorized audit deletion.",
 				"Unauthorized audit deletion is prevented and tested.",
+			}
+		}},
+		{name: "negated preserved property repeated throughout", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
+			v.PreservedSafetyProperty = "exclusive ownership is not guaranteed"
+			v.CorrectedInvariant = "intent visibility precedes publication but exclusive ownership is not guaranteed"
+			r.AcceptanceCriteria = []string{"Intent visibility is tested and exclusive ownership is not guaranteed."}
+		}},
+		{name: "exception qualified property", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
+			v.PreservedSafetyProperty = "exclusive ownership remains user-visible except when recovery runs"
+			v.CorrectedInvariant = "exclusive ownership remains user-visible except when recovery runs"
+			r.AcceptanceCriteria = []string{"Exclusive ownership remains user-visible except when recovery runs."}
+		}},
+		{name: "weakened modal property", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
+			v.PreservedSafetyProperty = "exclusive ownership may not remain user-visible"
+			v.CorrectedInvariant = "exclusive ownership may not remain user-visible after publication"
+			r.AcceptanceCriteria = []string{"Exclusive ownership may not remain user-visible after publication."}
+		}},
+		{name: "corrected invariant weakens property", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
+			v.CorrectedInvariant = "intent visibility precedes publication but exclusive ownership is not guaranteed"
+			r.AcceptanceCriteria = []string{"The corrected invariant is tested and exclusive ownership remains user-visible."}
+		}},
+		{name: "criteria assert safety violation", mutate: func(_ *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
+			r.AcceptanceCriteria = []string{
+				"Intent visibility precedes publication.",
+				"Exclusive ownership is not guaranteed and this behavior is tested.",
 			}
 		}},
 	}
@@ -321,6 +369,17 @@ func cloneReviewHistoryCycles(in []reviewHistoryCycle) []reviewHistoryCycle {
 		out[i].FindingsBySeverity = copyReviewFindingsBySeverity(cycle.FindingsBySeverity)
 	}
 	return out
+}
+
+func prependCompletedNonmatchingCycle(in []reviewHistoryCycle) []reviewHistoryCycle {
+	first := reviewHistoryCycle{
+		Cycle:               0,
+		HeadSHA:             "head-floor",
+		FindingsAfterDedupe: 1,
+		FindingsBySeverity:  map[string][]string{"MEDIUM": {"internal/worker/run.go: retry delay is too short"}},
+		FixIssues:           []reviewHistoryFixIssue{{Number: 99, StatusLabel: issues.StatusDone}},
+	}
+	return append([]reviewHistoryCycle{first}, in...)
 }
 
 func lowVolumeSynthesisResult() *agent.ReviewSynthesisResult {
