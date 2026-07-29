@@ -6672,7 +6672,8 @@ func TestReviewStandalone_ExtraInstructions(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	// Create a .herd/integrator.md so SystemPrompt is pre-populated before extra instructions are appended.
+	// Create a .herd/integrator.md so role instructions are kept separate
+	// from user-supplied review focus.
 	require.NoError(t, os.MkdirAll(dir+"/.herd", 0755))
 	require.NoError(t, os.WriteFile(dir+"/.herd/integrator.md", []byte("Base instructions"), 0644))
 
@@ -6682,7 +6683,8 @@ func TestReviewStandalone_ExtraInstructions(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, capturedOpts.SystemPrompt, "Base instructions")
-	assert.Contains(t, capturedOpts.SystemPrompt, "Focus on security issues")
+	assert.NotContains(t, capturedOpts.SystemPrompt, "Focus on security issues")
+	assert.Equal(t, "Focus on security issues", capturedOpts.ExtraInstructions)
 }
 
 func TestReviewStandalone_UserFeedbackPassedToAgent(t *testing.T) {

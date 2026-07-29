@@ -447,6 +447,44 @@ func TestMergePR_RequiresExpectedHeadAndSuccessfulStatus(t *testing.T) {
 	}
 }
 
+func TestMergePR_RedeliveryRepairsMergedPRAfterCompletionFailures(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.prs.items[8] = &platform.PullRequest{
+		Number:  8,
+		Title:   "[herd] Demo",
+		State:   "open",
+		Head:    "herd/batch/8-demo",
+		HeadSHA: "head",
+	}
+	fake.repo.branches["herd/batch/8-demo"] = "head"
+	fake.checks.status = "success"
+	st := newFakeStore()
+	key := idempotencyKey("merge", "repo", int64(123), "pr", 8, "head", "head")
+	st.completeMutationErrs[key] = []error{errors.New("mutation store down")}
+	st.completeErrs[key] = []error{errors.New("idempotency store down")}
+	svc := newTestService(fake, st, nil)
+
+	first, err := svc.MergePR(ctx, MergePRRequest{PRNumber: 8, ExpectedHeadSHA: "head", RequireCI: true})
+	require.Error(t, err)
+	assert.Nil(t, first)
+	assert.Equal(t, 8, fake.prs.merged)
+
+	fake.prs.merged = 0
+	second, err := svc.MergePR(ctx, MergePRRequest{PRNumber: 8, ExpectedHeadSHA: "head", RequireCI: true})
+
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	assert.True(t, second.Merged)
+	assert.Equal(t, "merge-sha", second.SHA)
+	assert.Zero(t, fake.prs.merged)
+	attempt, err := st.GetGitHubMutationAttempt(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, mutations.PhaseCompleted, attempt.Status)
+	assert.Equal(t, "completed", st.keys[key].Status)
+	assert.Equal(t, "merge:merge-sha", st.keys[key].ResultRef)
+}
+
 func TestCleanupClosedBatchPR_ClosesIssuesMilestoneAndDeletesBranch(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()

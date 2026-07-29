@@ -357,10 +357,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 
 	if params.ExtraInstructions != "" {
-		if reviewOpts.SystemPrompt != "" {
-			reviewOpts.SystemPrompt += "\n\n"
-		}
-		reviewOpts.SystemPrompt += params.ExtraInstructions
+		reviewOpts.ExtraInstructions = params.ExtraInstructions
 	}
 
 	aggregate, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, pr.Number)
@@ -1203,10 +1200,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	}
 
 	if params.ExtraInstructions != "" {
-		if reviewOpts.SystemPrompt != "" {
-			reviewOpts.SystemPrompt += "\n\n"
-		}
-		reviewOpts.SystemPrompt += params.ExtraInstructions
+		reviewOpts.ExtraInstructions = params.ExtraInstructions
 	}
 
 	prComments, commentErr := p.Issues().ListComments(ctx, params.PRNumber)

@@ -318,7 +318,23 @@ func (s Service) MergePR(ctx context.Context, req MergePRRequest) (*platform.Mer
 			method = platform.MergeMethodMerge
 		}
 		return nil
-	}, nil, func() (string, error) {
+	}, func() (string, bool, error) {
+		pr, err := s.Platform.PullRequests().Get(ctx, req.PRNumber)
+		if err != nil {
+			return "", false, err
+		}
+		if !pr.Merged && pr.State != "merged" {
+			return "", false, nil
+		}
+		if pr.HeadSHA != "" && pr.HeadSHA != req.ExpectedHeadSHA {
+			return "", false, fmt.Errorf("merged PR #%d head mismatch: expected %s, got %s", req.PRNumber, req.ExpectedHeadSHA, pr.HeadSHA)
+		}
+		mergeSHA := strings.TrimSpace(pr.MergeCommitSHA)
+		if mergeSHA == "" {
+			mergeSHA = req.ExpectedHeadSHA
+		}
+		return "merge:" + mergeSHA, true, nil
+	}, func() (string, error) {
 		merged, err := s.Platform.PullRequests().Merge(ctx, req.PRNumber, method)
 		if err != nil {
 			return "", err

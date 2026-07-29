@@ -1176,6 +1176,8 @@ func (s *fakePRService) Merge(_ context.Context, number int, method platform.Mer
 		return nil, err
 	}
 	pr.State = "closed"
+	pr.Merged = true
+	pr.MergeCommitSHA = "merge-sha"
 	s.merged = number
 	return &platform.MergeResult{SHA: "merge-sha", Merged: true, Message: string(method)}, nil
 }

@@ -229,6 +229,8 @@ func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 		Base:             pr.GetBase().GetRef(),
 		HeadSHA:          pr.GetHead().GetSHA(),
 		BaseSHA:          pr.GetBase().GetSHA(),
+		Merged:           pr.GetMerged(),
+		MergeCommitSHA:   pr.GetMergeCommitSHA(),
 		Labels:           labels,
 		Mergeable:        pr.GetMergeable(),
 		MergeableKnown:   pr.Mergeable != nil,

@@ -44,6 +44,7 @@ type IdempotencyFailureStore interface {
 type QueueStore interface {
 	GetRepository(ctx context.Context, owner string, name string) (store.Repository, error)
 	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
+	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
 }
 
 type AppGitHub interface {
@@ -331,6 +332,65 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 		return fmt.Errorf("marshal command metadata: %w", err)
 	}
 	return recordQueuedCommand(ctx, st, event, string(cmd.Kind), string(cmd.Kind), metadata)
+}
+
+// IssueCommentCommandQueued reports whether the stable command record for an
+// issue_comment delivery already exists. Webhook redelivery uses this as the
+// repair side of the durable enqueue boundary: after RecordCommand returns an
+// unknown error, the delivery must converge on the command record keyed by
+// repository/comment/command instead of replaying the enqueue as pre-processor
+// work and risking duplicate downstream effects.
+func IssueCommentCommandQueued(ctx context.Context, st QueueStore, appLogin string, event IssueComment) (bool, error) {
+	if st == nil {
+		return false, fmt.Errorf("command store is not configured")
+	}
+	key, ok, err := issueCommentCommandKey(appLogin, event)
+	if err != nil || !ok {
+		return false, err
+	}
+	repo, err := st.GetRepository(ctx, event.Owner, event.Repo)
+	if err != nil {
+		return false, fmt.Errorf("get repository: %w", err)
+	}
+	if _, err := st.GetCommandRecord(ctx, repo.ID, event.CommentID, key); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get command record: %w", err)
+	}
+	return true, nil
+}
+
+func issueCommentCommandKey(appLogin string, event IssueComment) (string, bool, error) {
+	if isBotComment(appLogin, event) || (event.Action != "created" && event.Action != "edited") {
+		return "", false, nil
+	}
+	if isLegacyHerdCommand(event.CommentBody) {
+		if !isAuthorized(event.AuthorAssociation) {
+			return "", false, nil
+		}
+		return "migration", true, nil
+	}
+	cmd, ok, err := ParseMentionCommand(appLogin, event.CommentBody)
+	if err != nil {
+		if ok && !isAuthorized(event.AuthorAssociation) {
+			return "", false, nil
+		}
+		if ok && errors.Is(err, ErrUnknownCommand) {
+			return "unknown", true, nil
+		}
+		return "", false, err
+	}
+	if !ok || !isAuthorized(event.AuthorAssociation) {
+		return "", false, nil
+	}
+	if shouldDispatch(cmd.Kind) && commandRequiresPR(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
+		return "", false, nil
+	}
+	if _, err := resolveCommandIssueNumber(cmd, event); err != nil {
+		return string(cmd.Kind), true, nil
+	}
+	return string(cmd.Kind), true, nil
 }
 
 func recordQueuedCommand(ctx context.Context, st QueueStore, event IssueComment, commandKey, commandName string, metadata json.RawMessage) error {

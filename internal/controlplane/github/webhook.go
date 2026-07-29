@@ -259,7 +259,7 @@ func (h Handler) markDeliveryProcessed(ctx context.Context, deliveryID string) e
 
 func eventHasRetryablePreProcessorSideEffects(event Event) bool {
 	switch event.(type) {
-	case InstallationEvent, InstallationRepositoriesEvent, IssueCommentEvent:
+	case InstallationEvent, InstallationRepositoriesEvent:
 		return true
 	default:
 		return false
@@ -297,6 +297,13 @@ func (h Handler) processIssueComment(ctx context.Context, e IssueCommentEvent) e
 		return fmt.Errorf("command queue storage is not configured")
 	}
 	if err := commands.EnqueueIssueCommentCommand(ctx, queueStore, h.appLogin, event); err != nil {
+		repaired, repairErr := commands.IssueCommentCommandQueued(ctx, queueStore, h.appLogin, event)
+		if repairErr == nil && repaired {
+			return nil
+		}
+		if repairErr != nil {
+			return fmt.Errorf("%w; repair command enqueue: %v", err, repairErr)
+		}
 		return err
 	}
 	return nil

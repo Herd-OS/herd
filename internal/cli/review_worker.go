@@ -155,7 +155,7 @@ func runHostedReviewReadOnly(ctx context.Context, input reviewInputServices, ag 
 	}, "\n")
 	reviewOpts := agent.ReviewOptions{
 		RepoRoot:               params.RepoRoot,
-		SystemPrompt:           strings.TrimSpace(params.ExtraInstructions),
+		ExtraInstructions:      strings.TrimSpace(params.ExtraInstructions),
 		Strictness:             cfg.Integrator.ReviewStrictness,
 		MinFixSeverity:         cfg.Integrator.ReviewFixSeverity,
 		CurrentPRMetadata:      metadata,
