@@ -100,7 +100,7 @@ jobs:
           set -e
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
             jq -n \
-              --arg status "timeout" \
+              --arg status "timed_out" \
               --arg summary "Herd Review timed out after ${HERD_REVIEW_TIMEOUT_MINUTES} minute(s)." \
               '{status: $status, summary: $summary}' \
               > /tmp/herd-review-command-result.json
@@ -122,7 +122,7 @@ jobs:
           STATUS="$(jq -er '.status // empty' /tmp/herd-review-command-result.json 2>/dev/null || true)"
           SUMMARY="$(jq -er '.summary // empty' /tmp/herd-review-command-result.json 2>/dev/null || true)"
           case "$STATUS" in
-            approved|changes_requested|failed|timeout|unparseable)
+            approved|changes_requested|failed|timed_out|unparseable)
               ;;
             "")
               STATUS="failed"

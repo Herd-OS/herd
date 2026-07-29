@@ -153,6 +153,21 @@ func TestParseResultPayload(t *testing.T) {
 			wantErr: "invalid worker result status",
 		},
 		{
+			name: "legacy review timeout status is rejected",
+			payload: `{
+				"version":1,
+				"kind":"review_completed",
+				"repository":"acme/widgets",
+				"job_id":"job-2",
+				"batch_number":106,
+				"pr_number":12,
+				"head_sha":"head",
+				"status":"timeout",
+				"summary":"timed out"
+			}`,
+			wantErr: `invalid review result status "timeout"`,
+		},
+		{
 			name: "success missing patch artifact",
 			payload: `{
 				"version":1,
