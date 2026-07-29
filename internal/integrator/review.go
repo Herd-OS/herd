@@ -679,7 +679,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				cancel()
 				if synthesisErr != nil {
 					fmt.Printf("Review non-convergence synthesis fallback: %v\n", synthesisErr)
-				} else if decision, reason := evaluateReviewSynthesis(synthesisResult, synthesisInput, cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence, analysis); decision != reviewSynthesisDecisionEscalate {
+				} else if decision, reason := evaluateReviewSynthesis(synthesisResult, cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence, analysis); decision != reviewSynthesisDecisionEscalate {
 					fmt.Printf("Review non-convergence synthesis fallback: %s\n", reason)
 				} else {
 					fmt.Printf("Review non-convergence synthesis decision: route=high-volume decision=escalate confidence=%.2f\n", synthesisResult.Confidence)

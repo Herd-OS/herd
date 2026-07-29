@@ -288,12 +288,12 @@ func TestValidateLowVolumeSynthesisProvenance(t *testing.T) {
 func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 	valid := lowVolumeSynthesisResult()
 	valid.RequirementReinterpretation = validReviewReinterpretation()
-	ok, reason := validateReviewRequirementReinterpretation(valid, validReviewSynthesisInput())
+	ok, reason := validateReviewRequirementReinterpretation(valid)
 	assert.True(t, ok)
 	assert.Empty(t, reason)
 
 	t.Run("omitted", func(t *testing.T) {
-		ok, reason := validateReviewRequirementReinterpretation(lowVolumeSynthesisResult(), agent.ReviewSynthesisInput{})
+		ok, reason := validateReviewRequirementReinterpretation(lowVolumeSynthesisResult())
 		assert.True(t, ok)
 		assert.Empty(t, reason)
 	})
@@ -306,7 +306,7 @@ func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 			result := lowVolumeSynthesisResult()
 			result.RequirementReinterpretation = validReviewReinterpretation()
 			result.RequirementReinterpretation.ConstraintKind = kind
-			ok, reason := validateReviewRequirementReinterpretation(result, validReviewSynthesisInput())
+			ok, reason := validateReviewRequirementReinterpretation(result)
 			assert.True(t, ok)
 			assert.Empty(t, reason)
 		})
@@ -337,7 +337,7 @@ func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 			result := lowVolumeSynthesisResult()
 			result.RequirementReinterpretation = validReviewReinterpretation()
 			test.mutate(result.RequirementReinterpretation, result)
-			ok, reason := validateReviewRequirementReinterpretation(result, validReviewSynthesisInput())
+			ok, reason := validateReviewRequirementReinterpretation(result)
 			assert.False(t, ok)
 			assert.NotEmpty(t, reason)
 		})
@@ -355,8 +355,6 @@ func TestValidateReviewRequirementReinterpretation_AcceptsTraceableSafetyVocabul
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			input := validReviewSynthesisInput()
-			input.OriginalRequirements[0].AcceptanceCriteria = []string{test.property}
 			result := lowVolumeSynthesisResult()
 			result.RequirementReinterpretation = validReviewReinterpretation()
 			result.RequirementReinterpretation.PreservedSafetyProperty = test.property
@@ -366,7 +364,7 @@ func TestValidateReviewRequirementReinterpretation_AcceptsTraceableSafetyVocabul
 				"Recovery tests verify that " + test.property + ".",
 			}
 
-			ok, reason := validateReviewRequirementReinterpretation(result, input)
+			ok, reason := validateReviewRequirementReinterpretation(result)
 
 			assert.True(t, ok, reason)
 			assert.Empty(t, reason)

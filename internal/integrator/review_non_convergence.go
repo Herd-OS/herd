@@ -778,7 +778,7 @@ func boundedReviewEvidenceExcerpt(value string) string {
 	return value[:reviewEvidenceExcerptBudget-len(marker)] + marker
 }
 
-func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput, minConfidence float64, analysis reviewConvergenceAnalysis) (reviewSynthesisDecision, string) {
+func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence float64, analysis reviewConvergenceAnalysis) (reviewSynthesisDecision, string) {
 	if result == nil {
 		return reviewSynthesisDecisionFallback, "synthesis returned nil result"
 	}
@@ -813,7 +813,7 @@ func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, input agent.Re
 	if synthesizedReviewStrategyFingerprint(result) == "" {
 		return reviewSynthesisDecisionFallback, "synthesis fingerprint is empty"
 	}
-	if ok, reason := validateReviewRequirementReinterpretation(result, input); !ok {
+	if ok, reason := validateReviewRequirementReinterpretation(result); !ok {
 		return reviewSynthesisDecisionFallback, reason
 	}
 	return reviewSynthesisDecisionEscalate, "synthesis passed safety gates"

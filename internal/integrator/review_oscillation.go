@@ -139,7 +139,7 @@ func evaluateLowVolumeReviewSynthesis(result *agent.ReviewSynthesisResult, input
 	return reviewSynthesisDecisionEscalate, "low-volume synthesis passed deterministic schema and provenance gates"
 }
 
-func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput) (bool, string) {
+func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResult) (bool, string) {
 	if result == nil || result.RequirementReinterpretation == nil {
 		return true, ""
 	}
@@ -267,7 +267,7 @@ func validateLowVolumeSynthesisProvenance(result *agent.ReviewSynthesisResult, i
 		return false, "synthesis evidence does not span three eligible cycles"
 	}
 	if value := result.RequirementReinterpretation; value != nil {
-		if ok, reason := validateReviewRequirementReinterpretation(result, input); !ok {
+		if ok, reason := validateReviewRequirementReinterpretation(result); !ok {
 			return false, reason
 		}
 		seen := map[string]struct{}{}
