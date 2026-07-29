@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/prompt"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -426,28 +428,93 @@ func TestBoundedLowVolumeEvidenceSourcesPreservesLatestAndHistoricalCycles(t *te
 	})
 }
 
-func TestBoundedReviewVerificationEvidencePreservesCitedAndSourceOrdering(t *testing.T) {
-	var sources []agent.ReviewEvidenceSource
-	for index := 0; index < 12; index++ {
-		sources = append(sources, agent.ReviewEvidenceSource{
-			ID: fmt.Sprintf("cycle:%d:finding:0", index+1), Kind: "review_finding", Cycle: index + 1,
-			Excerpt: strings.Repeat("bounded verifier evidence ", 180),
+func TestBoundedReviewVerificationInputTieringAndBudget(t *testing.T) {
+	input := agent.ReviewSynthesisInput{PRNumber: 7, BatchNumber: 9, HeadSHA: "current-head"}
+	for requirement := 0; requirement < 8; requirement++ {
+		input.EvidenceSources = append(input.EvidenceSources, agent.ReviewEvidenceSource{
+			ID: fmt.Sprintf("issue:7:criterion:%d", requirement), Kind: "requirement_criterion",
+			Excerpt: strings.Repeat(fmt.Sprintf("requirement-%d ", requirement), 250),
 		})
 	}
-	cited := map[string]struct{}{"cycle:12:finding:0": {}}
-
-	bounded := boundedReviewVerificationEvidence(sources, cited)
-
-	assert.Contains(t, bounded, sources[11])
-	assert.NotEmpty(t, bounded)
-	previousCycle := 0
-	total := 0
-	for _, source := range bounded {
-		assert.Greater(t, source.Cycle, previousCycle)
-		previousCycle = source.Cycle
-		total += len(source.ID) + len(source.Kind) + len(source.Excerpt) + 64
+	for cycle := 1; cycle <= 12; cycle++ {
+		for finding := 0; finding < 2; finding++ {
+			head := fmt.Sprintf("head-%d", cycle)
+			if cycle == 12 {
+				head = input.HeadSHA
+			}
+			input.EvidenceSources = append(input.EvidenceSources, agent.ReviewEvidenceSource{
+				ID: fmt.Sprintf("cycle:%d:finding:%d", cycle, finding), Kind: "review_finding", Cycle: cycle, HeadSHA: head,
+				Excerpt: strings.Repeat(fmt.Sprintf("cycle-%d-finding-%d λ ", cycle, finding), 180),
+			})
+		}
 	}
-	assert.LessOrEqual(t, total, 40*1024)
+	synthesis := agent.ReviewSynthesisResult{
+		ShouldEscalate: true,
+		RequirementReinterpretation: &agent.ReviewRequirementReinterpretation{
+			EvidenceReferences: []string{"issue:7:criterion:0", "cycle:1:finding:0"},
+		},
+	}
+
+	bounded, err := boundedReviewVerificationInput(input, synthesis,
+		[]string{"cycle:1:finding:0", "issue:7:criterion:0"}, true)
+
+	require.NoError(t, err)
+	assert.Positive(t, bounded.OmittedEvidenceCount)
+	assert.Contains(t, bounded.EvidenceSources, input.EvidenceSources[0])
+	for _, source := range input.EvidenceSources {
+		if source.HeadSHA == input.HeadSHA {
+			assert.Contains(t, bounded.EvidenceSources, source)
+		}
+		if strings.HasPrefix(source.Kind, "requirement_") {
+			assert.Contains(t, bounded.EvidenceSources, source)
+		}
+	}
+	rendered, err := prompt.RenderReviewVerificationPrompt(bounded)
+	require.NoError(t, err)
+	assert.True(t, utf8.ValidString(rendered))
+	assert.Contains(t, rendered, "optional authoritative source(s) were omitted")
+	assert.LessOrEqual(t, len(prompt.ReviewVerificationSystemPrompt)+2+len(rendered), prompt.ReviewVerificationPromptBudget)
+}
+
+func TestBoundedReviewVerificationInputRejectsOversizedMandatoryEvidence(t *testing.T) {
+	input := agent.ReviewSynthesisInput{
+		HeadSHA: "current-head",
+		EvidenceSources: []agent.ReviewEvidenceSource{
+			{ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1, Excerpt: strings.Repeat("cited ", 6000)},
+			{ID: "cycle:2:finding:0", Kind: "review_finding", Cycle: 2, Excerpt: strings.Repeat("cited ", 6000)},
+		},
+	}
+	synthesis := agent.ReviewSynthesisResult{
+		ShouldEscalate: true,
+		RecurringSymptoms: []agent.ReviewSynthesisSymptom{{
+			EvidenceReferences: []string{"cycle:1:finding:0", "cycle:2:finding:0"},
+		}},
+	}
+
+	bounded, err := boundedReviewVerificationInput(input, synthesis,
+		[]string{"cycle:1:finding:0", "cycle:2:finding:0"}, false)
+
+	assert.ErrorContains(t, err, "mandatory review verification evidence exceeds")
+	assert.Empty(t, bounded.EvidenceSources)
+}
+
+func TestRepresentativeReviewVerificationEvidenceUsesCycleBreadth(t *testing.T) {
+	sources := []agent.ReviewEvidenceSource{
+		{ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1},
+		{ID: "cycle:1:finding:1", Kind: "review_finding", Cycle: 1},
+		{ID: "cycle:2:finding:0", Kind: "review_finding", Cycle: 2},
+		{ID: "cycle:2:finding:1", Kind: "review_finding", Cycle: 2},
+		{ID: "cycle:3:finding:0", Kind: "review_finding", Cycle: 3},
+		{ID: "cycle:3:finding:1", Kind: "review_finding", Cycle: 3},
+	}
+
+	ordered := representativeReviewVerificationEvidence(sources, map[string]struct{}{})
+
+	require.Len(t, ordered, 6)
+	assert.Equal(t, []string{
+		"cycle:1:finding:0", "cycle:2:finding:0", "cycle:3:finding:0",
+		"cycle:1:finding:1", "cycle:2:finding:1", "cycle:3:finding:1",
+	}, []string{ordered[0].ID, ordered[1].ID, ordered[2].ID, ordered[3].ID, ordered[4].ID, ordered[5].ID})
 }
 
 func TestValidateHighVolumeSynthesisSourceExcerpts(t *testing.T) {

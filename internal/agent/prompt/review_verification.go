@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+	"unicode/utf8"
 
 	"github.com/herd-os/herd/internal/agent"
 )
@@ -13,6 +14,8 @@ import (
 const ReviewVerificationSystemPrompt = `You are an independent HerdOS review-strategy verifier in strict output mode.
 
 Do not use tools, inspect a repository, or perform another code review. Use only the supplied source evidence and synthesis. Return exactly one JSON object with approved, confidence, and reason. Reject when evidence is ambiguous, unrelated, generic, contradictory, or insufficient.`
+
+const ReviewVerificationPromptBudget = ReviewSynthesisInputBudget
 
 const reviewVerificationPromptTemplate = `Independently verify the proposed review strategy.
 
@@ -32,7 +35,8 @@ References cited by the synthesis:
 {{else}}(none)
 {{end}}
 
-All bounded eligible source evidence:
+Bounded eligible source evidence:
+{{if .OmittedEvidenceCount}}This is not all eligible evidence. {{.OmittedEvidenceCount}} optional authoritative source(s) were omitted by the deterministic prompt budget.{{else}}All eligible evidence is included.{{end}}
 {{range .EvidenceSources}}- {{.ID}} [{{.Kind}}{{if .Cycle}}, cycle {{.Cycle}}{{end}}{{if .HeadSHA}}, head {{.HeadSHA}}{{end}}]: {{.Excerpt}}
 {{else}}(none)
 {{end}}
@@ -50,6 +54,7 @@ type reviewVerificationPromptData struct {
 	HeadSHA                 string
 	EvidenceSources         []agent.ReviewEvidenceSource
 	CitedEvidenceReferences []string
+	OmittedEvidenceCount    int
 	SynthesisJSON           string
 }
 
@@ -66,13 +71,16 @@ func RenderReviewVerificationPrompt(input agent.ReviewVerificationInput) (string
 	if err := tmpl.Execute(&buf, reviewVerificationPromptData{
 		PRNumber: input.PRNumber, BatchNumber: input.BatchNumber, HeadSHA: input.HeadSHA,
 		EvidenceSources: input.EvidenceSources, CitedEvidenceReferences: input.CitedEvidenceReferences,
-		SynthesisJSON: string(synthesisJSON),
+		OmittedEvidenceCount: input.OmittedEvidenceCount, SynthesisJSON: string(synthesisJSON),
 	}); err != nil {
 		return "", fmt.Errorf("executing review verification template: %w", err)
 	}
 	rendered := buf.String()
-	if len(rendered) > ReviewSynthesisInputBudget {
-		return "", fmt.Errorf("review verification evidence exceeds bounded input budget")
+	if !utf8.ValidString(rendered) {
+		return "", fmt.Errorf("review verification prompt contains invalid UTF-8")
+	}
+	if len(ReviewVerificationSystemPrompt)+2+len(rendered) > ReviewVerificationPromptBudget {
+		return "", fmt.Errorf("review verification prompt exceeds bounded input budget")
 	}
 	return rendered, nil
 }

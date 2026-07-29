@@ -3,6 +3,7 @@ package prompt
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,7 @@ func TestRenderReviewVerificationPrompt_BoundedAndNoTools(t *testing.T) {
 			},
 		},
 		CitedEvidenceReferences: []string{"cycle:3:finding:0"},
+		OmittedEvidenceCount:    7,
 		Synthesis: agent.ReviewSynthesisResult{
 			ShouldEscalate: true, Confidence: .95, RootCauseTitle: "publication ordering gap",
 		},
@@ -34,12 +36,31 @@ func TestRenderReviewVerificationPrompt_BoundedAndNoTools(t *testing.T) {
 	assert.Contains(t, rendered, "cycle:3:finding:0")
 	assert.Contains(t, rendered, "publication precedes durable ownership")
 	assert.Contains(t, rendered, "References cited by the synthesis")
-	assert.Contains(t, rendered, "All bounded eligible source evidence")
+	assert.Contains(t, rendered, "Bounded eligible source evidence")
+	assert.Contains(t, rendered, "not all eligible evidence")
+	assert.Contains(t, rendered, "7 optional authoritative source(s) were omitted")
 	assert.Contains(t, rendered, "cycle:4:finding:0")
 	assert.Contains(t, rendered, "current review contradicts")
 	assert.Contains(t, rendered, `"root_cause_title":"publication ordering gap"`)
 	assert.Contains(t, strings.ToLower(rendered), "do not use tools")
-	assert.LessOrEqual(t, len(rendered), ReviewSynthesisInputBudget)
+	assert.True(t, utf8.ValidString(rendered))
+	assert.Contains(t, rendered, `{"approved": true, "confidence": 0.93, "reason":`)
+	assert.LessOrEqual(t, len(ReviewVerificationSystemPrompt)+2+len(rendered), ReviewVerificationPromptBudget)
+}
+
+func TestRenderReviewVerificationPrompt_RejectsOversizedCompletePrompt(t *testing.T) {
+	input := agent.ReviewVerificationInput{
+		EvidenceSources: []agent.ReviewEvidenceSource{{
+			ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1,
+			Excerpt: strings.Repeat("oversized λ evidence ", ReviewVerificationPromptBudget),
+		}},
+		Synthesis: agent.ReviewSynthesisResult{ShouldEscalate: true},
+	}
+
+	rendered, err := RenderReviewVerificationPrompt(input)
+
+	assert.ErrorContains(t, err, "exceeds bounded input budget")
+	assert.Empty(t, rendered)
 }
 
 func TestParseReviewVerificationOutput_Strict(t *testing.T) {

@@ -686,7 +686,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				} else if ok, reason := validateHighVolumeRequirementReinterpretationProvenance(synthesisResult, synthesisInput); !ok {
 					fmt.Printf("Review non-convergence synthesis fallback: %s\n", reason)
 				} else if synthesisResult.RequirementReinterpretation != nil {
-					if approved, reason := verifyReviewSynthesis(ctx, ag, synthesisInput, synthesisResult, params.RepoRoot); !approved {
+					if approved, reason := verifyReviewSynthesis(ctx, ag, synthesisInput, synthesisResult, params.RepoRoot, true); !approved {
 						fmt.Printf("Review non-convergence verification decision: route=high-volume decision=fallback reason=%s\n", reason)
 					} else {
 						return createHighVolumeSynthesizedStrategyFix(postReviewCtx, p, cfg, pr, ms, batchBranch, currentHeadSHA,
@@ -781,7 +781,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 						confidence = synthesisResult.Confidence
 					}
 					fmt.Printf("Review non-convergence synthesis decision: route=low-volume decision=%s confidence=%.2f reason=%s\n", decision, confidence, reason)
-				} else if approved, reason := verifyReviewSynthesis(ctx, ag, synthesisInput, synthesisResult, params.RepoRoot); !approved {
+				} else if approved, reason := verifyReviewSynthesis(ctx, ag, synthesisInput, synthesisResult, params.RepoRoot, false); !approved {
 					fmt.Printf("Review non-convergence verification decision: route=low-volume decision=fallback reason=%s\n", reason)
 				} else {
 					fingerprint := synthesizedReviewStrategyFingerprint(synthesisResult)

@@ -7915,6 +7915,23 @@ func TestReview_HighVolumeRequirementReinterpretationVerification(t *testing.T) 
 			},
 			wantVerification: 1,
 		},
+		{
+			name: "mandatory verification evidence exceeds prompt budget",
+			configure: func(fx *reviewNonConvergenceIntegrationFixture) {
+				for number := 100; number < 120; number++ {
+					fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
+						Number: number,
+						Title:  fmt.Sprintf("Current batch requirement %d", number),
+						Body: fmt.Sprintf("---\nherd:\n  version: 1\n  batch: 111\n---\n\n## Task\n%s\n",
+							strings.Repeat(fmt.Sprintf("authoritative requirement %d λ ", number), 220)),
+					})
+					fx.ag.synthesisResult.RequirementReinterpretation.EvidenceReferences = append(
+						fx.ag.synthesisResult.RequirementReinterpretation.EvidenceReferences,
+						fmt.Sprintf("issue:%d:task", number),
+					)
+				}
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -7945,6 +7962,11 @@ func TestReview_HighVolumeRequirementReinterpretationVerification(t *testing.T) 
 				assert.Contains(t, fx.createdIssues[0].body, "Requirement reinterpretation")
 				assert.NotEmpty(t, fx.ag.verificationInput.EvidenceSources)
 				assert.Contains(t, fx.ag.verificationInput.CitedEvidenceReferences, "issue:42:criterion:0")
+				for _, source := range fx.ag.synthesisInput.EvidenceSources {
+					if source.Kind == "review_finding" && source.HeadSHA == fx.headSHA {
+						assert.Contains(t, fx.ag.verificationInput.EvidenceSources, source)
+					}
+				}
 			} else {
 				assert.NotContains(t, fx.createdIssues[0].body, "Requirement reinterpretation")
 			}

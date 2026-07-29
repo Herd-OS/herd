@@ -252,6 +252,7 @@ type ReviewVerificationInput struct {
 	HeadSHA                 string                 `json:"head_sha"`
 	EvidenceSources         []ReviewEvidenceSource `json:"evidence_sources"`
 	CitedEvidenceReferences []string               `json:"cited_evidence_references"`
+	OmittedEvidenceCount    int                    `json:"omitted_evidence_count"`
 	Synthesis               ReviewSynthesisResult  `json:"synthesis"`
 }
 

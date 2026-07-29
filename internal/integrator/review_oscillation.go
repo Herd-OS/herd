@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/prompt"
 	"github.com/herd-os/herd/internal/issues"
 )
 
@@ -364,7 +365,7 @@ func validateHighVolumeSynthesisSourceExcerpts(result *agent.ReviewSynthesisResu
 	return true, ""
 }
 
-func verifyReviewSynthesis(ctx context.Context, configured agent.Agent, input agent.ReviewSynthesisInput, result *agent.ReviewSynthesisResult, repoRoot string) (bool, string) {
+func verifyReviewSynthesis(ctx context.Context, configured agent.Agent, input agent.ReviewSynthesisInput, result *agent.ReviewSynthesisResult, repoRoot string, highVolume bool) (bool, string) {
 	verifier, ok := configured.(agent.ReviewVerifier)
 	if !ok {
 		return false, "configured agent provider does not support independent verification"
@@ -381,10 +382,9 @@ func verifyReviewSynthesis(ctx context.Context, configured agent.Agent, input ag
 		}
 	}
 	citedReferences := sortedStringSet(referenced)
-	evidence := boundedReviewVerificationEvidence(input.EvidenceSources, referenced)
-	verificationInput := agent.ReviewVerificationInput{
-		PRNumber: input.PRNumber, BatchNumber: input.BatchNumber, HeadSHA: input.HeadSHA,
-		EvidenceSources: evidence, CitedEvidenceReferences: citedReferences, Synthesis: *result,
+	verificationInput, err := boundedReviewVerificationInput(input, *result, citedReferences, highVolume)
+	if err != nil {
+		return false, err.Error()
 	}
 	verifyCtx, cancel := context.WithTimeout(ctx, reviewVerificationTimeout)
 	defer cancel()
@@ -407,37 +407,121 @@ func verifyReviewSynthesis(ctx context.Context, configured agent.Agent, input ag
 	return true, verification.Reason
 }
 
-func boundedReviewVerificationEvidence(sources []agent.ReviewEvidenceSource, cited map[string]struct{}) []agent.ReviewEvidenceSource {
-	const budget = 40 * 1024
-	selected := make(map[string]struct{}, len(sources))
-	used := 0
-	for _, source := range sources {
-		if _, required := cited[source.ID]; !required || source.Kind == "truncation_marker" {
-			continue
-		}
-		selected[source.ID] = struct{}{}
-		used += len(source.ID) + len(source.Kind) + len(source.Excerpt) + 64
+func boundedReviewVerificationInput(input agent.ReviewSynthesisInput, synthesis agent.ReviewSynthesisResult, citedReferences []string, highVolume bool) (agent.ReviewVerificationInput, error) {
+	base := agent.ReviewVerificationInput{
+		PRNumber: input.PRNumber, BatchNumber: input.BatchNumber, HeadSHA: input.HeadSHA,
+		CitedEvidenceReferences: append([]string(nil), citedReferences...), Synthesis: synthesis,
 	}
-	for _, source := range sources {
-		if source.Kind == "truncation_marker" {
+	sources, ok, reason := indexedReviewEvidenceSources(input.EvidenceSources)
+	if !ok {
+		return agent.ReviewVerificationInput{}, fmt.Errorf("%s", reason)
+	}
+	cited := make(map[string]struct{}, len(citedReferences))
+	for _, reference := range citedReferences {
+		source, exists := sources[reference]
+		if !exists || source.Kind == "truncation_marker" {
+			return agent.ReviewVerificationInput{}, fmt.Errorf("verification cites missing or non-authoritative evidence %s", reference)
+		}
+		cited[reference] = struct{}{}
+	}
+
+	eligible := make([]agent.ReviewEvidenceSource, 0, len(input.EvidenceSources))
+	for _, source := range input.EvidenceSources {
+		if source.Kind != "truncation_marker" {
+			eligible = append(eligible, source)
+		}
+	}
+	sort.SliceStable(eligible, func(i, j int) bool {
+		if eligible[i].Cycle != eligible[j].Cycle {
+			return eligible[i].Cycle < eligible[j].Cycle
+		}
+		return eligible[i].ID < eligible[j].ID
+	})
+
+	mandatory := make(map[string]struct{}, len(cited))
+	for reference := range cited {
+		mandatory[reference] = struct{}{}
+	}
+	if synthesis.RequirementReinterpretation != nil {
+		for _, source := range eligible {
+			if strings.HasPrefix(source.Kind, "requirement_") ||
+				(highVolume && source.Kind == "review_finding" && source.HeadSHA == input.HeadSHA) {
+				mandatory[source.ID] = struct{}{}
+			}
+		}
+	}
+
+	orderedMandatory := make([]agent.ReviewEvidenceSource, 0, len(mandatory))
+	for _, reference := range citedReferences {
+		if _, required := mandatory[reference]; required {
+			orderedMandatory = append(orderedMandatory, sources[reference])
+			delete(mandatory, reference)
+		}
+	}
+	for _, source := range eligible {
+		if _, required := mandatory[source.ID]; required {
+			orderedMandatory = append(orderedMandatory, source)
+			delete(mandatory, source.ID)
+		}
+	}
+
+	selected := make(map[string]struct{}, len(eligible))
+	for _, source := range orderedMandatory {
+		selected[source.ID] = struct{}{}
+	}
+	optional := representativeReviewVerificationEvidence(eligible, selected)
+	base.EvidenceSources = append([]agent.ReviewEvidenceSource(nil), orderedMandatory...)
+	base.OmittedEvidenceCount = len(eligible) - len(base.EvidenceSources)
+	if _, err := prompt.RenderReviewVerificationPrompt(base); err != nil {
+		return agent.ReviewVerificationInput{}, fmt.Errorf("mandatory review verification evidence exceeds bounded prompt budget: %w", err)
+	}
+	for _, source := range optional {
+		candidate := base
+		candidate.EvidenceSources = append(append([]agent.ReviewEvidenceSource(nil), base.EvidenceSources...), source)
+		candidate.OmittedEvidenceCount = len(eligible) - len(candidate.EvidenceSources)
+		if _, err := prompt.RenderReviewVerificationPrompt(candidate); err != nil {
 			continue
 		}
+		base = candidate
+	}
+	return base, nil
+}
+
+func representativeReviewVerificationEvidence(sources []agent.ReviewEvidenceSource, selected map[string]struct{}) []agent.ReviewEvidenceSource {
+	var requirements []agent.ReviewEvidenceSource
+	byCycle := make(map[int][]agent.ReviewEvidenceSource)
+	var other []agent.ReviewEvidenceSource
+	for _, source := range sources {
 		if _, exists := selected[source.ID]; exists {
 			continue
 		}
-		cost := len(source.ID) + len(source.Kind) + len(source.Excerpt) + 64
-		if used+cost <= budget {
-			selected[source.ID] = struct{}{}
-			used += cost
+		switch {
+		case strings.HasPrefix(source.Kind, "requirement_"):
+			requirements = append(requirements, source)
+		case source.Kind == "review_finding" && source.Cycle > 0:
+			byCycle[source.Cycle] = append(byCycle[source.Cycle], source)
+		default:
+			other = append(other, source)
 		}
 	}
-	out := make([]agent.ReviewEvidenceSource, 0, len(selected))
-	for _, source := range sources {
-		if _, include := selected[source.ID]; include {
-			out = append(out, source)
+	cycles := make([]int, 0, len(byCycle))
+	maxFindings := 0
+	for cycle, findings := range byCycle {
+		cycles = append(cycles, cycle)
+		if len(findings) > maxFindings {
+			maxFindings = len(findings)
 		}
 	}
-	return out
+	sort.Ints(cycles)
+	out := append([]agent.ReviewEvidenceSource(nil), requirements...)
+	for index := 0; index < maxFindings; index++ {
+		for _, cycle := range cycles {
+			if index < len(byCycle[cycle]) {
+				out = append(out, byCycle[cycle][index])
+			}
+		}
+	}
+	return append(out, other...)
 }
 
 func lowVolumeReviewSynthesisInput(input agent.ReviewSynthesisInput, eligibility reviewOscillationEligibility) agent.ReviewSynthesisInput {
