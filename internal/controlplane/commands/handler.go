@@ -182,6 +182,9 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		if h.Dispatcher == nil {
 			return Result{}, fmt.Errorf("command dispatcher is not configured")
 		}
+		if err := h.markCommandDispatching(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
+			return Result{}, err
+		}
 		if err := h.Dispatcher.DispatchCommand(ctx, DispatchCommand{
 			RepositoryID:   repo.ID,
 			InstallationID: repo.InstallationID,
@@ -193,7 +196,10 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 			Actor:          event.SenderLogin,
 			Command:        cmd,
 		}); err != nil {
-			_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, string(cmd.Kind), StatusAcknowledged, commandMetadata)
+			var preCallErr mutations.PreCallError
+			if errors.As(err, &preCallErr) {
+				_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, string(cmd.Kind), StatusAcknowledged, commandMetadata)
+			}
 			return Result{}, fmt.Errorf("dispatch command: %w", err)
 		}
 		if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
@@ -478,6 +484,13 @@ func parseAckResultRef(resultRef string) (int64, bool) {
 func (h Handler) markCommandDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
 	if err := h.Store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "dispatched", metadata); err != nil {
 		return fmt.Errorf("mark command dispatched: %w", err)
+	}
+	return nil
+}
+
+func (h Handler) markCommandDispatching(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
+	if err := h.Store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "dispatching", metadata); err != nil {
+		return fmt.Errorf("mark command dispatching: %w", err)
 	}
 	return nil
 }

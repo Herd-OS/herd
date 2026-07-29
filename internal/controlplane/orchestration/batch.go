@@ -185,21 +185,22 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		if err != nil {
 			return dispatched, fmt.Errorf("dispatch worker for issue #%d: %w", issueNumber, err)
 		}
+		transitionID := issueStatusTransitionID(result, batchHeadSHA)
 		if status == issues.StatusBlocked {
-			if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusBlocked, "remove"), "issue_label_remove", func() (string, error) {
+			if err := s.mutate(ctx, issueStatusTransitionKey(s.Repo.ID, issueNumber, issues.StatusBlocked, "remove", transitionID), "issue_label_remove", func() (string, error) {
 				return "", s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusBlocked})
 			}); err != nil {
 				return dispatched, err
 			}
 		}
 		if status == issues.StatusReady {
-			if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusReady, "remove"), "issue_label_remove", func() (string, error) {
+			if err := s.mutate(ctx, issueStatusTransitionKey(s.Repo.ID, issueNumber, issues.StatusReady, "remove", transitionID), "issue_label_remove", func() (string, error) {
 				return "", s.Platform.Issues().RemoveLabels(ctx, issueNumber, []string{issues.StatusReady})
 			}); err != nil {
 				return dispatched, err
 			}
 		}
-		if err := s.mutate(ctx, idempotencyKey("issue-label", s.Repo.ID, issueNumber, issues.StatusInProgress, "add"), "issue_label_add", func() (string, error) {
+		if err := s.mutate(ctx, issueStatusTransitionKey(s.Repo.ID, issueNumber, issues.StatusInProgress, "add", transitionID), "issue_label_add", func() (string, error) {
 			return "", s.Platform.Issues().AddLabels(ctx, issueNumber, []string{issues.StatusInProgress})
 		}); err != nil {
 			return dispatched, err
@@ -219,6 +220,17 @@ type DispatchReadyWorkersRequest struct {
 	Ref         string
 	Reason      string
 	Config      *config.Config
+}
+
+func issueStatusTransitionID(result cpdispatch.DispatchResult, fallback string) string {
+	if id := strings.TrimSpace(result.JobID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func issueStatusTransitionKey(repoID int64, issueNumber int, label string, action string, transitionID string) string {
+	return idempotencyKey("issue-label", repoID, issueNumber, label, action, "transition", transitionID)
 }
 
 // WorkerCallbackResult describes callback freshness classification.

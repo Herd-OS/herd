@@ -1358,8 +1358,9 @@ func TestHandlerDoesNotRetryReviewResultAfterProcessorFailure(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusInternalServerError, second.Code)
 	assert.Len(t, processor.calls, 1)
-	require.Len(t, st.mutationCompletions, 1)
-	assert.Equal(t, mutationspkg.PhaseRepairRequired, st.mutationCompletions[0].status)
+	require.Len(t, st.mutationCompletions, 2)
+	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[0].status)
+	assert.Equal(t, mutationspkg.PhaseRepairRequired, st.mutationCompletions[1].status)
 	assert.Empty(t, st.results)
 }
 
@@ -1385,11 +1386,78 @@ func TestHandlerRetriesReviewResultAfterProcessorPreCallFailure(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, processor.calls, 2)
-	require.Len(t, st.mutationCompletions, 2)
-	assert.Equal(t, mutationspkg.PhaseFailedPreCall, st.mutationCompletions[0].status)
-	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationCompletions[1].status)
+	require.Len(t, st.mutationCompletions, 4)
+	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[0].status)
+	assert.Equal(t, mutationspkg.PhaseFailedPreCall, st.mutationCompletions[1].status)
+	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[2].status)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationCompletions[3].status)
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusApproved, st.results[0].Status)
+}
+
+func TestHandlerConcurrentDuplicateReviewResultsSubmitOnce(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	processor := newBlockingReviewProcessor()
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+	payload := validReviewPayload()
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, resultRequest("job-1", payload))
+		firstDone <- rec
+	}()
+	require.Eventually(t, func() bool { return processor.CallCount() == 1 }, time.Second, 10*time.Millisecond)
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+	processor.Release()
+	first := <-firstDone
+
+	require.Equal(t, http.StatusAccepted, first.Code)
+	require.Equal(t, http.StatusInternalServerError, second.Code)
+	assert.Contains(t, second.Body.String(), "process review result")
+	assert.Equal(t, 1, processor.CallCount())
+	require.Len(t, st.results, 1)
+	assert.Equal(t, StatusApproved, st.results[0].Status)
+}
+
+func TestHandlerReviewResultCompletionPersistenceFailureDoesNotResubmit(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	st.mutationCompleteErrs = []error{errors.New("mutation store down")}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+	payload := validReviewPayload()
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusInternalServerError, second.Code)
+	assert.Len(t, processor.calls, 1)
+	assert.Empty(t, st.results)
+	key := reviewResultMutationKey(mustParseReviewPayload(t, payload), st.jobs["job-1"])
+	require.Contains(t, st.idem, key)
+	assert.Equal(t, "failed", st.idem[key].Status)
+	assert.Equal(t, mutationspkg.PhaseRepairRequired, st.idem[key].ResultRef)
 }
 
 func TestHandlerRejectsReviewResultWhenProcessorMissing(t *testing.T) {
@@ -1675,6 +1743,41 @@ func (p *capturingReviewProcessor) SubmitReviewResult(_ context.Context, repo re
 	return nil
 }
 
+type blockingReviewProcessor struct {
+	mu       sync.Mutex
+	calls    int
+	entered  chan struct{}
+	released chan struct{}
+}
+
+func newBlockingReviewProcessor() *blockingReviewProcessor {
+	return &blockingReviewProcessor{
+		entered:  make(chan struct{}),
+		released: make(chan struct{}),
+	}
+}
+
+func (p *blockingReviewProcessor) SubmitReviewResult(_ context.Context, _ review.Repository, _ review.ReviewCompletedResult) error {
+	p.mu.Lock()
+	p.calls++
+	if p.calls == 1 {
+		close(p.entered)
+	}
+	p.mu.Unlock()
+	<-p.released
+	return nil
+}
+
+func (p *blockingReviewProcessor) CallCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func (p *blockingReviewProcessor) Release() {
+	close(p.released)
+}
+
 type artifactStore map[string][]byte
 
 func artifactMap(t *testing.T, metadata artifacts.PatchMetadata, patch []byte) artifactStore {
@@ -1866,6 +1969,14 @@ func patchApplyKeyForTest(t *testing.T, payload string, job store.Job) string {
 	worker, ok := result.(WorkerCompletedResult)
 	require.True(t, ok)
 	return PatchApplyIdempotencyKey(worker, job)
+}
+
+func mustParseReviewPayload(t *testing.T, payload string) ReviewCompletedResult {
+	t.Helper()
+	result := parsedResultPayload(t, payload)
+	reviewResult, ok := result.(ReviewCompletedResult)
+	require.True(t, ok)
+	return reviewResult
 }
 
 func validReviewPayload() string {

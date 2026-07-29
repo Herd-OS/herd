@@ -146,6 +146,40 @@ func TestDispatchReadyWorkers_RedeliveryRepairsLabelsAfterDispatchBeforeInProgre
 	assert.Contains(t, fake.issues.added[1], issues.StatusInProgress)
 }
 
+func TestDispatchReadyWorkers_StatusTransitionKeysArePerDispatchIdentity(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branches["herd/batch/7-demo"] = "batch-head-1"
+	disp := &fakeDispatcher{}
+	svc := newTestService(fake, newFakeStore(), disp)
+	req := DispatchReadyWorkersRequest{
+		BatchNumber: 7,
+		BatchBranch: "herd/batch/7-demo",
+		TierIssues:  []int{1},
+		AllIssues: []*platform.Issue{{
+			Number: 1,
+			Title:  "Task",
+			Labels: []string{issues.StatusReady},
+			Body:   "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n",
+		}},
+	}
+
+	firstCount, firstErr := svc.DispatchReadyWorkers(ctx, req)
+	duplicateCount, duplicateErr := svc.DispatchReadyWorkers(ctx, req)
+	fake.repo.branches["herd/batch/7-demo"] = "batch-head-2"
+	secondCount, secondErr := svc.DispatchReadyWorkers(ctx, req)
+
+	require.NoError(t, firstErr)
+	require.NoError(t, duplicateErr)
+	require.NoError(t, secondErr)
+	assert.Equal(t, 1, firstCount)
+	assert.Equal(t, 0, duplicateCount)
+	assert.Equal(t, 1, secondCount)
+	assert.Len(t, disp.requests, 2)
+	assert.Equal(t, []string{issues.StatusReady, issues.StatusReady}, fake.issues.removed[1])
+	assert.Equal(t, []string{issues.StatusInProgress, issues.StatusInProgress}, fake.issues.added[1])
+}
+
 func TestAdvanceBatch_OpensPRWhenAllTiersComplete(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()

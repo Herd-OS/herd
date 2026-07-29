@@ -294,7 +294,7 @@ func TestEnsureReviewFixIssueRecoversAfterOuterCompletionFailure(t *testing.T) {
 
 	firstIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "complete review fix issue idempotency key")
+	assert.Contains(t, err.Error(), "complete idempotency key")
 	assert.Zero(t, firstIssue)
 	assert.False(t, created)
 
@@ -305,4 +305,32 @@ func TestEnsureReviewFixIssueRecoversAfterOuterCompletionFailure(t *testing.T) {
 	assert.Len(t, fake.issues.created, 1)
 	assert.Equal(t, "completed", st.keys[key].Status)
 	assert.Equal(t, "issue:1", st.keys[key].ResultRef)
+}
+
+func TestEnsureReviewFixIssueRecoveryRequiresMatchingOperationMarker(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, nil)
+	repo := review.Repository{ID: 123, InstallationID: 456, Owner: "owner", Name: "repo", DefaultBranch: "main"}
+	current := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 42, BatchBranch: "herd/batch/9-demo", HeadSHA: "current-head", FixCycle: 1}
+	stale := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 41, BatchBranch: "herd/batch/9-demo", HeadSHA: "stale-head", FixCycle: 1}
+	finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
+	currentKey := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", current.PRNumber, "head", current.HeadSHA, "finding", finding.Fingerprint)
+	staleKey := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", stale.PRNumber, "head", stale.HeadSHA, "finding", finding.Fingerprint)
+	st.keys[currentKey] = store.IdempotencyKey{Key: currentKey, Scope: "review_fix_issue_create", Status: mutationStatusCallStarted}
+	title := "Review fix: " + finding.Fingerprint
+	fake.issues.listResult = []*platform.Issue{
+		{Number: 11, Title: title, Body: "same fingerprint" + reviewFixIssueMarker(staleKey)},
+		{Number: 12, Title: title, Body: "same fingerprint" + reviewFixIssueMarker(currentKey)},
+	}
+
+	issueNumber, created, err := svc.EnsureReviewFixIssue(ctx, repo, current, finding)
+
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, 12, issueNumber)
+	assert.Empty(t, fake.issues.created)
+	assert.Equal(t, "completed", st.keys[currentKey].Status)
+	assert.Equal(t, "issue:12", st.keys[currentKey].ResultRef)
 }

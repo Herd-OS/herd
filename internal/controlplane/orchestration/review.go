@@ -2,12 +2,11 @@ package orchestration
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
@@ -36,6 +35,8 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 		Task:    fmt.Sprintf("Fix review finding `%s`.\n\nSeverity: %s\n\n%s\n", finding.Fingerprint, finding.Severity, finding.Description),
 		Context: fmt.Sprintf("Found during Herd Review of PR #%d at head %s.", result.PRNumber, result.HeadSHA),
 	})
+	key := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
+	body += reviewFixIssueMarker(key)
 	req := TaskIssueRequest{
 		BatchNumber: result.BatchNumber,
 		Title:       title,
@@ -43,7 +44,6 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 		Labels:      []string{issues.TypeFix, issues.StatusInProgress},
 		Milestone:   result.BatchNumber,
 	}
-	key := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
 	created, err := s.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       key,
 		Scope:     "review_fix_issue_create",
@@ -81,38 +81,34 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 }
 
 func (s Service) createReviewFixIssueFromIntent(ctx context.Context, key string, req TaskIssueRequest) (int, bool, error) {
-	if err := s.Store.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
-		IdempotencyKey: key,
-		RepositoryID:   s.Repo.ID,
-		MutationType:   "review_fix_issue_create",
-		Status:         mutationStatusIntentRecorded,
-		CreatedAt:      s.now(),
-	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		_ = s.Store.FailIdempotencyKey(ctx, key, err.Error())
-		return 0, false, fmt.Errorf("record review fix issue mutation attempt: %w", err)
-	}
-	issue, err := s.EnsureTaskIssue(ctx, req)
+	result, err := mutationguard.Run(ctx, s.Store, mutationguard.RunRequest{
+		Key:          key,
+		RepositoryID: s.Repo.ID,
+		MutationType: "review_fix_issue_create",
+		Mutate: func() (string, error) {
+			issue, err := s.EnsureTaskIssue(ctx, req)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("issue:%d", issue.Number), nil
+		},
+		Repair: func() (string, bool, error) {
+			issueNumber, recovered, err := s.recoverReviewFixIssue(ctx, req, key)
+			if err != nil || !recovered {
+				return "", recovered, err
+			}
+			return fmt.Sprintf("issue:%d", issueNumber), true, nil
+		},
+		Now: s.now,
+	})
 	if err != nil {
-		_ = s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusFailedPreCall, nil, err.Error(), s.now())
-		_ = s.Store.FailIdempotencyKey(ctx, key, mutationStatusFailedPreCall+":"+err.Error())
 		return 0, false, err
 	}
-	resultRef := fmt.Sprintf("issue:%d", issue.Number)
-	response, _ := json.Marshal(map[string]string{"result_ref": resultRef})
-	if err := s.Store.CompleteGitHubMutationAttempt(ctx, key, mutationStatusCompleted, response, "", s.now()); err != nil {
-		if idemErr := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); idemErr != nil {
-			return 0, false, fmt.Errorf("complete review fix issue mutation attempt: %w; complete idempotency key after mutation attempt failure: %v", err, idemErr)
-		}
-		return 0, false, fmt.Errorf("complete review fix issue mutation attempt: %w", err)
-	}
-	if err := s.Store.CompleteIdempotencyKey(ctx, key, resultRef); err != nil {
-		return 0, false, fmt.Errorf("complete review fix issue idempotency key: %w", err)
-	}
-	issueNumber, ok := parseIssueResult(resultRef)
+	issueNumber, ok := parseIssueResult(result.ResultRef)
 	if !ok {
-		return 0, false, fmt.Errorf("invalid review fix issue result ref %q", resultRef)
+		return 0, false, fmt.Errorf("invalid review fix issue result ref %q", result.ResultRef)
 	}
-	return issueNumber, true, nil
+	return issueNumber, !result.Replayed, nil
 }
 
 func (s Service) recoverReviewFixIssue(ctx context.Context, req TaskIssueRequest, key string) (int, bool, error) {
@@ -124,7 +120,7 @@ func (s Service) recoverReviewFixIssue(ctx context.Context, req TaskIssueRequest
 		if issue == nil || issue.Title != req.Title {
 			continue
 		}
-		if !strings.Contains(issue.Body, req.Title[len("Review fix: "):]) {
+		if !strings.Contains(issue.Body, reviewFixIssueMarker(key)) {
 			continue
 		}
 		resultRef := fmt.Sprintf("issue:%d", issue.Number)
@@ -138,6 +134,10 @@ func (s Service) recoverReviewFixIssue(ctx context.Context, req TaskIssueRequest
 
 func platformIssueFilters(batchNumber int) platform.IssueFilters {
 	return platform.IssueFilters{State: "all", Milestone: &batchNumber}
+}
+
+func reviewFixIssueMarker(key string) string {
+	return fmt.Sprintf("\n\n<!-- herd:review-fix-issue %s -->\n", key)
 }
 
 // DispatchReviewFixWorker dispatches a fix worker for a review fix issue.

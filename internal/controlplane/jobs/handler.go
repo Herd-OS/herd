@@ -17,6 +17,7 @@ import (
 	"github.com/herd-os/herd/internal/appauth"
 	"github.com/herd-os/herd/internal/controlplane"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/store"
@@ -414,17 +415,22 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 	if h.reviewProcessor == nil {
 		return fmt.Errorf("review result processor is not configured")
 	}
-	mutationKey := reviewResultMutationKey(result, job)
-	shouldSubmit, err := h.acquireReviewResultMutation(ctx, mutationKey, job, reviewResult)
-	if err != nil {
-		return err
+	mutationStore, ok := h.store.(mutationguard.Store)
+	if !ok {
+		return fmt.Errorf("review result mutation store is not configured")
 	}
-	if !shouldSubmit {
-		return nil
+	mutationKey := reviewResultMutationKey(result, job)
+	if _, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       mutationKey,
+		Scope:     "review_result_process",
+		Status:    mutationspkg.PhaseIntentRecorded,
+		CreatedAt: h.now(),
+	}); err != nil {
+		return fmt.Errorf("acquire review result mutation idempotency key: %w", err)
 	}
 	repo := reviewRepositoryFromJob(job, reviewResult.Repository)
 	targetURL := firstMetadataString(metadataMap(job.Metadata), "workflow_run_url", "run_url", "target_url", "pr_url")
-	err = h.reviewProcessor.SubmitReviewResult(ctx, repo, review.ReviewCompletedResult{
+	submission := review.ReviewCompletedResult{
 		Repository:  reviewResult.Repository,
 		JobID:       reviewResult.JobID,
 		BatchNumber: reviewResult.BatchNumber,
@@ -436,17 +442,8 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		TargetURL:   targetURL,
 		FixCycle:    reviewResult.FixCycle,
 		Findings:    reviewFindings(reviewResult.Findings),
-	})
-	status := mutationspkg.PhaseCompleted
-	if err != nil {
-		var preCallErr mutationspkg.PreCallError
-		if errors.As(err, &preCallErr) {
-			status = mutationspkg.PhaseFailedPreCall
-		} else {
-			status = mutationspkg.PhaseRepairRequired
-		}
 	}
-	response, _ := json.Marshal(map[string]any{
+	request, _ := json.Marshal(map[string]any{
 		"job_id":        reviewResult.JobID,
 		"repository":    reviewResult.Repository,
 		"batch_number":  reviewResult.BatchNumber,
@@ -455,12 +452,20 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		"status":        reviewResult.Status,
 		"finding_count": len(reviewResult.Findings),
 	})
-	if completeErr := h.completeReviewResultMutation(ctx, mutationKey, status, response, err); completeErr != nil {
-		if err != nil {
-			return fmt.Errorf("%w; record review result mutation outcome: %v", err, completeErr)
-		}
-		return completeErr
-	}
+	_, err := mutationguard.Run(ctx, mutationStore, mutationguard.RunRequest{
+		Key:          mutationKey,
+		RepositoryID: job.RepositoryID,
+		MutationType: "review_result_process",
+		Request:      request,
+		Response:     func(string) json.RawMessage { return request },
+		Mutate: func() (string, error) {
+			if err := h.reviewProcessor.SubmitReviewResult(ctx, repo, submission); err != nil {
+				return "", err
+			}
+			return "review_result:processed", nil
+		},
+		Now: h.now,
+	})
 	return err
 }
 
@@ -477,64 +482,6 @@ func reviewResultMutationKey(result Result, job store.Job) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return "review_result:" + hex.EncodeToString(sum[:])
-}
-
-func (h Handler) acquireReviewResultMutation(ctx context.Context, key string, job store.Job, result ReviewCompletedResult) (bool, error) {
-	recorder, ok := h.store.(MutationRecorder)
-	if !ok {
-		return false, fmt.Errorf("review result mutation recorder is not configured")
-	}
-	request, _ := json.Marshal(map[string]any{
-		"job_id":       result.JobID,
-		"repository":   result.Repository,
-		"batch_number": result.BatchNumber,
-		"pr_number":    result.PRNumber,
-		"head_sha":     result.HeadSHA,
-		"status":       result.Status,
-		"fix_cycle":    result.FixCycle,
-	})
-	if err := recorder.RecordGitHubMutationAttempt(ctx, store.GitHubMutationAttempt{
-		IdempotencyKey: key,
-		RepositoryID:   job.RepositoryID,
-		MutationType:   "review_result_process",
-		Status:         mutationspkg.PhaseIntentRecorded,
-		Request:        request,
-		CreatedAt:      h.now(),
-	}); err != nil {
-		if !errors.Is(err, store.ErrAlreadyExists) {
-			return false, fmt.Errorf("record review result mutation attempt: %w", err)
-		}
-		reader, ok := h.store.(MutationReader)
-		if !ok {
-			return false, fmt.Errorf("review result mutation reader is not configured")
-		}
-		attempt, readErr := reader.GetGitHubMutationAttempt(ctx, key)
-		if readErr != nil {
-			return false, fmt.Errorf("get review result mutation attempt: %w", readErr)
-		}
-		if mutationspkg.IsCompleted(attempt.Status) {
-			return false, nil
-		}
-		if mutationspkg.IsPostCallUnknown(attempt.Status) {
-			return false, fmt.Errorf("review result mutation %q has unknown outcome after call started; reconciliation required", key)
-		}
-	}
-	return true, nil
-}
-
-func (h Handler) completeReviewResultMutation(ctx context.Context, key, status string, response json.RawMessage, resultErr error) error {
-	recorder, ok := h.store.(MutationRecorder)
-	if !ok {
-		return nil
-	}
-	errorMessage := ""
-	if resultErr != nil {
-		errorMessage = resultErr.Error()
-	}
-	if err := recorder.CompleteGitHubMutationAttempt(ctx, key, status, response, errorMessage, h.now()); err != nil {
-		return fmt.Errorf("complete review result mutation attempt: %w", err)
-	}
-	return nil
 }
 
 func reviewRepositoryFromJob(job store.Job, fullName string) review.Repository {

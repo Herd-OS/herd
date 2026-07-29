@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -394,7 +395,7 @@ func TestHandlerNonDispatchableAcknowledgementRecordFailureRedeliveryDoesNotAckA
 func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeGitHub{}
-	dispatcher := &fakeDispatcher{errs: []error{errors.New("dispatch down"), nil}}
+	dispatcher := &fakeDispatcher{errs: []error{mutations.PreCallError{Op: "build request", Err: errors.New("dispatch down")}, nil}}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
 	event := validComment("OWNER", "@herd-os review")
 
@@ -414,6 +415,30 @@ func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
 	for _, record := range st.idempotencyKeys {
 		assert.Equal(t, "completed", record.Status)
 	}
+}
+
+func TestHandlerDispatchUnknownOutcomeRedeliveryDoesNotDispatchAgain(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{dispatchThenErrs: []error{errors.New("workflow dispatch outcome unknown")}}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os review")
+
+	_, err := h.HandleIssueComment(context.Background(), event)
+	_, retryErr := h.HandleIssueComment(context.Background(), event)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workflow dispatch outcome unknown")
+	require.Error(t, retryErr)
+	assert.Contains(t, retryErr.Error(), "unknown outcome after started dispatcher call")
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.underlyingDispatches, 1)
+	key := "repo:42:comment:123:command:review"
+	require.Contains(t, st.idempotencyKeys, key)
+	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	require.Len(t, st.commandRecords, 1)
+	assert.Equal(t, "dispatching", st.commandRecords[0].Status)
 }
 
 func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(t *testing.T) {
@@ -554,7 +579,7 @@ func TestHandlerRecordFailureRetryPostsOneAcknowledgement(t *testing.T) {
 
 func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t *testing.T) {
 	st := newFakeStore()
-	st.updateErrs = []error{nil, errors.New("store down")}
+	st.updateErrs = []error{nil, nil, errors.New("store down"), nil}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
 	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
@@ -576,7 +601,7 @@ func TestHandlerDispatchStatusFailureRedeliveryRepairsWithoutDispatchingAgain(t 
 
 func TestHandlerDispatchStatusAndFallbackFailureRedeliveryDoesNotDispatchAgain(t *testing.T) {
 	st := newFakeStore()
-	st.updateErrs = []error{nil, errors.New("store down")}
+	st.updateErrs = []error{nil, nil, errors.New("store down")}
 	st.completeErrs = []error{nil, errors.New("idempotency down")}
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{}
@@ -588,15 +613,16 @@ func TestHandlerDispatchStatusAndFallbackFailureRedeliveryDoesNotDispatchAgain(t
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mark command dispatched")
-	require.NoError(t, retryErr)
+	require.Error(t, retryErr)
+	assert.Contains(t, retryErr.Error(), "unknown outcome after started dispatcher call")
 	assert.Len(t, gh.comments, 1)
-	assert.Len(t, dispatcher.dispatched, 2)
+	assert.Len(t, dispatcher.dispatched, 1)
 	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	key := "repo:42:comment:123:command:review"
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
-	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
+	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
-	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
+	assert.Equal(t, "dispatching", st.commandRecords[0].Status)
 }
 
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {
@@ -884,6 +910,7 @@ type fakeDispatcher struct {
 	underlyingDispatches []DispatchCommand
 	err                  error
 	errs                 []error
+	dispatchThenErrs     []error
 	completed            map[string]bool
 }
 
@@ -908,5 +935,12 @@ func (d *fakeDispatcher) DispatchCommand(_ context.Context, cmd DispatchCommand)
 	}
 	d.completed[key] = true
 	d.underlyingDispatches = append(d.underlyingDispatches, cmd)
+	if len(d.dispatchThenErrs) > 0 {
+		err := d.dispatchThenErrs[0]
+		d.dispatchThenErrs = d.dispatchThenErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
