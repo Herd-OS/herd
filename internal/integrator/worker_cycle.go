@@ -83,6 +83,33 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 			continue
 		}
 
+		pending, err := hasPendingWorkerCompletions(lockedCtx, p, ms.Number)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			result.PendingDrained = true
+			continue
+		}
+
+		reviewResult, err := Review(lockedCtx, p, ag, g, cfg, ReviewParams{
+			RunID:    params.RunID,
+			RepoRoot: params.RepoRoot,
+		})
+		if err != nil {
+			return nil, err
+		}
+		result.Review = reviewResult
+
+		checkCIResult, err := CheckCI(lockedCtx, p, cfg, CheckCIParams{
+			RunID:    params.RunID,
+			RepoRoot: params.RepoRoot,
+		})
+		if err != nil {
+			return nil, err
+		}
+		result.CheckCI = checkCIResult
+
 		return result, nil
 	}
 
