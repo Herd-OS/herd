@@ -316,7 +316,7 @@ func TestEnsureReviewFixIssuePreCallIdempotencyIsRetryable(t *testing.T) {
 	assert.Len(t, fake.issues.created, 1)
 }
 
-func TestEnsureReviewFixIssueNestedPreCreateFailureRetriesAndDispatchesOnce(t *testing.T) {
+func TestEnsureReviewFixIssuePreCallMutationFailureRetriesAndDispatchesOnce(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
 	st := newFakeStore()
@@ -326,21 +326,7 @@ func TestEnsureReviewFixIssueNestedPreCreateFailureRetriesAndDispatchesOnce(t *t
 	result := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 42, BatchBranch: "herd/batch/9-demo", HeadSHA: "head", FixCycle: 1}
 	finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
 	reviewFixKey := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
-	title := "Review fix: " + finding.Fingerprint
-	body := issues.RenderBody(issues.IssueBody{
-		FrontMatter: issues.FrontMatter{Version: 1, Batch: result.BatchNumber, Type: "fix", FixCycle: result.FixCycle + 1, BatchPR: result.PRNumber},
-		Task:        "Fix review finding `" + finding.Fingerprint + "`.\n\nSeverity: " + finding.Severity + "\n\n" + finding.Description + "\n",
-		Context:     "Found during Herd Review of PR #42 at head head.",
-	}) + reviewFixIssueMarker(reviewFixKey)
-	req := TaskIssueRequest{
-		BatchNumber: result.BatchNumber,
-		Title:       title,
-		Body:        body,
-		Labels:      []string{issues.TypeFix, issues.StatusInProgress},
-		Milestone:   result.BatchNumber,
-	}
-	taskIssueKey := idempotencyKey("task-issue", "repo", svc.Repo.ID, "batch", req.BatchNumber, "create", req.Title, taskIssueFingerprint(req, body, ""))
-	st.recordMutationErrs = map[string][]error{taskIssueKey: {assert.AnError, nil}}
+	st.recordMutationErrs = map[string][]error{reviewFixKey: {assert.AnError, nil}}
 
 	firstIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
 	require.Error(t, err)
@@ -348,7 +334,7 @@ func TestEnsureReviewFixIssueNestedPreCreateFailureRetriesAndDispatchesOnce(t *t
 	assert.Zero(t, firstIssue)
 	assert.False(t, created)
 	assert.Empty(t, fake.issues.created)
-	assert.Equal(t, mutationStatusIntentRecorded, st.keys[reviewFixKey].Status)
+	assert.Equal(t, mutationStatusFailedPreCall, st.keys[reviewFixKey].Status)
 
 	secondIssue, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
 	require.NoError(t, err)
@@ -362,6 +348,7 @@ func TestEnsureReviewFixIssueNestedPreCreateFailureRetriesAndDispatchesOnce(t *t
 	assert.Len(t, dispatcher.requests, 1)
 	assert.Equal(t, mutationStatusCompleted, st.keys[reviewFixKey].Status)
 	assert.Equal(t, "issue:1", st.keys[reviewFixKey].ResultRef)
+	assert.Equal(t, mutationStatusCompleted, st.mutations[reviewFixKey].Status)
 }
 
 func TestEnsureReviewFixIssueCreatedIntentWithoutMutationAttemptCreatesOnce(t *testing.T) {
@@ -393,7 +380,8 @@ func TestEnsureReviewFixIssuePostCallUnknownRequiresRepair(t *testing.T) {
 		name   string
 		status string
 	}{
-		{name: "failed", status: mutationStatusFailed},
+		{name: "call started", status: mutationStatusCallStarted},
+		{name: "repair required", status: mutationStatusRepairRequired},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -406,6 +394,7 @@ func TestEnsureReviewFixIssuePostCallUnknownRequiresRepair(t *testing.T) {
 			finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
 			key := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
 			st.keys[key] = store.IdempotencyKey{Key: key, Scope: "review_fix_issue_create", Status: tt.status}
+			st.mutations[key] = store.GitHubMutationAttempt{IdempotencyKey: key, MutationType: "review_fix_issue_create", Status: tt.status}
 
 			issueNumber, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
 
@@ -414,6 +403,43 @@ func TestEnsureReviewFixIssuePostCallUnknownRequiresRepair(t *testing.T) {
 			assert.Zero(t, issueNumber)
 			assert.False(t, created)
 			assert.Empty(t, fake.issues.created)
+		})
+	}
+}
+
+func TestEnsureReviewFixIssuePostCallUnknownRepairsByMarkerWithoutDuplicate(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "call started", status: mutationStatusCallStarted},
+		{name: "repair required", status: mutationStatusRepairRequired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			fake := newFakePlatform()
+			st := newFakeStore()
+			svc := newTestService(fake, st, nil)
+			repo := review.Repository{ID: 123, InstallationID: 456, Owner: "owner", Name: "repo", DefaultBranch: "main"}
+			result := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 42, BatchBranch: "herd/batch/9-demo", HeadSHA: "head", FixCycle: 1}
+			finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
+			key := idempotencyKey("review-fix-issue", "repo", repo.ID, "pr", result.PRNumber, "head", result.HeadSHA, "finding", finding.Fingerprint)
+			st.keys[key] = store.IdempotencyKey{Key: key, Scope: "review_fix_issue_create", Status: tt.status}
+			st.mutations[key] = store.GitHubMutationAttempt{IdempotencyKey: key, MutationType: "review_fix_issue_create", Status: tt.status}
+			fake.issues.listResult = []*platform.Issue{
+				{Number: 12, Title: "Review fix: fp-1", Body: "same fingerprint\n\n<!-- " + reviewFixIssueCreateMarker(key) + " -->"},
+			}
+
+			issueNumber, created, err := svc.EnsureReviewFixIssue(ctx, repo, result, finding)
+
+			require.NoError(t, err)
+			assert.Equal(t, 12, issueNumber)
+			assert.False(t, created)
+			assert.Empty(t, fake.issues.created)
+			assert.Equal(t, mutationStatusCompleted, st.keys[key].Status)
+			assert.Equal(t, "issue:12", st.keys[key].ResultRef)
+			assert.Equal(t, mutationStatusCompleted, st.mutations[key].Status)
 		})
 	}
 }
@@ -458,8 +484,8 @@ func TestEnsureReviewFixIssueRecoveryRequiresMatchingOperationMarker(t *testing.
 	st.keys[currentKey] = store.IdempotencyKey{Key: currentKey, Scope: "review_fix_issue_create", Status: mutationStatusCallStarted}
 	title := "Review fix: " + finding.Fingerprint
 	fake.issues.listResult = []*platform.Issue{
-		{Number: 11, Title: title, Body: "same fingerprint" + reviewFixIssueMarker(staleKey)},
-		{Number: 12, Title: title, Body: "same fingerprint" + reviewFixIssueMarker(currentKey)},
+		{Number: 11, Title: title, Body: "same fingerprint\n\n<!-- " + reviewFixIssueCreateMarker(staleKey) + " -->"},
+		{Number: 12, Title: title, Body: "same fingerprint\n\n<!-- " + reviewFixIssueCreateMarker(currentKey) + " -->"},
 	}
 
 	issueNumber, created, err := svc.EnsureReviewFixIssue(ctx, repo, current, finding)

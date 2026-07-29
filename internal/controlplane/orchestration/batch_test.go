@@ -878,6 +878,12 @@ func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessa
 	if rest, ok := strings.CutPrefix(errorMessage, mutations.PhaseFailedPreCall+":"); ok {
 		record.Status = mutations.PhaseFailedPreCall
 		record.ResultRef = rest
+	} else if rest, ok := strings.CutPrefix(errorMessage, mutations.PhaseRepairRequired+":"); ok {
+		record.Status = mutations.PhaseRepairRequired
+		record.ResultRef = rest
+	} else if errorMessage == mutations.PhaseFailedPreCall || errorMessage == mutations.PhaseRepairRequired {
+		record.Status = errorMessage
+		record.ResultRef = ""
 	} else {
 		record.Status = mutations.LegacyFailed
 	}
