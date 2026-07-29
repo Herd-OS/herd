@@ -163,7 +163,6 @@ func TestAnalyzeLowVolumeReviewOscillation_AlternatingBehavioralClusters(t *test
 
 			require.True(t, eligibility.Eligible)
 			assert.Equal(t, []string{"internal/integrator"}, eligibility.RecurringSubsystems)
-			assert.Empty(t, eligibility.RecurringArchitecturalTerms)
 			assert.Equal(t, []int{1, 2, 3}, reviewHistoryCycleNumbers(eligibility.EvidenceCycles))
 			assert.True(t, eligibility.DistinctHeadSHAsConfirmed)
 			assert.True(t, eligibility.CompletedFixChainConfirmed)
@@ -285,6 +284,41 @@ func TestValidateLowVolumeSynthesisProvenance(t *testing.T) {
 	}
 }
 
+func TestLowVolumeReviewSynthesisInputUsesStableEvidenceWithoutDuplicateProse(t *testing.T) {
+	eligibility := analyzeLowVolumeReviewOscillation(lowVolumeOscillationCycles(), 3, true)
+	require.True(t, eligibility.Eligible)
+	input := validReviewSynthesisInput()
+	for cycle := 1; cycle <= 4; cycle++ {
+		input.Cycles = append(input.Cycles, agent.ReviewSynthesisCycle{
+			Cycle: cycle,
+			FindingsBySeverity: map[string][]string{
+				"MEDIUM": {"duplicated finding prose"},
+			},
+			CompletedFixIssues: []agent.ReviewSynthesisFixIssue{{
+				Number: cycle + 100, Body: "duplicated completed fix body",
+			}},
+		})
+	}
+
+	bounded := lowVolumeReviewSynthesisInput(input, eligibility)
+
+	assert.Empty(t, bounded.OriginalRequirements)
+	require.Len(t, bounded.Cycles, 4)
+	for _, cycle := range bounded.Cycles {
+		assert.Empty(t, cycle.FindingsBySeverity)
+	}
+	for _, fix := range bounded.CompletedFixIssues {
+		assert.Empty(t, fix.Body)
+	}
+	assert.Contains(t, bounded.EvidenceSources, agent.ReviewEvidenceSource{
+		ID: "issue:1:criterion:0", Kind: "requirement_criterion",
+		Excerpt: "Exclusive ownership remains user-visible during intent publication.",
+	})
+	assert.Contains(t, bounded.EvidenceSources, agent.ReviewEvidenceSource{
+		ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1, Excerpt: "publication finding",
+	})
+}
+
 func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 	valid := lowVolumeSynthesisResult()
 	valid.RequirementReinterpretation = validReviewReinterpretation()
@@ -344,7 +378,7 @@ func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 	}
 }
 
-func TestValidateReviewRequirementReinterpretation_AcceptsTraceableSafetyVocabulary(t *testing.T) {
+func TestValidateReviewRequirementReinterpretation_AcceptsConcreteTextWithoutSemanticJudgment(t *testing.T) {
 	tests := []struct {
 		name     string
 		property string
@@ -358,11 +392,6 @@ func TestValidateReviewRequirementReinterpretation_AcceptsTraceableSafetyVocabul
 			result := lowVolumeSynthesisResult()
 			result.RequirementReinterpretation = validReviewReinterpretation()
 			result.RequirementReinterpretation.PreservedSafetyProperty = test.property
-			result.RequirementReinterpretation.CorrectedInvariant = "the corrected transition guarantees that " + test.property
-			result.AcceptanceCriteria = []string{
-				"The corrected transition enforces that " + test.property + ".",
-				"Recovery tests verify that " + test.property + ".",
-			}
 
 			ok, reason := validateReviewRequirementReinterpretation(result)
 
@@ -398,7 +427,7 @@ func TestBuildLowVolumeSynthesizedStrategyFixIssueTitle(t *testing.T) {
 		{name: "package path plus generic label", title: "pkg/scheduler invariant", want: "Review strategy fix: recurring architectural invariant failure"},
 		{name: "affected package name", title: "integrator package invariant", want: "Review strategy fix: recurring architectural invariant failure"},
 		{name: "arbitrary package name plus generic label", title: "scheduler invariant", want: "Review strategy fix: recurring architectural invariant failure"},
-		{name: "package name plus architectural labels", title: "scheduler durability invariant", want: "Review strategy fix: recurring architectural invariant failure"},
+		{name: "verified specific title is not lexically classified", title: "scheduler durability invariant", want: "Review strategy fix: scheduler durability invariant"},
 		{name: "generic architectural label", title: "durability", want: "Review strategy fix: recurring architectural invariant failure"},
 		{name: "valid specific cause", title: "durability ordering gap", want: "Review strategy fix: durability ordering gap"},
 	}

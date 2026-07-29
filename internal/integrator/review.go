@@ -808,10 +808,9 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 			}, nil
 		} else {
 			oscillation := analyzeLowVolumeReviewOscillation(history, cfg.Integrator.ReviewNonConvergence.MinCompletedCycles, cfg.Integrator.ReviewNonConvergence.SynthesisEnabled)
-			fmt.Printf("Review non-convergence route evaluated: route=low-volume completed_cycles=%d latest_findings=%d recurring_subsystems=%s recurring_architecture=%s distinct_heads=%t completed_fix_chain=%t eligible=%t rationale=%s\n",
+			fmt.Printf("Review non-convergence route evaluated: route=low-volume completed_cycles=%d latest_findings=%d recurring_subsystems=%s distinct_heads=%t completed_fix_chain=%t eligible=%t rationale=%s\n",
 				oscillation.CompletedCycleCount, oscillation.LatestFindingCount, formatStringList(oscillation.RecurringSubsystems),
-				formatStringList(oscillation.RecurringArchitecturalTerms), oscillation.DistinctHeadSHAsConfirmed,
-				oscillation.CompletedFixChainConfirmed, oscillation.Eligible, oscillation.Rationale)
+				oscillation.DistinctHeadSHAsConfirmed, oscillation.CompletedFixChainConfirmed, oscillation.Eligible, oscillation.Rationale)
 			if oscillation.Eligible {
 				fmt.Println("Review non-convergence synthesis invocation: route=low-volume")
 				synthesisCtx, cancel := context.WithTimeout(ctx, reviewSynthesisTimeout)

@@ -15,26 +15,15 @@ const reviewOscillationMinLatestFindings = 2
 const reviewOscillationMinEvidenceCycles = 3
 
 type reviewOscillationEligibility struct {
-	Eligible                    bool
-	Rationale                   string
-	CompletedCycleCount         int
-	LatestFindingCount          int
-	EvidenceCycles              []reviewHistoryCycle
-	LatestCycle                 int
-	RecurringSubsystems         []string
-	RecurringArchitecturalTerms []string
-	DistinctHeadSHAsConfirmed   bool
-	CompletedFixChainConfirmed  bool
-}
-
-var reviewArchitecturalConceptKeywords = map[string][]string{
-	"consistency-linearization": {"consistency", "consistent", "linearization", "linearizable", "atomic handoff", "commit point"},
-	"durability-recovery":       {"durability", "durable", "recovery", "recover", "repair", "crash"},
-	"invariant":                 {"invariant", "must always", "mutually incompatible", "cannot both", "contradict"},
-	"lifecycle-state":           {"lifecycle", "state transition", "state machine", "terminal state", "transition"},
-	"ownership-boundary":        {"ownership boundary", "owner", "ownership", "exclusive ownership", "authority boundary"},
-	"side-effect-publication":   {"side effect", "side-effect", "publication", "publish", "visibility", "github-visible"},
-	"synchronization":           {"synchronization", "synchronise", "synchronize", "lock", "race", "atomic", "mutex"},
+	Eligible                   bool
+	Rationale                  string
+	CompletedCycleCount        int
+	LatestFindingCount         int
+	EvidenceCycles             []reviewHistoryCycle
+	LatestCycle                int
+	RecurringSubsystems        []string
+	DistinctHeadSHAsConfirmed  bool
+	CompletedFixChainConfirmed bool
 }
 
 func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompletedCycles int, synthesisEnabled bool) reviewOscillationEligibility {
@@ -350,6 +339,9 @@ func lowVolumeReviewSynthesisInput(input agent.ReviewSynthesisInput, eligibility
 		if _, ok := allowed[cycle.Cycle]; !ok {
 			continue
 		}
+		// Stable evidence sources carry exact finding text and IDs. Keep only
+		// lifecycle metadata here instead of rendering every finding twice.
+		cycle.FindingsBySeverity = nil
 		cycles = append(cycles, cycle)
 		for _, fix := range cycle.CompletedFixIssues {
 			if _, duplicate := fixNumbers[fix.Number]; !duplicate {
@@ -371,6 +363,9 @@ func lowVolumeReviewSynthesisInput(input agent.ReviewSynthesisInput, eligibility
 	}
 	input.Cycles = cycles
 	input.CompletedFixIssues = fixes
+	// Stable requirement evidence is authoritative for this route. Rendering
+	// the structured copy too would spend the bounded prompt twice.
+	input.OriginalRequirements = nil
 	input.EvidenceSources = boundedLowVolumeEvidenceSources(sources)
 	return input
 }
@@ -468,22 +463,6 @@ func reviewCycleHasCompletedFix(cycle reviewHistoryCycle) bool {
 	return false
 }
 
-func reviewFindingArchitecturalTermSet(findings []string) map[string]struct{} {
-	out := map[string]struct{}{}
-	for _, finding := range findings {
-		normalized := " " + normalizeReviewSynthesisFingerprintText(finding) + " "
-		for family, keywords := range reviewArchitecturalConceptKeywords {
-			for _, keyword := range keywords {
-				if strings.Contains(normalized, " "+normalizeReviewSynthesisFingerprintText(keyword)+" ") {
-					out[family] = struct{}{}
-					break
-				}
-			}
-		}
-	}
-	return out
-}
-
 func isMeaningfulLowVolumeRootCause(title string, result *agent.ReviewSynthesisResult) bool {
 	normalized := normalizeReviewSynthesisFingerprintText(title)
 	if normalized == "" || isReviewFindingMetadataNoise(title) || isReviewFindingDismissalText(title) {
@@ -496,14 +475,8 @@ func isMeaningfulLowVolumeRootCause(title string, result *agent.ReviewSynthesisR
 		strings.Contains(normalized, "coverage") || strings.Contains(normalized, "files reviewed") {
 		return false
 	}
-	for _, generic := range []string{
-		"review workflow", "repeated review findings", "review issue", "fix loop", "internal integrator", "integrator",
-		"architecture", "architectural issue", "atomic", "durable", "durability", "invariant", "lifecycle",
-		"ownership", "publication", "recovery", "state machine", "synchronization",
-	} {
-		if normalized == generic {
-			return false
-		}
+	if len(strings.Fields(normalized)) < 3 {
+		return false
 	}
 	if result != nil {
 		for _, symptom := range result.RecurringSymptoms {
@@ -517,22 +490,9 @@ func isMeaningfulLowVolumeRootCause(title string, result *agent.ReviewSynthesisR
 			}
 		}
 	}
-	terms := reviewFindingArchitecturalTermSet([]string{title})
-	if len(terms) == 0 {
-		return false
-	}
-	if len(terms) >= 3 {
-		return true
-	}
-	for _, qualifier := range []string{
-		"ambiguity", "bypass", "conflict", "divergence", "double", "duplicate", "failure", "gap", "leak",
-		"lost", "loss", "mismatch", "missing", "ordering", "premature", "split", "stale", "violation", "window",
-	} {
-		if strings.Contains(" "+normalized+" ", " "+qualifier+" ") {
-			return true
-		}
-	}
-	return false
+	// This is only a syntactic/noise guard for an already verified result.
+	// Semantic coherence and root-cause specificity belong to the verifier.
+	return true
 }
 
 func isConcreteReviewReinterpretationText(value string) bool {

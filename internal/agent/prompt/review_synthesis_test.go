@@ -211,6 +211,7 @@ func TestRenderReviewSynthesisPrompt_DeterministicBudgetPreservesPriorityEvidenc
 			{ID: "cycle:4:finding:0", Kind: "review_finding", Cycle: 4, Excerpt: "internal/state/recovery.go: stale authorization survives recovery"},
 		},
 		RecentReviewComments: []string{strings.Repeat("older nonessential prose ", 10000)},
+		CurrentPRMetadata:    strings.Repeat("nonessential metadata ", 10000),
 	}
 
 	first, err := RenderReviewSynthesisPrompt(input, agent.ReviewSynthesisOptions{})

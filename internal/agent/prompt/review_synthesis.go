@@ -35,16 +35,11 @@ Read the cycles in the ascending chronological order supplied. A completed fix s
 
 Reject generic metadata, broad directory coincidence, unrelated findings, empty findings, coverage/chunk headings, generated summaries, and no-issue/approved verdicts as symptoms or root-cause evidence. Chunk labels and coverage bookkeeping are context only, not package/root-cause clusters. Do not use values such as "Chunk 1/9", "1/9", "Diff Coverage", "Review Aggregation", "Files reviewed", "Source: local-git", or synthetic coverage text in root_cause_title, recurring_symptoms.description, or affected_files. Prefer no escalation when evidence is weak, ambiguous, stale, incompatible, or already resolved by worker reports/no-op verdicts.
 
-## Current PR Metadata
+## Current Review Identity
 - PR number: {{.PRNumber}}
 - Batch number: {{.BatchNumber}}
 - Head SHA: {{.HeadSHA}}
 - Head ref: {{.HeadRef}}
-{{if .CurrentPRMetadata}}
-{{.CurrentPRMetadata}}
-{{else}}
-(none supplied)
-{{end}}
 
 ## Stable Evidence Sources (authoritative)
 {{if .EvidenceSources}}{{range .EvidenceSources}}
@@ -54,6 +49,13 @@ Reject generic metadata, broad directory coincidence, unrelated findings, empty 
   Head SHA: {{.HeadSHA}}{{end}}
   Source: {{.Excerpt}}
 {{end}}{{else}}(none supplied)
+{{end}}
+
+## Current PR Metadata
+{{if .CurrentPRMetadata}}
+{{.CurrentPRMetadata}}
+{{else}}
+(none supplied)
 {{end}}
 
 ## Recent Review Result Comments
