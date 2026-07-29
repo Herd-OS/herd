@@ -320,7 +320,7 @@ func TestBuildReviewPromptDataFallsBackWhenRawDiffTooLarge(t *testing.T) {
 		checks: &mockReviewPromptCheckService{},
 	}
 
-	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.DefaultChunkOptions())
+	data, err := buildReviewPromptData(context.Background(), reviewInputFromPlatform(client), 42, "example", "repo", t.TempDir(), reviewdiff.DefaultChunkOptions())
 
 	require.NoError(t, err)
 	assert.True(t, prs.getDiffCalled)
@@ -348,7 +348,7 @@ func TestBuildReviewPromptDataUsesChunkPlanningForInteractivePrompt(t *testing.T
 		checks: &mockReviewPromptCheckService{},
 	}
 
-	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+	data, err := buildReviewPromptData(context.Background(), reviewInputFromPlatform(client), 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
 		MaxChunkBytes:            1000,
 		MaxFileDiffBytes:         1000,
 		MaxFilesPerChunk:         1,
@@ -401,7 +401,7 @@ func TestBuildReviewPromptDataMarksPartialCoverage(t *testing.T) {
 		checks: &mockReviewPromptCheckService{},
 	}
 
-	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+	data, err := buildReviewPromptData(context.Background(), reviewInputFromPlatform(client), 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
 		MaxChunkBytes:            1000,
 		MaxFileDiffBytes:         1000,
 		MaxFilesPerChunk:         1,
@@ -444,7 +444,7 @@ func TestBuildReviewPromptDataZeroChunksDoesNotUseLegacyRenderedDiff(t *testing.
 		checks: &mockReviewPromptCheckService{},
 	}
 
-	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+	data, err := buildReviewPromptData(context.Background(), reviewInputFromPlatform(client), 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
 		MaxChunkBytes:            20,
 		MaxFileDiffBytes:         1000,
 		MaxFilesPerChunk:         10,
