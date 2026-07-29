@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
@@ -311,6 +314,69 @@ func TestHandleIntegrate_WithConsolidation(t *testing.T) {
 	assert.Contains(t, result.Message, "Integrator cycle for batch #1")
 }
 
+func TestHandleIntegrate_ReleasesConsolidationLockBeforeAdvanceAndReview(t *testing.T) {
+	dir, g := initIntegrateRemoteRepo(t)
+
+	batchBody := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 1},
+		Task:        "Test",
+	})
+
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Batch", Labels: []string{issues.StatusDone}},
+	}
+
+	repo := &integrateRepoService{
+		defaultBranch: "main",
+		branchSHAs: map[string]string{
+			"herd/batch/1-batch":   "batch-sha",
+			"herd/worker/10-batch": "worker-sha",
+		},
+	}
+	prSvc := &testPRService{}
+
+	cfg := baseConfig()
+	cfg.Integrator.Review = false
+
+	p := &integratePlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  &testWorkflowService{},
+		repo:       repo,
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch", State: "open", ClosedIssues: 1}}},
+		checks:     &testCheckService{status: "success"},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Git:         g,
+		Config:      cfg,
+		RepoRoot:    dir,
+		IssueNumber: 5,
+		IsPR:        false,
+		IssueBody:   batchBody,
+	}
+
+	result := handleIntegrate(hctx, Command{Name: "integrate"})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "Consolidated 1 worker branch(es)")
+	assert.Contains(t, result.Message, "All tiers complete")
+	assert.Contains(t, result.Message, "Review: completed")
+	assert.NotContains(t, result.Message, "Integrator batch lock active; skipping")
+	require.Len(t, prSvc.created, 1)
+	assert.Equal(t, "herd/batch/1-batch", prSvc.created[0].Head)
+	assert.Contains(t, repo.deleted, "herd/worker/10-batch")
+
+	state, ok, err := integrator.DescribeBatchLock(context.Background(), repo, 1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "unlocked", state.Status)
+	assert.False(t, integrator.IsBatchLockActive(state, time.Now().UTC()))
+}
+
 func TestHandleIntegrate_ReleasesBatchLockAfterConsolidationFailure(t *testing.T) {
 	dir, g := initHandlerTestRepo(t)
 
@@ -363,6 +429,42 @@ func TestHandleIntegrate_ReleasesBatchLockAfterConsolidationFailure(t *testing.T
 	require.True(t, ok)
 	assert.Equal(t, "unlocked", state.Status)
 	assert.False(t, integrator.IsBatchLockActive(state, time.Now().UTC()))
+}
+
+func initIntegrateRemoteRepo(t *testing.T) (string, *git.Git) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "repo")
+	remote := filepath.Join(root, "remote.git")
+	cmds := [][]string{
+		{"git", "init", "--bare", "--initial-branch=main", remote},
+		{"git", "init", "-b", "main", dir},
+		{"git", "-C", dir, "config", "user.email", "test@test.com"},
+		{"git", "-C", dir, "config", "user.name", "Test"},
+		{"git", "-C", dir, "commit", "--allow-empty", "-m", "init"},
+		{"git", "-C", dir, "remote", "add", "origin", remote},
+		{"git", "-C", dir, "push", "-u", "origin", "main"},
+		{"git", "-C", dir, "checkout", "-b", "herd/batch/1-batch"},
+		{"git", "-C", dir, "push", "-u", "origin", "herd/batch/1-batch"},
+		{"git", "-C", dir, "checkout", "-b", "herd/worker/10-batch"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "cmd %v failed: %s", args, string(out))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker change\n"), 0o644))
+	for _, args := range [][]string{
+		{"git", "-C", dir, "add", "worker.txt"},
+		{"git", "-C", dir, "commit", "-m", "worker change"},
+		{"git", "-C", dir, "push", "-u", "origin", "herd/worker/10-batch"},
+		{"git", "-C", dir, "checkout", "herd/batch/1-batch"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "cmd %v failed: %s", args, string(out))
+	}
+	return dir, git.New(dir)
 }
 
 func TestHandleIntegrate_ReviewRunsWithExistingPR(t *testing.T) {

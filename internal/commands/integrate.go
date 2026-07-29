@@ -69,12 +69,20 @@ func handleIntegrate(hctx *HandlerContext, cmd Command) Result {
 	if !acquired {
 		return Result{Message: commandBatchLockSkipReason(ctx, hctx.Platform.Repository(), batchNum, batchBranch)}
 	}
-	defer func() {
+	lockReleased := false
+	releaseLock := func() {
+		if lockReleased {
+			return
+		}
+		lockReleased = true
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if releaseErr := integrator.ReleaseBatchLock(releaseCtx, hctx.Platform.Repository(), lock); releaseErr != nil {
 			fmt.Printf("Warning: failed to release batch lock for batch #%d: %s\n", batchNum, releaseErr)
 		}
+	}
+	defer func() {
+		releaseLock()
 	}()
 
 	// Consolidate unconsolidated worker branches.
@@ -155,6 +163,8 @@ func handleIntegrate(hctx *HandlerContext, cmd Command) Result {
 			consolidated++
 		}
 	}
+	releaseLock()
+
 	// Run integrator steps.
 	var lines []string
 	lines = append(lines, fmt.Sprintf("🔄 **Integrator cycle for batch #%d**\n", batchNum))

@@ -80,6 +80,8 @@ func TestLogWorkerRunContextIncludesRunMetadataAndLockKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Close())
 
+	assert.Contains(t, string(out), "resolved worker run context:")
+	assert.Contains(t, string(out), "action=Review")
 	assert.Contains(t, string(out), "run_id=100")
 	assert.Contains(t, string(out), "issue=42")
 	assert.Contains(t, string(out), "milestone=7")

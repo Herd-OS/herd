@@ -86,6 +86,6 @@ func logWorkerRunContext(action string, c *WorkerRunContext) {
 	if c == nil {
 		return
 	}
-	fmt.Printf("%s worker run context: run_id=%d issue=%d milestone=%d batch_branch=%s worker_branch=%s conclusion=%s lock_key=%s workflow=%q workflow_path=%q head_branch=%q head_sha=%s\n",
+	fmt.Printf("resolved worker run context: action=%s run_id=%d issue=%d milestone=%d batch_branch=%s worker_branch=%s conclusion=%s lock_key=%s workflow=%q workflow_path=%q head_branch=%q head_sha=%s\n",
 		action, c.RunID, c.IssueNumber, c.MilestoneNumber, c.BatchBranch, c.WorkerBranch, c.Conclusion, c.LockKey, c.WorkflowName, c.WorkflowPath, c.HeadBranch, c.HeadSHA)
 }
