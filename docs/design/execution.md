@@ -29,6 +29,13 @@ Planner decomposes work into a DAG, creates issues with a milestone, and
 dispatches Tier 0. The Integrator advances tiers automatically. Come back when
 the batch PR is ready for review (or already merged, if auto-merge is enabled).
 
+Multiple active batches can run in the same repository. Worker completion events
+from `workflow_dispatch` workers may report the default branch as
+`workflow_run.head_branch`, so Herd resolves the worker run's issue number and
+milestone, then derives the batch branch from Herd metadata. Same-batch
+Integrator operations are serialized with a batch-scoped Herd lock; different
+batch numbers use different locks.
+
 ---
 
 ## 2. Workers
@@ -387,10 +394,13 @@ Before opening the batch PR, the Integrator sanity-checks that the milestone's i
 
 ### Run-to-Milestone Resolution
 
-`herd integrator consolidate --run-id <N>` is a **milestone-wide, batch-level**
-operation, not a single-branch merge. The triggering run identifies which
-milestone to operate on; the Integrator then processes every eligible worker
-branch in that milestone in a single invocation.
+`herd integrator worker-cycle --run-id <N>` is the workflow-level worker
+completion entrypoint. It holds one durable batch lock across consolidation,
+advancement, review, and CI checking. Its consolidation phase remains a
+**milestone-wide, batch-level** operation, not a single-branch merge. The
+triggering run identifies which milestone to operate on; the Integrator then
+processes every eligible worker branch in that milestone in a single
+invocation.
 
 1. Query the run's workflow_dispatch inputs to extract the issue number, and
    read that issue's milestone — this is the only role the run ID plays. The
@@ -430,6 +440,25 @@ Failed issues are explicitly excluded from the candidate set, so this
 self-healing property never resurrects work that was already abandoned. Only
 issues that reached `herd/status:done` and still have a remote worker branch
 are picked up.
+
+### Batch-Scoped Scheduling
+
+The Integrator acquires a durable batch lock before mutating a batch branch,
+advancing tiers, checking CI, or starting batch PR review work. The lock key is
+scoped to the milestone number, so duplicate triggers for batch 5 serialize with
+each other while batch 6 can continue independently. If a lock is active, the
+run logs `Integrator batch lock active; skipping` with the batch number, batch
+branch, run ID, and lock branch; the next workflow event, slash command, or
+Monitor patrol can retry safely.
+
+For completed worker runs, `herd integrator worker-cycle --run-id <N>` resolves
+the run ID back to the worker issue and milestone instead of trusting
+`workflow_run.head_branch`. If a same-batch worker completion loses the batch
+lock, Herd marks it `herd/integrator-pending`; the active worker cycle drains
+that marker with a fresh broad consolidation scan before PR review or CI
+eligibility. The diagnostic log starts with `resolved worker run context` and
+includes the resolved run ID, issue number, batch branch, worker branch, and
+lock key.
 
 ### Post-Merge Failure Handling
 
@@ -980,6 +1009,20 @@ worker workflow runs filtered by issue number and counting those with
 `conclusion: "failure"`. Backoff delays are enforced by timestamp comparison.
 This means the Monitor can be restarted, re-deployed, or run on different
 runners without losing track of anything.
+
+### Stranded Batch PR Recovery
+
+The Monitor also repairs a completed batch that missed PR creation because an
+Integrator event was canceled or lost. Each patrol can detect an open milestone
+whose issues are all complete, whose expected batch branch exists, and whose
+batch branch has no open or closed PR. It then runs the normal `AdvanceByBatch`
+PR-open path, which keeps recovery idempotent and uses the same duplicate-PR
+checks as normal advancement.
+
+Recovery honors the batch lock before doing work. If another Integrator owns the
+same batch lock, the Monitor logs `Stranded batch recovery skipped; active batch
+lock` and waits for a later patrol. Successful recovery logs `Recovered stranded
+batch` with the batch number, batch branch, and PR number.
 
 ### Stale Ready Issue Dispatch
 

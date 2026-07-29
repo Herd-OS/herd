@@ -597,7 +597,11 @@ func (m *mockCheckCIMilestoneService) Update(_ context.Context, _ int, _ platfor
 }
 
 type mockCheckCIRepoService struct {
-	defaultBranch string
+	defaultBranch  string
+	branchSHAs     map[string]string
+	commitMessages map[string]string
+	commitParents  map[string]string
+	commitSeq      int
 }
 
 func (m *mockCheckCIRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) {
@@ -610,8 +614,59 @@ func (m *mockCheckCIRepoService) CreateBranch(_ context.Context, _, _ string) er
 	return nil
 }
 func (m *mockCheckCIRepoService) DeleteBranch(_ context.Context, _ string) error { return nil }
-func (m *mockCheckCIRepoService) GetBranchSHA(_ context.Context, _ string) (string, error) {
-	return "", nil
+func (m *mockCheckCIRepoService) GetBranchSHA(_ context.Context, branch string) (string, error) {
+	if m.branchSHAs == nil {
+		m.branchSHAs = map[string]string{
+			"herd/batch/1-batch": "batch-sha",
+		}
+	}
+	if sha, ok := m.branchSHAs[branch]; ok {
+		return sha, nil
+	}
+	return "", fmt.Errorf("branch %s not found", branch)
+}
+func (m *mockCheckCIRepoService) CreateBranchWithCommit(ctx context.Context, name, parentSHA, message string) (string, error) {
+	sha, err := m.CreateCommit(ctx, parentSHA, message)
+	if err != nil {
+		return "", err
+	}
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if _, exists := m.branchSHAs[name]; exists {
+		return "", fmt.Errorf("reference already exists")
+	}
+	m.branchSHAs[name] = sha
+	return sha, nil
+}
+func (m *mockCheckCIRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	m.commitSeq++
+	sha := fmt.Sprintf("%s-lock-%d", parentSHA, m.commitSeq)
+	if m.commitMessages == nil {
+		m.commitMessages = make(map[string]string)
+	}
+	if m.commitParents == nil {
+		m.commitParents = make(map[string]string)
+	}
+	m.commitMessages[sha] = message
+	m.commitParents[sha] = parentSHA
+	return sha, nil
+}
+func (m *mockCheckCIRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if msg, ok := m.commitMessages[sha]; ok {
+		return msg, nil
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (m *mockCheckCIRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if m.branchSHAs[name] != m.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
+	m.branchSHAs[name] = sha
+	return nil
 }
 
 type mockCheckCIStatusService struct {
@@ -910,12 +965,14 @@ func TestIssueNumberFromRun(t *testing.T) {
 		name    string
 		run     *platform.Run
 		runErr  error
+		issue   *platform.Issue
 		wantNum int
 		wantErr string
 	}{
 		{
-			name:    "extracts issue number from run inputs",
+			name:    "extracts issue number from resolved run context",
 			run:     &platform.Run{ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+			issue:   &platform.Issue{Number: 42, Title: "Task", Milestone: &platform.Milestone{Number: 1, Title: "Batch"}},
 			wantNum: 42,
 		},
 		{
@@ -931,12 +988,18 @@ func TestIssueNumberFromRun(t *testing.T) {
 		{
 			name:    "returns error when issue_number is not a number",
 			run:     &platform.Run{ID: 100, Inputs: map[string]string{"issue_number": "abc"}},
-			wantErr: "strconv.Atoi",
+			wantErr: `invalid issue_number "abc" in run 100`,
 		},
 		{
 			name:    "returns error when inputs map is nil",
 			run:     &platform.Run{ID: 100, Inputs: nil},
 			wantErr: "run 100 has no issue_number input",
+		},
+		{
+			name:    "returns resolver error when issue has no milestone",
+			run:     &platform.Run{ID: 100, Inputs: map[string]string{"issue_number": "42"}},
+			issue:   &platform.Issue{Number: 42, Title: "Task"},
+			wantErr: "issue #42 for run 100 has no milestone",
 		},
 	}
 
@@ -951,6 +1014,9 @@ func TestIssueNumberFromRun(t *testing.T) {
 			// Override GetRun to return error if needed
 			mock := &mockFailurePlatform{
 				wf: &mockIntegratorWorkflowService{run: tt.run},
+				issues: &mockCommentIssueService{mockDispatchIssueService: mockDispatchIssueService{
+					getResult: tt.issue,
+				}},
 			}
 			if tt.runErr != nil {
 				mock.wf = &mockIntegratorWorkflowService{run: nil}

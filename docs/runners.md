@@ -28,6 +28,15 @@ gh variable set HERD_ENABLED --body true --repo <owner>/<repo>
 
 Three runners start by default (configurable in `docker-compose.herd.yml`). Workflows are inactive until `HERD_ENABLED` is set — this prevents a workflow storm from queued events firing before runners are ready.
 
+Multiple active batches can share the same runner pool. Herd workers are
+launched with `workflow_dispatch`, so their completed `workflow_run` events may
+show the repository default branch, such as `main`, as `head_branch`. That does
+not collapse batch scheduling: the Integrator resolves the worker issue and
+milestone from the run inputs, derives the batch branch, and serializes only
+same-batch mutations with a batch-scoped lock. Different batch numbers use
+different locks; runner capacity and `workers.max_concurrent` are the practical
+limits.
+
 Prefer `docker run` directly? See [Running runners directly with `docker run`](#running-runners-directly-with-docker-run) for the equivalent commands.
 
 ## Running runners directly with `docker run`

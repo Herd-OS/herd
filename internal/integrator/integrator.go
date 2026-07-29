@@ -31,6 +31,8 @@ type ConsolidateResult struct {
 	WorkerBranch     string
 	Merged           bool
 	NoOp             bool
+	BatchLockSkipped bool
+	SkipReason       string
 	ConflictDetected bool
 	ConflictIssue    int
 }
@@ -43,10 +45,28 @@ type AdvanceParams struct {
 
 // AdvanceResult holds the result of a tier advancement.
 type AdvanceResult struct {
-	TierComplete    bool
-	AllComplete     bool
-	DispatchedCount int
-	BatchPRNumber   int
+	TierComplete     bool
+	AllComplete      bool
+	DispatchedCount  int
+	BatchPRNumber    int
+	BatchLockSkipped bool
+	SkipReason       string
+}
+
+// StrandedBatch is a completed open milestone whose batch branch exists but
+// has no pull request for that branch.
+type StrandedBatch struct {
+	MilestoneNumber int
+	MilestoneTitle  string
+	BatchBranch     string
+}
+
+// PendingWorkerCompletionRecoveryResult describes a patrol recovery pass for
+// done workers that were marked pending while a batch PR already existed.
+type PendingWorkerCompletionRecoveryResult struct {
+	Recovered        int
+	BatchLockSkipped bool
+	SkipReason       string
 }
 
 // ReviewParams holds the parameters for reviewing a batch PR.
@@ -76,6 +96,8 @@ type ReviewResult struct {
 	SkippedDuplicateApprovedHead bool
 	// SkipReason is a human-readable reason for a skipped review that the CLI can print.
 	SkipReason string
+	// BatchLockSkipped is true when another integrator run owns the same batch lock.
+	BatchLockSkipped bool
 	// HeadSHA is the PR head SHA considered by the review, set for duplicate-skip diagnostics when available.
 	HeadSHA string
 	// ManualInterventionNeeded is true when the agent produced
@@ -110,38 +132,39 @@ type ReviewStandaloneResult struct {
 // The returned *ConsolidateResult reflects the TRIGGERING issue's outcome;
 // other workers in the milestone are processed for side effects only.
 func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, params ConsolidateParams) (*ConsolidateResult, error) {
-	run, err := p.Workflows().GetRun(ctx, params.RunID)
+	runCtx, err := ResolveWorkerRunContext(ctx, p, params.RunID)
 	if err != nil {
-		return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
+		return nil, err
 	}
+	logWorkerRunContext("Consolidate", runCtx)
 
-	issueNumStr, ok := run.Inputs["issue_number"]
-	if !ok {
-		return nil, fmt.Errorf("run %d has no issue_number input", params.RunID)
-	}
-	issueNumber, err := strconv.Atoi(issueNumStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid issue_number %q in run %d: %w", issueNumStr, params.RunID, err)
-	}
-
-	issue, err := p.Issues().Get(ctx, issueNumber)
-	if err != nil {
-		return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
-	}
-	if issue.Milestone == nil {
-		return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
-	}
+	issueNumber := runCtx.IssueNumber
+	issue := runCtx.issue
 	if isBatchComplete(issue.Milestone) {
 		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", issue.Milestone.Number)
 		return &ConsolidateResult{IssueNumber: issueNumber, NoOp: true}, nil
 	}
 
-	triggerWorkerBranch := fmt.Sprintf("herd/worker/%d-%s", issueNumber, planner.Slugify(issue.Title))
-	batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
+	triggerWorkerBranch := runCtx.WorkerBranch
+	batchBranch := runCtx.BatchBranch
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), issue.Milestone.Number, batchBranch, params.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", issue.Milestone.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), issue.Milestone.Number, batchBranch, params.RunID)
+		return &ConsolidateResult{
+			IssueNumber:      issueNumber,
+			NoOp:             true,
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), issue.Milestone.Number, batchBranch, params.RunID),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, issue.Milestone.Number)
 
 	// Failure/cancellation: relabel the trigger and return — do NOT scan other
 	// candidates in this case (preserves the trigger semantics for failed runs).
-	if run.Conclusion == "failure" || run.Conclusion == "cancelled" {
+	if runCtx.Conclusion == "failure" || runCtx.Conclusion == "cancelled" {
 		status := issues.StatusLabel(issue.Labels)
 		if status != issues.StatusFailed {
 			_ = p.Issues().RemoveLabels(ctx, issueNumber, []string{status})
@@ -259,6 +282,7 @@ func consolidateWorkerBranch(ctx context.Context, p platform.Platform, g *git.Gi
 			if err := p.Repository().DeleteBranch(ctx, workerBranch); err != nil {
 				fmt.Printf("Warning: failed to delete already-merged worker branch %s: %v\n", workerBranch, err)
 			}
+			clearPendingWorkerCompletionLabel(ctx, p, iss)
 			return &ConsolidateResult{
 				IssueNumber:  iss.Number,
 				WorkerBranch: workerBranch,
@@ -344,6 +368,7 @@ func consolidateWorkerBranch(ctx context.Context, p platform.Platform, g *git.Gi
 	if err := p.Repository().DeleteBranch(ctx, workerBranch); err != nil {
 		fmt.Printf("Warning: failed to delete worker branch %s: %v\n", workerBranch, err)
 	}
+	clearPendingWorkerCompletionLabel(ctx, p, iss)
 
 	return &ConsolidateResult{
 		IssueNumber:  iss.Number,
@@ -355,25 +380,14 @@ func consolidateWorkerBranch(ctx context.Context, p platform.Platform, g *git.Gi
 // Advance checks if the current tier is complete and dispatches the next tier.
 // If all tiers are complete, it opens the batch PR.
 func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, params AdvanceParams) (*AdvanceResult, error) {
-	// Get the run to find the issue and milestone
-	run, err := p.Workflows().GetRun(ctx, params.RunID)
+	runCtx, err := ResolveWorkerRunContext(ctx, p, params.RunID)
 	if err != nil {
-		return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
+		return nil, err
 	}
+	logWorkerRunContext("Advance", runCtx)
 
-	issueNumStr := run.Inputs["issue_number"]
-	issueNumber, err := strconv.Atoi(issueNumStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid issue_number: %w", err)
-	}
-
-	issue, err := p.Issues().Get(ctx, issueNumber)
-	if err != nil {
-		return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
-	}
-	if issue.Milestone == nil {
-		return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
-	}
+	issueNumber := runCtx.IssueNumber
+	issue := runCtx.issue
 
 	ms := issue.Milestone
 	if isBatchComplete(ms) {
@@ -381,7 +395,22 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		return &AdvanceResult{}, nil
 	}
 
-	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	batchBranch := runCtx.BatchBranch
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), ms.Number, batchBranch, params.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), ms.Number, batchBranch, params.RunID)
+		return &AdvanceResult{
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, params.RunID),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
+	if batchLock != nil {
+		ctx = withHeldBatchLock(ctx, ms.Number, batchBranch, batchLock)
+	}
 
 	// List all issues in the milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
@@ -459,6 +488,18 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		if !hasCompleteIssueList(allIssues, ms) {
 			fmt.Printf("Warning: milestone #%d has %d expected issues (%d open + %d closed) but only %d were returned by the API; skipping batch PR to avoid premature open\n",
 				ms.Number, ms.OpenIssues+ms.ClosedIssues, ms.OpenIssues, ms.ClosedIssues, len(allIssues))
+			return &AdvanceResult{TierComplete: true}, nil
+		}
+		if hasPendingWorkerCompletionInIssues(ctx, p, allIssues) {
+			fmt.Printf("Pending worker completion exists for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
+			return &AdvanceResult{TierComplete: true}, nil
+		}
+		pending, err := hasPendingWorkerCompletions(ctx, p, ms.Number)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			fmt.Printf("Pending worker completion appeared for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
 			return &AdvanceResult{TierComplete: true}, nil
 		}
 		// All tiers done — open batch PR
@@ -669,6 +710,205 @@ func isIssueComplete(issue *platform.Issue) bool {
 	return issue.State == "closed" || issues.HasLabel(issue.Labels, issues.StatusDone)
 }
 
+func isIssueCompleteForStrandedRecovery(issue *platform.Issue) bool {
+	status := issues.StatusLabel(issue.Labels)
+	if status == issues.StatusDone {
+		return true
+	}
+	if status != "" {
+		return false
+	}
+	return issue.State == "closed"
+}
+
+// FindStrandedCompletedBatches finds open milestones where every issue is
+// complete, the expected batch branch exists, and no pull request exists for
+// that exact head branch.
+func FindStrandedCompletedBatches(ctx context.Context, p platform.Platform) ([]StrandedBatch, error) {
+	milestones, err := p.Milestones().List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing milestones: %w", err)
+	}
+
+	var stranded []StrandedBatch
+	for _, ms := range milestones {
+		if ms == nil || ms.State == "closed" {
+			continue
+		}
+		allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+			State:     "all",
+			Milestone: &ms.Number,
+		})
+		if err != nil {
+			fmt.Printf("Warning: failed to list issues for milestone #%d while finding stranded batches: %v\n", ms.Number, err)
+			continue
+		}
+		if !hasCompleteIssueList(allIssues, ms) {
+			continue
+		}
+		allComplete := true
+		for _, issue := range allIssues {
+			if !isIssueCompleteForStrandedRecovery(issue) {
+				allComplete = false
+				break
+			}
+		}
+		if !allComplete {
+			continue
+		}
+
+		batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+		if _, err := p.Repository().GetBranchSHA(ctx, batchBranch); err != nil {
+			continue
+		}
+
+		prs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "all", Head: batchBranch})
+		if err != nil {
+			fmt.Printf("Warning: failed to list PRs for batch branch %s while finding stranded batches: %v\n", batchBranch, err)
+			continue
+		}
+		if hasPullRequestForHead(prs, batchBranch) {
+			continue
+		}
+
+		stranded = append(stranded, StrandedBatch{
+			MilestoneNumber: ms.Number,
+			MilestoneTitle:  ms.Title,
+			BatchBranch:     batchBranch,
+		})
+	}
+
+	return stranded, nil
+}
+
+// RecoverStrandedCompletedBatch opens the missing batch PR through the normal
+// AdvanceByBatch path. It first honors an active batch lock so patrol recovery
+// does not race an integrator already working on the same batch.
+func RecoverStrandedCompletedBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, batchNumber int) (*AdvanceResult, bool, error) {
+	ms, err := p.Milestones().Get(ctx, batchNumber)
+	if err != nil {
+		return nil, false, fmt.Errorf("getting milestone #%d: %w", batchNumber, err)
+	}
+	if isBatchComplete(ms) {
+		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", ms.Number)
+		return &AdvanceResult{}, false, nil
+	}
+
+	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), ms.Number, batchBranch, 0)
+	if err != nil {
+		return nil, false, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), ms.Number, batchBranch, 0)
+		return &AdvanceResult{
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, 0),
+		}, false, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
+
+	lockedCtx := withHeldBatchLock(ctx, ms.Number, batchBranch, batchLock)
+	if g != nil {
+		if _, err := recoverPendingWorkerCompletionsLocked(lockedCtx, p, g, cfg, ms, batchBranch); err != nil {
+			return nil, false, err
+		}
+	}
+
+	result, err := AdvanceByBatch(lockedCtx, p, g, cfg, batchNumber)
+	if err != nil {
+		return nil, false, err
+	}
+	if result.BatchLockSkipped {
+		return result, false, nil
+	}
+	return result, result.AllComplete && result.BatchPRNumber > 0, nil
+}
+
+// RecoverPendingWorkerCompletionsForBatchPR consolidates pending done worker
+// branches for an existing batch PR before patrol evaluates PR review or CI state.
+func RecoverPendingWorkerCompletionsForBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, pr *platform.PullRequest) (*PendingWorkerCompletionRecoveryResult, error) {
+	if pr == nil || pr.Head == "" || !strings.HasPrefix(pr.Head, "herd/batch/") {
+		return &PendingWorkerCompletionRecoveryResult{}, nil
+	}
+	if g == nil {
+		return &PendingWorkerCompletionRecoveryResult{}, nil
+	}
+	batchNumber, err := ParseBatchBranchMilestone(pr.Head)
+	if err != nil {
+		return &PendingWorkerCompletionRecoveryResult{}, nil
+	}
+	ms, err := p.Milestones().Get(ctx, batchNumber)
+	if err != nil {
+		return nil, fmt.Errorf("getting milestone #%d: %w", batchNumber, err)
+	}
+	if ms == nil || isBatchComplete(ms) {
+		return &PendingWorkerCompletionRecoveryResult{}, nil
+	}
+
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), batchNumber, pr.Head, 0)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", batchNumber, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), batchNumber, pr.Head, 0)
+		return &PendingWorkerCompletionRecoveryResult{
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), batchNumber, pr.Head, 0),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, batchNumber)
+
+	return recoverPendingWorkerCompletionsLocked(withHeldBatchLock(ctx, batchNumber, pr.Head, batchLock), p, g, cfg, ms, pr.Head)
+}
+
+func recoverPendingWorkerCompletionsLocked(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, ms *platform.Milestone, batchBranch string) (*PendingWorkerCompletionRecoveryResult, error) {
+	if ms == nil || isBatchComplete(ms) || g == nil {
+		return &PendingWorkerCompletionRecoveryResult{}, nil
+	}
+
+	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{State: "all", Milestone: &ms.Number})
+	if err != nil {
+		return nil, fmt.Errorf("listing milestone issues for pending worker recovery: %w", err)
+	}
+
+	if err := g.ConfigureIdentity("HerdOS Integrator", "herd@herd-os.com"); err != nil {
+		return nil, fmt.Errorf("configuring git identity: %w", err)
+	}
+	if err := g.Fetch("origin"); err != nil {
+		return nil, fmt.Errorf("fetching: %w", err)
+	}
+
+	recovered := 0
+	for _, iss := range allIssues {
+		if iss == nil || issues.StatusLabel(iss.Labels) != issues.StatusDone || !issues.HasLabel(iss.Labels, issues.IntegratorPending) {
+			continue
+		}
+		workerBranch := fmt.Sprintf("herd/worker/%d-%s", iss.Number, planner.Slugify(iss.Title))
+		if _, err := p.Repository().GetBranchSHA(ctx, workerBranch); err != nil {
+			continue
+		}
+		branchResult, err := consolidateWorkerBranch(ctx, p, g, cfg, ConsolidateParams{RepoRoot: g.WorkDir}, iss, ms, workerBranch, batchBranch)
+		if err != nil {
+			return nil, err
+		}
+		if branchResult != nil && (branchResult.Merged || branchResult.NoOp) {
+			recovered++
+		}
+	}
+
+	return &PendingWorkerCompletionRecoveryResult{Recovered: recovered}, nil
+}
+
+func hasPullRequestForHead(prs []*platform.PullRequest, head string) bool {
+	for _, pr := range prs {
+		if pr != nil && pr.Head == head {
+			return true
+		}
+	}
+	return false
+}
+
 // AdvanceByBatch triggers tier advancement for a batch by milestone number.
 // Used when an issue is closed (e.g., manual tasks) rather than via workflow run.
 func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, batchNumber int) (*AdvanceResult, error) {
@@ -682,6 +922,21 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 	}
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), ms.Number, batchBranch, 0)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), ms.Number, batchBranch, 0)
+		return &AdvanceResult{
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, 0),
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
+	if batchLock != nil {
+		ctx = withHeldBatchLock(ctx, ms.Number, batchBranch, batchLock)
+	}
 
 	// List all issues in the milestone
 	allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
@@ -732,6 +987,18 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 		if !hasCompleteIssueList(allIssues, ms) {
 			fmt.Printf("Warning: milestone #%d has %d expected issues (%d open + %d closed) but only %d were returned by the API; skipping batch PR to avoid premature open\n",
 				ms.Number, ms.OpenIssues+ms.ClosedIssues, ms.OpenIssues, ms.ClosedIssues, len(allIssues))
+			return &AdvanceResult{TierComplete: true}, nil
+		}
+		if hasPendingWorkerCompletionInIssues(ctx, p, allIssues) {
+			fmt.Printf("Pending worker completion exists for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
+			return &AdvanceResult{TierComplete: true}, nil
+		}
+		pending, err := hasPendingWorkerCompletions(ctx, p, ms.Number)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			fmt.Printf("Pending worker completion appeared for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
 			return &AdvanceResult{TierComplete: true}, nil
 		}
 		prNum, err := openBatchPR(ctx, p, g, cfg, ms, allIssues, tiers, batchBranch)
@@ -1276,6 +1543,37 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 	// Build PR title and body
 	title := fmt.Sprintf("[herd] %s (%d tasks)", ms.Title, len(allIssues))
 	body := buildBatchPRBody(ms, allIssues, tiers)
+
+	pending, err := hasHeldBatchLockPendingCompletions(ctx, p, ms.Number)
+	if err != nil {
+		return 0, err
+	}
+	if pending {
+		fmt.Printf("Pending worker completion published for batch #%d before PR creation; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
+		return 0, nil
+	}
+
+	clear, err := validateHeldBatchLockNoPending(ctx, p.Repository(), ms.Number, batchBranch)
+	if err != nil {
+		return 0, err
+	}
+	if !clear {
+		fmt.Printf("Pending worker completion published for batch #%d at PR creation boundary; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
+		return 0, nil
+	}
+
+	clear, err = prepareHeldBatchLockSideEffects(ctx, p.Repository(), ms.Number, batchBranch)
+	if err != nil {
+		return 0, err
+	}
+	if !clear {
+		fmt.Printf("Pending worker completion published for batch #%d before PR creation side effects; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
+		return 0, nil
+	}
+	if deferWorkerSideEffects, _ := ctx.Value(workerCompletionCycleContextKey{}).(bool); deferWorkerSideEffects {
+		fmt.Printf("Worker-held batch lock for batch #%d cannot atomically create a PR; deferring batch PR open to a quiescent recovery pass.\n", ms.Number)
+		return 0, nil
+	}
 
 	pr, err := p.PullRequests().Create(ctx, title, body, batchBranch, defaultBranch)
 	if err != nil {

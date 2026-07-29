@@ -3,7 +3,6 @@ package integrator
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/herd-os/herd/internal/config"
@@ -38,11 +37,13 @@ type CheckCIParams struct {
 
 // CheckCIResult holds the result of CI checking.
 type CheckCIResult struct {
-	Status       string // "success", "failure", "pending"
-	FixIssues    []int
-	FixCycle     int
-	MaxCyclesHit bool
-	Skipped      bool // true if require_ci is false or no batch branch found
+	Status           string // "success", "failure", "pending"
+	FixIssues        []int
+	FixCycle         int
+	MaxCyclesHit     bool
+	Skipped          bool // true if require_ci is false or no batch branch found
+	SkipReason       string
+	BatchLockSkipped bool
 }
 
 // CheckCI checks CI status on the batch branch after consolidation.
@@ -83,33 +84,37 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 		batchBranch = params.CIRun.HeadBranch
 	} else {
 		// Run-based lookup — used by workflow_run trigger
-		run, err := p.Workflows().GetRun(ctx, params.RunID)
+		runCtx, err := ResolveWorkerRunContext(ctx, p, params.RunID)
 		if err != nil {
-			return nil, fmt.Errorf("getting run %d: %w", params.RunID, err)
+			return nil, err
 		}
+		logWorkerRunContext("CheckCI", runCtx)
 
-		issueNumStr := run.Inputs["issue_number"]
-		issueNumber, err := strconv.Atoi(issueNumStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid issue_number: %w", err)
-		}
-
-		issue, err := p.Issues().Get(ctx, issueNumber)
-		if err != nil {
-			return nil, fmt.Errorf("getting issue #%d: %w", issueNumber, err)
-		}
-		if issue.Milestone == nil {
-			return nil, fmt.Errorf("issue #%d has no milestone", issueNumber)
-		}
-
-		ms = issue.Milestone
-		batchBranch = fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+		ms = runCtx.issue.Milestone
+		batchBranch = runCtx.BatchBranch
 	}
 
 	if isBatchComplete(ms) {
 		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", ms.Number)
 		return &CheckCIResult{Skipped: true}, nil
 	}
+	lockRunID := params.RunID
+	if lockRunID == 0 && params.CIRun != nil {
+		lockRunID = params.CIRun.RunID
+	}
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), ms.Number, batchBranch, lockRunID)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
+	}
+	if !acquired {
+		logActiveBatchLock(ctx, p.Repository(), ms.Number, batchBranch, lockRunID)
+		return &CheckCIResult{
+			Skipped:          true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, lockRunID),
+			BatchLockSkipped: true,
+		}, nil
+	}
+	defer releaseBatchLockDeferred(p, batchLock, ms.Number)
 
 	// Get CI status
 	status, err := p.Checks().GetCombinedStatus(ctx, batchBranch)

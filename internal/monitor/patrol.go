@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
@@ -14,14 +15,18 @@ import (
 
 // PatrolResult holds the result of a monitor patrol.
 type PatrolResult struct {
-	StaleIssues       int
-	FailedIssues      int
-	RedispatchedCount int
-	EscalatedCount    int
-	StuckPRs              int
-	CIFailures            int
-	StaleReadyDispatched  int
-	ConflictDetected      int
+	StaleIssues                        int
+	FailedIssues                       int
+	RedispatchedCount                  int
+	EscalatedCount                     int
+	StuckPRs                           int
+	CIFailures                         int
+	StaleReadyDispatched               int
+	ConflictDetected                   int
+	StrandedBatchesRecovered           int
+	StrandedBatchesSkippedLocked       int
+	PendingWorkerBranchesRecovered     int
+	PendingWorkerBranchesSkippedLocked int
 }
 
 const monitorCommentSignature = "**HerdOS Monitor Alert**"
@@ -43,6 +48,13 @@ func hasMonitorComment(ctx context.Context, p platform.Platform, number int) boo
 
 // Patrol checks for stale, failed, or stuck work and takes corrective action.
 func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*PatrolResult, error) {
+	return PatrolWithGit(ctx, p, nil, cfg)
+}
+
+// PatrolWithGit checks for stale, failed, stuck, or stranded work and takes
+// corrective action. The git handle is required only for stranded batch PR
+// recovery; callers may pass nil to disable that recovery path.
+func PatrolWithGit(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config) (*PatrolResult, error) {
 	result := &PatrolResult{}
 
 	// List in-progress and failed issues
@@ -149,10 +161,70 @@ func Patrol(ctx context.Context, p platform.Platform, cfg *config.Config) (*Patr
 		result.FailedIssues = len(failed)
 	}
 
+	if g != nil {
+		stranded, err := integrator.FindStrandedCompletedBatches(ctx, p)
+		if err != nil {
+			return nil, fmt.Errorf("finding stranded completed batches: %w", err)
+		}
+		for _, batch := range stranded {
+			advanceResult, recovered, err := integrator.RecoverStrandedCompletedBatch(ctx, p, g, cfg, batch.MilestoneNumber)
+			if err != nil {
+				fmt.Printf("Warning: failed to recover stranded batch #%d (%s): %v\n", batch.MilestoneNumber, batch.BatchBranch, err)
+				continue
+			}
+			if advanceResult != nil && advanceResult.BatchLockSkipped {
+				fmt.Printf("Stranded batch recovery skipped; active batch lock for batch #%d (%s): %s\n", batch.MilestoneNumber, batch.BatchBranch, advanceResult.SkipReason)
+				result.StrandedBatchesSkippedLocked++
+				continue
+			}
+			if recovered {
+				fmt.Printf("Recovered stranded batch #%d (%s) by opening batch PR #%d\n", batch.MilestoneNumber, batch.BatchBranch, advanceResult.BatchPRNumber)
+				result.StrandedBatchesRecovered++
+			}
+		}
+	}
+
 	// Stuck PR detection
 	openPRs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "open"})
 	if err != nil {
 		return nil, fmt.Errorf("listing open PRs: %w", err)
+	}
+	if g != nil {
+		for _, pr := range openPRs {
+			recoveryResult, err := integrator.RecoverPendingWorkerCompletionsForBatchPR(ctx, p, g, cfg, pr)
+			if err != nil {
+				fmt.Printf("Warning: failed to recover pending worker completions for PR #%d: %v\n", pr.Number, err)
+				continue
+			}
+			if recoveryResult == nil {
+				continue
+			}
+			if recoveryResult.BatchLockSkipped {
+				result.PendingWorkerBranchesSkippedLocked++
+				continue
+			}
+			result.PendingWorkerBranchesRecovered += recoveryResult.Recovered
+			if recoveryResult.Recovered > 0 {
+				batchNumber, parseErr := integrator.ParseBatchBranchMilestone(pr.Head)
+				if parseErr != nil {
+					fmt.Printf("Warning: failed to parse batch branch %s for PR #%d after pending worker recovery: %v\n", pr.Head, pr.Number, parseErr)
+				} else {
+					checkResult, err := integrator.CheckCI(ctx, p, cfg, integrator.CheckCIParams{BatchNumber: batchNumber})
+					if err != nil {
+						fmt.Printf("Warning: failed to resume CI check for PR #%d after pending worker recovery: %v\n", pr.Number, err)
+						continue
+					}
+					if checkResult != nil && checkResult.BatchLockSkipped {
+						fmt.Printf("Pending worker recovery CI resume skipped; active batch lock for PR #%d (%s): %s\n", pr.Number, pr.Head, checkResult.SkipReason)
+						result.PendingWorkerBranchesSkippedLocked++
+						continue
+					}
+				}
+				if err := p.PullRequests().AddComment(ctx, pr.Number, "/herd review"); err != nil {
+					fmt.Printf("Warning: failed to enqueue review for PR #%d after pending worker recovery: %v\n", pr.Number, err)
+				}
+			}
+		}
 	}
 	for _, pr := range openPRs {
 		if !strings.HasPrefix(pr.Title, "[herd]") {

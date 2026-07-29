@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/issues"
@@ -60,6 +62,28 @@ func handleIntegrate(hctx *HandlerContext, cmd Command) Result {
 	}
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+	lock, acquired, err := integrator.AcquireBatchLock(ctx, hctx.Platform.Repository(), batchNum, batchBranch, 0, time.Now().UTC())
+	if err != nil {
+		return Result{Error: fmt.Errorf("acquiring batch lock for batch #%d: %w", batchNum, err)}
+	}
+	if !acquired {
+		return Result{Message: commandBatchLockSkipReason(ctx, hctx.Platform.Repository(), batchNum, batchBranch)}
+	}
+	lockReleased := false
+	releaseLock := func() {
+		if lockReleased {
+			return
+		}
+		lockReleased = true
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if releaseErr := integrator.ReleaseBatchLock(releaseCtx, hctx.Platform.Repository(), lock); releaseErr != nil {
+			fmt.Printf("Warning: failed to release batch lock for batch #%d: %s\n", batchNum, releaseErr)
+		}
+	}
+	defer func() {
+		releaseLock()
+	}()
 
 	// Consolidate unconsolidated worker branches.
 	consolidated := 0
@@ -139,6 +163,7 @@ func handleIntegrate(hctx *HandlerContext, cmd Command) Result {
 			consolidated++
 		}
 	}
+	releaseLock()
 
 	// Run integrator steps.
 	var lines []string
@@ -226,4 +251,21 @@ func handleIntegrate(hctx *HandlerContext, cmd Command) Result {
 	}
 
 	return Result{Message: strings.Join(lines, "\n")}
+}
+
+func commandBatchLockSkipReason(ctx context.Context, repoSvc platform.RepositoryService, batchNumber int, batchBranch string) string {
+	state, ok, err := integrator.DescribeBatchLock(ctx, repoSvc, batchNumber)
+	if err == nil && ok {
+		return fmt.Sprintf("Integrator batch lock active; skipping batch=%d branch=%s run_id=0 owner=%s acquired_at=%s expires_at=%s lock_branch=%s",
+			batchNumber, batchBranch, state.Owner, commandBatchLockTime(state.AcquiredAt), commandBatchLockTime(state.ExpiresAt), integrator.BatchLockBranch(batchNumber))
+	}
+	return fmt.Sprintf("Integrator batch lock active; skipping batch=%d branch=%s run_id=0 lock_branch=%s",
+		batchNumber, batchBranch, integrator.BatchLockBranch(batchNumber))
+}
+
+func commandBatchLockTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
