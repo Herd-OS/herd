@@ -437,9 +437,16 @@ func runGit(t *testing.T, dir string, args ...string) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
+	require.NoError(t, err, string(out))
+}
+
+func gitOutputOK(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return strings.TrimSpace(string(out))
 }
 
 func TestIsDirty_CleanRepo(t *testing.T) {
@@ -483,6 +490,108 @@ func TestIsDirty_ModifiedTrackedFile(t *testing.T) {
 	dirty, err := g.IsDirty()
 	require.NoError(t, err)
 	assert.True(t, dirty)
+}
+
+func TestScrubTransientArtifacts_Untracked(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "review-fixes-123.md"), []byte("fixes"), 0644))
+
+	result, err := g.ScrubTransientArtifacts()
+
+	require.NoError(t, err)
+	assert.True(t, result.Changed())
+	assert.Equal(t, []string{".herd/review-fixes-123.md"}, result.Removed)
+	_, statErr := os.Stat(filepath.Join(dir, ".herd", "review-fixes-123.md"))
+	assert.True(t, os.IsNotExist(statErr))
+	assert.Empty(t, gitOutputOK(t, dir, "status", "--porcelain"))
+}
+
+func TestScrubTransientArtifacts_Staged(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "review-fixes-123.md"), []byte("fixes"), 0644))
+	runGit(t, dir, "add", ".herd/review-fixes-123.md")
+
+	result, err := g.ScrubTransientArtifacts()
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{".herd/review-fixes-123.md"}, result.Removed)
+	assert.Empty(t, gitOutputOK(t, dir, "diff", "--cached", "--name-only"))
+	_, statErr := os.Stat(filepath.Join(dir, ".herd", "review-fixes-123.md"))
+	assert.True(t, os.IsNotExist(statErr))
+
+	cmd := exec.Command("git", "commit", "-m", "should not commit transient artifact")
+	cmd.Dir = dir
+	out, commitErr := cmd.CombinedOutput()
+	require.Error(t, commitErr, string(out))
+}
+
+func TestScrubTransientArtifacts_Committed(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "review-fixes-123.md"), []byte("fixes"), 0644))
+	runGit(t, dir, "add", ".herd/review-fixes-123.md")
+	runGit(t, dir, "commit", "-m", "add transient artifact")
+
+	result, err := g.ScrubTransientArtifacts()
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{".herd/review-fixes-123.md"}, result.Removed)
+	_, statErr := os.Stat(filepath.Join(dir, ".herd", "review-fixes-123.md"))
+	assert.True(t, os.IsNotExist(statErr))
+	assert.Equal(t, "D\t.herd/review-fixes-123.md", gitOutputOK(t, dir, "diff", "--cached", "--name-status"))
+}
+
+func TestScrubTransientArtifacts_PreservesWorkerFile(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".herd"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".herd", "worker.md"), []byte("worker"), 0644))
+
+	result, err := g.ScrubTransientArtifacts()
+
+	require.NoError(t, err)
+	assert.False(t, result.Changed())
+	assert.Empty(t, result.Removed)
+	assert.FileExists(t, filepath.Join(dir, ".herd", "worker.md"))
+
+	runGit(t, dir, "add", ".herd/worker.md")
+	runGit(t, dir, "commit", "-m", "add worker file")
+	assert.Equal(t, ".herd/worker.md", gitOutputOK(t, dir, "show", "--name-only", "--format=", "HEAD"))
+}
+
+func TestScrubTransientArtifacts_PreservesNonMatchingHerdPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "without suffix", path: ".herd/review-fixes.md"},
+		{name: "wrong extension", path: ".herd/review-fixes-123.txt"},
+		{name: "progress file", path: ".herd/progress/123.md"},
+		{name: "nested review fixes", path: ".herd/tmp/review-fixes-123.md"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := initTestRepo(t)
+			g := New(dir)
+			fullPath := filepath.Join(dir, filepath.FromSlash(tt.path))
+			require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0755))
+			require.NoError(t, os.WriteFile(fullPath, []byte("keep"), 0644))
+
+			result, err := g.ScrubTransientArtifacts()
+
+			require.NoError(t, err)
+			assert.False(t, result.Changed())
+			assert.Empty(t, result.Removed)
+			assert.FileExists(t, fullPath)
+			assert.Equal(t, "?? "+tt.path, gitOutputOK(t, dir, "status", "--porcelain", "--", tt.path))
+		})
+	}
 }
 
 func TestBehindCount_UpToDate(t *testing.T) {
