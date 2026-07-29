@@ -103,6 +103,7 @@ var (
 	reviewRootCauseSplitRE = regexp.MustCompile(`(?i)\b(Suggested fix|Tests|Constraints)\s*:`)
 	reviewBareFractionRE   = regexp.MustCompile(`^[0-9]+/[0-9]+$`)
 	reviewChunkLabelRE     = regexp.MustCompile(`(?i)\bchunks?(?:\s+reviewed)?\s*:?\s*[0-9]+/[0-9]+\b`)
+	reviewBareChunkRE      = regexp.MustCompile(`(?i)^chunk\s+[0-9]+$`)
 )
 
 type reviewSynthesisDecision string
@@ -332,6 +333,11 @@ func analyzeReviewConvergence(cycles []reviewHistoryCycle, minCompletedCycles in
 	}
 
 	if repeatedSubsystem || repeatedRootCause {
+		var eligible bool
+		analysis, eligible = evaluateReviewNonConvergenceEligibility(analysis)
+		if !eligible {
+			return analysis
+		}
 		analysis.Decision = reviewDecisionEscalateToArchitectureFix
 		analysis.Confidence = 0.86
 		if repeatedRootCause && findingTrendTemporarilyDecreased(analysis.TrendCounts) {
@@ -343,6 +349,118 @@ func analyzeReviewConvergence(cycles []reviewHistoryCycle, minCompletedCycles in
 	}
 	analysis.Rationale = "no repeated subsystem or root-cause cluster met deterministic thresholds"
 	return analysis
+}
+
+func evaluateReviewNonConvergenceEligibility(analysis reviewConvergenceAnalysis) (reviewConvergenceAnalysis, bool) {
+	analysis.Decision = reviewDecisionContinueFixLoop
+
+	packages := concreteReviewPackageClusters(analysis.Cluster.PackageClusters)
+	if len(packages) == 0 {
+		analysis.Cluster.PackageClusters = nil
+		analysis.Rationale = "non-convergence escalation skipped: no concrete dominant package clusters"
+		return analysis, false
+	}
+	analysis.Cluster.PackageClusters = packages
+
+	if !representativeFindingsShareConcretePackageCluster(analysis.Cycles, packages) {
+		latestFindings := reviewActionableFindingDescriptions(analysis.Cycles[len(analysis.Cycles)-1])
+		if len(latestFindings) == 1 {
+			analysis.Rationale = "non-convergence escalation skipped: single finding without recurring concrete cluster"
+		} else {
+			analysis.Rationale = "non-convergence escalation skipped: latest findings do not share a recurring concrete cluster"
+		}
+		return analysis, false
+	}
+
+	terms := concreteReviewRootCauseTerms(analysis.Cluster.RootCauseTerms)
+	if len(terms) == 0 {
+		analysis.Cluster.RootCauseTerms = nil
+		analysis.Rationale = "non-convergence escalation skipped: generic-only root-cause terms"
+		return analysis, false
+	}
+	analysis.Cluster.RootCauseTerms = terms
+	analysis.Cluster.Fingerprint = reviewNonConvergenceFingerprint(analysis.Cluster)
+	analysis.Cluster.Summary = buildReviewClusterSummary(analysis.Cluster)
+	return analysis, true
+}
+
+func concreteReviewPackageClusters(values []string) []string {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		cluster := normalizeReviewPackagePath(value)
+		if cluster == "" {
+			cluster = normalizeReviewClusterTitleTerm(value)
+		}
+		if isConcreteReviewPackageCluster(cluster) {
+			seen[cluster] = struct{}{}
+		}
+	}
+	return sortedStringSet(seen)
+}
+
+func concreteReviewRootCauseTerms(values []string) []string {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		term := normalizeReviewRootCauseTerm(value)
+		if term == "" || isGenericReviewRootCauseTerm(term) {
+			continue
+		}
+		seen[term] = struct{}{}
+	}
+	return sortedStringSet(seen)
+}
+
+func representativeFindingsShareConcretePackageCluster(cycles []reviewHistoryCycle, clusters []string) bool {
+	if len(cycles) == 0 || len(clusters) == 0 {
+		return false
+	}
+	clusterSet := map[string]struct{}{}
+	for _, cluster := range concreteReviewPackageClusters(clusters) {
+		clusterSet[cluster] = struct{}{}
+	}
+	if len(clusterSet) == 0 {
+		return false
+	}
+	latestFindings := reviewActionableFindingDescriptions(cycles[len(cycles)-1])
+	for _, finding := range latestFindings {
+		cluster := packageClusterFromFinding(finding)
+		if !isConcreteReviewPackageCluster(cluster) {
+			continue
+		}
+		if _, ok := clusterSet[cluster]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewActionableFindingDescriptions(cycle reviewHistoryCycle) []string {
+	var out []string
+	for _, finding := range allReviewFindingDescriptions(cycle) {
+		finding = strings.TrimSpace(finding)
+		if finding == "" || isReviewFindingMetadataNoise(finding) {
+			continue
+		}
+		out = append(out, finding)
+	}
+	return out
+}
+
+func isGenericReviewRootCauseTerm(term string) bool {
+	switch normalizeReviewRootCauseTerm(term) {
+	case "durable", "idempotency", "mutation", "workflow", "retry", "repair", "side effect", "github-visible", "started", "unknown", "dispatch":
+		return true
+	default:
+		return false
+	}
+}
+
+func isConcreteReviewPackageCluster(value string) bool {
+	value = normalizeReviewClusterTitleTerm(value)
+	if value == "" || strings.EqualFold(value, "none") || isReviewClusterNoise(value) {
+		return false
+	}
+	return true
 }
 
 func findingTrendTemporarilyDecreased(counts []int) bool {
@@ -389,14 +507,15 @@ func rootCauseTermsFromFinding(description string) []string {
 	normalized := strings.ToLower(beforeBoilerplate)
 	normalized = strings.ReplaceAll(normalized, "_", "-")
 
-	var terms []string
+	seen := map[string]struct{}{}
 	for _, term := range reviewRootCauseVocabulary {
 		if strings.Contains(normalized, term) {
-			terms = append(terms, term)
+			if normalizedTerm := normalizeReviewRootCauseTerm(term); normalizedTerm != "" {
+				seen[normalizedTerm] = struct{}{}
+			}
 		}
 	}
-	sort.Strings(terms)
-	return terms
+	return sortedStringSet(seen)
 }
 
 func buildReviewConvergenceCluster(cycles []reviewHistoryCycle) reviewConvergenceCluster {
@@ -444,6 +563,8 @@ func buildStrategyFixIssueTitle(nextCycle int, cluster reviewConvergenceCluster)
 }
 
 func buildStrategyFixIssueBody(ms *platform.Milestone, pr *platform.PullRequest, nextCycle int, analysis reviewConvergenceAnalysis) string {
+	analysis.Cluster.PackageClusters = concreteReviewPackageClusters(analysis.Cluster.PackageClusters)
+	analysis.Cluster.RootCauseTerms = concreteReviewRootCauseTerms(analysis.Cluster.RootCauseTerms)
 	batchNumber := 0
 	if ms != nil {
 		batchNumber = ms.Number
@@ -673,6 +794,8 @@ func buildSynthesizedReviewNonConvergencePRComment(result *agent.ReviewSynthesis
 }
 
 func buildReviewNonConvergencePRComment(analysis reviewConvergenceAnalysis, strategyIssueNumber int) string {
+	analysis.Cluster.PackageClusters = concreteReviewPackageClusters(analysis.Cluster.PackageClusters)
+	analysis.Cluster.RootCauseTerms = concreteReviewRootCauseTerms(analysis.Cluster.RootCauseTerms)
 	fixIssues := append([]int{}, analysis.CompletedFixIssues...)
 	fixIssues = append(fixIssues, analysis.InProgressFixIssues...)
 	sort.Ints(fixIssues)
@@ -682,7 +805,9 @@ func buildReviewNonConvergencePRComment(analysis reviewConvergenceAnalysis, stra
 	fmt.Fprintf(&b, "- Cycles analyzed: %s\n", formatReviewCycleNumbers(analysis.Cycles))
 	fmt.Fprintf(&b, "- Finding count trend: %s\n", formatIntList(analysis.TrendCounts))
 	fmt.Fprintf(&b, "- Fix issues considered: %s\n", formatIssueNumberList(fixIssues))
-	fmt.Fprintf(&b, "- Dominant package clusters: %s\n", formatStringList(cleanReviewClusterValues(analysis.Cluster.PackageClusters)))
+	if packages := concreteReviewPackageClusters(analysis.Cluster.PackageClusters); len(packages) > 0 {
+		fmt.Fprintf(&b, "- Dominant package clusters: %s\n", formatStringList(packages))
+	}
 	fmt.Fprintf(&b, "- Dominant root-cause terms: %s\n", formatStringList(cleanReviewClusterValues(analysis.Cluster.RootCauseTerms)))
 	fmt.Fprintf(&b, "- Escalation reason: %s\n", fallbackString(analysis.Rationale, "repeated review/fix cycles share the same cluster fingerprint"))
 	fmt.Fprintf(&b, "- Strategy fix issue: #%d\n", strategyIssueNumber)
@@ -1430,12 +1555,16 @@ func sortedStringSet(seen map[string]struct{}) []string {
 }
 
 func buildStrategyFixIssueContext(analysis reviewConvergenceAnalysis) string {
+	analysis.Cluster.PackageClusters = concreteReviewPackageClusters(analysis.Cluster.PackageClusters)
+	analysis.Cluster.RootCauseTerms = concreteReviewRootCauseTerms(analysis.Cluster.RootCauseTerms)
 	var b strings.Builder
 	fmt.Fprintf(&b, "- Cycles analyzed: %s\n", formatReviewCycleNumbers(analysis.Cycles))
 	fmt.Fprintf(&b, "- Finding count trend: %s\n", formatIntList(analysis.TrendCounts))
 	fmt.Fprintf(&b, "- Completed fix issues: %s\n", formatIssueNumberList(analysis.CompletedFixIssues))
 	fmt.Fprintf(&b, "- In-progress fix issues: %s\n", formatIssueNumberList(analysis.InProgressFixIssues))
-	fmt.Fprintf(&b, "- Dominant package clusters: %s\n", formatStringList(cleanReviewClusterValues(analysis.Cluster.PackageClusters)))
+	if packages := concreteReviewPackageClusters(analysis.Cluster.PackageClusters); len(packages) > 0 {
+		fmt.Fprintf(&b, "- Dominant package clusters: %s\n", formatStringList(packages))
+	}
 	fmt.Fprintf(&b, "- Dominant root-cause terms: %s\n", formatStringList(cleanReviewClusterValues(analysis.Cluster.RootCauseTerms)))
 	fmt.Fprintf(&b, "- Rationale: %s\n", fallbackString(analysis.Rationale, "repeated review/fix cycles share the same cluster fingerprint"))
 	return strings.TrimRight(b.String(), "\n")
@@ -1464,10 +1593,14 @@ func formatCombinedPriorReviewFixAttempts(analysis reviewConvergenceAnalysis) st
 }
 
 func formatRepeatedReviewPattern(cluster reviewConvergenceCluster) string {
-	packages := cleanReviewClusterValues(cluster.PackageClusters)
-	terms := cleanReviewClusterValues(cluster.RootCauseTerms)
+	packages := concreteReviewPackageClusters(cluster.PackageClusters)
+	terms := concreteReviewRootCauseTerms(cluster.RootCauseTerms)
 	var paragraphs []string
-	paragraphs = append(paragraphs, fmt.Sprintf("Repeated findings cluster around package/subsystem scope %s with root-cause terms %s. Use these as signals for one shared architecture/design failure, not as a queue of independent review cleanups.", formatStringList(packages), formatStringList(terms)))
+	if len(packages) > 0 {
+		paragraphs = append(paragraphs, fmt.Sprintf("Repeated findings cluster around package/subsystem scope %s with root-cause terms %s. Use these as signals for one shared architecture/design failure, not as a queue of independent review cleanups.", formatStringList(packages), formatStringList(terms)))
+	} else {
+		paragraphs = append(paragraphs, fmt.Sprintf("Repeated findings lack a concrete package/subsystem scope and have root-cause terms %s. Use these only as diagnostic context until a concrete recurring scope is available.", formatStringList(terms)))
+	}
 	if reviewTermsNeedDurableMutationGuidance(terms) {
 		paragraphs = append(paragraphs, "Define durable GitHub-visible mutation boundaries with explicit pre-call, call-started, post-call-unknown, completed, failed-pre-call, and repair-required states. Retry and redelivery paths must consult that durable state before creating comments, issues, or workflow dispatches so repeated attempts converge without duplicates.")
 	}
@@ -1578,8 +1711,8 @@ func formatPriorReviewFixAttempts(cycles []reviewHistoryCycle) string {
 }
 
 func reviewStrategyTitleSuffix(cluster reviewConvergenceCluster) string {
-	terms := cleanReviewClusterValues(cluster.RootCauseTerms)
-	packages := cleanReviewClusterValues(cluster.PackageClusters)
+	terms := concreteReviewRootCauseTerms(cluster.RootCauseTerms)
+	packages := concreteReviewPackageClusters(cluster.PackageClusters)
 	if title := reviewRootCauseTitle(terms); title != "" {
 		return title
 	}
@@ -1662,6 +1795,14 @@ func normalizeReviewClusterTitleTerm(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }
 
+func normalizeReviewRootCauseTerm(value string) string {
+	value = normalizeReviewClusterTitleTerm(strings.ToLower(strings.ReplaceAll(value, "_", "-")))
+	if value == "side-effect" {
+		return "side effect"
+	}
+	return value
+}
+
 func isReviewClusterNoise(value string) bool {
 	value = strings.TrimSpace(strings.Trim(value, "`.,);:"))
 	value = strings.TrimPrefix(value, "- ")
@@ -1670,8 +1811,18 @@ func isReviewClusterNoise(value string) bool {
 		return true
 	}
 	lower := strings.ToLower(value)
-	if reviewBareFractionRE.MatchString(value) || reviewChunkLabelRE.MatchString(value) {
+	if reviewBareFractionRE.MatchString(value) || reviewChunkLabelRE.MatchString(value) || reviewBareChunkRE.MatchString(value) {
 		return true
+	}
+	exactNoiseLabels := []string{
+		"none",
+		"coverage",
+		"diff coverage",
+	}
+	for _, label := range exactNoiseLabels {
+		if lower == label {
+			return true
+		}
 	}
 	noiseLabels := []string{
 		"diff coverage",

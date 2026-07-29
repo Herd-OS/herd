@@ -7217,7 +7217,7 @@ func TestReview_NonConvergenceEscalatesToStrategyFixIssue(t *testing.T) {
 	assert.Equal(t, 39, result.FixCycle)
 	assert.Equal(t, 1, result.FindingsCount)
 	require.Len(t, fx.createdIssues, 1)
-	assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
+	assert.Equal(t, "Review strategy fix (cycle 39): control-plane post-call pre-call", fx.createdIssues[0].title)
 	assert.NotContains(t, fx.createdIssues[0].title, "Review fixes")
 	assert.Contains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
 	assert.Contains(t, fx.createdIssues[0].labels, issues.TypeFix)
@@ -7242,8 +7242,8 @@ func TestReview_NonConvergenceEscalatesToStrategyFixIssue(t *testing.T) {
 	assert.Contains(t, comment, "Finding count trend: 14, 20, 21, 24, 28, 28")
 	assert.Contains(t, comment, "Fix issues considered: #951, #952, #953, #954, #955")
 	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/dispatch")
-	assert.Contains(t, comment, "Dominant root-cause terms:")
-	assert.Contains(t, comment, "idempotency")
+	assert.Contains(t, comment, "Dominant root-cause terms: post-call, pre-call")
+	assert.NotContains(t, comment, "idempotency")
 	assert.Contains(t, comment, "Escalation reason:")
 	assert.Contains(t, comment, "Strategy fix issue: #9601")
 	assert.NotContains(t, strings.Join(fx.prSvc.comments, "\n"), "/herd fix")
@@ -7287,7 +7287,7 @@ func TestReview_NonConvergenceEscalatesWithPersistentRootCauseDespiteTemporaryDe
 	assert.Equal(t, []int{9601}, result.FixIssues)
 	assert.Equal(t, 39, result.FixCycle)
 	require.Len(t, fx.createdIssues, 1)
-	assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
+	assert.Equal(t, "Review strategy fix (cycle 39): control-plane post-call pre-call", fx.createdIssues[0].title)
 	assert.NotContains(t, fx.createdIssues[0].title, "1/9")
 	assert.NotContains(t, fx.createdIssues[0].title, "Chunk")
 	body := fx.createdIssues[0].body
@@ -7306,8 +7306,8 @@ func TestReview_NonConvergenceEscalatesWithPersistentRootCauseDespiteTemporaryDe
 	assert.Contains(t, comment, "Finding count trend: 13, 1, 1, 9, 7, 15")
 	assert.Contains(t, comment, "temporary finding-count decrease")
 	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/dispatch")
-	assert.Contains(t, comment, "durable")
-	assert.Contains(t, comment, "idempotency")
+	assert.Contains(t, comment, "Dominant root-cause terms: post-call, pre-call")
+	assert.NotContains(t, comment, "idempotency")
 	assert.NotContains(t, comment, "Chunk")
 	assert.NotContains(t, comment, "1/9")
 }
@@ -7324,7 +7324,7 @@ func TestReview_NonConvergenceDiffCoverageDoesNotPolluteClusters(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Len(t, fx.createdIssues, 1)
-	assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
+	assert.Equal(t, "Review strategy fix (cycle 39): control-plane post-call pre-call", fx.createdIssues[0].title)
 	body := fx.createdIssues[0].body
 	comment := requireCommentContaining(t, fx.prSvc.comments, "Herd review is not converging")
 	for _, noisy := range []string{"1/9", "Chunk 1/9", "Chunk 2/9", "Diff Coverage", "Chunks reviewed", "Files reviewed", "Source: local-git"} {
@@ -7334,9 +7334,8 @@ func TestReview_NonConvergenceDiffCoverageDoesNotPolluteClusters(t *testing.T) {
 	}
 	assert.Contains(t, body, "internal/controlplane/dispatch")
 	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/dispatch")
-	assert.Contains(t, comment, "Dominant root-cause terms:")
-	assert.Contains(t, comment, "durable")
-	assert.Contains(t, comment, "idempotency")
+	assert.Contains(t, comment, "Dominant root-cause terms: post-call, pre-call")
+	assert.NotContains(t, comment, "idempotency")
 }
 
 func TestReview_NonConvergenceSynthesisDisabledPreservesDeterministicBehavior(t *testing.T) {
@@ -7512,7 +7511,7 @@ func TestReview_NonConvergenceSynthesisFallbacks(t *testing.T) {
 			require.NotNil(t, result)
 			assert.Equal(t, 1, fx.ag.synthesisCalls)
 			require.Len(t, fx.createdIssues, 1)
-			assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
+			assert.Equal(t, "Review strategy fix (cycle 39): control-plane post-call pre-call", fx.createdIssues[0].title)
 			assert.Contains(t, fx.createdIssues[0].body, "Solve the shared architecture/design problem")
 			assert.NotContains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
 			require.Len(t, fx.wf.dispatched, 1)
@@ -7838,7 +7837,7 @@ func TestReview_NonConvergenceCompletedPriorStrategyIssueAllowsNewIssue(t *testi
 	assert.Equal(t, []int{9601}, result.FixIssues)
 	assert.Equal(t, 39, result.FixCycle)
 	require.Len(t, fx.createdIssues, 1)
-	assert.Equal(t, "Review strategy fix (cycle 39): durable mutation boundary gaps", fx.createdIssues[0].title)
+	assert.Equal(t, "Review strategy fix (cycle 39): control-plane post-call pre-call", fx.createdIssues[0].title)
 	assert.Contains(t, fx.createdIssues[0].body, "Previous strategy fix #9700 was completed but the same root-cause cluster reappeared, so that fix was incomplete.")
 	assert.Contains(t, fx.createdIssues[0].body, "head prior-head")
 	require.Len(t, fx.wf.dispatched, 1)
@@ -8182,7 +8181,7 @@ func (fx *reviewNonConvergenceIntegrationFixture) setHistoryWithHeadSHAs(t *test
 	findings := make([]string, len(counts))
 	for i := range counts {
 		cycle := 34 + i
-		findings[i] = fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go: durable mutation lacks idempotency before started workflow retry", cycle)
+		findings[i] = fmt.Sprintf("internal/controlplane/dispatch/cycle_%d.go: durable mutation lacks idempotency across pre-call and post-call boundaries", cycle)
 	}
 	fx.setHistoryWithFindingsAndHeadSHAs(t, counts, findings, headSHAs)
 }
@@ -8229,7 +8228,7 @@ func reviewNonConvergenceCurrentFindings(count int) []agent.ReviewFinding {
 		}
 		findings = append(findings, agent.ReviewFinding{
 			Severity:    severity,
-			Description: fmt.Sprintf("internal/controlplane/dispatch/current_%02d.go: durable mutation lacks idempotency before started workflow retry", i),
+			Description: fmt.Sprintf("internal/controlplane/dispatch/current_%02d.go: durable mutation lacks idempotency across pre-call and post-call boundaries", i),
 		})
 	}
 	return findings

@@ -259,11 +259,61 @@ func TestBuildReviewConvergenceClusterAndFingerprint(t *testing.T) {
 	assert.Contains(t, cluster.Summary, "packages:")
 }
 
+func TestConcreteReviewPackageClustersFiltersNoise(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{name: "none", in: "none"},
+		{name: "empty", in: ""},
+		{name: "fraction one", in: "1/9"},
+		{name: "fraction two", in: "2/9"},
+		{name: "bare chunk", in: "chunk 1"},
+		{name: "chunk fraction", in: "chunk 1/10"},
+		{name: "chunks reviewed fraction", in: "chunks reviewed: 1/10"},
+		{name: "coverage", in: "coverage"},
+		{name: "diff coverage", in: "diff coverage"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.False(t, isConcreteReviewPackageCluster(tt.in))
+			assert.Empty(t, concreteReviewPackageClusters([]string{tt.in}))
+		})
+	}
+
+	got := concreteReviewPackageClusters([]string{"none", "", "1/9", "2/9", "chunk 1", "chunk 1/10", "coverage", "diff coverage", "internal/controlplane/review"})
+	assert.Equal(t, []string{"internal/controlplane/review"}, got)
+	for _, noisy := range []string{"none", "", "1/9", "2/9", "chunk 1", "chunk 1/10", "coverage", "diff coverage"} {
+		assert.NotContains(t, got, noisy)
+	}
+}
+
+func TestConcreteReviewRootCauseTermsFiltersGenericTerms(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{name: "generic terms", in: []string{"durable", "idempotency", "mutation", "workflow", "retry", "repair", "side effect", "github-visible", "started", "unknown", "dispatch"}},
+		{name: "side effect hyphen normalization", in: []string{"side-effect"}},
+		{name: "specific terms survive", in: []string{"pre-call", "post-call", "durable"}, want: []string{"post-call", "pre-call"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if len(tt.want) == 0 {
+				assert.Empty(t, concreteReviewRootCauseTerms(tt.in))
+				return
+			}
+			assert.Equal(t, tt.want, concreteReviewRootCauseTerms(tt.in))
+		})
+	}
+}
+
 func TestAnalyzeReviewConvergence_EscalatesForIncreasingPR849StyleTrend(t *testing.T) {
 	counts := []int{14, 20, 21, 24, 28}
 	var cycles []reviewHistoryCycle
 	for i, count := range counts {
-		cycle := reviewHistoryCycleWithFinding(i+1, count, fmt.Sprintf("internal/controlplane/dispatch/file%d.go: durable mutation lacks idempotency before started workflow retry", i))
+		cycle := reviewHistoryCycleWithFinding(i+1, count, fmt.Sprintf("internal/controlplane/dispatch/file%d.go: durable mutation lacks idempotency before pre-call workflow retry", i))
 		cycle.FixIssues = []reviewHistoryFixIssue{{Number: 950 + i, StatusLabel: issues.StatusDone, WorkerReport: true, ValidationStatus: "success"}}
 		cycles = append(cycles, cycle)
 	}
@@ -275,6 +325,8 @@ func TestAnalyzeReviewConvergence_EscalatesForIncreasingPR849StyleTrend(t *testi
 	assert.Equal(t, 28, analysis.LatestFindingCount)
 	assert.Equal(t, []int{950, 951, 952, 953, 954}, analysis.CompletedFixIssues)
 	assert.Contains(t, analysis.Cluster.PackageClusters, "internal/controlplane/dispatch")
+	assert.Contains(t, analysis.Cluster.RootCauseTerms, "pre-call")
+	assert.NotContains(t, analysis.Cluster.RootCauseTerms, "durable")
 	assert.Contains(t, analysis.Rationale, "increasing or flat")
 }
 
@@ -307,11 +359,76 @@ func TestAnalyzeReviewConvergence_EscalatesForPersistentRootCauseDespiteTemporar
 	assert.Equal(t, counts, analysis.TrendCounts)
 	assert.Equal(t, 15, analysis.LatestFindingCount)
 	assert.Equal(t, 13, analysis.EarliestFindingCount)
-	assert.Contains(t, analysis.Cluster.RootCauseTerms, "idempotency")
-	assert.Contains(t, analysis.Cluster.RootCauseTerms, "durable")
-	assert.Contains(t, analysis.Cluster.RootCauseTerms, "repair")
+	assert.Contains(t, analysis.Cluster.RootCauseTerms, "pre-call")
+	assert.Contains(t, analysis.Cluster.RootCauseTerms, "post-call")
+	assert.NotContains(t, analysis.Cluster.RootCauseTerms, "idempotency")
+	assert.NotContains(t, analysis.Cluster.RootCauseTerms, "durable")
+	assert.NotContains(t, analysis.Cluster.RootCauseTerms, "repair")
 	assert.Contains(t, analysis.Rationale, "persistent root-cause cluster")
 	assert.Contains(t, analysis.Rationale, "temporary finding-count decrease")
+}
+
+func TestAnalyzeReviewConvergence_ContinuesForGenericOnlyRootCauseTermsWithoutConcretePackageCluster(t *testing.T) {
+	genericTerms := []string{"durable", "idempotency", "mutation", "workflow", "retry", "repair", "side effect", "github-visible", "started", "unknown", "dispatch"}
+	for _, term := range genericTerms {
+		t.Run(term, func(t *testing.T) {
+			cycles := make([]reviewHistoryCycle, 0, 3)
+			for i := 0; i < 3; i++ {
+				cycle := reviewHistoryCycleWithFinding(i+1, 12+i, fmt.Sprintf("review loop repeats %s evidence without concrete path", term))
+				cycle.FixIssues = []reviewHistoryFixIssue{{Number: 900 + i, StatusLabel: issues.StatusDone, WorkerReport: true, ValidationStatus: "success"}}
+				cycles = append(cycles, cycle)
+			}
+
+			analysis := analyzeReviewConvergence(cycles, 2)
+			assert.Equal(t, reviewDecisionContinueFixLoop, analysis.Decision)
+			assert.NotEqual(t, reviewDecisionEscalateToArchitectureFix, analysis.Decision)
+		})
+	}
+}
+
+func TestAnalyzeReviewConvergence_ContinuesForGenericOnlyRootCauseTermsWithConcretePackageCluster(t *testing.T) {
+	var cycles []reviewHistoryCycle
+	for i := 0; i < 3; i++ {
+		cycle := reviewHistoryCycleWithFinding(i+1, 12+i, fmt.Sprintf("internal/controlplane/review/file%d.go: durable mutation retry repair workflow dispatch remains unknown", i))
+		cycle.FixIssues = []reviewHistoryFixIssue{{Number: 910 + i, StatusLabel: issues.StatusDone, WorkerReport: true, ValidationStatus: "success"}}
+		cycles = append(cycles, cycle)
+	}
+
+	analysis := analyzeReviewConvergence(cycles, 2)
+	assert.Equal(t, reviewDecisionContinueFixLoop, analysis.Decision)
+	assert.Contains(t, analysis.Rationale, "non-convergence escalation skipped: generic-only root-cause terms")
+	assert.Equal(t, []string{"internal/controlplane/review"}, analysis.Cluster.PackageClusters)
+	assert.Empty(t, analysis.Cluster.RootCauseTerms)
+}
+
+func TestAnalyzeReviewConvergence_EscalatesForConcretePackageClusterAndSpecificTerms(t *testing.T) {
+	var cycles []reviewHistoryCycle
+	for i := 0; i < 3; i++ {
+		cycle := reviewHistoryCycleWithFinding(i+1, 12+i, fmt.Sprintf("internal/controlplane/jobs/file%d.go: pre-call and post-call ordering keeps recurring", i))
+		cycle.FixIssues = []reviewHistoryFixIssue{{Number: 920 + i, StatusLabel: issues.StatusDone, WorkerReport: true, ValidationStatus: "success"}}
+		cycles = append(cycles, cycle)
+	}
+
+	analysis := analyzeReviewConvergence(cycles, 2)
+	assert.Equal(t, reviewDecisionEscalateToArchitectureFix, analysis.Decision)
+	assert.Equal(t, []string{"internal/controlplane/jobs"}, analysis.Cluster.PackageClusters)
+	assert.Equal(t, []string{"post-call", "pre-call"}, analysis.Cluster.RootCauseTerms)
+	assert.NotEmpty(t, analysis.Cluster.Fingerprint)
+}
+
+func TestAnalyzeReviewConvergence_ContinuesForSingleLatestFindingWithoutRecurringConcreteCluster(t *testing.T) {
+	cycles := []reviewHistoryCycle{
+		reviewHistoryCycleWithFinding(1, 12, "internal/controlplane/review/a.go: pre-call ordering still recurs"),
+		reviewHistoryCycleWithFinding(2, 12, "internal/controlplane/review/b.go: pre-call ordering still recurs"),
+		reviewHistoryCycleWithFinding(3, 12, "internal/controlplane/jobs/current.go: pre-call ordering is separate"),
+	}
+	for i := range cycles {
+		cycles[i].FixIssues = []reviewHistoryFixIssue{{Number: 930 + i, StatusLabel: issues.StatusDone, WorkerReport: true, ValidationStatus: "success"}}
+	}
+
+	analysis := analyzeReviewConvergence(cycles, 2)
+	assert.Equal(t, reviewDecisionContinueFixLoop, analysis.Decision)
+	assert.Contains(t, analysis.Rationale, "non-convergence escalation skipped: single finding without recurring concrete cluster")
 }
 
 func TestAnalyzeReviewConvergence_ContinuesForDecreasingTrend(t *testing.T) {
@@ -508,22 +625,28 @@ func TestBuildStrategyFixIssueTitle(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "durable mutation title",
+			name:    "generic terms do not drive title",
 			cycle:   65,
 			cluster: reviewConvergenceCluster{PackageClusters: []string{"internal/controlplane/review"}, RootCauseTerms: []string{"durable", "mutation"}},
-			want:    "Review strategy fix (cycle 65): durable mutation boundary gaps",
+			want:    "Review strategy fix (cycle 65): control-plane",
 		},
 		{
-			name:    "hosted app package plus terms",
+			name:    "hosted app package ignores generic terms",
 			cycle:   65,
 			cluster: reviewConvergenceCluster{PackageClusters: []string{"cmd/herd-hosted-app"}, RootCauseTerms: []string{"idempotency", "repair"}},
-			want:    "Review strategy fix (cycle 65): hosted App idempotency repair",
+			want:    "Review strategy fix (cycle 65): hosted App",
 		},
 		{
-			name:    "control plane retry title",
+			name:    "control plane ignores generic retry terms",
 			cycle:   65,
 			cluster: reviewConvergenceCluster{PackageClusters: []string{"internal/controlplane/jobs"}, RootCauseTerms: []string{"retry", "workflow"}},
-			want:    "Review strategy fix (cycle 65): repeated control-plane retry failures",
+			want:    "Review strategy fix (cycle 65): control-plane",
+		},
+		{
+			name:    "specific call-boundary terms",
+			cycle:   65,
+			cluster: reviewConvergenceCluster{PackageClusters: []string{"internal/controlplane/jobs"}, RootCauseTerms: []string{"pre-call", "post-call", "retry"}},
+			want:    "Review strategy fix (cycle 65): control-plane post-call pre-call",
 		},
 		{
 			name:    "default fallback",
@@ -602,8 +725,10 @@ func TestBuildStrategyFixIssueBody(t *testing.T) {
 	assert.Contains(t, parsed.Context, "Completed fix issues: #951, #952")
 	assert.Contains(t, parsed.Context, "In-progress fix issues: #953")
 	assert.Contains(t, parsed.Context, "Dominant package clusters: internal/controlplane/commands, internal/controlplane/dispatch")
-	assert.Contains(t, parsed.Context, "Dominant root-cause terms: durable, idempotency, mutation, retry")
+	assert.Contains(t, parsed.Context, "Dominant root-cause terms: post-call, pre-call")
 	assert.Contains(t, parsed.Context, "Rationale: finding trend is increasing or flat after completed fix cycles")
+	assert.NotContains(t, parsed.Context, "Dominant package clusters: none")
+	assert.NotContains(t, parsed.Context, "package/subsystem scope none")
 
 	fingerprint, ok := parseReviewNonConvergenceFingerprint(body)
 	require.True(t, ok)
@@ -988,7 +1113,8 @@ func TestBuildReviewNonConvergencePRComment(t *testing.T) {
 	assert.Contains(t, comment, "Finding count trend: 14, 20, 20")
 	assert.Contains(t, comment, "Fix issues considered: #951, #952, #953")
 	assert.Contains(t, comment, "Dominant package clusters: internal/controlplane/commands, internal/controlplane/dispatch")
-	assert.Contains(t, comment, "Dominant root-cause terms: durable, idempotency, mutation, retry")
+	assert.Contains(t, comment, "Dominant root-cause terms: post-call, pre-call")
+	assert.NotContains(t, comment, "Dominant package clusters: none")
 	for _, noisy := range []string{"1/9", "Chunk 1/9", "Diff Coverage", "Review Aggregation", "Files reviewed", "Source: local-git"} {
 		assert.NotContains(t, comment, noisy)
 	}
@@ -1374,9 +1500,9 @@ func reviewStrategyAnalysisFixture() reviewConvergenceAnalysis {
 		EarliestFindingCount: 14,
 		Cluster: reviewConvergenceCluster{
 			PackageClusters: []string{"internal/controlplane/commands", "internal/controlplane/dispatch", "Chunk 1/9"},
-			RootCauseTerms:  []string{"durable", "idempotency", "mutation", "retry", "Diff Coverage"},
+			RootCauseTerms:  []string{"durable", "idempotency", "mutation", "post-call", "pre-call", "retry", "Diff Coverage"},
 			Fingerprint:     "fp-match",
-			Summary:         "packages: internal/controlplane/commands, internal/controlplane/dispatch; root causes: durable, idempotency, mutation, retry",
+			Summary:         "packages: internal/controlplane/commands, internal/controlplane/dispatch; root causes: post-call, pre-call",
 		},
 	}
 }
