@@ -247,14 +247,16 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 	if s.Mutations == nil {
 		return fmt.Errorf("review submission mutation store is required")
 	}
-	request, err := json.Marshal(map[string]any{
-		"repository": repo.Owner + "/" + repo.Name,
-		"pr_number":  result.PRNumber,
-		"head_sha":   result.HeadSHA,
-		"status":     result.Status,
-		"event":      event,
-		"job_id":     result.JobID,
-	})
+	submission := reviewSubmissionRequest{
+		Repository: repo.Owner + "/" + repo.Name,
+		PRNumber:   result.PRNumber,
+		HeadSHA:    result.HeadSHA,
+		Status:     result.Status,
+		Event:      event,
+		JobID:      result.JobID,
+		ReviewBody: reviewBody(result),
+	}
+	request, err := json.Marshal(submission)
 	if err != nil {
 		return fmt.Errorf("marshal review submission request: %w", err)
 	}
@@ -300,7 +302,7 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
 		}
 	}
-	response, _ := json.Marshal(map[string]any{"submitted": true, "event": event, "head_sha": result.HeadSHA})
+	response, _ := json.Marshal(map[string]any{"submitted": true, "event": submission.Event, "head_sha": submission.HeadSHA})
 	_, err = mutationguard.Run(ctx, s.Mutations, mutationguard.RunRequest{
 		Key:          key,
 		RepositoryID: repo.ID,
@@ -316,7 +318,7 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 			return response
 		},
 		Mutate: func() (string, error) {
-			if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA); err != nil {
+			if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, submission.PRNumber, submission.ReviewBody, submission.Event, submission.HeadSHA); err != nil {
 				return "", err
 			}
 			return string(response), nil
@@ -336,6 +338,16 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		return err
 	}
 	return nil
+}
+
+type reviewSubmissionRequest struct {
+	Repository string               `json:"repository"`
+	PRNumber   int                  `json:"pr_number"`
+	HeadSHA    string               `json:"head_sha"`
+	Status     string               `json:"status"`
+	Event      platform.ReviewEvent `json:"event"`
+	JobID      string               `json:"job_id"`
+	ReviewBody string               `json:"review_body"`
 }
 
 func (s ReviewService) submitReviewFailureCommentOnce(ctx context.Context, repo Repository, result ReviewCompletedResult, submissionErr error) error {
@@ -453,14 +465,39 @@ func (s ReviewService) repairStartedReviewSubmission(ctx context.Context, key st
 	if !ok {
 		return false, nil
 	}
-	found, err := lookup.FindReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, reviewBody(result), event, result.HeadSHA)
+	request := reviewSubmissionRequest{
+		Repository: repo.Owner + "/" + repo.Name,
+		PRNumber:   result.PRNumber,
+		HeadSHA:    result.HeadSHA,
+		Event:      event,
+		ReviewBody: reviewBody(result),
+	}
+	if len(attempt.Request) > 0 {
+		var persisted reviewSubmissionRequest
+		if err := json.Unmarshal(attempt.Request, &persisted); err != nil {
+			return false, fmt.Errorf("parse review submission request for repair: %w", err)
+		}
+		if persisted.PRNumber > 0 {
+			request.PRNumber = persisted.PRNumber
+		}
+		if strings.TrimSpace(persisted.HeadSHA) != "" {
+			request.HeadSHA = persisted.HeadSHA
+		}
+		if strings.TrimSpace(string(persisted.Event)) != "" {
+			request.Event = persisted.Event
+		}
+		if strings.TrimSpace(persisted.ReviewBody) != "" {
+			request.ReviewBody = persisted.ReviewBody
+		}
+	}
+	found, err := lookup.FindReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, request.PRNumber, request.ReviewBody, request.Event, request.HeadSHA)
 	if err != nil {
 		return false, fmt.Errorf("repair review submission lookup: %w", err)
 	}
 	if !found {
 		return false, nil
 	}
-	response, _ := json.Marshal(map[string]any{"submitted": true, "event": event, "head_sha": result.HeadSHA, "repaired": true})
+	response, _ := json.Marshal(map[string]any{"submitted": true, "event": request.Event, "head_sha": request.HeadSHA, "repaired": true})
 	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCompleted, response, "", s.now()); err != nil {
 		return true, fmt.Errorf("repair review submission mutation attempt: %w", err)
 	}
