@@ -1,0 +1,722 @@
+package commands
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
+	"github.com/herd-os/herd/internal/controlplane/store"
+)
+
+const (
+	StatusIgnored      = "ignored"
+	StatusQueued       = "queued"
+	StatusAcknowledged = "acknowledged"
+	StatusDispatching  = "dispatching"
+)
+
+type Store interface {
+	GetRepository(ctx context.Context, owner string, name string) (store.Repository, error)
+	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
+	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
+	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
+	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
+	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
+	UpdateCommandStatus(ctx context.Context, repoID int64, commentID int64, commandKey string, status string, metadata json.RawMessage) error
+	TryStartIdempotencyKey(ctx context.Context, key string, toStatus string, resultRef string, retryableFailedPrefix string) (store.IdempotencyStartResult, error)
+	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
+	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
+	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
+}
+
+type IdempotencyFailureStore interface {
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
+}
+
+type QueueStore interface {
+	GetRepository(ctx context.Context, owner string, name string) (store.Repository, error)
+	RecordCommand(ctx context.Context, c store.CommandRecord) (created bool, err error)
+	GetCommandRecord(ctx context.Context, repoID int64, commentID int64, commandKey string) (store.CommandRecord, error)
+}
+
+type AppGitHub interface {
+	AddIssueComment(ctx context.Context, owner, repo string, issueNumber int, body string) (commentID int64, err error)
+	ListIssueComments(ctx context.Context, owner, repo string, issueNumber int) ([]IssueCommentSummary, error)
+}
+
+type IssueCommentSummary struct {
+	ID   int64
+	Body string
+}
+
+type CommandDispatcher interface {
+	DispatchCommand(ctx context.Context, cmd DispatchCommand) error
+}
+
+type DispatchCommand struct {
+	RepositoryID   int64
+	InstallationID int64
+	Owner          string
+	Repo           string
+	IssueNumber    int
+	PRNumber       int
+	CommentID      int64
+	Actor          string
+	Command        ParsedCommand
+}
+
+type Handler struct {
+	AppLogin   string
+	Store      Store
+	GitHub     AppGitHub
+	Dispatcher CommandDispatcher
+}
+
+type IssueComment struct {
+	Action            string
+	Owner             string
+	Repo              string
+	IssueNumber       int
+	PullRequestURL    string
+	CommentID         int64
+	CommentBody       string
+	CommentAuthorType string
+	SenderLogin       string
+	AuthorAssociation string
+}
+
+type Result struct {
+	Status  string
+	Command ParsedCommand
+}
+
+func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Result, error) {
+	if h.Store == nil {
+		return Result{}, fmt.Errorf("command store is not configured")
+	}
+	if h.isBotComment(event) {
+		return Result{Status: StatusIgnored}, nil
+	}
+	if event.Action != "created" && event.Action != "edited" {
+		return Result{Status: StatusIgnored}, nil
+	}
+
+	if isLegacyHerdCommand(event.CommentBody) {
+		if !isAuthorized(event.AuthorAssociation) {
+			return Result{Status: StatusIgnored}, nil
+		}
+		if h.GitHub == nil {
+			return Result{}, fmt.Errorf("command GitHub client is not configured")
+		}
+		if _, _, _, _, err := h.recordAndAck(ctx, event, "migration", migrationResponse(h.AppLogin), store.CommandRecord{
+			CommandName: "migration",
+			Status:      StatusAcknowledged,
+		}, false); err != nil {
+			return Result{}, err
+		}
+		return Result{Status: StatusIgnored}, nil
+	}
+
+	cmd, ok, err := ParseMentionCommand(h.AppLogin, event.CommentBody)
+	if err != nil {
+		if ok && !isAuthorized(event.AuthorAssociation) {
+			return Result{Status: StatusIgnored}, nil
+		}
+		return Result{}, err
+	}
+	if !ok {
+		return Result{Status: StatusIgnored}, nil
+	}
+	if !isAuthorized(event.AuthorAssociation) {
+		return Result{Status: StatusIgnored, Command: cmd}, nil
+	}
+	if h.GitHub == nil {
+		return Result{}, fmt.Errorf("command GitHub client is not configured")
+	}
+
+	metadataBody := map[string]any{
+		"args":               cmd.Args,
+		"prompt":             cmd.Prompt,
+		"raw":                cmd.Raw,
+		"author_association": event.AuthorAssociation,
+		"action":             event.Action,
+	}
+	dispatchable := shouldDispatch(cmd.Kind)
+	if dispatchable && commandRequiresPR(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
+		dispatchable = false
+	}
+	targetIssueNumber, err := resolveCommandIssueNumber(cmd, event)
+	if err != nil {
+		return Result{}, err
+	}
+	if dispatchable {
+		if strings.TrimSpace(event.PullRequestURL) != "" {
+			metadataBody["pr_number"] = event.IssueNumber
+			if commandUsesPRAsIssueNumber(cmd.Kind) {
+				metadataBody["issue_number"] = event.IssueNumber
+			}
+		} else {
+			metadataBody["issue_number"] = event.IssueNumber
+		}
+		if cmd.Kind == CommandDispatch || cmd.Kind == CommandRetry {
+			metadataBody["issue_number"] = targetIssueNumber
+		}
+	}
+	metadata, err := json.Marshal(metadataBody)
+	if err != nil {
+		return Result{}, fmt.Errorf("marshal command metadata: %w", err)
+	}
+	record := store.CommandRecord{
+		CommandKey:  string(cmd.Kind),
+		CommandName: string(cmd.Kind),
+		Actor:       event.SenderLogin,
+		Status:      StatusAcknowledged,
+		Metadata:    metadata,
+	}
+	repo, dispatchPending, idempotencyKey, commandMetadata, err := h.recordAndAck(ctx, event, string(cmd.Kind), acknowledgement(h.AppLogin, cmd), record, dispatchable)
+	if err != nil {
+		return Result{}, err
+	}
+	prNumber := 0
+	if strings.TrimSpace(event.PullRequestURL) != "" {
+		prNumber = event.IssueNumber
+	}
+	issueNumber := targetIssueNumber
+	if prNumber > 0 && commandCreatesDurableFixIssue(cmd.Kind) {
+		issueNumber = 0
+	}
+	if dispatchPending && dispatchable {
+		if h.Dispatcher == nil {
+			return Result{}, fmt.Errorf("command dispatcher is not configured")
+		}
+		if err := h.markCommandDispatching(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
+			return Result{}, err
+		}
+		if err := h.Dispatcher.DispatchCommand(ctx, DispatchCommand{
+			RepositoryID:   repo.ID,
+			InstallationID: repo.InstallationID,
+			Owner:          event.Owner,
+			Repo:           event.Repo,
+			IssueNumber:    issueNumber,
+			PRNumber:       prNumber,
+			CommentID:      event.CommentID,
+			Actor:          event.SenderLogin,
+			Command:        cmd,
+		}); err != nil {
+			var preCallErr mutations.PreCallError
+			if errors.As(err, &preCallErr) {
+				_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, string(cmd.Kind), StatusAcknowledged, commandMetadata)
+			}
+			return Result{}, fmt.Errorf("dispatch command: %w", err)
+		}
+		if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed"); err != nil {
+			return Result{}, fmt.Errorf("complete command idempotency key: %w", err)
+		}
+		if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
+			return Result{}, err
+		}
+	}
+	return Result{Status: StatusAcknowledged, Command: cmd}, nil
+}
+
+func resolveCommandIssueNumber(cmd ParsedCommand, event IssueComment) (int, error) {
+	if cmd.Kind != CommandDispatch && cmd.Kind != CommandRetry {
+		return event.IssueNumber, nil
+	}
+	if len(cmd.Args) == 0 {
+		return event.IssueNumber, nil
+	}
+	n, err := strconv.Atoi(cmd.Args[0])
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("@herd-os %s requires a positive numeric issue number", cmd.Kind)
+	}
+	return n, nil
+}
+
+func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin string, event IssueComment) error {
+	if st == nil {
+		return fmt.Errorf("command store is not configured")
+	}
+	if isBotComment(appLogin, event) {
+		return nil
+	}
+	if event.Action != "created" && event.Action != "edited" {
+		return nil
+	}
+	if isLegacyHerdCommand(event.CommentBody) {
+		if !isAuthorized(event.AuthorAssociation) {
+			return nil
+		}
+		metadata, err := json.Marshal(map[string]any{
+			"raw":                event.CommentBody,
+			"author_association": event.AuthorAssociation,
+			"action":             event.Action,
+			"issue_number":       event.IssueNumber,
+		})
+		if err != nil {
+			return fmt.Errorf("marshal migration command metadata: %w", err)
+		}
+		return recordQueuedCommand(ctx, st, event, "migration", "migration", metadata)
+	}
+	cmd, ok, err := ParseMentionCommand(appLogin, event.CommentBody)
+	if err != nil {
+		if ok && !isAuthorized(event.AuthorAssociation) {
+			return nil
+		}
+		if ok && errors.Is(err, ErrUnknownCommand) {
+			metadata, marshalErr := json.Marshal(map[string]any{
+				"raw":                event.CommentBody,
+				"error":              err.Error(),
+				"author_association": event.AuthorAssociation,
+				"action":             event.Action,
+			})
+			if marshalErr != nil {
+				return fmt.Errorf("marshal unknown command metadata: %w", marshalErr)
+			}
+			return recordQueuedCommandWithStatus(ctx, st, event, "unknown", "unknown", StatusIgnored, metadata)
+		}
+		return err
+	}
+	if !ok || !isAuthorized(event.AuthorAssociation) {
+		return nil
+	}
+	dispatchable := shouldDispatch(cmd.Kind)
+	if dispatchable && commandRequiresPR(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
+		return nil
+	}
+	targetIssueNumber, err := resolveCommandIssueNumber(cmd, event)
+	if err != nil {
+		metadata, marshalErr := json.Marshal(map[string]any{
+			"args":               cmd.Args,
+			"prompt":             cmd.Prompt,
+			"raw":                cmd.Raw,
+			"error":              err.Error(),
+			"author_association": event.AuthorAssociation,
+			"action":             event.Action,
+		})
+		if marshalErr != nil {
+			return fmt.Errorf("marshal invalid command metadata: %w", marshalErr)
+		}
+		return recordQueuedCommandWithStatus(ctx, st, event, string(cmd.Kind), string(cmd.Kind), StatusIgnored, metadata)
+	}
+	metadataBody := map[string]any{
+		"args":               cmd.Args,
+		"prompt":             cmd.Prompt,
+		"raw":                cmd.Raw,
+		"author_association": event.AuthorAssociation,
+		"action":             event.Action,
+	}
+	if dispatchable {
+		if strings.TrimSpace(event.PullRequestURL) != "" {
+			metadataBody["pr_number"] = event.IssueNumber
+			if commandUsesPRAsIssueNumber(cmd.Kind) {
+				metadataBody["issue_number"] = event.IssueNumber
+			}
+		} else {
+			metadataBody["issue_number"] = event.IssueNumber
+		}
+		if cmd.Kind == CommandDispatch || cmd.Kind == CommandRetry {
+			metadataBody["issue_number"] = targetIssueNumber
+		}
+	}
+	metadata, err := json.Marshal(metadataBody)
+	if err != nil {
+		return fmt.Errorf("marshal command metadata: %w", err)
+	}
+	return recordQueuedCommand(ctx, st, event, string(cmd.Kind), string(cmd.Kind), metadata)
+}
+
+// IssueCommentCommandQueued reports whether the stable command record for an
+// issue_comment delivery already exists. Webhook redelivery uses this as the
+// repair side of the durable enqueue boundary: after RecordCommand returns an
+// unknown error, the delivery must converge on the command record keyed by
+// repository/comment/command instead of replaying the enqueue as pre-processor
+// work and risking duplicate downstream effects.
+func IssueCommentCommandQueued(ctx context.Context, st QueueStore, appLogin string, event IssueComment) (bool, error) {
+	if st == nil {
+		return false, fmt.Errorf("command store is not configured")
+	}
+	key, ok, err := issueCommentCommandKey(appLogin, event)
+	if err != nil || !ok {
+		return false, err
+	}
+	repo, err := st.GetRepository(ctx, event.Owner, event.Repo)
+	if err != nil {
+		return false, fmt.Errorf("get repository: %w", err)
+	}
+	if _, err := st.GetCommandRecord(ctx, repo.ID, event.CommentID, key); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get command record: %w", err)
+	}
+	return true, nil
+}
+
+func issueCommentCommandKey(appLogin string, event IssueComment) (string, bool, error) {
+	if isBotComment(appLogin, event) || (event.Action != "created" && event.Action != "edited") {
+		return "", false, nil
+	}
+	if isLegacyHerdCommand(event.CommentBody) {
+		if !isAuthorized(event.AuthorAssociation) {
+			return "", false, nil
+		}
+		return "migration", true, nil
+	}
+	cmd, ok, err := ParseMentionCommand(appLogin, event.CommentBody)
+	if err != nil {
+		if ok && !isAuthorized(event.AuthorAssociation) {
+			return "", false, nil
+		}
+		if ok && errors.Is(err, ErrUnknownCommand) {
+			return "unknown", true, nil
+		}
+		return "", false, err
+	}
+	if !ok || !isAuthorized(event.AuthorAssociation) {
+		return "", false, nil
+	}
+	if shouldDispatch(cmd.Kind) && commandRequiresPR(cmd.Kind) && strings.TrimSpace(event.PullRequestURL) == "" {
+		return "", false, nil
+	}
+	if _, err := resolveCommandIssueNumber(cmd, event); err != nil {
+		return string(cmd.Kind), true, nil
+	}
+	return string(cmd.Kind), true, nil
+}
+
+func recordQueuedCommand(ctx context.Context, st QueueStore, event IssueComment, commandKey, commandName string, metadata json.RawMessage) error {
+	return recordQueuedCommandWithStatus(ctx, st, event, commandKey, commandName, StatusQueued, metadata)
+}
+
+func recordQueuedCommandWithStatus(ctx context.Context, st QueueStore, event IssueComment, commandKey, commandName, status string, metadata json.RawMessage) error {
+	repo, err := st.GetRepository(ctx, event.Owner, event.Repo)
+	if err != nil {
+		return fmt.Errorf("get repository: %w", err)
+	}
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
+	_, err = st.RecordCommand(ctx, store.CommandRecord{
+		RepositoryID: repo.ID,
+		CommentID:    event.CommentID,
+		CommandKey:   commandKey,
+		CommandName:  commandName,
+		Actor:        event.SenderLogin,
+		Status:       status,
+		Metadata:     metadata,
+		CreatedAt:    time.Now().UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf("record command: %w", err)
+	}
+	return nil
+}
+
+func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKey, ackBody string, record store.CommandRecord, dispatchable bool) (store.Repository, bool, string, json.RawMessage, error) {
+	repo, err := h.Store.GetRepository(ctx, event.Owner, event.Repo)
+	if err != nil {
+		return store.Repository{}, false, "", nil, fmt.Errorf("get repository: %w", err)
+	}
+
+	idempotencyKey := fmt.Sprintf("repo:%d:comment:%d:command:%s", repo.ID, event.CommentID, commandKey)
+	created, err := h.Store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       idempotencyKey,
+		Scope:     "issue_comment_command",
+		Status:    mutations.PhaseIntentRecorded,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return store.Repository{}, false, "", nil, fmt.Errorf("acquire command idempotency key: %w", err)
+	}
+	if !created {
+		commandRecord, commandErr := h.Store.GetCommandRecord(ctx, repo.ID, event.CommentID, commandKey)
+		commandMissing := errors.Is(commandErr, store.ErrNotFound)
+		if commandErr != nil && !commandMissing {
+			return store.Repository{}, false, "", nil, fmt.Errorf("get command record: %w", commandErr)
+		}
+		record = prepareCommandRecord(repo, event, commandKey, record)
+		if _, err := h.Store.RecordCommand(ctx, record); err != nil {
+			return store.Repository{}, false, "", nil, fmt.Errorf("record command: %w", err)
+		}
+		if commandMissing {
+			commandRecord = record
+		}
+		existing, err := h.Store.GetIdempotencyKey(ctx, idempotencyKey)
+		if err != nil {
+			return store.Repository{}, false, "", nil, fmt.Errorf("get command idempotency key: %w", err)
+		}
+		if dispatchable && existing.Status != "completed" && h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
+			if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed"); err != nil {
+				return store.Repository{}, false, "", nil, fmt.Errorf("repair command idempotency key: %w", err)
+			}
+			return repo, false, idempotencyKey, commandRecord.Metadata, nil
+		}
+		if dispatchable && existing.Status == "completed" && existing.ResultRef == "dispatch:completed" && !h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
+			if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, commandKey, record.Metadata); err != nil {
+				return store.Repository{}, false, "", nil, err
+			}
+		}
+		if existing.Status != "completed" {
+			if resultRef := commandAckResultRef(commandRecord.Metadata); resultRef != "" {
+				if dispatchable {
+					return repo, true, idempotencyKey, commandRecord.Metadata, nil
+				}
+				if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, resultRef); err != nil {
+					return store.Repository{}, false, "", nil, fmt.Errorf("repair command idempotency key: %w", err)
+				}
+				return repo, false, idempotencyKey, commandRecord.Metadata, nil
+			}
+		}
+		canConverge, convergeErr := h.acknowledgementMutationCanConverge(ctx, idempotencyKey)
+		if convergeErr != nil {
+			return store.Repository{}, false, "", nil, convergeErr
+		}
+		if existing.Status != "completed" && (existing.Status == mutations.PhaseIntentRecorded || strings.HasPrefix(existing.ResultRef, mutations.PhaseFailedPreCall+":") || mutations.IsPreCallRetryable(existing.Status) || canConverge) {
+			return h.addAcknowledgement(ctx, repo, event, commandKey, ackBody, idempotencyKey, record.Metadata, dispatchable)
+		}
+		if existing.Status != "completed" {
+			return store.Repository{}, false, "", nil, fmt.Errorf("command acknowledgement %q outcome is unknown after started acknowledgement attempt; repair required", idempotencyKey)
+		}
+		if ackID, ok := parseAckResultRef(existing.ResultRef); ok {
+			ackMetadata := commandMetadataWithAck(commandRecord.Metadata, ackID)
+			if dispatchable && h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
+				if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed"); err != nil {
+					return store.Repository{}, false, "", nil, fmt.Errorf("repair command idempotency key: %w", err)
+				}
+				return repo, false, idempotencyKey, ackMetadata, nil
+			}
+			_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata)
+			if dispatchable {
+				return repo, true, idempotencyKey, ackMetadata, nil
+			}
+			return repo, false, idempotencyKey, ackMetadata, nil
+		}
+		return repo, existing.Status != "completed", idempotencyKey, commandRecord.Metadata, nil
+	}
+
+	record = prepareCommandRecord(repo, event, commandKey, record)
+	if _, err := h.Store.RecordCommand(ctx, record); err != nil {
+		if failures, ok := h.Store.(IdempotencyFailureStore); ok {
+			_ = failures.FailIdempotencyKey(ctx, idempotencyKey, mutations.PhaseFailedPreCall+":"+err.Error())
+		}
+		return store.Repository{}, false, "", nil, fmt.Errorf("record command: %w", err)
+	}
+	return h.addAcknowledgement(ctx, repo, event, commandKey, ackBody, idempotencyKey, record.Metadata, dispatchable)
+}
+
+func (h Handler) acknowledgementMutationCanConverge(ctx context.Context, idempotencyKey string) (bool, error) {
+	attempt, err := h.Store.GetGitHubMutationAttempt(ctx, idempotencyKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get acknowledgement mutation attempt: %w", err)
+	}
+	return mutations.IsCompleted(attempt.Status) || mutations.IsPostCallUnknown(attempt.Status) || mutations.IsPreCallRetryable(attempt.Status), nil
+}
+
+func (h Handler) addAcknowledgement(ctx context.Context, repo store.Repository, event IssueComment, commandKey, ackBody, idempotencyKey string, metadata json.RawMessage, dispatchable bool) (store.Repository, bool, string, json.RawMessage, error) {
+	req, err := json.Marshal(map[string]any{
+		"owner":        event.Owner,
+		"repo":         event.Repo,
+		"issue_number": event.IssueNumber,
+		"comment_id":   event.CommentID,
+		"command_key":  commandKey,
+		"body":         ackBody,
+	})
+	if err != nil {
+		return store.Repository{}, false, "", nil, fmt.Errorf("marshal acknowledgement mutation request: %w", err)
+	}
+	result, err := mutationguard.Run(ctx, h.Store, mutationguard.RunRequest{
+		Key:          idempotencyKey,
+		RepositoryID: repo.ID,
+		MutationType: "issue_comment_acknowledgement",
+		Request:      req,
+		Mutate: func() (string, error) {
+			ackID, err := h.GitHub.AddIssueComment(ctx, event.Owner, event.Repo, event.IssueNumber, ackBody)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("issue_comment:%d", ackID), nil
+		},
+		Repair: func() (string, bool, error) {
+			return h.repairAcknowledgement(ctx, event, ackBody)
+		},
+	})
+	if err != nil {
+		return store.Repository{}, false, "", nil, fmt.Errorf("add acknowledgement comment: %w", err)
+	}
+	ackID, ok := parseAckResultRef(result.ResultRef)
+	if !ok {
+		return store.Repository{}, false, "", nil, fmt.Errorf("add acknowledgement comment: invalid result %q", result.ResultRef)
+	}
+	ackMetadata := commandMetadataWithAck(metadata, ackID)
+	if err := h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata); err != nil {
+		return store.Repository{}, false, "", nil, fmt.Errorf("record acknowledgement comment: %w", err)
+	}
+	return repo, dispatchable, idempotencyKey, ackMetadata, nil
+}
+
+func (h Handler) repairAcknowledgement(ctx context.Context, event IssueComment, ackBody string) (string, bool, error) {
+	comments, err := h.GitHub.ListIssueComments(ctx, event.Owner, event.Repo, event.IssueNumber)
+	if err != nil {
+		return "", false, fmt.Errorf("list issue comments for acknowledgement repair: %w", err)
+	}
+	for _, comment := range comments {
+		if strings.TrimSpace(comment.Body) == strings.TrimSpace(ackBody) && comment.ID > 0 {
+			return fmt.Sprintf("issue_comment:%d", comment.ID), true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func commandMetadataWithAck(metadata json.RawMessage, ackID int64) json.RawMessage {
+	var body map[string]any
+	if len(metadata) == 0 || json.Unmarshal(metadata, &body) != nil {
+		body = map[string]any{}
+	}
+	body["ack_comment_id"] = ackID
+	out, err := json.Marshal(body)
+	if err != nil {
+		return metadata
+	}
+	return out
+}
+
+func commandAckResultRef(metadata json.RawMessage) string {
+	var body struct {
+		AckCommentID int64 `json:"ack_comment_id"`
+	}
+	if len(metadata) == 0 || json.Unmarshal(metadata, &body) != nil || body.AckCommentID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("issue_comment:%d", body.AckCommentID)
+}
+
+func parseAckResultRef(resultRef string) (int64, bool) {
+	raw := strings.TrimPrefix(resultRef, "issue_comment:")
+	if raw == resultRef || raw == "" {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	return id, err == nil && id > 0
+}
+
+func (h Handler) markCommandDispatching(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
+	if err := h.Store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, StatusDispatching, metadata); err != nil {
+		return fmt.Errorf("mark command dispatching: %w", err)
+	}
+	return nil
+}
+
+func (h Handler) markCommandDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
+	if err := h.Store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, "dispatched", metadata); err != nil {
+		return fmt.Errorf("mark command dispatched: %w", err)
+	}
+	return nil
+}
+
+func (h Handler) commandAlreadyDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
+	record, err := h.Store.GetCommandRecord(ctx, repoID, commentID, commandKey)
+	return err == nil && record.Status == "dispatched"
+}
+
+func prepareCommandRecord(repo store.Repository, event IssueComment, commandKey string, record store.CommandRecord) store.CommandRecord {
+	record.RepositoryID = repo.ID
+	record.CommentID = event.CommentID
+	record.CommandKey = commandKey
+	if record.Actor == "" {
+		record.Actor = event.SenderLogin
+	}
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now().UTC()
+	}
+	if len(record.Metadata) == 0 {
+		record.Metadata = json.RawMessage(`{}`)
+	}
+	return record
+}
+
+func isAuthorized(association string) bool {
+	switch strings.ToUpper(strings.TrimSpace(association)) {
+	case "OWNER", "MEMBER", "COLLABORATOR":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h Handler) isBotComment(event IssueComment) bool {
+	return isBotComment(h.AppLogin, event)
+}
+
+func isBotComment(appLogin string, event IssueComment) bool {
+	if strings.EqualFold(event.CommentAuthorType, "Bot") {
+		return true
+	}
+	if strings.EqualFold(event.SenderLogin, appLogin+"[bot]") || strings.EqualFold(event.SenderLogin, appLogin) {
+		return true
+	}
+	return false
+}
+
+func isLegacyHerdCommand(body string) bool {
+	fields := strings.Fields(firstNonEmptyLine(body))
+	return len(fields) > 0 && fields[0] == "/herd"
+}
+
+func acknowledgement(appLogin string, cmd ParsedCommand) string {
+	login := strings.TrimSpace(appLogin)
+	if login == "" {
+		login = "herd-os"
+	}
+	return fmt.Sprintf("Acknowledged `@%s %s`.", login, cmd.Kind)
+}
+
+func shouldDispatch(kind CommandKind) bool {
+	switch kind {
+	case CommandReview, CommandFix, CommandFixCI, CommandResolveConflicts, CommandDispatch, CommandRetry, CommandIntegrate:
+		return true
+	default:
+		return false
+	}
+}
+
+func commandRequiresPR(kind CommandKind) bool {
+	switch kind {
+	case CommandReview, CommandFix, CommandFixCI, CommandResolveConflicts, CommandIntegrate:
+		return true
+	default:
+		return false
+	}
+}
+
+func commandCreatesDurableFixIssue(kind CommandKind) bool {
+	switch kind {
+	case CommandFix, CommandFixCI:
+		return true
+	default:
+		return false
+	}
+}
+
+func commandUsesPRAsIssueNumber(kind CommandKind) bool {
+	return !commandCreatesDurableFixIssue(kind)
+}
+
+func migrationResponse(appLogin string) string {
+	login := strings.TrimSpace(appLogin)
+	if login == "" {
+		login = "herd-os"
+	}
+	return fmt.Sprintf("`/herd` comments are no longer dispatched. Use `@%s <command>` instead.", login)
+}

@@ -27,7 +27,7 @@ func newReviewCmd() *cobra.Command {
 		Long: "Launch an interactive Claude Code session pre-loaded with a PR's " +
 			"diff, comments, and CI status. The agent acts as a reviewer assistant " +
 			"— you drive the conversation; it can read code and discuss findings, " +
-			"and it drafts `/herd fix` comments for any actionable changes (it " +
+			"and it drafts `@herd-os fix` comments for any actionable changes (it " +
 			"never edits files locally). It will NOT auto-dispatch workers or " +
 			"create issues.",
 		Args: cobra.ExactArgs(1),
@@ -67,7 +67,7 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
-	data, err := buildReviewPromptData(ctx, client, prNumber, cfg.Platform.Owner, cfg.Platform.Repo, dir, reviewDiffChunkOptions(cfg.Integrator.ReviewDiff))
+	data, err := buildReviewPromptData(ctx, reviewInputFromPlatform(client), prNumber, cfg.Platform.Owner, cfg.Platform.Repo, dir, reviewDiffChunkOptions(cfg.Integrator.ReviewDiff))
 	if err != nil {
 		return err
 	}
@@ -92,8 +92,25 @@ func runReview(ctx context.Context, prNumber int, initialPrompt string) error {
 	})
 }
 
-func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumber int, owner, repo, repoRoot string, opts reviewdiff.ChunkOptions) (*reviewCmdPromptData, error) {
-	pr, err := client.PullRequests().Get(ctx, prNumber)
+type reviewInputServices struct {
+	Issues       platform.IssueReader
+	PullRequests platform.PullRequestReader
+	Checks       platform.CheckReader
+}
+
+func reviewInputFromPlatform(client platform.Platform) reviewInputServices {
+	return reviewInputServices{
+		Issues:       client.Issues(),
+		PullRequests: client.PullRequests(),
+		Checks:       client.Checks(),
+	}
+}
+
+func buildReviewPromptData(ctx context.Context, client reviewInputServices, prNumber int, owner, repo, repoRoot string, opts reviewdiff.ChunkOptions) (*reviewCmdPromptData, error) {
+	if client.PullRequests == nil {
+		return nil, fmt.Errorf("pull request reader is required")
+	}
+	pr, err := client.PullRequests.Get(ctx, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("getting PR #%d: %w", prNumber, err)
 	}
@@ -103,7 +120,7 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		HeadRef:      pr.Head,
 		RepoRoot:     repoRoot,
 		Git:          git.New(repoRoot),
-		PullRequests: client.PullRequests(),
+		PullRequests: client.PullRequests,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("preparing PR diff for review: %w", err)
@@ -122,16 +139,18 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 	}
 
 	var general []reviewCmdComment
-	if cs, cerr := client.Issues().ListComments(ctx, prNumber); cerr == nil {
-		for _, c := range cs {
-			general = append(general, reviewCmdComment{Author: c.AuthorLogin, Body: c.Body})
+	if client.Issues != nil {
+		if cs, cerr := client.Issues.ListComments(ctx, prNumber); cerr == nil {
+			for _, c := range cs {
+				general = append(general, reviewCmdComment{Author: c.AuthorLogin, Body: c.Body})
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: failed to list PR comments: %v\n", cerr)
 		}
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: failed to list PR comments: %v\n", cerr)
 	}
 
 	var inline []reviewCmdInlineComment
-	if rcs, rerr := client.PullRequests().ListReviewComments(ctx, prNumber); rerr == nil {
+	if rcs, rerr := client.PullRequests.ListReviewComments(ctx, prNumber); rerr == nil {
 		for _, c := range rcs {
 			inline = append(inline, reviewCmdInlineComment{
 				Author:   c.AuthorLogin,
@@ -146,10 +165,12 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 	}
 
 	ciStatus := "unknown"
-	if s, serr := client.Checks().GetCombinedStatus(ctx, pr.Head); serr == nil {
-		ciStatus = s
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: failed to get CI status: %v\n", serr)
+	if client.Checks != nil {
+		if s, serr := client.Checks.GetCombinedStatus(ctx, pr.Head); serr == nil {
+			ciStatus = s
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: failed to get CI status: %v\n", serr)
+		}
 	}
 
 	return &reviewCmdPromptData{
@@ -158,6 +179,8 @@ func buildReviewPromptData(ctx context.Context, client platform.Platform, prNumb
 		PRURL:                  pr.URL,
 		PRBaseBranch:           pr.Base,
 		PRHeadBranch:           pr.Head,
+		PRHeadSHA:              pr.HeadSHA,
+		PRLabels:               pr.Labels,
 		Diff:                   diff,
 		ReviewMode:             string(plan.Coverage.ReviewMode),
 		ChunkIndex:             chunkIndex,
@@ -204,6 +227,8 @@ type reviewCmdPromptData struct {
 	PRURL                  string
 	PRBaseBranch           string
 	PRHeadBranch           string
+	PRHeadSHA              string
+	PRLabels               []string
 	Diff                   string
 	ReviewMode             string
 	ChunkIndex             int
@@ -235,7 +260,7 @@ type reviewCmdInlineComment struct {
 
 const reviewSystemPromptTemplate = `You are a HerdOS PR review/fix assistant. The user has opened an interactive session scoped to a single pull request and wants to discuss and potentially fix issues on it.
 
-This PR is managed by herd's batch workers. Local file edits during this session would create phantom commits that the integrator doesn't track and conflict with any in-flight fix workers. Always use ` + "`/herd fix`" + ` to enact changes — this session is read-only on the working tree.
+This PR is managed by herd's batch workers. Local file edits during this session would create phantom commits that the integrator doesn't track and conflict with any in-flight fix workers. Always use ` + "`@herd-os fix`" + ` to enact changes — this session is read-only on the working tree.
 
 ## Pull Request #{{.PRNumber}}: {{.PRTitle}}
 URL: {{.PRURL}}
@@ -278,9 +303,9 @@ You are a reviewer assistant for this PR. The user drives the conversation. You 
 - Discuss the diff, the comments, and the CI status with the user
 - Investigate the codebase by reading files, running git/gh commands, and exploring — but do NOT modify, create, or delete any files
 
-### Drafting /herd fix comments
+### Drafting @herd-os fix comments
 
-Whenever the conversation produces any actionable change to the code — regardless of how the user phrases it — draft a ` + "`/herd fix`" + ` comment. This is the ONLY way to make code changes from a ` + "`herd review`" + ` session. There is no alternative path.
+Whenever the conversation produces any actionable change to the code — regardless of how the user phrases it — draft an ` + "`@herd-os fix`" + ` comment. This is the ONLY way to make code changes from a ` + "`herd review`" + ` session. There is no alternative path.
 
 Each draft must contain:
 - A single, focused task — one bullet of work, not a list of unrelated changes
@@ -288,15 +313,15 @@ Each draft must contain:
 - Acceptance criteria that describe how the fix will be verified
 
 Examples:
-- User: "let's delete the unused constants" → draft ` + "`/herd fix`" + `
-- User: "we should move X to a different section" → draft ` + "`/herd fix`" + `
-- User: "edit the file directly" / "do it locally" / "just make the change" → still draft ` + "`/herd fix`" + `; explain to the user that ` + "`herd review`" + ` never edits files locally because the PR is managed by herd workers, and a manual edit would conflict with the batch
+- User: "let's delete the unused constants" → draft ` + "`@herd-os fix`" + `
+- User: "we should move X to a different section" → draft ` + "`@herd-os fix`" + `
+- User: "edit the file directly" / "do it locally" / "just make the change" → still draft ` + "`@herd-os fix`" + `; explain to the user that ` + "`herd review`" + ` never edits files locally because the PR is managed by herd workers, and a manual edit would conflict with the batch
 - User: "why is this constant here?" → answer the question, no draft (informational only)
 
 Use this exact format for the drafted comment:
 
 ` + "```" + `
-/herd fix <one-line summary>
+@herd-os fix <one-line summary>
 
 Scope: <files/functions to touch>
 
@@ -315,12 +340,12 @@ gh pr comment {{.PRNumber}} --repo {{.RepoOwner}}/{{.RepoName}} --body "..."
 
 After the comment is posted, tell the user the comment was posted and the herd workers will handle it from here.
 
-If the user is asking purely informational questions, exploring the diff, or thinking out loud with no actionable change implied, do NOT draft a ` + "`/herd fix`" + ` comment. Purely informational discussion does not warrant a draft. As soon as the discussion turns toward any change to the code, draft.
+If the user is asking purely informational questions, exploring the diff, or thinking out loud with no actionable change implied, do NOT draft an ` + "`@herd-os fix`" + ` comment. Purely informational discussion does not warrant a draft. As soon as the discussion turns toward any change to the code, draft.
 
 You MUST NOT:
-- Modify, create, or delete files in the repo — ` + "`herd review`" + ` is read-only on the working tree. The ONLY way to enact changes is by drafting and posting a ` + "`/herd fix`" + ` comment.
-- Run shell commands that mutate state (` + "`git add`" + `, ` + "`git commit`" + `, ` + "`gh issue create`" + `, etc.). The only allowed mutating call is ` + "`gh pr comment`" + ` to post a drafted ` + "`/herd fix`" + ` after user approval, and only after the user has explicitly approved the draft you showed them.
-- Post ` + "`/herd fix`" + ` comments without first drafting them and receiving the user's explicit approval in this session — auto-posting is forbidden, but posting is allowed once the user approves a draft you showed them
+- Modify, create, or delete files in the repo — ` + "`herd review`" + ` is read-only on the working tree. The ONLY way to enact changes is by drafting and posting an ` + "`@herd-os fix`" + ` comment.
+- Run shell commands that mutate state (` + "`git add`" + `, ` + "`git commit`" + `, ` + "`gh issue create`" + `, etc.). The only allowed mutating call is ` + "`gh pr comment`" + ` to post a drafted ` + "`@herd-os fix`" + ` after user approval, and only after the user has explicitly approved the draft you showed them.
+- Post ` + "`@herd-os fix`" + ` comments without first drafting them and receiving the user's explicit approval in this session — auto-posting is forbidden, but posting is allowed once the user approves a draft you showed them
 - Automatically dispatch workers, create GitHub issues, or post any other comments on the PR
 - Take action on findings without the user's go-ahead
 - Treat this session as a planning session (no JSON output, no batch creation)

@@ -3,13 +3,16 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/platform"
@@ -36,6 +39,48 @@ func TestIntegratorCmd_RequiresHerdRunner(t *testing.T) {
 			err := root.Execute()
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "HERD_RUNNER")
+		})
+	}
+}
+
+func TestIntegratorCmd_ProductionRunnerWithoutLegacyTokenFailsBeforeGitHubClient(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+	}{
+		{name: "consolidate", args: []string{"integrator", "consolidate", "--run-id", "123"}},
+		{name: "advance", args: []string{"integrator", "advance", "--run-id", "123"}},
+		{name: "review", args: []string{"integrator", "review", "--run-id", "123"}},
+		{name: "merge", args: []string{"integrator", "merge", "--pr", "10"}},
+		{name: "cleanup", args: []string{"integrator", "cleanup", "--pr", "10"}},
+		{name: "check-ci", args: []string{"integrator", "check-ci", "--run-id", "123"}},
+		{
+			name: "handle-comment",
+			args: []string{"integrator", "handle-comment", "--comment-id", "1", "--issue-number", "10", "--author-association", "OWNER"},
+			env:  map[string]string{"COMMENT_BODY": "/herd help"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HERD_RUNNER", "true")
+			t.Setenv("GITHUB_TOKEN", "")
+			t.Setenv("GH_TOKEN", "")
+			t.Setenv("HERD_GITHUB_TOKEN", "")
+			t.Setenv("HERD_LOCAL_GITHUB_AUTH", "")
+			for key, value := range tt.env {
+				t.Setenv(key, value)
+			}
+
+			root := NewRootCmd()
+			root.SetArgs(tt.args)
+			err := root.Execute()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "legacy local/operator-only integrator command")
+			assert.Contains(t, err.Error(), "durable workflow events")
+			assert.NotContains(t, err.Error(), "creating GitHub client")
 		})
 	}
 }
@@ -114,6 +159,88 @@ func TestReviewResultMessage(t *testing.T) {
 			assert.Equal(t, tt.want, reviewResultMessage(tt.result))
 		})
 	}
+}
+
+func TestHostedReviewResultFromIntegrator(t *testing.T) {
+	tests := []struct {
+		name       string
+		result     *integrator.ReviewResult
+		wantStatus string
+	}{
+		{name: "approved", result: &integrator.ReviewResult{Approved: true}, wantStatus: "approved"},
+		{name: "duplicate approved", result: &integrator.ReviewResult{SkippedDuplicateApprovedHead: true}, wantStatus: "approved"},
+		{name: "changes requested", result: &integrator.ReviewResult{FixIssues: []int{101}}, wantStatus: "changes_requested"},
+		{name: "plain changes requested", result: &integrator.ReviewResult{}, wantStatus: "changes_requested"},
+		{name: "max cycles", result: &integrator.ReviewResult{MaxCyclesHit: true}, wantStatus: "failed"},
+		{name: "unparseable manual intervention", result: &integrator.ReviewResult{ManualInterventionNeeded: true}, wantStatus: "failed"},
+		{name: "nil", result: nil, wantStatus: "failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hostedReviewResultFromIntegrator(tt.result)
+			assert.Equal(t, tt.wantStatus, got.Status)
+			assert.NotEmpty(t, got.Summary)
+		})
+	}
+}
+
+func TestHostedReviewResultFromIntegratorPreservesFindings(t *testing.T) {
+	findings := []agent.ReviewFinding{
+		{Severity: "HIGH", Description: "internal/a.go:12 first durable boundary gap"},
+		{Severity: "MEDIUM", Description: "internal/b.go:34 second durable boundary gap"},
+	}
+
+	got := hostedReviewResultFromIntegrator(&integrator.ReviewResult{Findings: findings})
+
+	require.Len(t, got.Findings, 2)
+	assert.NotEmpty(t, got.Findings[0].Fingerprint)
+	assert.Equal(t, "high", got.Findings[0].Severity)
+	assert.Equal(t, findings[0].Description, got.Findings[0].Description)
+	assert.NotEmpty(t, got.Findings[1].Fingerprint)
+	assert.Equal(t, "medium", got.Findings[1].Severity)
+	assert.Equal(t, findings[1].Description, got.Findings[1].Description)
+}
+
+func TestWriteHostedReviewResult(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.json")
+
+	require.NoError(t, writeHostedReviewResult(path, hostedReviewWorkflowResult{
+		Status:  "changes_requested",
+		Summary: "needs work",
+		Findings: []hostedReviewFinding{{
+			Fingerprint: "finding-1",
+			Severity:    "high",
+			Description: "internal/a.go:12 fix mutation ordering",
+		}},
+	}))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var got hostedReviewWorkflowResult
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, "changes_requested", got.Status)
+	assert.Equal(t, "needs work", got.Summary)
+	require.Len(t, got.Findings, 1)
+	assert.Equal(t, "finding-1", got.Findings[0].Fingerprint)
+	assert.Equal(t, "high", got.Findings[0].Severity)
+	assert.Contains(t, got.Findings[0].Description, "internal/a.go:12")
+}
+
+func TestHostedReviewFindingsFiltersEmptyDescriptionsAndUsesStableIdentity(t *testing.T) {
+	findings := []agent.ReviewFinding{
+		{Severity: " HIGH ", Description: " auth.go: reject expired token "},
+		{Severity: "medium", Description: "   "},
+	}
+
+	first := hostedReviewFindings(findings)
+	second := hostedReviewFindings(findings)
+
+	require.Len(t, first, 1)
+	assert.Equal(t, first, second)
+	assert.Equal(t, "high", first[0].Severity)
+	assert.Equal(t, "auth.go: reject expired token", first[0].Description)
+	assert.Len(t, first[0].Fingerprint, 64)
 }
 
 func TestIntegratorReviewCmd_DuplicateSkipReasonPrintedOnce(t *testing.T) {

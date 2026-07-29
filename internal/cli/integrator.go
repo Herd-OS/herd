@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/factory"
 	"github.com/herd-os/herd/internal/commands"
 	"github.com/herd-os/herd/internal/config"
@@ -34,6 +37,22 @@ func newIntegratorCmd() *cobra.Command {
 	return cmd
 }
 
+func ensureLegacyIntegratorGitHubClientAllowed(command string) error {
+	if os.Getenv("HERD_RUNNER") == "true" && os.Getenv("HERD_LOCAL_GITHUB_AUTH") != "true" && firstNonEmptyEnv("GITHUB_TOKEN", "GH_TOKEN", "HERD_GITHUB_TOKEN") == "" {
+		return fmt.Errorf("%s is a legacy local/operator-only integrator command; hosted production runs must submit durable workflow events to the control plane instead of constructing a legacy GitHub client", command)
+	}
+	return nil
+}
+
+func firstNonEmptyEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func newConsolidateCmd() *cobra.Command {
 	var runID int64
 
@@ -43,6 +62,12 @@ func newConsolidateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator consolidate is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator consolidate"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator consolidate"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -102,6 +127,12 @@ func newAdvanceCmd() *cobra.Command {
 			}
 			if runID == 0 && batchNum == 0 {
 				return fmt.Errorf("either --run-id or --batch is required")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator advance"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator advance"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -172,6 +203,7 @@ func newIntegratorReviewCmd() *cobra.Command {
 	var runID int64
 	var prNumber int
 	var batchNum int
+	var resultFile string
 
 	cmd := &cobra.Command{
 		Use:   "review",
@@ -195,6 +227,12 @@ func newIntegratorReviewCmd() *cobra.Command {
 			}
 			if set > 1 {
 				return fmt.Errorf("--run-id, --pr, and --batch are mutually exclusive")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator review"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator review"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -234,6 +272,12 @@ func newIntegratorReviewCmd() *cobra.Command {
 				RepoRoot:    cwd,
 			})
 			if err != nil {
+				if resultFile != "" {
+					_ = writeHostedReviewResult(resultFile, hostedReviewWorkflowResult{
+						Status:  "failed",
+						Summary: "Herd Review failed: " + err.Error(),
+					})
+				}
 				if prNumber != 0 {
 					postIntegratorFailure(cmd.Context(), client.Issues(), prNumber, "review", err)
 				} else if runID != 0 {
@@ -247,6 +291,11 @@ func newIntegratorReviewCmd() *cobra.Command {
 				}
 				return err
 			}
+			if resultFile != "" {
+				if err := writeHostedReviewResult(resultFile, hostedReviewResultFromIntegrator(result)); err != nil {
+					return err
+				}
+			}
 
 			printReviewResultMessage(result)
 			return nil
@@ -256,7 +305,82 @@ func newIntegratorReviewCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID")
 	cmd.Flags().IntVar(&prNumber, "pr", 0, "PR number")
 	cmd.Flags().IntVar(&batchNum, "batch", 0, "Batch/milestone number")
+	cmd.Flags().StringVar(&resultFile, "result-file", "", "Write hosted review workflow result JSON")
 	return cmd
+}
+
+type hostedReviewWorkflowResult struct {
+	Status   string                `json:"status"`
+	Summary  string                `json:"summary"`
+	Findings []hostedReviewFinding `json:"findings,omitempty"`
+}
+
+// hostedReviewFinding is the durable worker-to-control-plane representation of
+// an actionable review finding. The hosted worker remains read-only: it emits
+// the complete structured result and lets the control plane own all
+// GitHub-visible review, comment, issue, and dispatch mutations.
+type hostedReviewFinding struct {
+	Fingerprint string `json:"fingerprint"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
+}
+
+func hostedReviewResultFromIntegrator(result *integrator.ReviewResult) hostedReviewWorkflowResult {
+	if result == nil {
+		return hostedReviewWorkflowResult{Status: "failed", Summary: "Herd Review did not produce a result."}
+	}
+	switch {
+	case result.Approved || result.SkippedDuplicateApprovedHead:
+		summary := reviewResultMessage(result)
+		if summary == "" {
+			summary = "Herd Review approved this head."
+		}
+		return hostedReviewWorkflowResult{Status: "approved", Summary: summary, Findings: hostedReviewFindings(result.Findings)}
+	case result.MaxCyclesHit:
+		return hostedReviewWorkflowResult{Status: "failed", Summary: "Herd Review reached the maximum fix cycle count.", Findings: hostedReviewFindings(result.Findings)}
+	case result.ManualInterventionNeeded, result.StableDisagreement, result.AllCreatesFailed:
+		summary := reviewResultMessage(result)
+		if summary == "" {
+			summary = "Herd Review requires manual intervention."
+		}
+		return hostedReviewWorkflowResult{Status: "failed", Summary: summary, Findings: hostedReviewFindings(result.Findings)}
+	default:
+		summary := reviewResultMessage(result)
+		if summary == "" {
+			summary = "Herd Review requested changes."
+		}
+		return hostedReviewWorkflowResult{Status: "changes_requested", Summary: summary, Findings: hostedReviewFindings(result.Findings)}
+	}
+}
+
+func hostedReviewFindings(findings []agent.ReviewFinding) []hostedReviewFinding {
+	out := make([]hostedReviewFinding, 0, len(findings))
+	for _, finding := range findings {
+		description := strings.TrimSpace(finding.Description)
+		if description == "" {
+			continue
+		}
+		severity := strings.ToLower(strings.TrimSpace(finding.Severity))
+		fingerprint := sha256.Sum256([]byte(severity + "\x00" + description))
+		out = append(out, hostedReviewFinding{
+			Fingerprint: fmt.Sprintf("%x", fingerprint),
+			Severity:    severity,
+			Description: description,
+		})
+	}
+	return out
+}
+
+func writeHostedReviewResult(path string, result hostedReviewWorkflowResult) error {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling hosted review result: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("writing hosted review result: %w", err)
+	}
+	return nil
 }
 
 func printReviewResultMessage(result *integrator.ReviewResult) {
@@ -300,6 +424,12 @@ func newIntegratorMergeCmd() *cobra.Command {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator merge is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
+			if err := ensureProductionControlPlaneAuth("herd integrator merge"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator merge"); err != nil {
+				return err
+			}
 
 			cfg, err := config.Load(".")
 			if err != nil {
@@ -341,6 +471,12 @@ func newIntegratorCleanupCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd integrator cleanup is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator cleanup"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator cleanup"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -419,6 +555,12 @@ func newHandleCommentCmd() *cobra.Command {
 					fmt.Printf("Ignoring command from %s (association: %s)\n", authorLogin, authorAssociation)
 					return nil
 				}
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator handle-comment"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator handle-comment"); err != nil {
+				return err
 			}
 
 			cfg, err := config.Load(".")
@@ -507,6 +649,12 @@ func newIntegratorCheckCICmd() *cobra.Command {
 				return fmt.Errorf("herd integrator check-ci is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
 			if err := validateCheckCIFlags(runID, batchNum, ciRunID); err != nil {
+				return err
+			}
+			if err := ensureProductionControlPlaneAuth("herd integrator check-ci"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator check-ci"); err != nil {
 				return err
 			}
 

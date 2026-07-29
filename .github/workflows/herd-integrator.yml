@@ -11,14 +11,10 @@ on:
     types: [closed]
   issues:
     types: [closed]
-  issue_comment:
-    types: [created]
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  actions: write
+  contents: read
+  id-token: write
   statuses: read
   checks: read
 
@@ -30,27 +26,95 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Consolidate, advance, and review
+      - name: Request hosted integration
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-          HERD_ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          herd integrator consolidate --run-id "$RUN_ID"
-          herd integrator advance --run-id "$RUN_ID"
-          herd integrator review --run-id "$RUN_ID"
-          herd integrator check-ci --run-id "$RUN_ID"
+          BATCH=$(echo "$RUN_HEAD_BRANCH" | sed -n 's#^herd/batch/\([0-9][0-9]*\).*#\1#p')
+          if [ -z "$BATCH" ]; then
+            echo "Skipping HerdOS worker_completed callback for non-batch branch: ${RUN_HEAD_BRANCH}"
+            exit 0
+          fi
+          case "$RUN_ID" in
+            ''|*[!0-9]*)
+              echo "Invalid GitHub workflow run ID: expected a numeric value." >&2
+              exit 1
+              ;;
+          esac
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "workflow_run" \
+            --arg action "worker_completed" \
+            --argjson run_id "$RUN_ID" \
+            --argjson batch_number "$BATCH" \
+            --arg conclusion "$RUN_CONCLUSION" \
+            --arg head_branch "$RUN_HEAD_BRANCH" \
+            --arg head_sha "$RUN_HEAD_SHA" \
+            '{
+              version: 1,
+              kind: "integrator_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: $action,
+              batch_number: $batch_number,
+              workflow_run: {
+                id: $run_id,
+                conclusion: $conclusion,
+                head_branch: $head_branch,
+                head_sha: $head_sha
+              }
+            }' \
+            > /tmp/herd-integrator-event.json
+          attempt=1
+          delay=1
+          AUTH_HEADER_FILE="$(mktemp)"
+          chmod 600 "$AUTH_HEADER_FILE"
+          trap 'rm -f "$AUTH_HEADER_FILE"' EXIT
+          while true; do
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            printf 'header = "Authorization: bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" > "$AUTH_HEADER_FILE"
+            if ! OIDC_TOKEN="$(curl -fsSL --config "$AUTH_HEADER_FILE" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
+              if [ "$attempt" -ge 4 ]; then
+                echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
+                exit 1
+              fi
+              echo "HerdOS workflow event OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt 30 ]; then
+                delay=30
+              fi
+              continue
+            fi
+            printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$OIDC_TOKEN" > "$AUTH_HEADER_FILE"
+            if curl -fsSL -X POST --config "$AUTH_HEADER_FILE" \
+              --data-binary @/tmp/herd-integrator-event.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"; then
+              echo "Submitted HerdOS workflow event after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS workflow event after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS workflow event callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done
 
   check-ci-on-completion:
     if: >
@@ -62,28 +126,95 @@ jobs:
       cancel-in-progress: true
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.check_run.check_suite.head_branch }}
-          fetch-depth: 0
-          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Check CI and dispatch fix workers
+      - name: Request hosted CI reconciliation
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-          HERD_ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           HEAD_BRANCH: ${{ github.event.check_run.check_suite.head_branch }}
+          CHECK_RUN_ID: ${{ github.event.check_run.id }}
+          CHECK_RUN_CONCLUSION: ${{ github.event.check_run.conclusion }}
+          CHECK_RUN_HEAD_SHA: ${{ github.event.check_run.check_suite.head_sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+')
-          if [ -n "$BATCH" ]; then
-            herd integrator check-ci --batch "$BATCH"
+          BATCH=$(echo "$HEAD_BRANCH" | grep -oP 'herd/batch/\K[0-9]+' || true)
+          if [ -z "$BATCH" ]; then
+            echo "Skipping HerdOS check_run_completed callback for non-batch branch: $HEAD_BRANCH"
+            exit 0
           fi
+          case "$CHECK_RUN_ID" in
+            ''|*[!0-9]*)
+              echo "Invalid GitHub check run ID: expected a numeric value." >&2
+              exit 1
+              ;;
+          esac
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "check_run" \
+            --arg action "check_run_completed" \
+            --argjson check_run_id "$CHECK_RUN_ID" \
+            --argjson batch_number "$BATCH" \
+            --arg conclusion "$CHECK_RUN_CONCLUSION" \
+            --arg head_branch "$HEAD_BRANCH" \
+            --arg head_sha "$CHECK_RUN_HEAD_SHA" \
+            '{
+              version: 1,
+              kind: "integrator_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: $action,
+              batch_number: $batch_number,
+              check_run: {
+                id: $check_run_id,
+                conclusion: $conclusion,
+                head_branch: $head_branch,
+                head_sha: $head_sha
+              }
+            }' \
+            > /tmp/herd-integrator-event.json
+          attempt=1
+          delay=1
+          AUTH_HEADER_FILE="$(mktemp)"
+          chmod 600 "$AUTH_HEADER_FILE"
+          trap 'rm -f "$AUTH_HEADER_FILE"' EXIT
+          while true; do
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            printf 'header = "Authorization: bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" > "$AUTH_HEADER_FILE"
+            if ! OIDC_TOKEN="$(curl -fsSL --config "$AUTH_HEADER_FILE" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
+              if [ "$attempt" -ge 4 ]; then
+                echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
+                exit 1
+              fi
+              echo "HerdOS workflow event OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt 30 ]; then
+                delay=30
+              fi
+              continue
+            fi
+            printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$OIDC_TOKEN" > "$AUTH_HEADER_FILE"
+            if curl -fsSL -X POST --config "$AUTH_HEADER_FILE" \
+              --data-binary @/tmp/herd-integrator-event.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"; then
+              echo "Submitted HerdOS workflow event after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS workflow event after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS workflow event callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done
 
   advance-on-close:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'issues'
@@ -93,28 +224,79 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Check if herd issue and advance
+      - name: Request hosted issue-close reconciliation
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-          HERD_ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          BATCH=$(echo "$ISSUE_BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1)
+          ISSUE_BODY="$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH")"
+          BATCH=$(echo "$ISSUE_BODY" | grep -oP '^\s*batch:\s*\K[0-9]+' | head -1 || true)
+          if [ -z "$BATCH" ]; then
+            BATCH="$(jq -r '.issue.milestone.number // ""' "$GITHUB_EVENT_PATH")"
+          fi
           if [ -n "$BATCH" ]; then
-            herd integrator advance --batch "$BATCH"
-            herd integrator review --batch "$BATCH"
-            herd integrator check-ci --batch "$BATCH"
+            jq -n \
+              --arg repository "$REPOSITORY" \
+              --arg event_name "issues" \
+              --arg action "issue_closed" \
+              --argjson issue_number "$ISSUE_NUMBER" \
+              --argjson batch_number "$BATCH" \
+              '{
+                version: 1,
+                kind: "integrator_event",
+                repository: $repository,
+                event_name: $event_name,
+                action: $action,
+                issue_number: $issue_number,
+                batch_number: $batch_number
+              }' \
+              > /tmp/herd-integrator-event.json
+          attempt=1
+          delay=1
+          AUTH_HEADER_FILE="$(mktemp)"
+          chmod 600 "$AUTH_HEADER_FILE"
+          trap 'rm -f "$AUTH_HEADER_FILE"' EXIT
+          while true; do
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            printf 'header = "Authorization: bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" > "$AUTH_HEADER_FILE"
+            if ! OIDC_TOKEN="$(curl -fsSL --config "$AUTH_HEADER_FILE" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
+              if [ "$attempt" -ge 4 ]; then
+                echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
+                exit 1
+              fi
+              echo "HerdOS workflow event OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt 30 ]; then
+                delay=30
+              fi
+              continue
+            fi
+            printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$OIDC_TOKEN" > "$AUTH_HEADER_FILE"
+            if curl -fsSL -X POST --config "$AUTH_HEADER_FILE" \
+              --data-binary @/tmp/herd-integrator-event.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"; then
+              echo "Submitted HerdOS workflow event after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS workflow event after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS workflow event callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done
           else
             echo "Not a herd issue — skipping."
           fi
@@ -129,30 +311,85 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
-          fetch-depth: 0
-          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Handle review
+      - name: Request hosted review reconciliation
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-          HERD_ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           REVIEW_STATE: ${{ github.event.review.state }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          if [ "$REVIEW_STATE" = "approved" ]; then
-            herd integrator merge --pr "$PR_NUMBER"
-          else
-            herd integrator review --pr "$PR_NUMBER"
+          BATCH=$(echo "$PR_HEAD_REF" | sed -n 's#^herd/batch/\([0-9][0-9]*\).*#\1#p')
+          if [ -z "$BATCH" ]; then
+            echo "Skipping HerdOS review_submitted callback for non-batch branch: ${PR_HEAD_REF}"
+            exit 0
           fi
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "pull_request_review" \
+            --arg action "review_submitted" \
+            --arg review_state "$REVIEW_STATE" \
+            --argjson pr_number "$PR_NUMBER" \
+            --argjson batch_number "$BATCH" \
+            --arg head_sha "$PR_HEAD_SHA" \
+            '{
+              version: 1,
+              kind: "integrator_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: $action,
+              pr_number: $pr_number,
+              batch_number: $batch_number,
+              review_state: $review_state,
+              head_sha: $head_sha
+            }' \
+            > /tmp/herd-integrator-event.json
+          attempt=1
+          delay=1
+          AUTH_HEADER_FILE="$(mktemp)"
+          chmod 600 "$AUTH_HEADER_FILE"
+          trap 'rm -f "$AUTH_HEADER_FILE"' EXIT
+          while true; do
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            printf 'header = "Authorization: bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" > "$AUTH_HEADER_FILE"
+            if ! OIDC_TOKEN="$(curl -fsSL --config "$AUTH_HEADER_FILE" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
+              if [ "$attempt" -ge 4 ]; then
+                echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
+                exit 1
+              fi
+              echo "HerdOS workflow event OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt 30 ]; then
+                delay=30
+              fi
+              continue
+            fi
+            printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$OIDC_TOKEN" > "$AUTH_HEADER_FILE"
+            if curl -fsSL -X POST --config "$AUTH_HEADER_FILE" \
+              --data-binary @/tmp/herd-integrator-event.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"; then
+              echo "Submitted HerdOS workflow event after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS workflow event after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS workflow event callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done
 
   cleanup:
     if: >
@@ -165,63 +402,71 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Post-close cleanup
+      - name: Request hosted cleanup
         env:
           HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-          HERD_ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HERD_CONTROL_PLANE_URL: ${{ vars.HERD_CONTROL_PLANE_URL || 'https://api.herd-os.com' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_MERGED: ${{ github.event.pull_request.merged }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          MERGED_FLAG=""
-          if [ "$PR_MERGED" = "true" ]; then
-            MERGED_FLAG="--merged"
-          fi
-          herd integrator cleanup --pr "$PR_NUMBER" $MERGED_FLAG
-
-  handle-comment:
-    if: >
-      vars.HERD_ENABLED == 'true'
-      && github.event_name == 'issue_comment'
-      && github.event.action == 'created'
-      && startsWith(github.event.comment.body, '/herd ')
-    concurrency:
-      # Issue comments do not expose a herd PR number at expression time; use the milestone when present.
-      group: herd-comment-${{ github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number }}
-      cancel-in-progress: false
-    runs-on: [self-hosted, '${{ vars.HERD_RUNNER_LABEL || ''herd-worker'' }}']
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Handle comment command
-        env:
-          HERD_RUNNER: "true"
-          GITHUB_TOKEN: ${{ secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-          HERD_ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
-          COMMENT_ID: ${{ github.event.comment.id }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          AUTHOR_LOGIN: ${{ github.event.comment.user.login }}
-          AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association }}
-          IS_PR: ${{ github.event.issue.pull_request && 'true' || 'false' }}
-        run: |
-          herd integrator handle-comment \
-            --comment-id "$COMMENT_ID" \
-            --issue-number "$ISSUE_NUMBER" \
-            --author-login "$AUTHOR_LOGIN" \
-            --author-association "$AUTHOR_ASSOCIATION" \
-            --is-pr "$IS_PR"
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg event_name "pull_request" \
+            --arg action "pull_request_closed" \
+            --argjson pr_number "$PR_NUMBER" \
+            --argjson merged "$PR_MERGED" \
+            '{
+              version: 1,
+              kind: "integrator_event",
+              repository: $repository,
+              event_name: $event_name,
+              action: $action,
+              pr_number: $pr_number,
+              merged: $merged
+            }' \
+            > /tmp/herd-integrator-event.json
+          attempt=1
+          delay=1
+          AUTH_HEADER_FILE="$(mktemp)"
+          chmod 600 "$AUTH_HEADER_FILE"
+          trap 'rm -f "$AUTH_HEADER_FILE"' EXIT
+          while true; do
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            printf 'header = "Authorization: bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" > "$AUTH_HEADER_FILE"
+            if ! OIDC_TOKEN="$(curl -fsSL --config "$AUTH_HEADER_FILE" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
+              if [ "$attempt" -ge 4 ]; then
+                echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
+                exit 1
+              fi
+              echo "HerdOS workflow event OIDC token fetch failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt 30 ]; then
+                delay=30
+              fi
+              continue
+            fi
+            printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$OIDC_TOKEN" > "$AUTH_HEADER_FILE"
+            if curl -fsSL -X POST --config "$AUTH_HEADER_FILE" \
+              --data-binary @/tmp/herd-integrator-event.json \
+              "$HERD_CONTROL_PLANE_URL/api/v1/workflow-events"; then
+              echo "Submitted HerdOS workflow event after ${attempt} attempt(s)."
+              break
+            fi
+            if [ "$attempt" -ge 4 ]; then
+              echo "Failed to submit HerdOS workflow event after ${attempt} attempt(s)." >&2
+              exit 1
+            fi
+            echo "HerdOS workflow event callback failed; retrying in ${delay}s (attempt ${attempt}/4)." >&2
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+            if [ "$delay" -gt 30 ]; then
+              delay=30
+            fi
+          done

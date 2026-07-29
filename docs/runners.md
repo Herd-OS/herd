@@ -16,10 +16,11 @@ Subsequent sections assume Docker Compose for command examples, but every step h
 ## Quick Setup
 
 ```bash
-herd init                    # generates runner files + config + PR
+gh auth login -h github.com  # setup-time only; not needed in runner containers
+herd init                    # registers repo, generates runner files + config + PR
 # merge the PR created by herd init
-cp .env.herd.example .env         # copy the env template
-# fill in .env (see sections below)
+cp .env.herd.example .env         # if herd init did not already create .env
+# fill in agent auth in .env; keep HERD_RUNNER_BOOTSTRAP_TOKEN from herd init
 docker compose -f docker-compose.herd.yml build
 docker compose -f docker-compose.herd.yml up -d
 # enable workflows after runners are online:
@@ -65,51 +66,55 @@ docker restart herd-worker-1
 
 Notes:
 
-- **`--env-file .env`** reads the same file Docker Compose does, so the credential setup is identical between the two paths. AI provider auth, `GITHUB_TOKEN`, and the Codex subscription vars all live in `.env` either way (see [Agent Authentication](#2-agent-authentication) below).
+- **`--env-file .env`** reads the same file Docker Compose does, so the credential setup is identical between the two paths. AI provider auth, `HERD_RUNNER_BOOTSTRAP_TOKEN`, and the Codex subscription vars all live in `.env` either way (see [Agent Authentication](#2-agent-authentication) below).
 - **`-v codex-auth:/home/runner/.codex`** uses a Docker named volume to persist Codex subscription state across container restarts. If you're not using the Codex subscription auth path, the volume is still harmless to mount and is created lazily by Docker on first use.
 - **`--restart unless-stopped`** mirrors the `restart: always` policy in the generated Compose file. After each ephemeral job, the runner exits and Docker restarts it; the entrypoint re-registers with GitHub for the next job.
 - **Container names matter** when scaling: each runner needs a unique name (which becomes its registered name on GitHub). The `--name herd-worker-$i` pattern above gives you stable, predictable names.
 
 `Dockerfile.herd_runner` is the same file `herd init` generated for Docker Compose — no separate "direct mode" Dockerfile to maintain. Updates to it (e.g., extra `RUN apt-get install` lines for project-specific tools) take effect on the next `docker build`.
 
-## 1. GitHub Token
+## 1. Runner Bootstrap Credentials
 
-You need a Personal Access Token (PAT) for runner registration and API operations.
+Production HerdOS runner registration does **not** use a GitHub Personal Access
+Token. Install the official HerdOS GitHub App (`@herd-os`) on the repository,
+authenticate GitHub CLI on your setup machine with `gh auth login -h github.com`,
+and run `herd init`.
 
-### Fine-grained token (recommended)
+`herd init` registers the repository with the HerdOS control plane and writes a
+repo-scoped bootstrap credential to `.env`:
 
-1. Go to **Settings → Developer settings → Fine-grained tokens → Generate new token**
-   (https://github.com/settings/tokens?type=beta)
-2. Set a name (e.g., `herd-runner`) and expiration
-3. Under **Repository access**, select **Only select repositories** → pick your HerdOS repos
-4. Under **Permissions**, enable:
-   - **Actions**: Read and write
-   - **Administration**: Read and write (runner self-registration)
-   - **Commit statuses**: Read and write
-   - **Contents**: Read and write
-   - **Issues**: Read and write
-   - **Pull requests**: Read and write
-   - **Workflows**: Read and write
-   - **Metadata**: Read-only (auto-selected)
-5. Generate and copy the token
+```bash
+HERD_RUNNER_BOOTSTRAP_TOKEN=hrb_...
+```
 
-### Classic token (simpler)
+That value is a Herd service credential, not a GitHub token. At container
+startup the runner entrypoint sends it to the control plane, which uses the
+GitHub App installation to request a short-lived GitHub self-hosted runner
+registration token. The short-lived GitHub token is never stored in `.env`.
 
-1. Go to **Settings → Developer settings → Tokens (classic) → Generate new token**
-   (https://github.com/settings/tokens)
-2. Select the `repo` and `workflow` scopes
-3. Generate and copy the token
+Hosted installs use the official control plane by default:
 
-### Where to use it
+```bash
+https://api.herd-os.com
+```
 
-Add the token in two places:
+Leave `HERD_CONTROL_PLANE_URL` unset for the hosted HerdOS service. For a
+self-hosted control plane, run init with your service URL and keep the generated
+override:
 
-| Location | Variable | Purpose |
-|----------|----------|---------|
-| `.env` file | `GITHUB_TOKEN=ghp_...` | Docker runner registration |
-| Org/repo secrets | `HERD_GITHUB_TOKEN` | Workflow dispatch between roles |
+```bash
+herd init --control-plane-url https://herd.example.com
+HERD_CONTROL_PLANE_URL=https://herd.example.com
+```
 
-The same token works for both. `HERD_GITHUB_TOKEN` is needed because GitHub's automatic `GITHUB_TOKEN` cannot trigger `workflow_dispatch` events (anti-recursion protection). Without it, HerdOS runs but Monitor cannot redispatch failed workers and the Integrator cannot dispatch next-tier workers.
+`HERD_CONTROL_PLANE_URL` must be an absolute `http` or `https` URL. Runner
+containers fail loudly if the URL is invalid or `HERD_RUNNER_BOOTSTRAP_TOKEN` is
+missing.
+
+Do not add `GITHUB_TOKEN`, `HERD_GITHUB_TOKEN`, or human PATs to `.env` for
+production Herd orchestration. Local developer-only commands may still use your
+interactive `gh` login on your own machine, but worker, integrator, monitor, and
+runner-registration paths use the App/control-plane model.
 
 ## 2. Agent Authentication
 
@@ -184,7 +189,10 @@ CODEX_API_KEY=sk-...
 
 > `.env` is auto-gitignored by `herd init` — credentials won't be committed.
 
-> `.env` holds the Docker runner's agent credentials and is read at container startup. The only GitHub Actions secret needed for auth is `HERD_GITHUB_TOKEN` (workflow dispatch); AI provider keys are not secrets — see the principle box above.
+> `.env` holds the Docker runner's agent credentials and runner bootstrap token.
+> GitHub Actions secrets are not used for production Herd orchestration. Add
+> repository or organization secrets only for your own private dependencies via
+> `workers.extra_env`.
 
 ##### Auth precedence
 
@@ -293,27 +301,49 @@ Verify settings are inherited from org and not overridden to be more restrictive
 
 > **Most common issue**: The "Allow GitHub Actions to create and approve pull requests" checkbox is off by default. If the Integrator gets 403 errors when creating PRs, this is why.
 
-## 4. Secrets Summary
+## 4. Branch Protection
+
+Branch protection is a repository policy that you configure in GitHub. HerdOS
+does not create or mutate branch protection rules.
+
+If `integrator.review` is enabled and Herd Review should block merges, add a
+required status check named exactly:
+
+```text
+Herd Review
+```
+
+Require that status on protected branches such as `main`. The hosted service
+sets the status through the `@herd-os` GitHub App, but GitHub only blocks merges
+after you add the required status check. If `integrator.review` is disabled for a
+repo, do not require `Herd Review` or PRs will wait forever for a status HerdOS
+does not set.
+
+## 5. Secrets Summary
 
 Configure at **org level** (recommended for multi-repo) or **repo level**:
 
 | Secret/Variable | Type | Required | Purpose |
 |----------------|------|----------|---------|
-| `HERD_GITHUB_TOKEN` | Secret | Yes | PAT for workflow dispatch, releases, cross-repo ops |
 | `HERD_ENABLED` | Variable | Yes | Activates workflows — set to `true` after runners are online |
 | `HERD_RUNNER_LABEL` | Variable | No | Override default runner label (default: `herd-worker`) |
+
+Do not create `HERD_GITHUB_TOKEN` for production Herd orchestration. If older
+docs or workflows in a repo still reference it, re-run `herd init` with the
+current binary and remove the obsolete secret after the generated workflow PR is
+merged.
 
 **Org secrets**: https://github.com/organizations/{org}/settings/secrets/actions — set visibility to "All repositories".
 
 **Repo secrets**: https://github.com/{org}/{repo}/settings/secrets/actions
 
-## 5. What's in the Docker Image
+## 6. What's in the Docker Image
 
 The base image is **published** at `ghcr.io/herd-os/herd-runner-base` — a public, multi-arch (linux/amd64, linux/arm64) image that provides the GitHub Actions runner and base tools (Node 22, git, gh, curl, jq). `herd init` no longer generates a local `Dockerfile.herd_runner_base`; the base is pulled from GHCR instead. (If a `Dockerfile.herd_runner_base` is left over from an older init, re-running `herd init` removes it — see [Migrating from the local base image](#migrating-from-the-local-base-image).)
 
 `herd init` generates a single user-owned Dockerfile:
 
-- **`Dockerfile.herd_runner`** — user-owned, created once by `herd init`, never overwritten. Its first line is `FROM ghcr.io/herd-os/herd-runner-base:<herd-version>` (see [Runner images](#6-runner-images)). Add project-specific tools (languages, a database client, linters, etc.) below the `FROM` line.
+- **`Dockerfile.herd_runner`** — user-owned, created once by `herd init`, never overwritten. Its first line is `FROM ghcr.io/herd-os/herd-runner-base:<herd-version>` (see [Runner images](#7-runner-images)). Add project-specific tools (languages, a database client, linters, etc.) below the `FROM` line.
 
 For example, to add a Postgres client on top of the base image:
 
@@ -331,7 +361,7 @@ The base image's entrypoint script handles runner lifecycle:
 1. Downloads the herd binary (latest or pinned version)
 2. Installs the npm-distributed agent CLIs at container startup: Claude Code (`@anthropic-ai/claude-code`) and OpenCode (`opencode-ai`). Codex is included in the published runner image. Supported agents are present in every runner regardless of which `agent.provider` the repo selects, so switching providers does not require rebuilding the image.
 3. Removes stale config from previous runs (ephemeral runners leave `.runner` behind on restart)
-4. Registers with GitHub using a short-lived registration token
+4. Exchanges `HERD_RUNNER_BOOTSTRAP_TOKEN` with the Herd control plane for a short-lived GitHub runner registration token
 5. Starts the runner in ephemeral mode (picks up one job, then deregisters)
 6. On SIGTERM/SIGINT, deregisters cleanly
 
@@ -370,7 +400,7 @@ Caveats:
 - **`Dockerfile.herd_runner` must end as root.** If your wrapper ends with `USER runner` (older `herd init` versions added this), the container starts non-root and the entrypoint skips the remap entirely. Remove the trailing `USER runner` line to opt in.
 - **Codex auth volume.** When you change `RUNNER_UID`, the existing `codex-auth` volume contents are chowned to the new UID on the next start. No re-seeding needed.
 
-## 6. Runner images
+## 7. Runner images
 
 The base image is a first-party runner image published to `ghcr.io/herd-os/` on every herd release. It is **public** (no `docker login` needed to pull) and **multi-arch** (linux/amd64, linux/arm64).
 
@@ -503,7 +533,7 @@ This means the per-project upgrade from the old local-base model collapses to:
 
 No manual edit of `Dockerfile.herd_runner` is required.
 
-## 7. Scaling
+## 8. Scaling
 
 ### Docker Compose
 
@@ -562,7 +592,7 @@ and terminates that group where possible when the inner timeout fires. This help
 clean up wrapper-spawned descendants such as Codex's native child process. On
 Windows runners, HerdOS terminates the direct child process.
 
-## 8. Cloud Runners
+## 9. Cloud Runners
 
 You can run on cloud VMs instead of Docker. Requirements:
 
@@ -571,7 +601,7 @@ You can run on cloud VMs instead of Docker. Requirements:
    - Claude Code: `npm install -g @anthropic-ai/claude-code`
    - OpenCode: `npm install -g opencode-ai`
 3. Install Herd CLI: `go install github.com/herd-os/herd/cmd/herd@latest`
-4. Register the runner with the `herd-worker` label
+4. Register the runner with the `herd-worker` label using a short-lived registration token from your Herd control plane, or run the same entrypoint logic used by the container with `HERD_RUNNER_BOOTSTRAP_TOKEN`
 5. Set the agent credentials in the runner's environment:
    - For `agent.provider: claude` — `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
    - For `agent.provider: opencode` — the provider API key for the configured model (e.g. `ANTHROPIC_API_KEY` for `anthropic/...` models, `OPENAI_API_KEY` for `openai/...` models)
@@ -645,7 +675,7 @@ See [configuration.md](configuration.md) for the full field reference.
 | Agent not found | Not installed | Ensure the configured agent CLI is in the Docker image — the base image installs both (`npm install -g @anthropic-ai/claude-code` and `npm install -g opencode-ai`) |
 | 403 on PR creation | Org setting | Enable "Allow GitHub Actions to create and approve pull requests" in org settings |
 | 403 on listing PRs | Missing permission | Ensure `pull-requests: write` is in workflow permissions |
-| Dispatch succeeds but no run appears | Missing secret | Add `HERD_GITHUB_TOKEN` as org/repo secret (see section 1) |
-| Token permission errors | Insufficient scope | Fine-grained: needs Administration read/write. Classic: needs `repo` scope |
-| Integrator crashes checking CI | Missing CI read permission | Add **Actions: Read**, **Checks: Read**, and **Statuses: Read** to the fine-grained PAT, or set `require_ci: false` in `.herdos.yml`. CI diagnostics are best-effort and depend on the permissions GitHub grants to the workflow/token. |
+| Runner registration fails | Missing or expired bootstrap credential | Re-run `herd init` and confirm `.env` contains `HERD_RUNNER_BOOTSTRAP_TOKEN` |
+| Control-plane URL error | Invalid self-hosted override | Set `HERD_CONTROL_PLANE_URL` to an absolute `http` or `https` URL, or unset it for hosted HerdOS |
+| Integrator crashes checking CI | Missing App/workflow permission or CI access | Confirm the `@herd-os` App is installed with Actions, Checks, and Commit statuses permissions, or set `require_ci: false` in `.herdos.yml`. CI diagnostics are best-effort and depend on permissions GitHub grants to the App/workflow. |
 | Auth errors in worker | Missing credentials | Verify `.env` has the right key for the configured provider — Claude: `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenCode: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` matching `agent.model`; Codex: `OPENAI_API_KEY` or `CODEX_API_KEY` |

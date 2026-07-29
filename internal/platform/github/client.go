@@ -2,8 +2,10 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -25,6 +27,22 @@ type Client struct {
 	authLogin  string
 }
 
+type ReviewInputClient struct {
+	c *Client
+}
+
+type reviewInputIssueService struct {
+	issues *issueService
+}
+
+type reviewInputPullRequestService struct {
+	pullRequests *pullRequestService
+}
+
+type reviewInputCheckService struct {
+	checks *checkService
+}
+
 // Compile-time check that Client implements platform.Platform.
 var _ platform.Platform = (*Client)(nil)
 
@@ -36,6 +54,20 @@ func New(owner, repo string) (*Client, error) {
 		return nil, err
 	}
 
+	return NewWithToken(owner, repo, token)
+}
+
+func NewWithToken(owner, repo string, token string) (*Client, error) {
+	if strings.TrimSpace(owner) == "" {
+		return nil, fmt.Errorf("repository owner is required")
+	}
+	if strings.TrimSpace(repo) == "" {
+		return nil, fmt.Errorf("repository name is required")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, fmt.Errorf("GitHub token is required")
+	}
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	httpClient := oauth2.NewClient(context.Background(), ts)
 	httpClient.Transport = newRetryTransport(httpClient.Transport, time.Second)
@@ -49,7 +81,37 @@ func New(owner, repo string) (*Client, error) {
 	}, nil
 }
 
+func NewReviewInputWithToken(owner, repo string, token string) (*ReviewInputClient, error) {
+	client, err := NewWithToken(owner, repo, token)
+	if err != nil {
+		return nil, err
+	}
+	return &ReviewInputClient{c: client}, nil
+}
+
+// NewWithClient creates a platform client around an already-authenticated
+// go-github client, such as a GitHub App installation client.
+func NewWithClient(owner, repo string, client *gh.Client) (*Client, error) {
+	if strings.TrimSpace(owner) == "" {
+		return nil, fmt.Errorf("repository owner is required")
+	}
+	if strings.TrimSpace(repo) == "" {
+		return nil, fmt.Errorf("repository name is required")
+	}
+	if client == nil {
+		return nil, fmt.Errorf("GitHub client is required")
+	}
+	return &Client{
+		gh:    client,
+		owner: owner,
+		repo:  repo,
+	}, nil
+}
+
 func resolveToken() (string, error) {
+	if os.Getenv("HERD_RUNNER") == "true" {
+		return "", fmt.Errorf("GitHub client local auth is disabled when HERD_RUNNER=true; use the Herd control plane GitHub App path")
+	}
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		return token, nil
 	}
@@ -91,6 +153,42 @@ func (c *Client) Milestones() platform.MilestoneService     { return &milestoneS
 func (c *Client) Runners() platform.RunnerService           { return &runnerService{c} }
 func (c *Client) Repository() platform.RepositoryService    { return &repositoryService{c} }
 func (c *Client) Checks() platform.CheckService             { return &checkService{c} }
+
+func (c *ReviewInputClient) Issues() platform.IssueReader {
+	return reviewInputIssueService{issues: &issueService{c.c}}
+}
+
+func (c *ReviewInputClient) PullRequests() platform.PullRequestReader {
+	return reviewInputPullRequestService{pullRequests: &pullRequestService{c.c}}
+}
+
+func (c *ReviewInputClient) Checks() platform.CheckReader {
+	return reviewInputCheckService{checks: &checkService{c.c}}
+}
+
+func (s reviewInputIssueService) ListComments(ctx context.Context, number int) ([]*platform.Comment, error) {
+	return s.issues.ListComments(ctx, number)
+}
+
+func (s reviewInputPullRequestService) Get(ctx context.Context, number int) (*platform.PullRequest, error) {
+	return s.pullRequests.Get(ctx, number)
+}
+
+func (s reviewInputPullRequestService) ListReviewComments(ctx context.Context, number int) ([]*platform.ReviewComment, error) {
+	return s.pullRequests.ListReviewComments(ctx, number)
+}
+
+func (s reviewInputPullRequestService) ListFiles(ctx context.Context, number int) ([]*platform.PullRequestFile, error) {
+	return s.pullRequests.ListFiles(ctx, number)
+}
+
+func (s reviewInputPullRequestService) GetDiff(ctx context.Context, number int) (string, error) {
+	return s.pullRequests.GetDiff(ctx, number)
+}
+
+func (s reviewInputCheckService) GetCombinedStatus(ctx context.Context, ref string) (string, error) {
+	return s.checks.GetCombinedStatus(ctx, ref)
+}
 
 // AuthenticatedLogin returns the login for the token used by this client.
 func (c *Client) AuthenticatedLogin(ctx context.Context) (string, error) {
@@ -199,12 +297,51 @@ func (s *repositoryService) DeleteBranch(ctx context.Context, name string) error
 	return nil
 }
 
-func (s *repositoryService) GetBranchSHA(ctx context.Context, name string) (string, error) {
-	ref, _, err := s.c.gh.Git.GetRef(ctx, s.c.owner, s.c.repo, "refs/heads/"+name)
+func (s *repositoryService) DeleteBranchIfHead(ctx context.Context, name, expectedHeadSHA string) error {
+	current, etag, err := s.getBranchSHAWithETag(ctx, name)
 	if err != nil {
-		return "", fmt.Errorf("getting branch SHA for %s: %w", name, err)
+		return err
 	}
-	return ref.GetObject().GetSHA(), nil
+	if current != expectedHeadSHA {
+		return fmt.Errorf("deleting branch %s: head mismatch: expected %s, got %s: %w", name, expectedHeadSHA, current, platform.ErrRefUpdateConflict)
+	}
+	u := fmt.Sprintf("repos/%v/%v/git/refs/%v", s.c.owner, s.c.repo, githubRefPath("heads/"+name))
+	req, err := s.c.gh.NewRequest(http.MethodDelete, u, nil)
+	if err != nil {
+		return fmt.Errorf("deleting branch %s: %w", name, err)
+	}
+	if etag != "" {
+		req.Header.Set("If-Match", etag)
+	}
+	_, err = s.c.gh.BareDo(ctx, req)
+	if err != nil {
+		if isGitHubRefUpdateConflict(err) {
+			return fmt.Errorf("deleting branch %s: %w", name, platform.ErrRefUpdateConflict)
+		}
+		return fmt.Errorf("deleting branch %s: %w", name, err)
+	}
+	return nil
+}
+
+func (s *repositoryService) GetBranchSHA(ctx context.Context, name string) (string, error) {
+	sha, _, err := s.getBranchSHAWithETag(ctx, name)
+	return sha, err
+}
+
+func (s *repositoryService) getBranchSHAWithETag(ctx context.Context, name string) (string, string, error) {
+	ref, resp, err := s.c.gh.Git.GetRef(ctx, s.c.owner, s.c.repo, "refs/heads/"+name)
+	if err != nil {
+		var responseErr *gh.ErrorResponse
+		if errors.As(err, &responseErr) && responseErr.Response != nil && responseErr.Response.StatusCode == http.StatusNotFound {
+			return "", "", fmt.Errorf("getting branch SHA for %s: %w", name, platform.ErrNotFound)
+		}
+		return "", "", fmt.Errorf("getting branch SHA for %s: %w", name, err)
+	}
+	etag := ""
+	if resp != nil && resp.Response != nil {
+		etag = resp.Header.Get("ETag")
+	}
+	return ref.GetObject().GetSHA(), etag, nil
 }
 
 func (s *repositoryService) GetCommitMessage(ctx context.Context, sha string) (string, error) {
@@ -228,4 +365,43 @@ func (s *repositoryService) UpdateBranchToCommit(ctx context.Context, name, sha 
 		return fmt.Errorf("updating branch %s to %s: %w", name, sha, err)
 	}
 	return nil
+}
+
+func (s *repositoryService) UpdateBranchToCommitIfHead(ctx context.Context, name, sha, expectedHeadSHA string, force bool) error {
+	current, etag, err := s.getBranchSHAWithETag(ctx, name)
+	if err != nil {
+		return err
+	}
+	if current != expectedHeadSHA {
+		return fmt.Errorf("updating branch %s to %s: head mismatch: expected %s, got %s: %w", name, sha, expectedHeadSHA, current, platform.ErrRefUpdateConflict)
+	}
+	body := struct {
+		SHA   string `json:"sha"`
+		Force bool   `json:"force"`
+	}{SHA: sha, Force: force}
+	u := fmt.Sprintf("repos/%v/%v/git/refs/%v", s.c.owner, s.c.repo, githubRefPath("heads/"+name))
+	req, err := s.c.gh.NewRequest(http.MethodPatch, u, body)
+	if err != nil {
+		return fmt.Errorf("updating branch %s to %s: %w", name, sha, err)
+	}
+	if etag != "" {
+		req.Header.Set("If-Match", etag)
+	}
+	ref := new(gh.Reference)
+	_, err = s.c.gh.Do(ctx, req, ref)
+	if err != nil {
+		if isGitHubRefUpdateConflict(err) {
+			return fmt.Errorf("updating branch %s to %s: %w", name, sha, platform.ErrRefUpdateConflict)
+		}
+		return fmt.Errorf("updating branch %s to %s: %w", name, sha, err)
+	}
+	return nil
+}
+
+func githubRefPath(ref string) string {
+	parts := strings.Split(strings.TrimPrefix(ref, "refs/"), "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }

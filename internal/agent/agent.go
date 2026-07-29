@@ -91,6 +91,7 @@ type ReviewOptions struct {
 	AcceptanceCriteria     []string
 	RepoRoot               string
 	SystemPrompt           string
+	ExtraInstructions      string   // User-supplied review focus/context; rendered in the user prompt, never as the agent system prompt.
 	Strictness             string   // "standard", "strict", "lenient" — controls review aggressiveness
 	MinFixSeverity         string   // minimum severity that blocks approval: "high", "medium", "low"
 	CurrentPRMetadata      string   // PR metadata fetched before agent invocation; live state is refreshed again before applying results
@@ -102,6 +103,7 @@ type ReviewOptions struct {
 	CoverageSummary        string
 	ChunkedReview          bool
 	PartialReview          bool
+	Manual                 bool
 	// WorkerNoOpVerdicts contains the bodies of structured verdict
 	// comments posted by fix workers on the batch PR in previous cycles.
 	// Each entry is one full verdict comment body (header + reasoning).

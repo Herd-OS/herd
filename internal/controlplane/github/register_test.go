@@ -1,0 +1,525 @@
+package github
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	ghapi "github.com/google/go-github/v68/github"
+	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/controlplane/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
+)
+
+type registerFakeStore struct {
+	installations []store.Installation
+	repositories  map[string]store.Repository
+	attempts      []store.RegistrationAttempt
+	tokens        []store.RunnerBootstrapToken
+	err           error
+	rotateErrs    []error
+	commitOnError bool
+}
+
+func newRegisterFakeStore() *registerFakeStore {
+	return &registerFakeStore{repositories: map[string]store.Repository{}}
+}
+
+func (s *registerFakeStore) UpsertInstallation(_ context.Context, i store.Installation) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.installations = append(s.installations, i)
+	return nil
+}
+
+func (s *registerFakeStore) UpsertRepository(_ context.Context, r store.Repository) (store.Repository, error) {
+	if s.err != nil {
+		return store.Repository{}, s.err
+	}
+	if r.ID == 0 {
+		r.ID = 1234
+	}
+	s.repositories[r.Owner+"/"+r.Name] = r
+	return r, nil
+}
+
+func (s *registerFakeStore) CreateRegistrationAttempt(_ context.Context, a store.RegistrationAttempt) error {
+	s.attempts = append(s.attempts, a)
+	return nil
+}
+
+func (s *registerFakeStore) RotateRunnerBootstrapToken(_ context.Context, repoID int64, tokenHash string) (store.RunnerBootstrapToken, error) {
+	if s.err != nil {
+		return store.RunnerBootstrapToken{}, s.err
+	}
+	now := time.Now().UTC()
+	tok := store.RunnerBootstrapToken{
+		ID:           int64(len(s.tokens) + 1),
+		RepositoryID: repoID,
+		TokenHash:    tokenHash,
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(24 * time.Hour),
+	}
+	var rotateErr error
+	if len(s.rotateErrs) > 0 {
+		rotateErr = s.rotateErrs[0]
+		s.rotateErrs = s.rotateErrs[1:]
+	}
+	if rotateErr != nil && !s.commitOnError {
+		return store.RunnerBootstrapToken{}, rotateErr
+	}
+	for i := range s.tokens {
+		if s.tokens[i].RepositoryID == repoID && s.tokens[i].RevokedAt == nil {
+			s.tokens[i].RevokedAt = &now
+			s.tokens[i].RevokedReason = "rotated"
+		}
+	}
+	s.tokens = append(s.tokens, tok)
+	if rotateErr != nil {
+		return store.RunnerBootstrapToken{}, rotateErr
+	}
+	return tok, nil
+}
+
+type fakeSetupVerifier struct {
+	repo SetupRepository
+	err  error
+	got  string
+}
+
+func (v *fakeSetupVerifier) VerifySetupRepository(_ context.Context, setupToken string, _ string, _ string) (SetupRepository, error) {
+	v.got = setupToken
+	return v.repo, v.err
+}
+
+type fakeAppVerifier struct {
+	findErr        error
+	err            error
+	installation   AppInstallation
+	installationID int64
+}
+
+func (v *fakeAppVerifier) FindRepositoryInstallation(_ context.Context, _ string, _ string) (AppInstallation, error) {
+	if v.findErr != nil {
+		return AppInstallation{}, v.findErr
+	}
+	if v.installation.ID != 0 {
+		return v.installation, nil
+	}
+	return AppInstallation{ID: 42, AccountLogin: "octo", AccountID: 100, AccountType: "Organization"}, nil
+}
+
+func (v *fakeAppVerifier) VerifyAppAccess(_ context.Context, installationID int64, _ string, _ string) error {
+	v.installationID = installationID
+	return v.err
+}
+
+func TestRegisterHandlerValidRegistration(t *testing.T) {
+	st := newRegisterFakeStore()
+	setup := &fakeSetupVerifier{repo: validSetupRepository()}
+	app := &fakeAppVerifier{}
+	handler := NewRegisterHandler(RegisterHandlerOptions{
+		Store:           st,
+		SetupVerifier:   setup,
+		AppVerifier:     app,
+		AppLogin:        "herd-os",
+		ControlPlaneURL: "https://api.herd-os.com",
+		Now:             func() time.Time { return time.Unix(100, 0).UTC() },
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, registerRequest(`{"repository":"octo/herd","owner":"octo","name":"herd","setup_token":"gho_human","app_login":"@herd-os"}`))
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var resp struct {
+		RepositoryID         int64  `json:"repository_id"`
+		InstallationID       int64  `json:"installation_id"`
+		RunnerBootstrapToken string `json:"runner_bootstrap_token"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, int64(1234), resp.RepositoryID)
+	assert.Equal(t, int64(42), resp.InstallationID)
+	assert.NotEmpty(t, resp.RunnerBootstrapToken)
+	assert.Equal(t, "gho_human", setup.got)
+	assert.Equal(t, int64(42), app.installationID)
+	require.Len(t, st.tokens, 1)
+	assert.Equal(t, int64(1234), st.tokens[0].RepositoryID)
+	assert.NotEqual(t, resp.RunnerBootstrapToken, st.tokens[0].TokenHash)
+	assert.NotContains(t, st.tokens[0].TokenHash, "gho_human")
+	require.Len(t, st.attempts, 1)
+	assert.Equal(t, "registered", st.attempts[0].Status)
+	for _, attempt := range st.attempts {
+		assert.NotContains(t, attempt.Error, "gho_human")
+		assert.NotContains(t, string(attempt.Metadata), "gho_human")
+	}
+}
+
+func TestValidatedRegistrationConfiguration(t *testing.T) {
+	valid := config.Default()
+	valid.Platform.Owner = "octo"
+	valid.Platform.Repo = "herd"
+	validRaw, err := json.Marshal(valid)
+	require.NoError(t, err)
+	mismatch := *valid
+	mismatch.Platform.Repo = "other"
+	mismatchRaw, err := json.Marshal(mismatch)
+	require.NoError(t, err)
+	invalid := *valid
+	invalid.Workers.TimeoutMinutes = 0
+	invalidRaw, err := json.Marshal(invalid)
+	require.NoError(t, err)
+	tests := []struct {
+		name    string
+		raw     json.RawMessage
+		wantErr string
+	}{
+		{name: "valid", raw: validRaw},
+		{name: "missing", wantErr: "required"},
+		{name: "null", raw: json.RawMessage(`null`), wantErr: "required"},
+		{name: "malformed", raw: json.RawMessage(`{`), wantErr: "malformed"},
+		{name: "invalid", raw: invalidRaw, wantErr: "timeout_minutes"},
+		{name: "repository mismatch", raw: mismatchRaw, wantErr: "does not match"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validatedRegistrationConfiguration(tt.raw, "octo", "herd")
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "octo", got.Platform.Owner)
+			assert.Equal(t, "herd", got.Platform.Repo)
+		})
+	}
+}
+
+func TestRegisterHandlerRetryRotatesBootstrapCredential(t *testing.T) {
+	tests := []struct {
+		name          string
+		rotateErrs    []error
+		commitOnError bool
+		firstStatus   int
+	}{
+		{
+			name:          "token commit followed by reported storage error",
+			rotateErrs:    []error{errors.New("commit result unavailable"), nil},
+			commitOnError: true,
+			firstStatus:   http.StatusInternalServerError,
+		},
+		{
+			name:        "successful response is lost by caller",
+			rotateErrs:  []error{nil, nil},
+			firstStatus: http.StatusCreated,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newRegisterFakeStore()
+			st.rotateErrs = append([]error(nil), tt.rotateErrs...)
+			st.commitOnError = tt.commitOnError
+			handler := NewRegisterHandler(RegisterHandlerOptions{
+				Store:         st,
+				SetupVerifier: &fakeSetupVerifier{repo: validSetupRepository()},
+				AppVerifier:   &fakeAppVerifier{},
+				AppLogin:      "herd-os",
+			})
+			body := `{"repository":"octo/herd","owner":"octo","name":"herd","setup_token":"gho_human"}`
+
+			first := httptest.NewRecorder()
+			handler.ServeHTTP(first, registerRequest(body))
+			assert.Equal(t, tt.firstStatus, first.Code)
+
+			retry := httptest.NewRecorder()
+			handler.ServeHTTP(retry, registerRequest(body))
+			require.Equal(t, http.StatusCreated, retry.Code)
+			assert.NotContains(t, retry.Body.String(), "gho_human")
+			require.Len(t, st.tokens, 2)
+			active := 0
+			for _, token := range st.tokens {
+				if token.RevokedAt == nil {
+					active++
+				}
+			}
+			assert.Equal(t, 1, active)
+			assert.NotNil(t, st.tokens[0].RevokedAt)
+			assert.Equal(t, "rotated", st.tokens[0].RevokedReason)
+		})
+	}
+}
+
+func TestRegisterHandlerFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		setup      *fakeSetupVerifier
+		app        *fakeAppVerifier
+		wantStatus int
+		wantError  string
+	}{
+		{
+			name:       "missing setup token",
+			body:       `{"owner":"octo","name":"herd"}`,
+			setup:      &fakeSetupVerifier{repo: validSetupRepository()},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusBadRequest,
+			wantError:  "setup_token",
+		},
+		{
+			name:       "insufficient permission rejected",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{repo: SetupRepository{ID: 99, Admin: false, InstallationID: 42}},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusForbidden,
+			wantError:  "admin access",
+		},
+		{
+			name:       "setup verifier unauthorized",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{err: ErrRepoUnauthorized},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusForbidden,
+			wantError:  "gh auth login",
+		},
+		{
+			name:       "setup verifier app not installed",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{err: ErrAppInstallation},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusConflict,
+			wantError:  "GitHub App is not installed",
+		},
+		{
+			name:       "app not installed",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{repo: SetupRepository{ID: 99, Admin: true}},
+			app:        &fakeAppVerifier{findErr: ErrAppInstallation},
+			wantStatus: http.StatusConflict,
+			wantError:  "GitHub App is not installed",
+		},
+		{
+			name:       "app installation mismatch",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{repo: validSetupRepository()},
+			app:        &fakeAppVerifier{err: ErrAppInstallationMatch},
+			wantStatus: http.StatusConflict,
+			wantError:  "App installation",
+		},
+		{
+			name:       "app verifier transient failure",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{repo: validSetupRepository()},
+			app:        &fakeAppVerifier{err: errors.New("github 500")},
+			wantStatus: http.StatusBadGateway,
+			wantError:  "GitHub unavailable",
+		},
+		{
+			name:       "wrong app login",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human","app_login":"other-app"}`,
+			setup:      &fakeSetupVerifier{repo: validSetupRepository()},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusBadRequest,
+			wantError:  "app_login",
+		},
+		{
+			name:       "github unavailable",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{err: errors.New("github unavailable")},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusBadGateway,
+			wantError:  "GitHub unavailable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newRegisterFakeStore()
+			handler := NewRegisterHandler(RegisterHandlerOptions{
+				Store:         st,
+				SetupVerifier: tt.setup,
+				AppVerifier:   tt.app,
+				AppLogin:      "herd-os",
+			})
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, registerRequest(tt.body))
+
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			assert.Contains(t, rec.Body.String(), tt.wantError)
+			assert.Empty(t, st.tokens)
+			assert.NotContains(t, rec.Body.String(), "gho_human")
+		})
+	}
+}
+
+func TestRegisterHandlerSetupVerifierTransientFailureDoesNotSuggestGhAuthLogin(t *testing.T) {
+	st := newRegisterFakeStore()
+	handler := NewRegisterHandler(RegisterHandlerOptions{
+		Store:         st,
+		SetupVerifier: &fakeSetupVerifier{err: errors.New("github 502")},
+		AppVerifier:   &fakeAppVerifier{},
+		AppLogin:      "herd-os",
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, registerRequest(`{"owner":"octo","name":"herd","setup_token":"gho_human"}`))
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "retry repository registration")
+	assert.NotContains(t, rec.Body.String(), "gh auth login")
+	assert.Empty(t, st.tokens)
+}
+
+func TestRegisterHandlerSanitizesVerifierErrorBeforePersistingAttempt(t *testing.T) {
+	setupToken := "gho_secret_setup_token"
+	st := newRegisterFakeStore()
+	handler := NewRegisterHandler(RegisterHandlerOptions{
+		Store:         st,
+		SetupVerifier: &fakeSetupVerifier{err: errors.New("request failed with token " + setupToken)},
+		AppVerifier:   &fakeAppVerifier{},
+		AppLogin:      "herd-os",
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, registerRequest(`{"owner":"octo","name":"herd","setup_token":"`+setupToken+`"}`))
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Len(t, st.attempts, 1)
+	assert.NotContains(t, st.attempts[0].Error, setupToken)
+	assert.NotContains(t, rec.Body.String(), setupToken)
+}
+
+func TestSetupVerificationErrorResponseRateLimitsAreRetryable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "core rate limit",
+			err:  &ghapi.RateLimitError{Rate: ghapi.Rate{Limit: 1}},
+		},
+		{
+			name: "abuse rate limit",
+			err:  &ghapi.AbuseRateLimitError{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, msg := setupVerificationErrorResponse(tt.err)
+
+			assert.Equal(t, http.StatusBadGateway, status)
+			assert.Contains(t, msg, "rate limit")
+			assert.NotContains(t, msg, "gh auth login")
+		})
+	}
+}
+
+func TestGitHubRateLimitErrorClassifiesTypedForbiddenRateLimits(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "core rate limit", err: &ghapi.RateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}, want: true},
+		{name: "abuse rate limit", err: &ghapi.AbuseRateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}, want: true},
+		{name: "plain forbidden", err: &ghapi.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, githubRateLimitError(tt.err))
+		})
+	}
+}
+
+func TestDefaultGitHubVerifiersUseSetupTokenForAdminAndAppAuthForInstallationDiscovery(t *testing.T) {
+	seenAuth := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/v3")
+		seenAuth[path] = r.Header.Get("Authorization")
+		switch path {
+		case "/user":
+			writeJSON(w, http.StatusOK, map[string]string{"login": "mona"})
+		case "/repos/octo/herd":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id":             99,
+				"name":           "herd",
+				"full_name":      "octo/herd",
+				"default_branch": "main",
+				"private":        true,
+				"permissions":    map[string]bool{"admin": true},
+			})
+		case "/repos/octo/herd/installation":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id":      42,
+				"account": map[string]any{"login": "octo", "id": 100, "type": "Organization"},
+			})
+		default:
+			writeJSON(w, http.StatusNotFound, map[string]string{"message": "not found"})
+		}
+	}))
+	defer server.Close()
+	clientFor := func(httpClient *http.Client) *ghapi.Client {
+		client, err := ghapi.NewClient(httpClient).WithEnterpriseURLs(server.URL+"/", server.URL+"/")
+		require.NoError(t, err)
+		return client
+	}
+	setup := githubSetupVerifier{newClient: clientFor}
+	appHTTPClient := oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "app-jwt"}))
+	app := githubAppVerifier{appClient: clientFor(appHTTPClient)}
+
+	repo, err := setup.VerifySetupRepository(context.Background(), "gho_setup", "octo", "herd")
+	require.NoError(t, err)
+	installation, err := app.FindRepositoryInstallation(context.Background(), "octo", "herd")
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(99), repo.ID)
+	assert.Zero(t, repo.InstallationID)
+	assert.Equal(t, int64(42), installation.ID)
+	assert.Equal(t, "Bearer gho_setup", seenAuth["/user"])
+	assert.Equal(t, "Bearer gho_setup", seenAuth["/repos/octo/herd"])
+	assert.Equal(t, "Bearer app-jwt", seenAuth["/repos/octo/herd/installation"])
+}
+
+func registerRequest(body string) *http.Request {
+	var request map[string]any
+	if json.Unmarshal([]byte(body), &request) == nil {
+		if _, ok := request["configuration"]; !ok {
+			cfg := config.Default()
+			cfg.Platform.Owner = "octo"
+			cfg.Platform.Repo = "herd"
+			request["configuration"] = cfg
+			encoded, err := json.Marshal(request)
+			if err == nil {
+				body = string(encoded)
+			}
+		}
+	}
+	return httptest.NewRequest(http.MethodPost, "/api/v1/github/repositories/register", bytes.NewBufferString(body))
+}
+
+func validSetupRepository() SetupRepository {
+	return SetupRepository{
+		ID:             99,
+		Owner:          "octo",
+		Name:           "herd",
+		FullName:       "octo/herd",
+		DefaultBranch:  "main",
+		Private:        true,
+		Admin:          true,
+		InstallationID: 42,
+		AccountLogin:   "octo",
+		AccountID:      100,
+		AccountType:    "Organization",
+	}
+}

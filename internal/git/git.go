@@ -1,11 +1,14 @@
 package git
 
 import (
+	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,7 +16,9 @@ import (
 
 // Git wraps the git CLI for repository operations.
 type Git struct {
-	WorkDir string
+	WorkDir     string
+	ExtraConfig []string
+	Env         []string
 }
 
 type NameStatusEntry struct {
@@ -35,6 +40,38 @@ func New(workDir string) *Git {
 	return &Git{WorkDir: workDir}
 }
 
+// NewWithConfig creates a Git wrapper that passes non-sensitive config entries
+// through Git's environment config interface for each invocation. Sensitive
+// auth material must use a transport such as askpass, not argv or env config.
+func NewWithConfig(workDir string, config ...string) *Git {
+	return &Git{WorkDir: workDir, ExtraConfig: append([]string(nil), config...)}
+}
+
+func NewWithConfigAndEnv(workDir string, config []string, env []string) *Git {
+	return &Git{WorkDir: workDir, ExtraConfig: append([]string(nil), config...), Env: append([]string(nil), env...)}
+}
+
+// Clone clones a repository into dst.
+func Clone(repoURL, dst string) error {
+	return CloneWithConfig(repoURL, dst)
+}
+
+// CloneWithConfig clones a repository while passing command-scoped git config.
+func CloneWithConfig(repoURL, dst string, config ...string) error {
+	return CloneWithConfigAndEnv(repoURL, dst, config, nil)
+}
+
+func CloneWithConfigAndEnv(repoURL, dst string, config []string, env []string) error {
+	args := gitArgs("clone", repoURL, dst)
+	cmd := exec.Command("git", args...)
+	cmd.Env = gitEnv(config, env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(args), err, redactGitOutput(out))
+	}
+	return nil
+}
+
 // ConfigureIdentity sets the local git user identity for commits/merges if not already set.
 func (g *Git) ConfigureIdentity(name, email string) error {
 	// Check if local config already has identity (ignore global config)
@@ -53,6 +90,10 @@ func (g *Git) ConfigureIdentity(name, email string) error {
 
 func (g *Git) Checkout(branch string) error {
 	return g.run("checkout", branch)
+}
+
+func (g *Git) CheckoutDetached(ref string) error {
+	return g.run("checkout", "--detach", ref)
 }
 
 // CheckoutReset checks out a branch, resetting it to match the remote tracking branch.
@@ -85,6 +126,14 @@ func (g *Git) Push(remote, branch string) error {
 	return g.run("push", remote, branch)
 }
 
+func (g *Git) PushHEAD(remote, branch, expectedOldSHA string) error {
+	refspec := "HEAD:refs/heads/" + branch
+	if expectedOldSHA != "" {
+		return g.run("push", "--force-with-lease=refs/heads/"+branch+":"+expectedOldSHA, remote, refspec)
+	}
+	return g.run("push", remote, refspec)
+}
+
 func (g *Git) ForcePush(remote, branch string) error {
 	return g.run("push", "--force-with-lease", remote, branch)
 }
@@ -95,6 +144,14 @@ func (g *Git) Pull(remote, branch string) error {
 
 func (g *Git) Diff(base, head string) (string, error) {
 	return g.output("diff", base+"..."+head)
+}
+
+func (g *Git) BinaryDiff(base, head string) ([]byte, error) {
+	return g.outputBytes("diff", "--binary", "--full-index", base, head)
+}
+
+func (g *Git) ApplyBinaryPatch(patchFile string) error {
+	return g.run("apply", "--index", "--binary", patchFile)
 }
 
 func (g *Git) DiffNameStatus(base, head string) ([]NameStatusEntry, error) {
@@ -341,27 +398,173 @@ func (g *Git) RevParse(ref string) (string, error) {
 	return g.output("rev-parse", ref)
 }
 
+func (g *Git) RemoteBranchSHA(remote, branch string) (string, error) {
+	return g.output("rev-parse", remote+"/"+branch)
+}
+
 func (g *Git) run(args ...string) error {
-	cmd := exec.Command("git", args...)
+	cmdArgs := gitArgs(args...)
+	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
+	cmd.Env = gitEnv(g.ExtraConfig, g.Env)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, redactGitOutput(out))
 	}
 	return nil
 }
 
 func (g *Git) output(args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmdArgs := gitArgs(args...)
+	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = g.WorkDir
+	cmd.Env = gitEnv(g.ExtraConfig, g.Env)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(exitErr.Stderr)))
+			return "", fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, redactGitOutput(exitErr.Stderr))
 		}
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return "", fmt.Errorf("git %s: %w", gitCommandDisplay(cmdArgs), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (g *Git) outputBytes(args ...string) ([]byte, error) {
+	cmdArgs := gitArgs(args...)
+	cmd := exec.Command("git", cmdArgs...)
+	cmd.Dir = g.WorkDir
+	cmd.Env = gitEnv(g.ExtraConfig, g.Env)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w\n%s", gitCommandDisplay(cmdArgs), err, redactGitOutput(stderr.Bytes()))
+	}
+	return out, nil
+}
+
+func gitArgs(args ...string) []string {
+	return args
+}
+
+func gitEnv(config []string, env []string) []string {
+	out := make([]string, 0, len(os.Environ())+len(env)+len(config)*2+1)
+	for _, entry := range os.Environ() {
+		if inheritedGitConfigEnv(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	for _, entry := range env {
+		if inheritedGitConfigEnv(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	out = append(out, "GIT_CONFIG_NOSYSTEM=1")
+	configIndex := 0
+	for _, entry := range config {
+		if strings.TrimSpace(entry) == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			continue
+		}
+		if sensitiveGitConfigKey(key) || sensitiveGitConfigValue(value) {
+			continue
+		}
+		out = append(out,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", configIndex, key),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", configIndex, value),
+		)
+		configIndex++
+	}
+	if configIndex > 0 {
+		out = append(out, fmt.Sprintf("GIT_CONFIG_COUNT=%d", configIndex))
+	}
+	return out
+}
+
+func inheritedGitConfigEnv(entry string) bool {
+	key, _, ok := strings.Cut(entry, "=")
+	if !ok {
+		key = entry
+	}
+	return key == "GIT_CONFIG" || strings.HasPrefix(key, "GIT_CONFIG_")
+}
+
+func gitCommandDisplay(args []string) string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-c" && i+1 < len(args) {
+			out = append(out, "-c", redactGitConfig(args[i+1]))
+			i++
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return strings.Join(out, " ")
+}
+
+var gitSecretPattern = regexp.MustCompile(`(?i)(authorization:\s*(?:bearer|basic)\s+)[^\s]+|\b(?:gh[opsru]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b|extraHeader`)
+
+func redactGitOutput(out []byte) string {
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		return ""
+	}
+	return gitSecretPattern.ReplaceAllStringFunc(msg, func(match string) string {
+		lower := strings.ToLower(match)
+		if strings.HasPrefix(lower, "authorization:") {
+			prefix, _, _ := strings.Cut(match, " ")
+			return prefix + " [redacted]"
+		}
+		return "[redacted]"
+	})
+}
+
+func redactGitConfig(entry string) string {
+	key, value, ok := strings.Cut(entry, "=")
+	if !ok {
+		if sensitiveGitConfigKey(entry) {
+			return entry + "=<redacted>"
+		}
+		return entry
+	}
+	if sensitiveGitConfigKey(key) || sensitiveGitConfigValue(value) {
+		return key + "=<redacted>"
+	}
+	return entry
+}
+
+func sensitiveGitConfigKey(key string) bool {
+	if gitSecretPattern.MatchString(key) || strings.Contains(key, "://") && strings.Contains(strings.Split(key, "://")[1], "@") {
+		return true
+	}
+	key = strings.ToLower(key)
+	for _, marker := range []string{"authorization", "token", "password", "extraheader"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func sensitiveGitConfigValue(value string) bool {
+	lower := strings.ToLower(value)
+	if gitSecretPattern.MatchString(value) {
+		return true
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.User != nil {
+		return true
+	}
+	return strings.Contains(lower, "authorization:") ||
+		strings.Contains(lower, "bearer ") ||
+		strings.Contains(lower, "token ") ||
+		strings.Contains(lower, "x-access-token") ||
+		strings.Contains(lower, "password") ||
+		strings.Contains(lower, "credential.helper")
 }
 
 func parseNameStatus(out string) []NameStatusEntry {

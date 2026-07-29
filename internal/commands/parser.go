@@ -64,7 +64,12 @@ func parseCommandLine(line string, remainingBody string) *Command {
 	if strings.HasPrefix(afterName, "\"") {
 		rest := afterName[1:]
 		if end := strings.Index(rest, "\""); end >= 0 {
-			cmd.Prompt = rest[:end]
+			quotedPrompt := rest[:end]
+			trailingPrompt := strings.TrimSpace(rest[end+1:])
+			if trailingPrompt != "" {
+				quotedPrompt = strings.TrimSpace(quotedPrompt + " " + trailingPrompt)
+			}
+			cmd.Prompt = commandPrompt(quotedPrompt, remainingBody)
 		} else {
 			return &Command{ParseErr: errors.New("unterminated quote in command")}
 		}
@@ -87,4 +92,15 @@ func parseCommandLine(line string, remainingBody string) *Command {
 	}
 
 	return cmd
+}
+
+func commandPrompt(firstLinePrompt, remainingBody string) string {
+	var promptParts []string
+	if firstLinePrompt != "" {
+		promptParts = append(promptParts, firstLinePrompt)
+	}
+	if trimmed := strings.TrimRight(remainingBody, "\n "); trimmed != "" {
+		promptParts = append(promptParts, trimmed)
+	}
+	return strings.Join(promptParts, "\n")
 }

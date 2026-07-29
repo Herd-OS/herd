@@ -12,6 +12,8 @@ import (
 func TestDefault(t *testing.T) {
 	cfg := Default()
 	assert.Equal(t, 1, cfg.Version)
+	assert.Empty(t, cfg.ControlPlaneURL)
+	assert.Equal(t, DefaultControlPlaneURL, cfg.EffectiveControlPlaneURL())
 	assert.Equal(t, "github", cfg.Platform.Provider)
 	assert.Equal(t, "claude", cfg.Agent.Provider)
 	assert.Equal(t, "medium", cfg.Agent.CodexReasoningEffort)
@@ -57,6 +59,7 @@ platform:
   provider: "github"
   owner: "my-org"
   repo: "my-project"
+control_plane_url: "https://cp.example.com"
 agent:
   provider: "claude"
 workers:
@@ -110,6 +113,8 @@ image_publish:
 
 	assert.Equal(t, "my-org", cfg.Platform.Owner)
 	assert.Equal(t, "my-project", cfg.Platform.Repo)
+	assert.Equal(t, "https://cp.example.com", cfg.ControlPlaneURL)
+	assert.Equal(t, "https://cp.example.com", cfg.EffectiveControlPlaneURL())
 	assert.Equal(t, 5, cfg.Workers.MaxConcurrent)
 	assert.Equal(t, "custom-label", cfg.Workers.RunnerLabel)
 	assert.Equal(t, 60, cfg.Workers.TimeoutMinutes)
@@ -137,6 +142,43 @@ image_publish:
 	assert.Equal(t, []string{"self-hosted", "linux x64", "gpu:large"}, cfg.ImagePublish.RunsOn)
 	assert.Equal(t, []string{"linux/amd64"}, cfg.ImagePublish.Platforms)
 	assert.Equal(t, []string{"BUNDLE_RUBYGEMS__PKG__GITHUB__COM", "NPM_TOKEN"}, cfg.ImagePublish.BuildSecrets)
+}
+
+func TestLoadRejectsUnsafeControlPlaneURLEnvOverride(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "userinfo", value: "https://user:token@cp.example.com", wantErr: "userinfo"},
+		{name: "query", value: "https://cp.example.com?token=secret", wantErr: "query string"},
+		{name: "fragment", value: "https://cp.example.com#token", wantErr: "fragment"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(""), 0644))
+			t.Setenv("HERD_CONTROL_PLANE_URL", tt.value)
+
+			_, err := Load(dir)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestLoadNormalizesControlPlaneURLEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte(""), 0644))
+	t.Setenv("HERD_CONTROL_PLANE_URL", "  https://cp.example.com  ")
+
+	cfg, err := Load(dir)
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://cp.example.com", cfg.ControlPlaneURL)
+	assert.Equal(t, "https://cp.example.com", cfg.EffectiveControlPlaneURL())
 }
 
 func TestLoadAgentExecFields(t *testing.T) {
@@ -385,6 +427,8 @@ func TestValidateErrors(t *testing.T) {
 		{"zero stale", func(c *Config) { c.Monitor.StaleThresholdMinutes = 0 }, "monitor.stale_threshold_minutes must be > 0"},
 		{"zero pr age", func(c *Config) { c.Monitor.MaxPRHAgeHours = 0 }, "monitor.max_pr_age_hours must be > 0"},
 		{"zero redispatch", func(c *Config) { c.Monitor.MaxRedispatchAttempts = 0 }, "monitor.max_redispatch_attempts must be > 0"},
+		{"control plane query", func(c *Config) { c.ControlPlaneURL = "https://cp.example.com?token=x" }, "control_plane_url must not include a query string"},
+		{"control plane fragment", func(c *Config) { c.ControlPlaneURL = "https://cp.example.com#frag" }, "control_plane_url must not include a fragment"},
 	}
 
 	for _, tt := range tests {

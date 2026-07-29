@@ -12,6 +12,12 @@ func IsRefUpdateConflict(err error) bool {
 	return errors.Is(err, ErrRefUpdateConflict)
 }
 
+var ErrNotFound = errors.New("platform resource not found")
+
+func IsNotFound(err error) bool {
+	return errors.Is(err, ErrNotFound)
+}
+
 var ErrPullRequestDiffTooLarge = errors.New("pull request diff too large")
 
 func IsPullRequestDiffTooLarge(err error) bool {
@@ -30,7 +36,12 @@ type Platform interface {
 	Checks() CheckService
 }
 
+type IssueReader interface {
+	ListComments(ctx context.Context, number int) ([]*Comment, error)
+}
+
 type IssueService interface {
+	IssueReader
 	Create(ctx context.Context, title, body string, labels []string, milestone *int) (*Issue, error)
 	Get(ctx context.Context, number int) (*Issue, error)
 	List(ctx context.Context, filters IssueFilters) ([]*Issue, error)
@@ -45,18 +56,22 @@ type IssueService interface {
 	CreateCommentReaction(ctx context.Context, commentID int64, reaction string) error
 }
 
-type PullRequestService interface {
-	Create(ctx context.Context, title, body, head, base string) (*PullRequest, error)
+type PullRequestReader interface {
 	Get(ctx context.Context, number int) (*PullRequest, error)
+	ListReviewComments(ctx context.Context, number int) ([]*ReviewComment, error)
+	ListFiles(ctx context.Context, number int) ([]*PullRequestFile, error)
+	GetDiff(ctx context.Context, number int) (string, error)
+}
+
+type PullRequestService interface {
+	PullRequestReader
+	Create(ctx context.Context, title, body, head, base string) (*PullRequest, error)
 	List(ctx context.Context, filters PRFilters) ([]*PullRequest, error)
 	Update(ctx context.Context, number int, title, body *string) (*PullRequest, error)
 	Merge(ctx context.Context, number int, method MergeMethod) (*MergeResult, error)
 	UpdateBranch(ctx context.Context, number int) error
 	CreateReview(ctx context.Context, number int, body string, event ReviewEvent) error
 	AddComment(ctx context.Context, number int, body string) error
-	ListReviewComments(ctx context.Context, number int) ([]*ReviewComment, error)
-	ListFiles(ctx context.Context, number int) ([]*PullRequestFile, error)
-	GetDiff(ctx context.Context, number int) (string, error)
 	Close(ctx context.Context, number int) error
 }
 
@@ -87,10 +102,14 @@ type RunnerService interface {
 	Get(ctx context.Context, id int64) (*Runner, error)
 }
 
-type CheckService interface {
+type CheckReader interface {
 	// GetCombinedStatus returns the combined CI status for a ref (branch or SHA).
 	// Returns "success", "failure", "pending", or "error".
 	GetCombinedStatus(ctx context.Context, ref string) (string, error)
+}
+
+type CheckService interface {
+	CheckReader
 
 	// RerunFailedChecks re-runs failed check suites for a ref.
 	RerunFailedChecks(ctx context.Context, ref string) error

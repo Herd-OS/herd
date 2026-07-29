@@ -28,7 +28,7 @@ func IsMilestoneAlreadyExists(err error) bool {
 }
 
 func isGitHubRefUpdateConflict(err error) bool {
-	return isGitHubStatus(err, http.StatusConflict) || isGitHubStatus(err, http.StatusUnprocessableEntity)
+	return isGitHubStatus(err, http.StatusConflict) || isGitHubStatus(err, http.StatusPreconditionFailed) || isGitHubStatus(err, http.StatusUnprocessableEntity)
 }
 
 func isGitHubDiffTooLarge(err error) bool {

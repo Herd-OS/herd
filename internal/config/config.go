@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,14 +17,15 @@ const (
 )
 
 type Config struct {
-	Version      int          `yaml:"version"`
-	Platform     Platform     `yaml:"platform"`
-	Agent        Agent        `yaml:"agent"`
-	Workers      Workers      `yaml:"workers"`
-	Integrator   Integrator   `yaml:"integrator"`
-	Monitor      Monitor      `yaml:"monitor"`
-	PullRequests PullRequests `yaml:"pull_requests"`
-	ImagePublish ImagePublish `yaml:"image_publish"`
+	Version         int          `yaml:"version"`
+	ControlPlaneURL string       `yaml:"control_plane_url,omitempty"`
+	Platform        Platform     `yaml:"platform"`
+	Agent           Agent        `yaml:"agent"`
+	Workers         Workers      `yaml:"workers"`
+	Integrator      Integrator   `yaml:"integrator"`
+	Monitor         Monitor      `yaml:"monitor"`
+	PullRequests    PullRequests `yaml:"pull_requests"`
+	ImagePublish    ImagePublish `yaml:"image_publish"`
 }
 
 type Platform struct {
@@ -200,6 +202,9 @@ func Load(dir string) (*Config, error) {
 	}
 
 	applyEnvOverrides(cfg)
+	if err := normalizeControlPlaneURL(cfg); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
@@ -214,7 +219,17 @@ func Save(dir string, cfg *Config) error {
 	return os.WriteFile(path, data, 0644)
 }
 
+func (c *Config) EffectiveControlPlaneURL() string {
+	if c != nil && c.ControlPlaneURL != "" {
+		return c.ControlPlaneURL
+	}
+	return DefaultControlPlaneURL
+}
+
 func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("HERD_CONTROL_PLANE_URL"); v != "" {
+		cfg.ControlPlaneURL = v
+	}
 	if v := os.Getenv("HERD_MAX_WORKERS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Workers.MaxConcurrent = n
@@ -234,4 +249,20 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Workers.TimeoutMinutes = n
 		}
 	}
+}
+
+func normalizeControlPlaneURL(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	value := strings.TrimSpace(cfg.ControlPlaneURL)
+	if value == "" {
+		cfg.ControlPlaneURL = ""
+		return nil
+	}
+	if err := validateHTTPURL("control_plane_url", value); err != nil {
+		return fmt.Errorf("control plane URL: %w", err)
+	}
+	cfg.ControlPlaneURL = value
+	return nil
 }

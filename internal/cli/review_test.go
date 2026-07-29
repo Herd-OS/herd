@@ -183,7 +183,8 @@ func TestReviewSystemPrompt_IncludesFixGuidance(t *testing.T) {
 	out, err := renderReviewSystemPrompt(data)
 	require.NoError(t, err)
 
-	assert.Contains(t, out, "/herd fix", "drafting instruction should reference /herd fix")
+	assert.Contains(t, out, "@herd-os fix", "drafting instruction should reference @herd-os fix")
+	assert.NotContains(t, out, "/herd fix", "drafting instruction should not reference legacy slash commands")
 	assert.True(t,
 		strings.Contains(out, "draft") || strings.Contains(out, "Draft"),
 		"prompt should include drafting language")
@@ -267,7 +268,7 @@ func TestReviewSystemPrompt_ExplicitNoEditEvenIfUserAsks(t *testing.T) {
 	require.NoError(t, err)
 
 	// The prompt must explicitly address the user-asks-for-local-edit case
-	// and instruct the agent to draft /herd fix instead.
+	// and instruct the agent to draft @herd-os fix instead.
 	assert.True(t,
 		strings.Contains(out, "edit the file directly") ||
 			strings.Contains(out, "do it locally") ||
@@ -275,8 +276,8 @@ func TestReviewSystemPrompt_ExplicitNoEditEvenIfUserAsks(t *testing.T) {
 		"prompt should enumerate the user-asks-for-local-edit phrasing")
 	assert.Contains(t, out, "never edits files locally",
 		"prompt should state herd review never edits files locally")
-	assert.Contains(t, out, "/herd fix",
-		"prompt should redirect the user to /herd fix")
+	assert.Contains(t, out, "@herd-os fix",
+		"prompt should redirect the user to @herd-os fix")
 }
 
 func TestReviewSystemPrompt_MustNotIncludesFileMutation(t *testing.T) {
@@ -319,7 +320,7 @@ func TestBuildReviewPromptDataFallsBackWhenRawDiffTooLarge(t *testing.T) {
 		checks: &mockReviewPromptCheckService{},
 	}
 
-	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.DefaultChunkOptions())
+	data, err := buildReviewPromptData(context.Background(), reviewInputFromPlatform(client), 42, "example", "repo", t.TempDir(), reviewdiff.DefaultChunkOptions())
 
 	require.NoError(t, err)
 	assert.True(t, prs.getDiffCalled)
@@ -347,7 +348,7 @@ func TestBuildReviewPromptDataUsesChunkPlanningForInteractivePrompt(t *testing.T
 		checks: &mockReviewPromptCheckService{},
 	}
 
-	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+	data, err := buildReviewPromptData(context.Background(), reviewInputFromPlatform(client), 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
 		MaxChunkBytes:            1000,
 		MaxFileDiffBytes:         1000,
 		MaxFilesPerChunk:         1,
@@ -400,7 +401,7 @@ func TestBuildReviewPromptDataMarksPartialCoverage(t *testing.T) {
 		checks: &mockReviewPromptCheckService{},
 	}
 
-	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+	data, err := buildReviewPromptData(context.Background(), reviewInputFromPlatform(client), 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
 		MaxChunkBytes:            1000,
 		MaxFileDiffBytes:         1000,
 		MaxFilesPerChunk:         1,
@@ -443,7 +444,7 @@ func TestBuildReviewPromptDataZeroChunksDoesNotUseLegacyRenderedDiff(t *testing.
 		checks: &mockReviewPromptCheckService{},
 	}
 
-	data, err := buildReviewPromptData(context.Background(), client, 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
+	data, err := buildReviewPromptData(context.Background(), reviewInputFromPlatform(client), 42, "example", "repo", t.TempDir(), reviewdiff.ChunkOptions{
 		MaxChunkBytes:            20,
 		MaxFileDiffBytes:         1000,
 		MaxFilesPerChunk:         10,

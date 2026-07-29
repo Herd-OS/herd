@@ -118,6 +118,22 @@ func (s *checkService) RerunFailedChecks(ctx context.Context, ref string) error 
 	return nil
 }
 
+func (s *checkService) CreateCommitStatus(ctx context.Context, sha string, status platform.CommitStatus) error {
+	req := &gh.RepoStatus{
+		State:       gh.Ptr(status.State),
+		Context:     gh.Ptr(status.Context),
+		Description: gh.Ptr(status.Description),
+	}
+	if status.TargetURL != "" {
+		req.TargetURL = gh.Ptr(status.TargetURL)
+	}
+	_, _, err := s.c.gh.Repositories.CreateStatus(ctx, s.c.owner, s.c.repo, sha, req)
+	if err != nil {
+		return fmt.Errorf("creating commit status %q on %s: %w", status.Context, sha, err)
+	}
+	return nil
+}
+
 // newActionsTokenClient creates a GitHub client using the Actions-provided token.
 // Fine-grained PATs cannot access the Checks API, but the workflow's GITHUB_TOKEN can.
 // The workflow passes the Actions token as HERD_ACTIONS_TOKEN to avoid conflict with

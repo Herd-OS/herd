@@ -357,10 +357,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 	}
 
 	if params.ExtraInstructions != "" {
-		if reviewOpts.SystemPrompt != "" {
-			reviewOpts.SystemPrompt += "\n\n"
-		}
-		reviewOpts.SystemPrompt += params.ExtraInstructions
+		reviewOpts.ExtraInstructions = params.ExtraInstructions
 	}
 
 	aggregate, err := runChunkedReviewWithRetry(ctx, ag, p, plan, reviewOpts, pr.Number)
@@ -867,6 +864,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		FixIssues:     fixIssueNums,
 		FixCycle:      nextCycle,
 		BatchPRNumber: pr.Number,
+		Findings:      append([]agent.ReviewFinding(nil), actionableFindings...),
 	}, nil
 }
 
@@ -1203,10 +1201,7 @@ func ReviewStandalone(ctx context.Context, p platform.Platform, ag agent.Agent, 
 	}
 
 	if params.ExtraInstructions != "" {
-		if reviewOpts.SystemPrompt != "" {
-			reviewOpts.SystemPrompt += "\n\n"
-		}
-		reviewOpts.SystemPrompt += params.ExtraInstructions
+		reviewOpts.ExtraInstructions = params.ExtraInstructions
 	}
 
 	prComments, commentErr := p.Issues().ListComments(ctx, params.PRNumber)
@@ -1961,9 +1956,9 @@ func buildStableDisagreementComment(blocked []agent.ReviewFinding, verdictIdx []
 	}
 	b.WriteString("\n")
 	b.WriteString("Resolution options:\n")
-	b.WriteString("1. If the workers were right and the code is correct as-is, post a `/herd fix` with explicit acceptance criteria that close out these findings, or close the PR review with `/herd integrate` to merge if you're satisfied.\n")
-	b.WriteString("2. If the reviewer is right and the workers missed something, post a `/herd fix` with concrete file:line evidence that contradicts the worker verdicts.\n")
-	b.WriteString("3. Remove the `herd/stable-disagreement` label and post `/herd integrate` to resume automatic reviews.\n")
+	b.WriteString("1. If the workers were right and the code is correct as-is, post `@herd-os fix` with explicit acceptance criteria that close out these findings, or close the PR review with `@herd-os integrate` to merge if you're satisfied.\n")
+	b.WriteString("2. If the reviewer is right and the workers missed something, post `@herd-os fix` with concrete file:line evidence that contradicts the worker verdicts.\n")
+	b.WriteString("3. Remove the `herd/stable-disagreement` label and post `@herd-os integrate` to resume automatic reviews.\n")
 	return b.String()
 }
 

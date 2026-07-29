@@ -28,6 +28,9 @@ func newPatrolCmd() *cobra.Command {
 			if os.Getenv("HERD_RUNNER") != "true" {
 				return fmt.Errorf("herd monitor patrol is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
+			if err := ensureProductionControlPlaneAuth("herd monitor patrol"); err != nil {
+				return err
+			}
 
 			cfg, err := config.Load(".")
 			if err != nil {
