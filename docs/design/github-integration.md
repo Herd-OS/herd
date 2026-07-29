@@ -178,6 +178,7 @@ Worker and integrator jobs that need repository history use `actions/checkout` w
 | Issues | Read and write | Create/update/label issues and milestones |
 | Metadata | Read | Required by GitHub Apps |
 | Pull requests | Read and write | Create/update/comment/review PRs |
+| Workflows | Read and write | Allow App-authored worker commits that modify workflow files |
 
 The App does not mutate branch protection. Users configure branch protection
 manually and should require the `Herd Review` status only when Herd Review is
