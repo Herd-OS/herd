@@ -491,6 +491,14 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 			fmt.Printf("Pending worker completion exists for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
 			return &AdvanceResult{TierComplete: true}, nil
 		}
+		pending, err := hasPendingWorkerCompletions(ctx, p, ms.Number)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			fmt.Printf("Pending worker completion appeared for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
+			return &AdvanceResult{TierComplete: true}, nil
+		}
 		// All tiers done — open batch PR
 		prNum, err := openBatchPR(ctx, p, g, cfg, ms, allIssues, tiers, batchBranch)
 		if err != nil {
@@ -977,6 +985,14 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 		}
 		if hasPendingWorkerCompletionInIssues(ctx, p, allIssues) {
 			fmt.Printf("Pending worker completion exists for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
+			return &AdvanceResult{TierComplete: true}, nil
+		}
+		pending, err := hasPendingWorkerCompletions(ctx, p, ms.Number)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			fmt.Printf("Pending worker completion appeared for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
 			return &AdvanceResult{TierComplete: true}, nil
 		}
 		prNum, err := openBatchPR(ctx, p, g, cfg, ms, allIssues, tiers, batchBranch)

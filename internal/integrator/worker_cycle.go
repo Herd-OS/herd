@@ -47,7 +47,9 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 	}
 	if !acquired {
 		logActiveBatchLock(ctx, p.Repository(), ms.Number, runCtx.BatchBranch, params.RunID)
-		markWorkerCompletionPending(ctx, p, runCtx)
+		if err := markWorkerCompletionPending(ctx, p, runCtx); err != nil {
+			return nil, err
+		}
 		return &WorkerCompletionCycleResult{
 			BatchLockSkipped: true,
 			SkipReason:       batchLockSkipReason(ctx, p.Repository(), ms.Number, runCtx.BatchBranch, params.RunID),
@@ -69,13 +71,22 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 	}
 
 	for attempt := 0; attempt < 5; attempt++ {
+		drained, err := drainPendingWorkerCompletions(lockedCtx, p, g, cfg, params.RunID, ms.Number)
+		if err != nil {
+			return nil, err
+		}
+		if drained {
+			result.PendingDrained = true
+			continue
+		}
+
 		advanceResult, err := Advance(lockedCtx, p, g, cfg, AdvanceParams(params))
 		if err != nil {
 			return nil, err
 		}
 		result.Advance = advanceResult
 
-		drained, err := drainPendingWorkerCompletions(lockedCtx, p, g, cfg, params.RunID, ms.Number)
+		drained, err = drainPendingWorkerCompletions(lockedCtx, p, g, cfg, params.RunID, ms.Number)
 		if err != nil {
 			return nil, err
 		}
@@ -93,20 +104,39 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 			continue
 		}
 
-		result.SideEffectsDeferred = true
+		if advanceResult != nil && advanceResult.AllComplete && advanceResult.BatchPRNumber > 0 {
+			reviewResult, err := Review(lockedCtx, p, ag, g, cfg, ReviewParams{
+				RunID:    params.RunID,
+				RepoRoot: params.RepoRoot,
+			})
+			if err != nil {
+				return nil, err
+			}
+			result.Review = reviewResult
+
+			checkCIResult, err := CheckCI(lockedCtx, p, cfg, CheckCIParams{
+				RunID:    params.RunID,
+				RepoRoot: params.RepoRoot,
+			})
+			if err != nil {
+				return nil, err
+			}
+			result.CheckCI = checkCIResult
+		}
 		return result, nil
 	}
 
 	return nil, fmt.Errorf("pending worker completions for batch #%d did not quiesce", ms.Number)
 }
 
-func markWorkerCompletionPending(ctx context.Context, p platform.Platform, runCtx *WorkerRunContext) {
+func markWorkerCompletionPending(ctx context.Context, p platform.Platform, runCtx *WorkerRunContext) error {
 	if runCtx == nil || runCtx.IssueNumber == 0 {
-		return
+		return nil
 	}
 	if err := p.Issues().AddLabels(ctx, runCtx.IssueNumber, []string{issues.IntegratorPending}); err != nil {
-		fmt.Printf("Warning: failed to mark issue #%d pending integrator recovery: %v\n", runCtx.IssueNumber, err)
+		return fmt.Errorf("marking issue #%d pending integrator recovery: %w", runCtx.IssueNumber, err)
 	}
+	return nil
 }
 
 func drainPendingWorkerCompletions(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, runID int64, batchNumber int) (bool, error) {

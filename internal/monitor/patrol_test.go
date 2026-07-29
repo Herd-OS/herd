@@ -50,13 +50,17 @@ func (m *mockPlatform) Checks() platform.CheckService {
 }
 
 type mockCheckService struct {
-	status string
+	status        string
+	checkedRefs   []string
+	rerunFailedOn []string
 }
 
-func (m *mockCheckService) GetCombinedStatus(_ context.Context, _ string) (string, error) {
+func (m *mockCheckService) GetCombinedStatus(_ context.Context, ref string) (string, error) {
+	m.checkedRefs = append(m.checkedRefs, ref)
 	return m.status, nil
 }
-func (m *mockCheckService) RerunFailedChecks(_ context.Context, _ string) error {
+func (m *mockCheckService) RerunFailedChecks(_ context.Context, ref string) error {
+	m.rerunFailedOn = append(m.rerunFailedOn, ref)
 	return nil
 }
 
@@ -527,6 +531,7 @@ func TestPatrolWithGit_RecoversPendingWorkerBranchForExistingBatchPR(t *testing.
 	prSvc.listResult = []*platform.PullRequest{
 		{Number: 100, Title: "[herd] Batch", Head: batchBranch, State: "open", CreatedAt: time.Now()},
 	}
+	checkSvc := &mockCheckService{status: "success"}
 	mock := &mockPlatform{
 		issues:    issueSvc,
 		prs:       prSvc,
@@ -546,14 +551,18 @@ func TestPatrolWithGit_RecoversPendingWorkerBranchForExistingBatchPR(t *testing.
 			getResult:  map[int]*platform.Milestone{1: ms},
 			listResult: []*platform.Milestone{ms},
 		},
-		checks: &mockCheckService{status: "success"},
+		checks: checkSvc,
 	}
 
-	result, err := PatrolWithGit(context.Background(), mock, g, &config.Config{})
+	result, err := PatrolWithGit(context.Background(), mock, g, &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.PendingWorkerBranchesRecovered)
 	assert.Equal(t, 0, result.PendingWorkerBranchesSkippedLocked)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
+	assert.Contains(t, issueSvc.comments[100], "/herd review")
+	assert.Contains(t, checkSvc.checkedRefs, batchBranch)
 	assert.False(t, mock.repo.branchExists[workerBranch])
 	runMonitorGit(t, g.WorkDir, "fetch", "origin", batchBranch)
 	runMonitorGit(t, g.WorkDir, "checkout", batchBranch)

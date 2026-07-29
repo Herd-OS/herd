@@ -204,6 +204,17 @@ func PatrolWithGit(ctx context.Context, p platform.Platform, g *git.Git, cfg *co
 				continue
 			}
 			result.PendingWorkerBranchesRecovered += recoveryResult.Recovered
+			if recoveryResult.Recovered > 0 {
+				batchNumber, parseErr := integrator.ParseBatchBranchMilestone(pr.Head)
+				if parseErr != nil {
+					fmt.Printf("Warning: failed to parse batch branch %s for PR #%d after pending worker recovery: %v\n", pr.Head, pr.Number, parseErr)
+				} else if _, err := integrator.CheckCI(ctx, p, cfg, integrator.CheckCIParams{BatchNumber: batchNumber}); err != nil {
+					fmt.Printf("Warning: failed to resume CI check for PR #%d after pending worker recovery: %v\n", pr.Number, err)
+				}
+				if err := p.Issues().AddComment(ctx, pr.Number, "/herd review"); err != nil {
+					fmt.Printf("Warning: failed to enqueue review for PR #%d after pending worker recovery: %v\n", pr.Number, err)
+				}
+			}
 		}
 	}
 	for _, pr := range openPRs {
