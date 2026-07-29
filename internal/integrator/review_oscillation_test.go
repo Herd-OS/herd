@@ -26,6 +26,18 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 			c[1].FixIssues = nil
 			return c
 		}, minCycles: 3, enabled: true},
+		{name: "gap before latest review", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			c[2].FixIssues = nil
+			return c
+		}, minCycles: 3, enabled: true},
+		{name: "out of order cycles", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			c[1].Cycle, c[2].Cycle = c[2].Cycle, c[1].Cycle
+			return c
+		}, minCycles: 3, enabled: true},
+		{name: "duplicate cycle numbers", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			c[2].Cycle = c[1].Cycle
+			return c
+		}, minCycles: 3, enabled: true},
 		{name: "missing head", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			c[0].HeadSHA = ""
 			return c

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/agent/prompt"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -971,27 +972,42 @@ func TestBuildReviewSynthesisInputAffectedFilesIgnoreChunkCoverageMetadata(t *te
 }
 
 func TestBuildReviewSynthesisInputOriginalRequirementsAndPriorStrategies(t *testing.T) {
-	originalBody := issues.RenderBody(issues.IssueBody{
-		FrontMatter:           issues.FrontMatter{Version: 1, Batch: 111},
-		Task:                  "Preserve exclusive ownership.",
-		ImplementationDetails: "Publish only after durable intent.",
-		Criteria:              []string{"Ownership remains visible."},
-		Context:               "Original milestone specification.",
-	})
+	requirementBody := func(batch int, issueType, marker string) string {
+		return issues.RenderBody(issues.IssueBody{
+			FrontMatter:           issues.FrontMatter{Version: 1, Batch: batch, Type: issueType},
+			Task:                  marker + " task",
+			ImplementationDetails: marker + " implementation details",
+			Criteria:              []string{marker + " acceptance criterion"},
+			Context:               marker + " context",
+		})
+	}
 	strategyBody := appendReviewNonConvergenceFingerprintWithHeadSHA(issues.RenderBody(issues.IssueBody{
 		FrontMatter: issues.FrontMatter{Version: 1, Batch: 111, Type: "fix", BatchPR: 849, FixCycle: 7},
 		Task:        "Prior state-machine strategy.",
 	}), "prior-fingerprint", "prior-head")
 	allIssues := []*platform.Issue{
-		{Number: 10, Title: "Original task", Body: originalBody},
+		{Number: 10, Title: "Current batch task", Body: requirementBody(111, "", "current batch")},
+		{Number: 11, Title: "Foreign batch task", Body: requirementBody(222, "", "foreign batch")},
+		{Number: 12, Title: "Unrelated standalone fix", Body: requirementBody(111, "standalone-fix", "unrelated type")},
 		{Number: 20, Title: "Review strategy fix: publication invariant", State: "closed", Labels: []string{issues.ReviewNonConverging, issues.StatusDone}, Body: strategyBody},
 	}
 
 	input := buildReviewSynthesisInput(&platform.PullRequest{Number: 849}, &platform.Milestone{Number: 111}, "head", nil, nil, allIssues, nil, "")
 
 	require.Len(t, input.OriginalRequirements, 1)
-	assert.Equal(t, "Preserve exclusive ownership.", input.OriginalRequirements[0].Task)
-	assert.Equal(t, []string{"Ownership remains visible."}, input.OriginalRequirements[0].AcceptanceCriteria)
+	assert.Equal(t, 10, input.OriginalRequirements[0].IssueNumber)
+	assert.Equal(t, "current batch task", input.OriginalRequirements[0].Task)
+	assert.Equal(t, "current batch implementation details", input.OriginalRequirements[0].ImplementationDetails)
+	assert.Equal(t, []string{"current batch acceptance criterion"}, input.OriginalRequirements[0].AcceptanceCriteria)
+	assert.Equal(t, "current batch context", input.OriginalRequirements[0].Context)
+	rendered, err := prompt.RenderReviewSynthesisPrompt(input, agent.ReviewSynthesisOptions{})
+	require.NoError(t, err)
+	for _, current := range []string{"current batch task", "current batch implementation details", "current batch acceptance criterion", "current batch context"} {
+		assert.Contains(t, rendered, current)
+	}
+	for _, unrelated := range []string{"foreign batch", "unrelated type"} {
+		assert.NotContains(t, rendered, unrelated)
+	}
 	require.Len(t, input.PriorStrategyFixIssues, 1)
 	assert.Equal(t, 7, input.PriorStrategyFixIssues[0].Cycle)
 	assert.Equal(t, "prior-fingerprint", input.PriorStrategyFixIssues[0].Fingerprint)

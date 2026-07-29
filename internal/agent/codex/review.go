@@ -179,6 +179,9 @@ func (c *CodexAgent) SynthesizeReviewNonConvergence(ctx context.Context, input a
 		}
 	}
 
+	if err := validateStructuredOutput("review_synthesis.json", finalMsg); err != nil {
+		return nil, fmt.Errorf("review synthesis output violates schema: %w", err)
+	}
 	result, err := prompt.ParseReviewSynthesisOutput(finalMsg)
 	if err != nil {
 		return nil, fmt.Errorf("parsing review synthesis output: %w", err)

@@ -46,6 +46,11 @@ func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompleted
 	if len(cycles) == 0 {
 		return fail("no parsed review cycles available")
 	}
+	for i := 1; i < len(cycles); i++ {
+		if cycles[i].Cycle <= cycles[i-1].Cycle {
+			return fail("review cycles are not in strictly increasing chronological order")
+		}
+	}
 
 	latest := cycles[len(cycles)-1]
 	latestFindings := sanitizedDistinctReviewFindings(latest)
@@ -61,15 +66,14 @@ func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompleted
 	if minCompletedCycles > requiredCompleted {
 		requiredCompleted = minCompletedCycles
 	}
-	var completed []reviewHistoryCycle
-	for _, cycle := range cycles[:len(cycles)-1] {
-		if reviewCycleHasCompletedFix(cycle) {
-			completed = append(completed, cycle)
-		}
+	completedStart := len(cycles) - 1
+	for completedStart > 0 && reviewCycleHasCompletedFix(cycles[completedStart-1]) {
+		completedStart--
 	}
+	completed := append([]reviewHistoryCycle(nil), cycles[completedStart:len(cycles)-1]...)
 	out.CompletedCycleCount = len(completed)
 	if len(completed) < requiredCompleted {
-		return fail(fmt.Sprintf("only %d completed review/fix cycles; need at least %d", len(completed), requiredCompleted))
+		return fail(fmt.Sprintf("latest contiguous review/fix chain has only %d completed cycles; need at least %d", len(completed), requiredCompleted))
 	}
 	out.CompletedFixChainConfirmed = true
 

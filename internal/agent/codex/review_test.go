@@ -2,7 +2,6 @@ package codex
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -265,38 +264,79 @@ if [ -n "$out" ]; then printf '%%s' '{"should_escalate":true,"confidence":0.93,"
 	assert.Contains(t, string(schemaBytes), `"should_escalate"`)
 	assert.Contains(t, string(schemaBytes), `"root_cause_title"`)
 
-	var schema struct {
-		Required   []string `json:"required"`
-		Properties map[string]struct {
-			AdditionalProperties *bool `json:"additionalProperties"`
-			Required             []string
-			Properties           map[string]struct {
-				Enum     []string `json:"enum"`
-				MinItems int      `json:"minItems"`
-			}
-		}
+}
+
+func TestSynthesizeReviewNonConvergence_SchemaEnforcement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
 	}
-	require.NoError(t, json.Unmarshal(schemaBytes, &schema))
-	assert.Equal(t, []string{"should_escalate", "confidence"}, schema.Required,
-		"the optional reinterpretation must not change required top-level keys")
-	reinterpretationSchema, ok := schema.Properties["requirement_reinterpretation"]
-	require.True(t, ok)
-	require.NotNil(t, reinterpretationSchema.AdditionalProperties)
-	assert.False(t, *reinterpretationSchema.AdditionalProperties)
-	assert.ElementsMatch(t, []string{
-		"constraint_kind",
-		"conflicting_requirement",
-		"platform_consistency_constraint",
-		"preserved_safety_property",
-		"corrected_invariant",
-		"linearization_boundaries",
-		"durability_boundaries",
-	}, reinterpretationSchema.Required)
-	assert.Equal(t,
-		[]string{"over_constrained", "internally_conflicting", "platform_non_atomic"},
-		reinterpretationSchema.Properties["constraint_kind"].Enum)
-	assert.Equal(t, 1, reinterpretationSchema.Properties["linearization_boundaries"].MinItems)
-	assert.Equal(t, 1, reinterpretationSchema.Properties["durability_boundaries"].MinItems)
+
+	const completeReinterpretation = `"requirement_reinterpretation":{` +
+		`"constraint_kind":"platform_non_atomic",` +
+		`"conflicting_requirement":"one atomic cross-store commit",` +
+		`"platform_consistency_constraint":"stores commit independently",` +
+		`"preserved_safety_property":"exclusive ownership",` +
+		`"corrected_invariant":"durable intent gates visibility",` +
+		`"linearization_boundaries":["intent creation"],` +
+		`"durability_boundaries":["intent persisted"]}`
+	tests := []struct {
+		name    string
+		output  string
+		wantErr bool
+	}{
+		{
+			name:   "complete reinterpretation",
+			output: `{"should_escalate":true,"confidence":0.93,` + completeReinterpretation + `}`,
+		},
+		{
+			name:   "optional reinterpretation omitted",
+			output: `{"should_escalate":false,"confidence":0.25}`,
+		},
+		{
+			name:    "unknown constraint kind",
+			output:  `{"should_escalate":true,"confidence":0.93,` + strings.Replace(completeReinterpretation, `"platform_non_atomic"`, `"unknown_kind"`, 1) + `}`,
+			wantErr: true,
+		},
+		{
+			name:    "missing nested field",
+			output:  `{"should_escalate":true,"confidence":0.93,` + strings.Replace(completeReinterpretation, `"corrected_invariant":"durable intent gates visibility",`, "", 1) + `}`,
+			wantErr: true,
+		},
+		{
+			name:    "empty linearization boundaries",
+			output:  `{"should_escalate":true,"confidence":0.93,` + strings.Replace(completeReinterpretation, `["intent creation"]`, `[]`, 1) + `}`,
+			wantErr: true,
+		},
+		{
+			name:    "empty durability boundaries",
+			output:  `{"should_escalate":true,"confidence":0.93,` + strings.Replace(completeReinterpretation, `["intent persisted"]`, `[]`, 1) + `}`,
+			wantErr: true,
+		},
+		{
+			name:    "extra nested property",
+			output:  `{"should_escalate":true,"confidence":0.93,` + strings.Replace(completeReinterpretation, `"constraint_kind":`, `"unexpected":true,"constraint_kind":`, 1) + `}`,
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			binary, _, _ := writeFakeCodex(t, test.output, "", 0)
+			result, err := NewAgent(binary, "", "", "").SynthesizeReviewNonConvergence(
+				context.Background(),
+				agent.ReviewSynthesisInput{},
+				agent.ReviewSynthesisOptions{RepoRoot: t.TempDir()},
+			)
+			if test.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, result)
+				assert.Contains(t, err.Error(), "review synthesis output violates schema")
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result)
+		})
+	}
 }
 
 func TestSynthesizeReviewNonConvergence_UnparseableOutputReturnsError(t *testing.T) {
@@ -310,5 +350,5 @@ func TestSynthesizeReviewNonConvergence_UnparseableOutputReturnsError(t *testing
 	result, err := a.SynthesizeReviewNonConvergence(context.Background(), agent.ReviewSynthesisInput{}, agent.ReviewSynthesisOptions{RepoRoot: t.TempDir()})
 	assert.Error(t, err)
 	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "parsing review synthesis output")
+	assert.Contains(t, err.Error(), "review synthesis output violates schema")
 }

@@ -1,9 +1,12 @@
 package codex
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"os"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // schemaFS holds the embedded JSON Schema documents used to constrain Codex's
@@ -42,4 +45,31 @@ func writeSchemaFile(name string) (string, error) {
 		return "", fmt.Errorf("closing schema temp file: %w", err)
 	}
 	return f.Name(), nil
+}
+
+func validateStructuredOutput(name, output string) error {
+	schemaData, err := schemaFS.ReadFile("schemas/" + name)
+	if err != nil {
+		return err
+	}
+	schemaDocument, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaData))
+	if err != nil {
+		return fmt.Errorf("parsing schema: %w", err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(name, schemaDocument); err != nil {
+		return fmt.Errorf("loading schema: %w", err)
+	}
+	schema, err := compiler.Compile(name)
+	if err != nil {
+		return fmt.Errorf("compiling schema: %w", err)
+	}
+	value, err := jsonschema.UnmarshalJSON(bytes.NewBufferString(output))
+	if err != nil {
+		return fmt.Errorf("parsing output as JSON: %w", err)
+	}
+	if err := schema.Validate(value); err != nil {
+		return fmt.Errorf("validating output: %w", err)
+	}
+	return nil
 }

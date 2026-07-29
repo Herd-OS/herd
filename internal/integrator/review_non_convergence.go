@@ -653,6 +653,9 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 		}
 		fm := parsed.FrontMatter
 		if fm.Type != "fix" {
+			if ms == nil || fm.Batch != ms.Number || fm.Type != "" {
+				continue
+			}
 			if strings.TrimSpace(parsed.Task) == "" && strings.TrimSpace(parsed.ImplementationDetails) == "" &&
 				len(parsed.Criteria) == 0 && strings.TrimSpace(parsed.Context) == "" {
 				continue
