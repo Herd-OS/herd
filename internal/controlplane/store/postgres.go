@@ -161,7 +161,7 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Rep
 		return Repository{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	args := []any{nullableInt64(r.GitHubID), r.InstallationID, r.Owner, r.Name, r.DefaultBranch, r.Private, timeOrNow(r.RegisteredAt), timeOrNow(r.UpdatedAt), metadataOrEmpty(r.Metadata)}
+	updateArgs := []any{nullableInt64(r.GitHubID), r.InstallationID, r.Owner, r.Name, r.DefaultBranch, r.Private, timeOrNow(r.UpdatedAt), metadataOrEmpty(r.Metadata)}
 	if r.GitHubID != 0 {
 		err = tx.QueryRowContext(ctx, `
 			UPDATE repositories SET
@@ -170,10 +170,10 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Rep
 				name = $4,
 				default_branch = $5,
 				private = $6,
-				updated_at = $8,
-				metadata = $9
+				updated_at = $7,
+				metadata = $8
 			WHERE github_id = $1
-			RETURNING id`, args...).Scan(&r.ID)
+			RETURNING id`, updateArgs...).Scan(&r.ID)
 		if err == nil {
 			return r, tx.Commit()
 		}
@@ -187,10 +187,10 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Rep
 			installation_id = $2,
 			default_branch = $5,
 			private = $6,
-			updated_at = $8,
-			metadata = $9
+			updated_at = $7,
+			metadata = $8
 		WHERE owner = $3 AND name = $4
-		RETURNING id`, args...).Scan(&r.ID)
+		RETURNING id`, updateArgs...).Scan(&r.ID)
 	if err == nil {
 		return r, tx.Commit()
 	}
@@ -200,7 +200,10 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Rep
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO repositories (github_id, installation_id, owner, name, default_branch, private, registered_at, updated_at, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		RETURNING id`, args...).Scan(&r.ID)
+		RETURNING id`,
+		nullableInt64(r.GitHubID), r.InstallationID, r.Owner, r.Name, r.DefaultBranch, r.Private,
+		timeOrNow(r.RegisteredAt), timeOrNow(r.UpdatedAt), metadataOrEmpty(r.Metadata),
+	).Scan(&r.ID)
 	if err != nil {
 		return Repository{}, err
 	}
