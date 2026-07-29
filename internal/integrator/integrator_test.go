@@ -1066,14 +1066,18 @@ func TestRunWorkerCompletionCycle_PendingAfterHeldLockGuardSkipsPRUntilConsolida
 		checks:     &mockCheckService{status: "success"},
 	}
 
-	lockReads := 0
+	sideEffectBoundaries := 0
 	lateWorkerTriggered := false
-	repoSvc.onGetBranchSHA = func(name string) {
+	repoSvc.onUpdateBranch = func(name, sha string) {
 		if name != BatchLockBranch(1) {
 			return
 		}
-		lockReads++
-		if lateWorkerTriggered || lockReads < 4 {
+		state, ok := parseBatchLockCommitMessage(repoSvc.commitMessages[sha])
+		if !ok || state.Status != "locked" || state.PendingCompletions != 0 || state.SideEffectGeneration != state.PendingGeneration+1 {
+			return
+		}
+		sideEffectBoundaries++
+		if lateWorkerTriggered || sideEffectBoundaries != 1 {
 			return
 		}
 		lateWorkerTriggered = true
@@ -1098,11 +1102,235 @@ func TestRunWorkerCompletionCycle_PendingAfterHeldLockGuardSkipsPRUntilConsolida
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.PendingDrained)
+	require.NotNil(t, result.Advance)
+	assert.True(t, result.Advance.AllComplete)
+	assert.Equal(t, 100, result.Advance.BatchPRNumber)
 	assert.Equal(t, 1, prInner.createCalls)
-	assert.NotNil(t, prInner.created)
+	require.NotNil(t, prInner.created)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
+}
+
+func TestRunWorkerCompletionCycle_PendingBeforeReviewDefersReviewAndCI(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch", ClosedIssues: 1}
+	batchBranch := "herd/batch/1-batch"
+	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
+		num  int
+		slug string
+	}{
+		{42, "task-a"},
+		{43, "task-b"},
+	})
+
+	issueA := &platform.Issue{
+		Number:    42,
+		Title:     "Task A",
+		State:     "closed",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nA\n",
+	}
+	issueB := &platform.Issue{
+		Number:    43,
+		Title:     "Task B",
+		State:     "closed",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nB\n",
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = issueA
+	issueSvc.getResult[43] = issueB
+	issueSvc.onList = func(platform.IssueFilters) []*platform.Issue {
+		if issues.HasLabel(issueB.Labels, issues.IntegratorPending) {
+			return []*platform.Issue{issueA, issueB}
+		}
+		return []*platform.Issue{issueA}
+	}
+
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			batchBranch:             true,
+			"herd/worker/42-task-a": true,
+		},
+		branchSHAs: map[string]string{
+			batchBranch:             "batch-sha",
+			"herd/worker/42-task-a": "worker-a-sha",
+		},
+	}
+	prSvc := &createdVisiblePRService{mockPRService: &mockPRService{}}
+	mock := &mockPlatform{
+		issues: issueSvc,
+		prs:    prSvc,
+		workflows: &mockWorkflowService{
+			runs: map[int64]*platform.Run{
+				100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+				101: {ID: 101, Conclusion: "success", Inputs: map[string]string{"issue_number": "43"}},
+			},
+		},
+		repo:       repoSvc,
+		milestones: &mockMilestoneService{getResult: map[int]*platform.Milestone{1: ms}},
+		checks:     &mockCheckService{status: "failure"},
+	}
+
+	sideEffectBoundaries := 0
+	lateWorkerTriggered := false
+	repoSvc.onUpdateBranch = func(name, sha string) {
+		if name != BatchLockBranch(1) {
+			return
+		}
+		state, ok := parseBatchLockCommitMessage(repoSvc.commitMessages[sha])
+		if !ok || state.Status != "locked" || state.PendingCompletions != 0 || state.SideEffectGeneration != state.PendingGeneration+1 {
+			return
+		}
+		sideEffectBoundaries++
+		if lateWorkerTriggered || sideEffectBoundaries != 2 {
+			return
+		}
+		lateWorkerTriggered = true
+		ms.ClosedIssues = 2
+		repoSvc.branchExists["herd/worker/43-task-b"] = true
+		repoSvc.branchSHAs["herd/worker/43-task-b"] = "worker-b-sha"
+
+		lateResult, err := RunWorkerCompletionCycle(context.Background(), mock, &mockReviewAgent{}, g, &config.Config{}, WorkerCompletionCycleParams{
+			RunID:    101,
+			RepoRoot: dir,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, lateResult)
+		require.True(t, lateResult.BatchLockSkipped)
+		issueB.Labels = append(issueB.Labels, issues.IntegratorPending)
+	}
+
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	result, err := RunWorkerCompletionCycle(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, RequireCI: true},
+	}, WorkerCompletionCycleParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.SideEffectsDeferred)
+	assert.Nil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
+	assert.Equal(t, 0, ag.calls)
+	assert.Empty(t, prSvc.reviews)
+	assert.Empty(t, prSvc.comments)
+	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
+	assert.True(t, repoSvc.branchExists["herd/worker/43-task-b"])
+}
+
+func TestRunWorkerCompletionCycle_PendingBeforeCheckCIDefersCI(t *testing.T) {
+	ms := &platform.Milestone{Number: 1, Title: "Batch", ClosedIssues: 1}
+	batchBranch := "herd/batch/1-batch"
+	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
+		num  int
+		slug string
+	}{
+		{42, "task-a"},
+		{43, "task-b"},
+	})
+
+	issueA := &platform.Issue{
+		Number:    42,
+		Title:     "Task A",
+		State:     "closed",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nA\n",
+	}
+	issueB := &platform.Issue{
+		Number:    43,
+		Title:     "Task B",
+		State:     "closed",
+		Labels:    []string{issues.StatusDone},
+		Milestone: ms,
+		Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nB\n",
+	}
+
+	issueSvc := newMockIssueService()
+	issueSvc.getResult[42] = issueA
+	issueSvc.getResult[43] = issueB
+	issueSvc.onList = func(platform.IssueFilters) []*platform.Issue {
+		if issues.HasLabel(issueB.Labels, issues.IntegratorPending) {
+			return []*platform.Issue{issueA, issueB}
+		}
+		return []*platform.Issue{issueA}
+	}
+
+	checkSvc := &mockCheckService{status: "failure"}
+	wfSvc := &mockWorkflowService{
+		runs: map[int64]*platform.Run{
+			100: {ID: 100, Conclusion: "success", Inputs: map[string]string{"issue_number": "42"}},
+			101: {ID: 101, Conclusion: "success", Inputs: map[string]string{"issue_number": "43"}},
+		},
+	}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			batchBranch:             true,
+			"herd/worker/42-task-a": true,
+		},
+		branchSHAs: map[string]string{
+			batchBranch:             "batch-sha",
+			"herd/worker/42-task-a": "worker-a-sha",
+		},
+	}
+	mock := &mockPlatform{
+		issues:     issueSvc,
+		prs:        &createdVisiblePRService{mockPRService: &mockPRService{}},
+		workflows:  wfSvc,
+		repo:       repoSvc,
+		milestones: &mockMilestoneService{getResult: map[int]*platform.Milestone{1: ms}},
+		checks:     checkSvc,
+	}
+
+	sideEffectBoundaries := 0
+	lateWorkerTriggered := false
+	repoSvc.onUpdateBranch = func(name, sha string) {
+		if name != BatchLockBranch(1) {
+			return
+		}
+		state, ok := parseBatchLockCommitMessage(repoSvc.commitMessages[sha])
+		if !ok || state.Status != "locked" || state.PendingCompletions != 0 || state.SideEffectGeneration != state.PendingGeneration+1 {
+			return
+		}
+		sideEffectBoundaries++
+		if lateWorkerTriggered || sideEffectBoundaries != 3 {
+			return
+		}
+		lateWorkerTriggered = true
+		ms.ClosedIssues = 2
+		repoSvc.branchExists["herd/worker/43-task-b"] = true
+		repoSvc.branchSHAs["herd/worker/43-task-b"] = "worker-b-sha"
+
+		lateResult, err := RunWorkerCompletionCycle(context.Background(), mock, &mockReviewAgent{}, g, &config.Config{}, WorkerCompletionCycleParams{
+			RunID:    101,
+			RepoRoot: dir,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, lateResult)
+		require.True(t, lateResult.BatchLockSkipped)
+		issueB.Labels = append(issueB.Labels, issues.IntegratorPending)
+	}
+
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	result, err := RunWorkerCompletionCycle(context.Background(), mock, ag, g, &config.Config{
+		Integrator: config.Integrator{Review: true, RequireCI: true},
+	}, WorkerCompletionCycleParams{RunID: 100, RepoRoot: dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.SideEffectsDeferred)
+	require.NotNil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
+	assert.Equal(t, 1, ag.calls)
+	assert.Empty(t, wfSvc.dispatched)
+	assert.Empty(t, issueSvc.createdTitle)
+	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
+	assert.True(t, repoSvc.branchExists["herd/worker/43-task-b"])
 }
 
 func TestRunWorkerCompletionCycle_FinalUnlockPendingOccursAfterHeldLockSideEffects(t *testing.T) {

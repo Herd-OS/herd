@@ -16,19 +16,21 @@ const batchLockExpiry = 2 * time.Hour
 const batchLockMaxAttempts = 6
 
 type BatchLockState struct {
-	Kind               string     `json:"kind"`
-	Version            int        `json:"version"`
-	Status             string     `json:"status"`
-	LockID             string     `json:"lock_id,omitempty"`
-	BatchNumber        int        `json:"batch_number"`
-	BatchBranch        string     `json:"batch_branch,omitempty"`
-	RunID              int64      `json:"run_id,omitempty"`
-	Owner              string     `json:"owner,omitempty"`
-	AcquiredAt         *time.Time `json:"acquired_at,omitempty"`
-	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
-	PendingCompletions int        `json:"pending_completions,omitempty"`
-	ReleasedLockID     string     `json:"released_lock_id,omitempty"`
-	ReleasedAt         *time.Time `json:"released_at,omitempty"`
+	Kind                 string     `json:"kind"`
+	Version              int        `json:"version"`
+	Status               string     `json:"status"`
+	LockID               string     `json:"lock_id,omitempty"`
+	BatchNumber          int        `json:"batch_number"`
+	BatchBranch          string     `json:"batch_branch,omitempty"`
+	RunID                int64      `json:"run_id,omitempty"`
+	Owner                string     `json:"owner,omitempty"`
+	AcquiredAt           *time.Time `json:"acquired_at,omitempty"`
+	ExpiresAt            *time.Time `json:"expires_at,omitempty"`
+	PendingCompletions   int        `json:"pending_completions,omitempty"`
+	PendingGeneration    int        `json:"pending_generation,omitempty"`
+	SideEffectGeneration int        `json:"side_effect_generation,omitempty"`
+	ReleasedLockID       string     `json:"released_lock_id,omitempty"`
+	ReleasedAt           *time.Time `json:"released_at,omitempty"`
 }
 
 type BatchLockHandle struct {
@@ -134,6 +136,65 @@ func validateHeldBatchLockNoPending(ctx context.Context, repoSvc platform.Reposi
 		return false, nil
 	}
 	return state.PendingCompletions == 0, nil
+}
+
+func prepareHeldBatchLockSideEffects(ctx context.Context, repoSvc platform.RepositoryService, batchNumber int, batchBranch string) (bool, error) {
+	held, ok := ctx.Value(heldBatchLockContextKey{}).(heldBatchLockContext)
+	if !ok || held.batchNumber != batchNumber || held.batchBranch != batchBranch || held.lockID == "" {
+		return true, nil
+	}
+	repo, ok := repoSvc.(reviewLockRepository)
+	if !ok {
+		return false, fmt.Errorf("repository service does not support append-only batch locks")
+	}
+	lockBranch := BatchLockBranch(batchNumber)
+	for attempt := 0; attempt < batchLockMaxAttempts; attempt++ {
+		headSHA, state, stateOK, err := readBatchLockHead(ctx, repoSvc, repo, lockBranch)
+		if err != nil {
+			return false, err
+		}
+		if !stateOK {
+			return false, fmt.Errorf("batch lock branch %s has malformed state", lockBranch)
+		}
+		if state.Status != "locked" || state.LockID != held.lockID || state.BatchNumber != batchNumber || state.BatchBranch != batchBranch {
+			return false, nil
+		}
+		if state.PendingCompletions > 0 {
+			return false, nil
+		}
+
+		state.SideEffectGeneration = state.PendingGeneration + 1
+		message, err := buildBatchLockCommitMessage(state)
+		if err != nil {
+			return false, err
+		}
+		commitSHA, err := repo.CreateCommit(ctx, headSHA, message)
+		if err != nil {
+			return false, fmt.Errorf("creating batch side-effect boundary for %s: %w", lockBranch, err)
+		}
+		if err := repo.UpdateBranchToCommit(ctx, lockBranch, commitSHA, false); err != nil {
+			if platform.IsRefUpdateConflict(err) {
+				continue
+			}
+			return false, fmt.Errorf("updating batch side-effect boundary %s: %w", lockBranch, err)
+		}
+
+		_, current, currentOK, err := readBatchLockHead(ctx, repoSvc, repo, lockBranch)
+		if err != nil {
+			return false, err
+		}
+		if !currentOK {
+			return false, fmt.Errorf("batch lock branch %s has malformed state", lockBranch)
+		}
+		if current.Status != "locked" || current.LockID != held.lockID || current.BatchNumber != batchNumber || current.BatchBranch != batchBranch {
+			return false, nil
+		}
+		if current.PendingCompletions > 0 || current.SideEffectGeneration != current.PendingGeneration+1 {
+			return false, nil
+		}
+		return true, nil
+	}
+	return false, fmt.Errorf("preparing batch side effects for batch #%d: exceeded retry attempts", batchNumber)
 }
 
 func ReleaseBatchLock(ctx context.Context, repoSvc platform.RepositoryService, h *BatchLockHandle) error {

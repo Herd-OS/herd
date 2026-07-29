@@ -208,8 +208,16 @@ func PatrolWithGit(ctx context.Context, p platform.Platform, g *git.Git, cfg *co
 				batchNumber, parseErr := integrator.ParseBatchBranchMilestone(pr.Head)
 				if parseErr != nil {
 					fmt.Printf("Warning: failed to parse batch branch %s for PR #%d after pending worker recovery: %v\n", pr.Head, pr.Number, parseErr)
-				} else if _, err := integrator.CheckCI(ctx, p, cfg, integrator.CheckCIParams{BatchNumber: batchNumber}); err != nil {
-					fmt.Printf("Warning: failed to resume CI check for PR #%d after pending worker recovery: %v\n", pr.Number, err)
+				} else {
+					checkResult, err := integrator.CheckCI(ctx, p, cfg, integrator.CheckCIParams{BatchNumber: batchNumber})
+					if err != nil {
+						fmt.Printf("Warning: failed to resume CI check for PR #%d after pending worker recovery: %v\n", pr.Number, err)
+					}
+					if checkResult != nil && checkResult.BatchLockSkipped {
+						fmt.Printf("Pending worker recovery CI resume skipped; active batch lock for PR #%d (%s): %s\n", pr.Number, pr.Head, checkResult.SkipReason)
+						result.PendingWorkerBranchesSkippedLocked++
+						continue
+					}
 				}
 				if err := p.PullRequests().AddComment(ctx, pr.Number, "/herd review"); err != nil {
 					fmt.Printf("Warning: failed to enqueue review for PR #%d after pending worker recovery: %v\n", pr.Number, err)

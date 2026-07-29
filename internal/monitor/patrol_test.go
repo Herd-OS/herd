@@ -77,6 +77,7 @@ type mockIssueService struct {
 	listCommentsErr  error
 	deletedComments  []int64
 	callLog          *[]string // if non-nil, records "issue:AddLabels" etc. for ordering assertions
+	onRemoveLabels   func(number int, labels []string)
 	createResult     *platform.Issue
 	createErr        error
 }
@@ -133,6 +134,9 @@ func (m *mockIssueService) AddLabels(_ context.Context, number int, labels []str
 }
 func (m *mockIssueService) RemoveLabels(_ context.Context, number int, labels []string) error {
 	m.removedLabels[number] = append(m.removedLabels[number], labels...)
+	if m.onRemoveLabels != nil {
+		m.onRemoveLabels(number, labels)
+	}
 	return nil
 }
 func (m *mockIssueService) AddComment(_ context.Context, number int, body string) error {
@@ -568,6 +572,112 @@ func TestPatrolWithGit_RecoversPendingWorkerBranchForExistingBatchPR(t *testing.
 	runMonitorGit(t, g.WorkDir, "checkout", batchBranch)
 	_, statErr := os.Stat(filepath.Join(g.WorkDir, "worker43.txt"))
 	require.NoError(t, statErr)
+}
+
+func TestPatrolWithGit_PendingRecoverySkipsReviewWhenCheckCILockSkipped(t *testing.T) {
+	g := setupMonitorBatchRepo(t)
+	batchBranch := "herd/batch/1-batch"
+	workerBranch := "herd/worker/43-task-b"
+	runMonitorGit(t, g.WorkDir, "checkout", "main")
+	runMonitorGit(t, g.WorkDir, "checkout", "-b", workerBranch)
+	require.NoError(t, os.WriteFile(filepath.Join(g.WorkDir, "worker43.txt"), []byte("worker 43\n"), 0644))
+	runMonitorGit(t, g.WorkDir, "add", ".")
+	runMonitorGit(t, g.WorkDir, "commit", "-m", "Complete #43")
+	runMonitorGit(t, g.WorkDir, "push", "origin", workerBranch)
+	runMonitorGit(t, g.WorkDir, "checkout", batchBranch)
+
+	ms := &platform.Milestone{Number: 1, Title: "Batch", State: "open", ClosedIssues: 2}
+	issueSvc := newMockIssueService()
+	issueSvc.listByMilestone = map[int][]*platform.Issue{
+		1: {
+			{
+				Number:    42,
+				Title:     "Task A",
+				State:     "closed",
+				Labels:    []string{issues.StatusDone},
+				Milestone: ms,
+				Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nA\n",
+			},
+			{
+				Number:    43,
+				Title:     "Task B",
+				State:     "closed",
+				Labels:    []string{issues.StatusDone, issues.IntegratorPending},
+				Milestone: ms,
+				Body:      "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nB\n",
+			},
+		},
+	}
+	prSvc := newMockPRService()
+	prSvc.listResult = []*platform.PullRequest{
+		{Number: 100, Title: "[herd] Batch", Head: batchBranch, State: "open", CreatedAt: time.Now()},
+	}
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			batchBranch:  true,
+			workerBranch: true,
+		},
+		branchSHAs: map[string]string{
+			batchBranch:  "batch-sha",
+			workerBranch: "worker-b-sha",
+		},
+	}
+	issueSvc.onRemoveLabels = func(number int, labels []string) {
+		if number != 43 || !assert.ObjectsAreEqual([]string{issues.IntegratorPending}, labels) {
+			return
+		}
+		now := time.Now().UTC()
+		acquiredAt := now.Add(-time.Minute)
+		expiresAt := now.Add(time.Hour)
+		active := integrator.BatchLockState{
+			Kind:        "herd-batch-lock",
+			Version:     1,
+			Status:      "locked",
+			LockID:      "active-lock",
+			BatchNumber: 1,
+			BatchBranch: batchBranch,
+			Owner:       "batch-1",
+			AcquiredAt:  &acquiredAt,
+			ExpiresAt:   &expiresAt,
+		}
+		activeMessage, err := json.Marshal(active)
+		require.NoError(t, err)
+		if repoSvc.branchExists == nil {
+			repoSvc.branchExists = map[string]bool{}
+		}
+		if repoSvc.branchSHAs == nil {
+			repoSvc.branchSHAs = map[string]string{}
+		}
+		if repoSvc.commitMessages == nil {
+			repoSvc.commitMessages = map[string]string{}
+		}
+		repoSvc.branchExists[integrator.BatchLockBranch(1)] = true
+		repoSvc.branchSHAs[integrator.BatchLockBranch(1)] = "active-sha"
+		repoSvc.commitMessages["active-sha"] = string(activeMessage)
+	}
+	checkSvc := &mockCheckService{status: "success"}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo:      repoSvc,
+		milestones: &mockMilestoneService{
+			getResult:  map[int]*platform.Milestone{1: ms},
+			listResult: []*platform.Milestone{ms},
+		},
+		checks: checkSvc,
+	}
+
+	result, err := PatrolWithGit(context.Background(), mock, g, &config.Config{
+		Integrator: config.Integrator{RequireCI: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.PendingWorkerBranchesRecovered)
+	assert.Equal(t, 1, result.PendingWorkerBranchesSkippedLocked)
+	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
+	assert.NotContains(t, prSvc.comments[100], "/herd review")
+	assert.False(t, repoSvc.branchExists[workerBranch])
 }
 
 func setupMonitorBatchRepo(t *testing.T) *git.Git {

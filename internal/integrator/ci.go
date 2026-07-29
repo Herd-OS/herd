@@ -37,12 +37,13 @@ type CheckCIParams struct {
 
 // CheckCIResult holds the result of CI checking.
 type CheckCIResult struct {
-	Status       string // "success", "failure", "pending"
-	FixIssues    []int
-	FixCycle     int
-	MaxCyclesHit bool
-	Skipped      bool // true if require_ci is false or no batch branch found
-	SkipReason   string
+	Status           string // "success", "failure", "pending"
+	FixIssues        []int
+	FixCycle         int
+	MaxCyclesHit     bool
+	Skipped          bool // true if require_ci is false or no batch branch found
+	SkipReason       string
+	BatchLockSkipped bool
 }
 
 // CheckCI checks CI status on the batch branch after consolidation.
@@ -108,8 +109,9 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 	if !acquired {
 		logActiveBatchLock(ctx, p.Repository(), ms.Number, batchBranch, lockRunID)
 		return &CheckCIResult{
-			Skipped:    true,
-			SkipReason: batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, lockRunID),
+			Skipped:          true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), ms.Number, batchBranch, lockRunID),
+			BatchLockSkipped: true,
 		}, nil
 	}
 	defer releaseBatchLockDeferred(p, batchLock, ms.Number)

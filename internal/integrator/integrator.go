@@ -1562,6 +1562,15 @@ func openBatchPR(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 		return 0, nil
 	}
 
+	clear, err = prepareHeldBatchLockSideEffects(ctx, p.Repository(), ms.Number, batchBranch)
+	if err != nil {
+		return 0, err
+	}
+	if !clear {
+		fmt.Printf("Pending worker completion published for batch #%d before PR creation side effects; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
+		return 0, nil
+	}
+
 	pr, err := p.PullRequests().Create(ctx, title, body, batchBranch, defaultBranch)
 	if err != nil {
 		// Handle race condition: another integrator run created the PR between our List and Create.

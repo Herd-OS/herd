@@ -105,6 +105,16 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 		}
 
 		if advanceResult != nil && advanceResult.AllComplete && advanceResult.BatchPRNumber > 0 {
+			clear, err := prepareHeldBatchLockSideEffects(lockedCtx, p.Repository(), ms.Number, runCtx.BatchBranch)
+			if err != nil {
+				return nil, err
+			}
+			if !clear {
+				fmt.Printf("Pending worker completion published for batch #%d before review; deferring review and CI side effects until consolidation is refreshed.\n", ms.Number)
+				result.SideEffectsDeferred = true
+				return result, nil
+			}
+
 			reviewResult, err := Review(lockedCtx, p, ag, g, cfg, ReviewParams{
 				RunID:    params.RunID,
 				RepoRoot: params.RepoRoot,
@@ -113,6 +123,16 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 				return nil, err
 			}
 			result.Review = reviewResult
+
+			clear, err = prepareHeldBatchLockSideEffects(lockedCtx, p.Repository(), ms.Number, runCtx.BatchBranch)
+			if err != nil {
+				return nil, err
+			}
+			if !clear {
+				fmt.Printf("Pending worker completion published for batch #%d before CI check; deferring CI side effects until consolidation is refreshed.\n", ms.Number)
+				result.SideEffectsDeferred = true
+				return result, nil
+			}
 
 			checkResult, err := CheckCI(lockedCtx, p, cfg, CheckCIParams{
 				RunID:    params.RunID,
@@ -179,6 +199,7 @@ func publishPendingWorkerCompletion(ctx context.Context, repoSvc platform.Reposi
 			return nil
 		}
 		state.PendingCompletions++
+		state.PendingGeneration++
 		message, err := buildBatchLockCommitMessage(state)
 		if err != nil {
 			return err
