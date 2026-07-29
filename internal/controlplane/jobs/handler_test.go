@@ -1739,6 +1739,41 @@ func TestHandlerRetryAfterReviewAcceptanceCompletionFailureDoesNotResubmit(t *te
 	assert.Equal(t, "completed", st.idem["job_result:"+resultKey].Status)
 }
 
+func TestHandlerChangedReviewResultRepairsPriorAcceptedMutationWithoutResubmit(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	st.recordJobResultErrs = []error{assert.AnError, nil}
+	job := store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	st.jobs["job-1"] = job
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+	firstPayload := validReviewPayload()
+	changedPayload := `{"version":1,"kind":"review_completed","repository":"acme/widgets","job_id":"job-1","batch_number":106,"pr_number":42,"head_sha":"head","status":"approved","summary":"changed review summary"}`
+	firstResultKey := ResultIdempotencyKey(parsedResultPayload(t, firstPayload), []byte(firstPayload))
+	acceptanceKey := reviewResultAcceptanceKey(job)
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", firstPayload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", changedPayload))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Len(t, processor.calls, 1)
+	require.Len(t, st.results, 1)
+	assert.Equal(t, firstResultKey, st.results[0].IdempotencyKey)
+	assert.Equal(t, StatusApproved, st.results[0].Status)
+	assert.Equal(t, ResultPayloadHash([]byte(firstPayload)), st.results[0].ResultRef)
+	assert.Equal(t, "completed", st.idem[acceptanceKey].Status)
+	assert.Equal(t, firstResultKey, st.idem[acceptanceKey].ResultRef)
+}
+
 func TestHandlerRepairsDanglingReviewAcceptanceOnCompletedCallbackRedelivery(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()

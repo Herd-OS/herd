@@ -167,7 +167,49 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 		}
 		return nil
 	}
-	_, err := s.withIdempotencyPhased(ctx, key, "branch_"+req.OperationKind, preflight, nil, func() (string, error) {
+	repair := func() (string, bool, error) {
+		switch req.OperationKind {
+		case "create":
+			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)
+			if err != nil {
+				if platform.IsNotFound(err) {
+					return "", false, nil
+				}
+				return "", false, err
+			}
+			if current != req.FromSHA {
+				return "", false, fmt.Errorf("branch %s exists at %s, expected repaired create source %s", req.BranchName, current, req.FromSHA)
+			}
+			return "branch:" + req.BranchName, true, nil
+		case "update":
+			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)
+			if err != nil {
+				return "", false, err
+			}
+			if current == req.NewSHA {
+				return "branch:" + req.BranchName, true, nil
+			}
+			if current != req.ExpectedHeadSHA {
+				return "", false, fmt.Errorf("branch %s head mismatch during update repair: expected %s or %s, got %s", req.BranchName, req.ExpectedHeadSHA, req.NewSHA, current)
+			}
+			return "", false, nil
+		case "delete":
+			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)
+			if err != nil {
+				if platform.IsNotFound(err) {
+					return "branch:" + req.BranchName, true, nil
+				}
+				return "", false, err
+			}
+			if current != req.ExpectedHeadSHA {
+				return "", false, fmt.Errorf("branch %s head mismatch during delete repair: expected %s or missing branch, got %s", req.BranchName, req.ExpectedHeadSHA, current)
+			}
+			return "", false, nil
+		default:
+			return "", false, fmt.Errorf("unsupported branch operation %q", req.OperationKind)
+		}
+	}
+	_, err := s.withIdempotencyPhased(ctx, key, "branch_"+req.OperationKind, preflight, repair, func() (string, error) {
 		switch req.OperationKind {
 		case "create":
 			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)

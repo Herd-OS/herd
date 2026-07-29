@@ -274,6 +274,83 @@ func TestApplyBranchOperationGuardsHeadAtMutationBoundary(t *testing.T) {
 	}
 }
 
+func TestApplyBranchOperationRepairsPostCallUnknownBranchMutations(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name       string
+		req        BranchOperationRequest
+		setup      func(*fakeRepoService)
+		wantBranch string
+	}{
+		{
+			name: "create repaired from branch at source sha",
+			req: BranchOperationRequest{
+				OperationKind: "create",
+				BranchName:    "herd/worker/1-task",
+				FromSHA:       "base",
+			},
+			wantBranch: "base",
+		},
+		{
+			name: "update repaired from branch at new sha",
+			req: BranchOperationRequest{
+				OperationKind:   "update",
+				BranchName:      "herd/worker/1-task",
+				ExpectedHeadSHA: "old",
+				NewSHA:          "new",
+			},
+			setup: func(repo *fakeRepoService) {
+				repo.branches["herd/worker/1-task"] = "old"
+			},
+			wantBranch: "new",
+		},
+		{
+			name: "delete repaired from missing branch",
+			req: BranchOperationRequest{
+				OperationKind:   "delete",
+				BranchName:      "herd/worker/1-task",
+				ExpectedHeadSHA: "old",
+			},
+			setup: func(repo *fakeRepoService) {
+				repo.branches["herd/worker/1-task"] = "old"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakePlatform()
+			if tt.setup != nil {
+				tt.setup(fake.repo)
+			}
+			st := newFakeStore()
+			svc := newTestService(fake, st, nil)
+			identitySHA := tt.req.ExpectedHeadSHA
+			if tt.req.OperationKind == "create" {
+				identitySHA = tt.req.FromSHA
+			}
+			key := idempotencyKey("branch", "repo", svc.Repo.ID, tt.req.BranchName, identitySHA, tt.req.OperationKind)
+			st.completeMutationErrs[key] = []error{assert.AnError}
+			st.completeErrs[key] = []error{assert.AnError}
+
+			firstErr := svc.ApplyBranchOperation(ctx, tt.req)
+			require.Error(t, firstErr)
+			require.NoError(t, svc.ApplyBranchOperation(ctx, tt.req))
+
+			assert.Len(t, fake.repo.created, boolToInt(tt.req.OperationKind == "create"))
+			assert.Len(t, fake.repo.updated, boolToInt(tt.req.OperationKind == "update"))
+			assert.Len(t, fake.repo.deleted, boolToInt(tt.req.OperationKind == "delete"))
+			if tt.wantBranch == "" {
+				assert.NotContains(t, fake.repo.branches, tt.req.BranchName)
+			} else {
+				assert.Equal(t, tt.wantBranch, fake.repo.branches[tt.req.BranchName])
+			}
+			assert.Equal(t, mutations.PhaseCompleted, st.mutations[key].Status)
+			assert.Equal(t, "completed", st.keys[key].Status)
+		})
+	}
+}
+
 func TestApplyBranchOperationValidatesOperationBeforeMutationAttempt(t *testing.T) {
 	ctx := context.Background()
 
@@ -326,6 +403,13 @@ func TestApplyBranchOperationValidatesOperationBeforeMutationAttempt(t *testing.
 			}
 		})
 	}
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func TestMergePR_RequiresExpectedHeadAndSuccessfulStatus(t *testing.T) {

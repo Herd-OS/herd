@@ -134,7 +134,7 @@ func runHostedReviewReadOnly(ctx context.Context, input reviewInputServices, ag 
 	}
 	batchNumber, err := integrator.ParseBatchBranchMilestone(data.PRHeadBranch)
 	if err != nil {
-		return hostedReviewWorkflowResult{}, fmt.Errorf("parsing milestone from branch %s: %w", data.PRHeadBranch, err)
+		batchNumber = data.PRNumber
 	}
 	if decision := integrator.HostedReviewReadOnlySkipDecision(integrator.HostedReviewSkipInput{
 		PRNumber:    data.PRNumber,

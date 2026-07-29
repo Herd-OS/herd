@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -297,26 +298,50 @@ func (s *repositoryService) DeleteBranch(ctx context.Context, name string) error
 }
 
 func (s *repositoryService) DeleteBranchIfHead(ctx context.Context, name, expectedHeadSHA string) error {
-	current, err := s.GetBranchSHA(ctx, name)
+	current, etag, err := s.getBranchSHAWithETag(ctx, name)
 	if err != nil {
 		return err
 	}
 	if current != expectedHeadSHA {
 		return fmt.Errorf("deleting branch %s: head mismatch: expected %s, got %s: %w", name, expectedHeadSHA, current, platform.ErrRefUpdateConflict)
 	}
-	return s.DeleteBranch(ctx, name)
+	u := fmt.Sprintf("repos/%v/%v/git/refs/%v", s.c.owner, s.c.repo, githubRefPath("heads/"+name))
+	req, err := s.c.gh.NewRequest(http.MethodDelete, u, nil)
+	if err != nil {
+		return fmt.Errorf("deleting branch %s: %w", name, err)
+	}
+	if etag != "" {
+		req.Header.Set("If-Match", etag)
+	}
+	_, err = s.c.gh.BareDo(ctx, req)
+	if err != nil {
+		if isGitHubRefUpdateConflict(err) {
+			return fmt.Errorf("deleting branch %s: %w", name, platform.ErrRefUpdateConflict)
+		}
+		return fmt.Errorf("deleting branch %s: %w", name, err)
+	}
+	return nil
 }
 
 func (s *repositoryService) GetBranchSHA(ctx context.Context, name string) (string, error) {
-	ref, _, err := s.c.gh.Git.GetRef(ctx, s.c.owner, s.c.repo, "refs/heads/"+name)
+	sha, _, err := s.getBranchSHAWithETag(ctx, name)
+	return sha, err
+}
+
+func (s *repositoryService) getBranchSHAWithETag(ctx context.Context, name string) (string, string, error) {
+	ref, resp, err := s.c.gh.Git.GetRef(ctx, s.c.owner, s.c.repo, "refs/heads/"+name)
 	if err != nil {
 		var responseErr *gh.ErrorResponse
 		if errors.As(err, &responseErr) && responseErr.Response != nil && responseErr.Response.StatusCode == http.StatusNotFound {
-			return "", fmt.Errorf("getting branch SHA for %s: %w", name, platform.ErrNotFound)
+			return "", "", fmt.Errorf("getting branch SHA for %s: %w", name, platform.ErrNotFound)
 		}
-		return "", fmt.Errorf("getting branch SHA for %s: %w", name, err)
+		return "", "", fmt.Errorf("getting branch SHA for %s: %w", name, err)
 	}
-	return ref.GetObject().GetSHA(), nil
+	etag := ""
+	if resp != nil && resp.Response != nil {
+		etag = resp.Header.Get("ETag")
+	}
+	return ref.GetObject().GetSHA(), etag, nil
 }
 
 func (s *repositoryService) GetCommitMessage(ctx context.Context, sha string) (string, error) {
@@ -343,12 +368,40 @@ func (s *repositoryService) UpdateBranchToCommit(ctx context.Context, name, sha 
 }
 
 func (s *repositoryService) UpdateBranchToCommitIfHead(ctx context.Context, name, sha, expectedHeadSHA string, force bool) error {
-	current, err := s.GetBranchSHA(ctx, name)
+	current, etag, err := s.getBranchSHAWithETag(ctx, name)
 	if err != nil {
 		return err
 	}
 	if current != expectedHeadSHA {
 		return fmt.Errorf("updating branch %s to %s: head mismatch: expected %s, got %s: %w", name, sha, expectedHeadSHA, current, platform.ErrRefUpdateConflict)
 	}
-	return s.UpdateBranchToCommit(ctx, name, sha, force)
+	body := struct {
+		SHA   string `json:"sha"`
+		Force bool   `json:"force"`
+	}{SHA: sha, Force: force}
+	u := fmt.Sprintf("repos/%v/%v/git/refs/%v", s.c.owner, s.c.repo, githubRefPath("heads/"+name))
+	req, err := s.c.gh.NewRequest(http.MethodPatch, u, body)
+	if err != nil {
+		return fmt.Errorf("updating branch %s to %s: %w", name, sha, err)
+	}
+	if etag != "" {
+		req.Header.Set("If-Match", etag)
+	}
+	ref := new(gh.Reference)
+	_, err = s.c.gh.Do(ctx, req, ref)
+	if err != nil {
+		if isGitHubRefUpdateConflict(err) {
+			return fmt.Errorf("updating branch %s to %s: %w", name, sha, platform.ErrRefUpdateConflict)
+		}
+		return fmt.Errorf("updating branch %s to %s: %w", name, sha, err)
+	}
+	return nil
+}
+
+func githubRefPath(ref string) string {
+	parts := strings.Split(strings.TrimPrefix(ref, "refs/"), "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }

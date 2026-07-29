@@ -161,10 +161,6 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		if status != issues.StatusReady && status != issues.StatusBlocked && status != "" {
 			continue
 		}
-		batchHeadSHA, err := s.Platform.Repository().GetBranchSHA(ctx, req.BatchBranch)
-		if err != nil {
-			return dispatched, fmt.Errorf("resolve batch branch %s head before dispatching issue #%d: %w", req.BatchBranch, issueNumber, err)
-		}
 		dispatchReq := cpdispatch.DispatchRequest{
 			RepoID:          s.Repo.ID,
 			GitHubRepoID:    s.Repo.GitHubID,
@@ -177,9 +173,6 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			BatchNumber:     req.BatchNumber,
 			IssueNumber:     issueNumber,
 			BatchBranch:     req.BatchBranch,
-			BaseSHA:         batchHeadSHA,
-			HeadSHA:         batchHeadSHA,
-			ExpectedHeadSHA: batchHeadSHA,
 			RunnerLabel:     cfg.Workers.RunnerLabel,
 			TimeoutMinutes:  cfg.Workers.TimeoutMinutes,
 			ControlPlaneURL: cfg.EffectiveControlPlaneURL(),
@@ -188,6 +181,20 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		recovered, recoveredOK := s.recoverWorkflowDispatchIntent(ctx, dispatchReq)
 		if status != issues.StatusReady && status != issues.StatusBlocked && !recoveredOK {
 			continue
+		}
+		batchHeadSHA := ""
+		if recoveredOK {
+			batchHeadSHA = recovered.Request.HeadSHA
+			dispatchReq = recovered.Request
+		} else {
+			var err error
+			batchHeadSHA, err = s.Platform.Repository().GetBranchSHA(ctx, req.BatchBranch)
+			if err != nil {
+				return dispatched, fmt.Errorf("resolve batch branch %s head before dispatching issue #%d: %w", req.BatchBranch, issueNumber, err)
+			}
+			dispatchReq.BaseSHA = batchHeadSHA
+			dispatchReq.HeadSHA = batchHeadSHA
+			dispatchReq.ExpectedHeadSHA = batchHeadSHA
 		}
 		var result cpdispatch.DispatchResult
 		if recoveredOK {
@@ -456,7 +463,7 @@ func (s Service) withIdempotencyPhased(ctx context.Context, key string, mutation
 			return resultRef, err
 		}
 		status := strings.TrimSpace(record.Status)
-		if status == "failed" || status == mutationStatusFailedPreCall {
+		if status == mutationStatusFailedPreCall {
 			if attempt, err := s.Store.GetGitHubMutationAttempt(ctx, key); errors.Is(err, store.ErrNotFound) {
 				return s.withAcquiredIdempotency(ctx, key, mutationType, preflight, repair, fn)
 			} else if err != nil {

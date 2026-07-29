@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
@@ -149,6 +151,55 @@ func TestDispatchReadyWorkers_RedeliveryRepairsLabelsAfterDispatchBeforeInProgre
 	assert.Len(t, disp.requests, 1)
 	assert.Contains(t, fake.issues.removed[1], issues.StatusReady)
 	assert.Contains(t, fake.issues.added[1], issues.StatusInProgress)
+}
+
+func TestDispatchReadyWorkersEmptyStatusRecoversBeforeResolvingMissingBatchBranch(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branchErrs = []error{errors.New("branch deleted")}
+	disp := &fakeDispatcher{}
+	st := newFakeStore()
+	svc := newTestService(fake, st, disp)
+	dispatchReq := cpdispatch.DispatchRequest{
+		RepoID:          svc.Repo.ID,
+		GitHubRepoID:    svc.Repo.GitHubID,
+		Owner:           svc.Repo.Owner,
+		Repo:            svc.Repo.Name,
+		InstallationID:  svc.Repo.InstallationID,
+		Kind:            cpdispatch.JobKindWorker,
+		WorkflowFile:    "herd-worker.yml",
+		Ref:             "main",
+		BatchNumber:     7,
+		IssueNumber:     1,
+		BatchBranch:     "herd/batch/7-demo",
+		BaseSHA:         "recovered-head",
+		HeadSHA:         "recovered-head",
+		ExpectedHeadSHA: "recovered-head",
+	}
+	st.keys["workflow-dispatch-completed"] = store.IdempotencyKey{
+		Key:       "workflow-dispatch-completed",
+		Scope:     "workflow_dispatch",
+		Status:    "completed",
+		Metadata:  workflowDispatchMetadata(t, dispatchReq),
+		CreatedAt: fixedClock(),
+	}
+
+	count, err := svc.DispatchReadyWorkers(ctx, DispatchReadyWorkersRequest{
+		BatchNumber: 7,
+		BatchBranch: "herd/batch/7-demo",
+		TierIssues:  []int{1},
+		AllIssues: []*platform.Issue{{
+			Number: 1,
+			Title:  "Task",
+			Body:   "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n",
+		}},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+	assert.Empty(t, disp.requests)
+	assert.Empty(t, fake.repo.branchLookups)
+	assert.Equal(t, []string{issues.StatusInProgress}, fake.issues.added[1])
 }
 
 func TestRecoverWorkflowDispatchIntentChoosesLatestCompletedMatchingDispatch(t *testing.T) {
@@ -392,6 +443,50 @@ func TestOpenBatchPRStartedIdempotencyDoesNotCreateDuplicate(t *testing.T) {
 	assert.Nil(t, pr)
 	assert.Contains(t, err.Error(), "without a completed result")
 	assert.Nil(t, fake.prs.created)
+}
+
+func TestOpenBatchPRGenericFailedIdempotencyWithoutMutationAttemptDoesNotRetry(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("batch-pr", "repo", svc.Repo.ID, "batch", 4)
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "pull_request_create", Status: mutations.LegacyFailed, CreatedAt: fixedClock()}
+
+	pr, err := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, pr)
+	assert.Contains(t, err.Error(), "retry after reconciliation")
+	assert.Nil(t, fake.prs.created)
+}
+
+func TestOpenBatchPRExplicitFailedPreCallWithoutMutationAttemptRetries(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	svc := newTestService(fake, st, &fakeDispatcher{})
+	key := idempotencyKey("batch-pr", "repo", svc.Repo.ID, "batch", 4)
+	st.keys[key] = store.IdempotencyKey{Key: key, Scope: "pull_request_create", Status: mutations.PhaseFailedPreCall, CreatedAt: fixedClock()}
+
+	pr, err := svc.OpenBatchPR(ctx, OpenBatchPRRequest{
+		BatchNumber: 4,
+		Title:       "[herd] Demo",
+		Body:        "body",
+		Head:        "herd/batch/4-demo",
+		Base:        "main",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, pr)
+	assert.Equal(t, 1, pr.Number)
+	assert.Equal(t, 1, len(fake.prs.createCalls))
 }
 
 func TestOpenBatchPRCompletedIdempotencyRepairsStartedMutationAttempt(t *testing.T) {
@@ -709,7 +804,12 @@ func (s *fakeStore) FailIdempotencyKey(_ context.Context, key string, errorMessa
 		return store.ErrNotFound
 	}
 	record.ResultRef = errorMessage
-	record.Status = "failed"
+	if rest, ok := strings.CutPrefix(errorMessage, mutations.PhaseFailedPreCall+":"); ok {
+		record.Status = mutations.PhaseFailedPreCall
+		record.ResultRef = rest
+	} else {
+		record.Status = mutations.LegacyFailed
+	}
 	s.keys[key] = record
 	return nil
 }
@@ -1026,6 +1126,7 @@ func (s *fakePRService) Close(context.Context, int) error             { return n
 type fakeRepoService struct {
 	branches      map[string]string
 	defaultBranch string
+	created       []string
 	deleted       []string
 	updated       []string
 	branchErrs    []error
@@ -1042,6 +1143,7 @@ func (s *fakeRepoService) GetDefaultBranch(context.Context) (string, error) {
 }
 func (s *fakeRepoService) CreateBranch(_ context.Context, name, fromSHA string) error {
 	s.branches[name] = fromSHA
+	s.created = append(s.created, name)
 	return nil
 }
 func (s *fakeRepoService) DeleteBranch(_ context.Context, name string) error {

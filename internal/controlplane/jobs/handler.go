@@ -296,7 +296,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	acceptedReviewKey, err := h.acquireReviewResultAcceptance(r.Context(), result, job, idempotencyKey)
+	acceptedReviewKey, err := h.acquireReviewResultAcceptance(r.Context(), result, job, idempotencyKey, payload, claims, applyMetadata)
 	if err != nil {
 		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -397,9 +397,13 @@ func (h Handler) acquireWorkerResultAcceptance(ctx context.Context, result Resul
 	return "", fmt.Errorf("conflicting worker result is already pending for job %q", job.JobID)
 }
 
-func (h Handler) acquireReviewResultAcceptance(ctx context.Context, result Result, job store.Job, resultKey string) (string, error) {
+func (h Handler) acquireReviewResultAcceptance(ctx context.Context, result Result, job store.Job, resultKey string, payload []byte, claims OIDCClaims, applyMetadata map[string]any) (string, error) {
 	if _, ok := result.(ReviewCompletedResult); !ok {
 		return "", nil
+	}
+	metadata, err := reviewResultAcceptanceMetadata(result, job, resultKey, payload, claims, applyMetadata)
+	if err != nil {
+		return "", err
 	}
 	key := reviewResultAcceptanceKey(job)
 	created, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
@@ -407,6 +411,7 @@ func (h Handler) acquireReviewResultAcceptance(ctx context.Context, result Resul
 		Scope:     "review_result_acceptance",
 		Status:    mutationspkg.PhaseIntentRecorded,
 		ResultRef: resultKey,
+		Metadata:  metadata,
 		CreatedAt: h.now(),
 	})
 	if err != nil {
@@ -425,6 +430,11 @@ func (h Handler) acquireReviewResultAcceptance(ctx context.Context, result Resul
 		}
 		return "", nil
 	}
+	if repaired, err := h.repairPriorReviewResultAcceptance(ctx, key, record, job); err != nil {
+		return "", err
+	} else if repaired {
+		return "", fmt.Errorf("conflicting review result already accepted for job %q", job.JobID)
+	}
 	if record.Status == mutationspkg.PhaseCompleted || record.Status == "completed" {
 		return "", fmt.Errorf("conflicting review result already accepted for job %q", job.JobID)
 	}
@@ -432,6 +442,78 @@ func (h Handler) acquireReviewResultAcceptance(ctx context.Context, result Resul
 		return "", fmt.Errorf("review result acceptance for job %q is pending repair", job.JobID)
 	}
 	return "", fmt.Errorf("conflicting review result is already pending for job %q", job.JobID)
+}
+
+type reviewAcceptanceMetadata struct {
+	ResultKey         string          `json:"result_key"`
+	MutationKey       string          `json:"mutation_key"`
+	Status            string          `json:"status"`
+	PayloadHash       string          `json:"payload_hash"`
+	JobResultMetadata json.RawMessage `json:"job_result_metadata"`
+}
+
+func reviewResultAcceptanceMetadata(result Result, job store.Job, resultKey string, payload []byte, claims OIDCClaims, applyMetadata map[string]any) (json.RawMessage, error) {
+	jobResultMetadata, err := resultMetadata(payload, claims, applyMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("build review acceptance metadata: %w", err)
+	}
+	metadata, err := json.Marshal(reviewAcceptanceMetadata{
+		ResultKey:         resultKey,
+		MutationKey:       reviewResultMutationKey(result, job),
+		Status:            result.StatusValue(),
+		PayloadHash:       ResultPayloadHash(payload),
+		JobResultMetadata: jobResultMetadata,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal review acceptance metadata: %w", err)
+	}
+	return metadata, nil
+}
+
+func (h Handler) repairPriorReviewResultAcceptance(ctx context.Context, acceptanceKey string, record store.IdempotencyKey, job store.Job) (bool, error) {
+	var metadata reviewAcceptanceMetadata
+	if len(record.Metadata) == 0 || json.Unmarshal(record.Metadata, &metadata) != nil {
+		return false, nil
+	}
+	if strings.TrimSpace(metadata.ResultKey) == "" || strings.TrimSpace(metadata.MutationKey) == "" {
+		return false, nil
+	}
+	if !h.reviewResultProcessCompleted(ctx, metadata.MutationKey) {
+		return false, nil
+	}
+	if len(metadata.JobResultMetadata) > 0 && strings.TrimSpace(metadata.Status) != "" && strings.TrimSpace(metadata.PayloadHash) != "" {
+		if _, err := h.store.RecordJobResult(ctx, store.JobResult{
+			JobID:          job.JobID,
+			IdempotencyKey: metadata.ResultKey,
+			Status:         metadata.Status,
+			ResultRef:      metadata.PayloadHash,
+			Metadata:       metadata.JobResultMetadata,
+			CreatedAt:      h.now(),
+		}); err != nil {
+			return false, fmt.Errorf("record repaired review job result: %w", err)
+		}
+	}
+	if err := h.store.CompleteIdempotencyKey(ctx, acceptanceKey, metadata.ResultKey); err != nil {
+		return false, fmt.Errorf("complete repaired review result acceptance: %w", err)
+	}
+	return true, nil
+}
+
+func (h Handler) reviewResultProcessCompleted(ctx context.Context, mutationKey string) bool {
+	record, err := h.store.GetIdempotencyKey(ctx, mutationKey)
+	if err == nil && mutationspkg.IsCompleted(record.Status) {
+		return true
+	}
+	reader, ok := h.store.(MutationReader)
+	if !ok {
+		return false
+	}
+	attempt, err := reader.GetGitHubMutationAttempt(ctx, mutationKey)
+	if err != nil || !mutationspkg.IsCompleted(attempt.Status) {
+		return false
+	}
+	_ = h.store.CompleteIdempotencyKey(ctx, mutationKey, "review_result:processed")
+	return true
 }
 
 func (h Handler) repairResultAcceptance(ctx context.Context, result Result, job store.Job, resultKey string) error {

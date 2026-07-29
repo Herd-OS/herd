@@ -99,6 +99,29 @@ func TestRunHostedReviewReadOnlyUsesReadServices(t *testing.T) {
 	assert.Equal(t, "success", checks.status)
 }
 
+func TestRunHostedReviewReadOnlyStandalonePRRunsAgent(t *testing.T) {
+	prs := hostedReviewTestPRReader{
+		pr:   &platform.PullRequest{Number: 42, Title: "Standalone", URL: "https://github.test/pr/42", Base: "main", Head: "feature/auth", HeadSHA: "head"},
+		diff: "diff --git a/auth.go b/auth.go\n+change\n",
+	}
+	ag := &hostedReviewTestAgent{result: &agent.ReviewResult{Summary: "needs auth fix"}}
+	cfg := config.Default()
+	cfg.Platform.Owner = "octo"
+	cfg.Platform.Repo = "widgets"
+
+	result, err := runHostedReviewReadOnly(t.Context(), reviewInputServices{
+		Issues:       hostedReviewTestIssueReader{},
+		PullRequests: prs,
+		Checks:       hostedReviewTestCheckReader{status: "success"},
+	}, ag, cfg, reviewWorkerParams(42, t.TempDir(), "", false))
+
+	require.NoError(t, err)
+	assert.Equal(t, "changes_requested", result.Status)
+	assert.Equal(t, "needs auth fix", result.Summary)
+	require.Len(t, ag.reviewOpts, 1)
+	assert.Contains(t, ag.reviewOpts[0].CurrentPRMetadata, "Head: feature/auth")
+}
+
 func TestRunHostedReviewReadOnlyPassesPromptAndManualOptions(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -11,7 +11,7 @@ CREATE TABLE app_installations (
 
 CREATE TABLE repositories (
 	id BIGSERIAL PRIMARY KEY,
-	github_id BIGINT NOT NULL UNIQUE,
+	github_id BIGINT,
 	installation_id BIGINT NOT NULL REFERENCES app_installations(id) ON DELETE CASCADE,
 	owner TEXT NOT NULL,
 	name TEXT NOT NULL,
@@ -23,6 +23,7 @@ CREATE TABLE repositories (
 	CONSTRAINT repositories_owner_name_key UNIQUE (owner, name)
 );
 
+CREATE UNIQUE INDEX repositories_github_id_key ON repositories (github_id) WHERE github_id IS NOT NULL;
 CREATE INDEX repositories_installation_id_idx ON repositories (installation_id);
 
 CREATE TABLE registration_attempts (

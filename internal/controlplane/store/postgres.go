@@ -173,7 +173,7 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Rep
 			updated_at = EXCLUDED.updated_at,
 			metadata = EXCLUDED.metadata
 		RETURNING id`, conflictTarget),
-		r.GitHubID, r.InstallationID, r.Owner, r.Name, r.DefaultBranch, r.Private, timeOrNow(r.RegisteredAt), timeOrNow(r.UpdatedAt), metadataOrEmpty(r.Metadata)).Scan(&r.ID)
+		nullableInt64(r.GitHubID), r.InstallationID, r.Owner, r.Name, r.DefaultBranch, r.Private, timeOrNow(r.RegisteredAt), timeOrNow(r.UpdatedAt), metadataOrEmpty(r.Metadata)).Scan(&r.ID)
 	if err != nil {
 		return Repository{}, err
 	}
@@ -183,16 +183,20 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Rep
 func (s *PostgresStore) GetRepository(ctx context.Context, owner string, name string) (Repository, error) {
 	var r Repository
 	var metadata []byte
+	var githubID sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, github_id, installation_id, owner, name, default_branch, private, registered_at, updated_at, metadata
 		FROM repositories
 		WHERE owner = $1 AND name = $2`, owner, name).Scan(
-		&r.ID, &r.GitHubID, &r.InstallationID, &r.Owner, &r.Name, &r.DefaultBranch, &r.Private, &r.RegisteredAt, &r.UpdatedAt, &metadata)
+		&r.ID, &githubID, &r.InstallationID, &r.Owner, &r.Name, &r.DefaultBranch, &r.Private, &r.RegisteredAt, &r.UpdatedAt, &metadata)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Repository{}, ErrNotFound
 	}
 	if err != nil {
 		return Repository{}, err
+	}
+	if githubID.Valid {
+		r.GitHubID = githubID.Int64
 	}
 	r.Metadata = json.RawMessage(metadata)
 	return r, nil

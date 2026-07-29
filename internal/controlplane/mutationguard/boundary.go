@@ -88,7 +88,7 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 	start, err := st.TryStartGitHubMutationAttempt(ctx, req.Key, []string{mutations.PhaseIntentRecorded, mutations.PhaseFailedPreCall}, now(req.Now))
 	if err != nil {
 		_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseFailedPreCall, nil, err.Error(), now(req.Now))
-		_ = st.FailIdempotencyKey(ctx, req.Key, err.Error())
+		_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseFailedPreCall+":"+err.Error())
 		return RunResult{}, fmt.Errorf("mark mutation call started: %w", err)
 	}
 	if !start.Started {
@@ -146,12 +146,12 @@ func recordIntent(ctx context.Context, st Store, req RunRequest) (store.GitHubMu
 		CreatedAt:      now(req.Now),
 	}); err != nil {
 		if !errors.Is(err, store.ErrAlreadyExists) {
-			_ = st.FailIdempotencyKey(ctx, req.Key, err.Error())
+			_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseFailedPreCall+":"+err.Error())
 			return store.GitHubMutationAttempt{}, false, fmt.Errorf("record mutation attempt: %w", err)
 		}
 		attempt, readErr := st.GetGitHubMutationAttempt(ctx, req.Key)
 		if readErr != nil {
-			_ = st.FailIdempotencyKey(ctx, req.Key, readErr.Error())
+			_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseFailedPreCall+":"+readErr.Error())
 			return store.GitHubMutationAttempt{}, false, fmt.Errorf("get existing mutation attempt: %w", readErr)
 		}
 		if !mutations.IsPreCallRetryable(attempt.Status) && !mutations.IsCompleted(attempt.Status) {

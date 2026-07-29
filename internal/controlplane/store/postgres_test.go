@@ -699,6 +699,32 @@ func TestPostgresUpsertRepositoryUpdatesRenameByGitHubID(t *testing.T) {
 	assert.Equal(t, int64(3003), got.GitHubID)
 }
 
+func TestPostgresUpsertRepositoryAllowsDistinctRepositoriesWithoutGitHubID(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	require.NoError(t, ApplyMigrations(ctx, db))
+	s := &PostgresStore{db: db}
+	require.NoError(t, s.UpsertInstallation(ctx, Installation{
+		ID:           1001,
+		AccountLogin: "octo",
+		AccountID:    2002,
+		TargetType:   "Organization",
+	}))
+
+	first, err := s.UpsertRepository(ctx, Repository{InstallationID: 1001, Owner: "octo", Name: "one", DefaultBranch: "main"})
+	require.NoError(t, err)
+	second, err := s.UpsertRepository(ctx, Repository{InstallationID: 1001, Owner: "octo", Name: "two", DefaultBranch: "main"})
+	require.NoError(t, err)
+
+	assert.NotEqual(t, first.ID, second.ID)
+	gotFirst, err := s.GetRepository(ctx, "octo", "one")
+	require.NoError(t, err)
+	assert.Zero(t, gotFirst.GitHubID)
+	gotSecond, err := s.GetRepository(ctx, "octo", "two")
+	require.NoError(t, err)
+	assert.Zero(t, gotSecond.GitHubID)
+}
+
 func isDockerUnavailable(err error) bool {
 	if err == nil {
 		return false
