@@ -73,6 +73,39 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 			c[3].FindingsBySeverity["MEDIUM"] = []string{"Files reviewed: 3", "No issue found"}
 			return c
 		}, minCycles: 3, enabled: true},
+		{name: "generic architectural tokens only", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			for i := range c {
+				c[i].FindingsBySeverity["MEDIUM"] = []string{
+					"internal/integrator/review.go: durable repair race lock atomic",
+					"internal/integrator/review_non_convergence.go: durable repair race lock atomic",
+				}
+			}
+			return c
+		}, minCycles: 3, enabled: true},
+		{name: "unrelated findings in one package", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			values := [][]string{
+				{"internal/integrator/review.go: lifecycle transition publishes before ownership is stored"},
+				{"internal/integrator/review.go: lifecycle transition loses durable recovery metadata"},
+				{"internal/integrator/review.go: lifecycle transition races synchronization during cleanup"},
+				{
+					"internal/integrator/review.go: lifecycle transition violates an ownership boundary",
+					"internal/integrator/review_non_convergence.go: lifecycle transition loses durable recovery metadata",
+				},
+			}
+			for i := range c {
+				c[i].FindingsBySeverity["MEDIUM"] = values[i]
+			}
+			return c
+		}, minCycles: 3, enabled: true},
+		{name: "subsystem and architecture split across findings", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			for i := range c {
+				c[i].FindingsBySeverity["MEDIUM"] = []string{
+					"internal/integrator/review.go: parser drops the requested label",
+					"state machine publication invariant violates ordering",
+				}
+			}
+			return c
+		}, minCycles: 3, enabled: true},
 	}
 
 	for _, test := range tests {
@@ -125,7 +158,7 @@ func TestEvaluateLowVolumeReviewSynthesis(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			result := lowVolumeSynthesisResult()
 			test.mutate(result)
-			decision, reason := evaluateLowVolumeReviewSynthesis(result, .75, eligibility)
+			decision, reason := evaluateLowVolumeReviewSynthesis(result, validReviewSynthesisInput(), .75, eligibility)
 			assert.Equal(t, test.want, decision)
 			assert.NotEmpty(t, reason)
 		})
@@ -135,9 +168,29 @@ func TestEvaluateLowVolumeReviewSynthesis(t *testing.T) {
 func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 	valid := lowVolumeSynthesisResult()
 	valid.RequirementReinterpretation = validReviewReinterpretation()
-	ok, reason := validateReviewRequirementReinterpretation(valid)
+	ok, reason := validateReviewRequirementReinterpretation(valid, validReviewSynthesisInput())
 	assert.True(t, ok)
 	assert.Empty(t, reason)
+
+	t.Run("omitted", func(t *testing.T) {
+		ok, reason := validateReviewRequirementReinterpretation(lowVolumeSynthesisResult(), agent.ReviewSynthesisInput{})
+		assert.True(t, ok)
+		assert.Empty(t, reason)
+	})
+	for _, kind := range []agent.ReviewRequirementConstraintKind{
+		agent.ReviewRequirementOverConstrained,
+		agent.ReviewRequirementInternallyConflicting,
+		agent.ReviewRequirementPlatformNonAtomic,
+	} {
+		t.Run("allowed kind "+string(kind), func(t *testing.T) {
+			result := lowVolumeSynthesisResult()
+			result.RequirementReinterpretation = validReviewReinterpretation()
+			result.RequirementReinterpretation.ConstraintKind = kind
+			ok, reason := validateReviewRequirementReinterpretation(result, validReviewSynthesisInput())
+			assert.True(t, ok)
+			assert.Empty(t, reason)
+		})
+	}
 
 	tests := []struct {
 		name   string
@@ -164,13 +217,30 @@ func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 		{name: "criteria omit safety", mutate: func(_ *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
 			r.AcceptanceCriteria = []string{"The intent visibility invariant is tested.", "Recovery is tested."}
 		}},
+		{name: "fabricated conflicting requirement", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
+			v.ConflictingRequirement = "atomically rotate unrelated encryption credentials"
+		}},
+		{name: "unsupported platform constraint", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
+			v.PlatformConsistencyConstraint = "the remote ledger only supports eventual settlement"
+		}},
+		{name: "generic pseudo safety", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
+			v.PreservedSafetyProperty = "user data remains consistent and durable"
+		}},
+		{name: "self consistent generated criteria without original safety", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
+			v.PreservedSafetyProperty = "unauthorized audit deletion is prevented"
+			v.CorrectedInvariant = "the corrected workflow prevents unauthorized audit deletion"
+			r.AcceptanceCriteria = []string{
+				"The corrected workflow prevents unauthorized audit deletion.",
+				"Unauthorized audit deletion is prevented and tested.",
+			}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			result := lowVolumeSynthesisResult()
 			result.RequirementReinterpretation = validReviewReinterpretation()
 			test.mutate(result.RequirementReinterpretation, result)
-			ok, reason := validateReviewRequirementReinterpretation(result)
+			ok, reason := validateReviewRequirementReinterpretation(result, validReviewSynthesisInput())
 			assert.False(t, ok)
 			assert.NotEmpty(t, reason)
 		})
@@ -190,6 +260,33 @@ func TestLowVolumeTitleBodyAndFingerprint(t *testing.T) {
 	assert.Contains(t, details, "Requirement reinterpretation")
 	assert.Contains(t, details, "Linearization boundaries")
 	assert.Contains(t, details, "Durability boundaries")
+}
+
+func TestBuildLowVolumeSynthesizedStrategyFixIssueTitle(t *testing.T) {
+	tests := []struct {
+		name  string
+		title string
+		want  string
+	}{
+		{name: "valid architectural title", title: "state machine publication invariant", want: "Review strategy fix: state machine publication invariant"},
+		{name: "arbitrary package path", title: "internal/state", want: "Review strategy fix: recurring architectural invariant failure"},
+		{name: "package path plus generic label", title: "pkg/scheduler invariant", want: "Review strategy fix: recurring architectural invariant failure"},
+		{name: "affected package name", title: "integrator package invariant", want: "Review strategy fix: recurring architectural invariant failure"},
+		{name: "arbitrary package name plus generic label", title: "scheduler invariant", want: "Review strategy fix: recurring architectural invariant failure"},
+		{name: "package name plus architectural labels", title: "scheduler durability invariant", want: "Review strategy fix: recurring architectural invariant failure"},
+		{name: "generic architectural label", title: "durability", want: "Review strategy fix: recurring architectural invariant failure"},
+		{name: "valid specific cause", title: "durability ordering gap", want: "Review strategy fix: durability ordering gap"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := lowVolumeSynthesisResult()
+			result.RootCauseTitle = test.title
+			assert.Equal(t, test.want, buildLowVolumeSynthesizedStrategyFixIssueTitle(result))
+		})
+	}
+
+	assert.Equal(t, "Review strategy fix (cycle 39): state machine publication invariant",
+		buildSynthesizedStrategyFixIssueTitle(39, lowVolumeSynthesisResult()))
 }
 
 func lowVolumeOscillationCycles() []reviewHistoryCycle {
@@ -249,8 +346,22 @@ func validReviewReinterpretation() *agent.ReviewRequirementReinterpretation {
 		ConflictingRequirement:        "atomically publish both independent records",
 		PlatformConsistencyConstraint: "the platform stores cannot commit atomically",
 		PreservedSafetyProperty:       "exclusive ownership remains user-visible",
-		CorrectedInvariant:            "intent visibility precedes external publication",
+		CorrectedInvariant:            "intent visibility precedes external publication while exclusive ownership remains user-visible",
 		LinearizationBoundaries:       []string{"intent creation commit", "external visibility marker"},
 		DurabilityBoundaries:          []string{"intent record persisted", "recovery state completed"},
+	}
+}
+
+func validReviewSynthesisInput() agent.ReviewSynthesisInput {
+	return agent.ReviewSynthesisInput{
+		OriginalRequirements: []agent.ReviewSynthesisRequirement{
+			{
+				Title: "Atomic intent publication",
+				Task:  "Atomically publish both independent records even though the platform stores cannot commit atomically.",
+				AcceptanceCriteria: []string{
+					"Exclusive ownership remains user-visible during intent publication.",
+				},
+			},
+		},
 	}
 }

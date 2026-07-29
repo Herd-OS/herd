@@ -2,6 +2,7 @@ package integrator
 
 import (
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
@@ -77,73 +78,45 @@ func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompleted
 	}
 	out.CompletedFixChainConfirmed = true
 
-	latestSubsystems := reviewFindingSubsystemSet(latestFindings)
-	latestTerms := reviewFindingArchitecturalTermSet(latestFindings)
-	if len(latestSubsystems) == 0 {
+	latestClusters := reviewFindingEvidenceClusters(latestFindings)
+	if len(latestClusters) == 0 {
 		return fail("latest review has no concrete package/subsystem or ownership boundary")
 	}
-	if len(latestTerms) == 0 {
-		return fail("latest review has no concrete architectural concept")
-	}
 
-	subsystemCycles := map[string][]reviewHistoryCycle{}
-	termCycles := map[string]map[int]struct{}{}
+	clusterCycles := map[string][]reviewHistoryCycle{}
 	for _, cycle := range completed {
-		findings := sanitizedDistinctReviewFindings(cycle)
-		if len(findings) == 0 {
-			continue
-		}
-		for subsystem := range reviewFindingSubsystemSet(findings) {
-			if _, inLatest := latestSubsystems[subsystem]; inLatest {
-				subsystemCycles[subsystem] = append(subsystemCycles[subsystem], cycle)
+		for key := range reviewFindingEvidenceClusters(sanitizedDistinctReviewFindings(cycle)) {
+			if _, inLatest := latestClusters[key]; inLatest {
+				clusterCycles[key] = append(clusterCycles[key], cycle)
 			}
-		}
-		for term := range reviewFindingArchitecturalTermSet(findings) {
-			if _, inLatest := latestTerms[term]; !inLatest {
-				continue
-			}
-			if termCycles[term] == nil {
-				termCycles[term] = map[int]struct{}{}
-			}
-			termCycles[term][cycle.Cycle] = struct{}{}
 		}
 	}
 
 	evidenceByCycle := map[int]reviewHistoryCycle{}
-	for subsystem, matching := range subsystemCycles {
+	subsystemSet := map[string]struct{}{}
+	termSet := map[string]struct{}{}
+	for key, matching := range clusterCycles {
 		if len(matching) < reviewOscillationMinEvidenceCycles {
 			continue
 		}
-		out.RecurringSubsystems = append(out.RecurringSubsystems, subsystem)
+		cluster := latestClusters[key]
+		subsystemSet[cluster.subsystem] = struct{}{}
+		termSet[cluster.firstTerm] = struct{}{}
+		termSet[cluster.secondTerm] = struct{}{}
 		for _, cycle := range matching {
 			evidenceByCycle[cycle.Cycle] = cycle
 		}
 	}
-	for term, matching := range termCycles {
-		if len(matching) >= reviewOscillationMinEvidenceCycles {
-			out.RecurringArchitecturalTerms = append(out.RecurringArchitecturalTerms, term)
-		}
-	}
-	sort.Strings(out.RecurringSubsystems)
-	sort.Strings(out.RecurringArchitecturalTerms)
+	out.RecurringSubsystems = sortedStringSet(subsystemSet)
+	out.RecurringArchitecturalTerms = sortedStringSet(termSet)
 	if len(out.RecurringSubsystems) == 0 {
-		return fail("no concrete subsystem recurs in the latest review and three completed evidence cycles")
-	}
-	if len(out.RecurringArchitecturalTerms) == 0 {
-		return fail("no architectural concept family recurs in the latest review and three completed evidence cycles")
+		return fail("no same-finding subsystem and architectural behavior cluster recurs in the latest review and three completed evidence cycles")
 	}
 
 	for _, cycle := range completed {
-		if _, ok := evidenceByCycle[cycle.Cycle]; !ok {
-			continue
+		if evidence, ok := evidenceByCycle[cycle.Cycle]; ok {
+			out.EvidenceCycles = append(out.EvidenceCycles, evidence)
 		}
-		terms := reviewFindingArchitecturalTermSet(sanitizedDistinctReviewFindings(cycle))
-		if stringSetIntersects(terms, sliceStringSet(out.RecurringArchitecturalTerms)) {
-			out.EvidenceCycles = append(out.EvidenceCycles, cycle)
-		}
-	}
-	if len(out.EvidenceCycles) < reviewOscillationMinEvidenceCycles {
-		return fail("subsystem and architectural evidence do not co-occur in three completed cycles")
 	}
 	evidenceHeads := append([]reviewHistoryCycle(nil), out.EvidenceCycles...)
 	evidenceHeads = append(evidenceHeads, latest)
@@ -164,9 +137,9 @@ func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompleted
 	return out
 }
 
-func evaluateLowVolumeReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence float64, eligibility reviewOscillationEligibility) (reviewSynthesisDecision, string) {
+func evaluateLowVolumeReviewSynthesis(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput, minConfidence float64, eligibility reviewOscillationEligibility) (reviewSynthesisDecision, string) {
 	analysis := reviewConvergenceAnalysis{CompletedFixIssues: completedFixNumbers(eligibility.EvidenceCycles)}
-	if decision, reason := evaluateReviewSynthesis(result, minConfidence, analysis); decision != reviewSynthesisDecisionEscalate {
+	if decision, reason := evaluateReviewSynthesis(result, input, minConfidence, analysis); decision != reviewSynthesisDecisionEscalate {
 		return decision, reason
 	}
 	if !eligibility.Eligible {
@@ -192,7 +165,7 @@ func evaluateLowVolumeReviewSynthesis(result *agent.ReviewSynthesisResult, minCo
 	return reviewSynthesisDecisionEscalate, "low-volume synthesis passed deterministic alignment and safety gates"
 }
 
-func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResult) (bool, string) {
+func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput) (bool, string) {
 	if result == nil || result.RequirementReinterpretation == nil {
 		return true, ""
 	}
@@ -227,6 +200,19 @@ func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResu
 	}
 	if !isClearlyPreservedSafetyProperty(value.PreservedSafetyProperty) {
 		return false, "requirement reinterpretation does not preserve a clear user-visible safety property"
+	}
+	originalEvidence := reviewOriginalRequirementEvidence(input.OriginalRequirements)
+	if !reviewTextAlignsWithEvidence(value.ConflictingRequirement, originalEvidence) {
+		return false, "conflicting requirement is not traceable to an original requirement"
+	}
+	if !reviewTextAlignsWithEvidence(value.PreservedSafetyProperty, originalEvidence) {
+		return false, "preserved safety property is not traceable to an original requirement"
+	}
+	if !reviewTextAlignsWithEvidence(value.PlatformConsistencyConstraint, reviewPlatformConstraintEvidence(input)) {
+		return false, "platform consistency constraint is not supported by supplied specification or review history"
+	}
+	if !reviewRequirementsMateriallyOverlap(value.CorrectedInvariant, value.PreservedSafetyProperty) {
+		return false, "corrected invariant does not materially preserve the original safety property"
 	}
 	criteria := strings.Join(trimBlankStrings(result.AcceptanceCriteria), " ")
 	if !reviewTextCoversRequirement(criteria, value.CorrectedInvariant) || !reviewTextCoversRequirement(criteria, value.PreservedSafetyProperty) {
@@ -305,7 +291,7 @@ func reviewFindingArchitecturalTermSet(findings []string) map[string]struct{} {
 		normalized := " " + normalizeReviewSynthesisFingerprintText(finding) + " "
 		for family, keywords := range reviewArchitecturalConceptKeywords {
 			for _, keyword := range keywords {
-				if strings.Contains(normalized, normalizeReviewSynthesisFingerprintText(keyword)) {
+				if strings.Contains(normalized, " "+normalizeReviewSynthesisFingerprintText(keyword)+" ") {
 					out[family] = struct{}{}
 					break
 				}
@@ -313,6 +299,68 @@ func reviewFindingArchitecturalTermSet(findings []string) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+type reviewFindingEvidenceCluster struct {
+	subsystem  string
+	firstTerm  string
+	secondTerm string
+}
+
+func reviewFindingEvidenceClusters(findings []string) map[string]reviewFindingEvidenceCluster {
+	out := map[string]reviewFindingEvidenceCluster{}
+	for _, finding := range findings {
+		subsystems := reviewFindingSubsystemSet([]string{finding})
+		terms := concreteReviewFindingArchitecturalTerms(finding)
+		if len(subsystems) == 0 || len(terms) < 2 {
+			continue
+		}
+		sortedTerms := sortedStringSet(terms)
+		for subsystem := range subsystems {
+			for i := 0; i < len(sortedTerms)-1; i++ {
+				for j := i + 1; j < len(sortedTerms); j++ {
+					cluster := reviewFindingEvidenceCluster{subsystem: subsystem, firstTerm: sortedTerms[i], secondTerm: sortedTerms[j]}
+					key := strings.Join([]string{cluster.subsystem, cluster.firstTerm, cluster.secondTerm}, "\x00")
+					out[key] = cluster
+				}
+			}
+		}
+	}
+	return out
+}
+
+func concreteReviewFindingArchitecturalTerms(finding string) map[string]struct{} {
+	terms := reviewFindingArchitecturalTermSet([]string{finding})
+	if len(terms) < 2 {
+		return nil
+	}
+	description := finding
+	for _, file := range reviewFilePathsFromText(finding) {
+		description = strings.ReplaceAll(description, file, " ")
+	}
+	architecturalWords := map[string]struct{}{}
+	for _, keywords := range reviewArchitecturalConceptKeywords {
+		for _, keyword := range keywords {
+			for _, word := range strings.Fields(normalizeReviewSynthesisFingerprintText(keyword)) {
+				architecturalWords[word] = struct{}{}
+			}
+		}
+	}
+	for _, word := range strings.Fields(normalizeReviewSynthesisFingerprintText(description)) {
+		if len(word) < 4 {
+			continue
+		}
+		if _, architectural := architecturalWords[word]; architectural {
+			continue
+		}
+		switch word {
+		case "finding", "issue", "problem", "review":
+			continue
+		default:
+			return terms
+		}
+	}
+	return nil
 }
 
 func completedFixNumbers(cycles []reviewHistoryCycle) []int {
@@ -350,20 +398,50 @@ func isMeaningfulLowVolumeRootCause(title string, result *agent.ReviewSynthesisR
 	if normalized == "" || isReviewFindingMetadataNoise(title) || isReviewFindingDismissalText(title) {
 		return false
 	}
+	if strings.ContainsAny(title, `/\`) || looksLikeReviewFilePath(strings.TrimSpace(title)) {
+		return false
+	}
 	if reviewCycleRE.MatchString(title) || reviewChunkLabelRE.MatchString(title) ||
 		strings.Contains(normalized, "coverage") || strings.Contains(normalized, "files reviewed") {
 		return false
 	}
-	for _, generic := range []string{"review workflow", "repeated review findings", "review issue", "fix loop", "internal integrator", "integrator"} {
+	for _, generic := range []string{
+		"review workflow", "repeated review findings", "review issue", "fix loop", "internal integrator", "integrator",
+		"architecture", "architectural issue", "atomic", "durable", "durability", "invariant", "lifecycle",
+		"ownership", "publication", "recovery", "state machine", "synchronization",
+	} {
 		if normalized == generic {
 			return false
 		}
 	}
-	combined := normalized
 	if result != nil {
-		combined += " " + normalizeReviewSynthesisFingerprintText(result.RootCauseSummary+" "+result.ProposedStrategy)
+		for _, symptom := range result.RecurringSymptoms {
+			for _, file := range symptom.AffectedFiles {
+				subsystem := normalizeReviewPackagePath(file)
+				base := normalizeReviewSynthesisFingerprintText(path.Base(subsystem))
+				if base != "" && (normalized == base || strings.HasPrefix(normalized, base+" package ") ||
+					strings.HasPrefix(normalized, base+" module ") || strings.HasPrefix(normalized, base+" component ")) {
+					return false
+				}
+			}
+		}
 	}
-	return len(reviewFindingArchitecturalTermSet([]string{combined})) > 0
+	terms := reviewFindingArchitecturalTermSet([]string{title})
+	if len(terms) == 0 {
+		return false
+	}
+	if len(terms) >= 3 {
+		return true
+	}
+	for _, qualifier := range []string{
+		"ambiguity", "bypass", "conflict", "divergence", "double", "duplicate", "failure", "gap", "leak",
+		"lost", "loss", "mismatch", "missing", "ordering", "premature", "split", "stale", "violation", "window",
+	} {
+		if strings.Contains(" "+normalized+" ", " "+qualifier+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 func synthesisRootCauseAlignsWithArchitecture(result *agent.ReviewSynthesisResult, recurring []string) bool {
@@ -463,12 +541,100 @@ func canonicalReviewRequirementWords(value string) map[string]struct{} {
 
 func isClearlyPreservedSafetyProperty(value string) bool {
 	normalized := normalizeReviewSynthesisFingerprintText(value)
-	for _, term := range []string{"visible", "user", "duplicate", "loss", "corrupt", "exclusive", "ownership", "consistent", "durable", "safety", "exactly once"} {
+	for _, term := range []string{
+		"exclusive ownership", "exactly once", "no duplicate", "without duplicate", "data loss", "without loss",
+		"never lose", "corrupt", "unauthorized", "user visible", "externally visible", "committed data",
+	} {
 		if strings.Contains(normalized, term) {
 			return true
 		}
 	}
 	return false
+}
+
+func reviewOriginalRequirementEvidence(requirements []agent.ReviewSynthesisRequirement) []string {
+	var out []string
+	for _, requirement := range requirements {
+		out = append(out, requirement.Title, requirement.Task, requirement.ImplementationDetails, requirement.Context)
+		out = append(out, requirement.AcceptanceCriteria...)
+	}
+	return trimBlankStrings(out)
+}
+
+func reviewPlatformConstraintEvidence(input agent.ReviewSynthesisInput) []string {
+	out := reviewOriginalRequirementEvidence(input.OriginalRequirements)
+	out = append(out, input.CurrentPRMetadata)
+	out = append(out, input.RecentReviewComments...)
+	out = append(out, input.WorkerNoOpVerdicts...)
+	for _, cycle := range input.Cycles {
+		out = append(out, cycle.ChunkCoverageSummary)
+		for _, findings := range cycle.FindingsBySeverity {
+			out = append(out, findings...)
+		}
+		for _, fix := range cycle.CompletedFixIssues {
+			out = append(out, fix.Title, fix.Body, fix.ValidationStatus)
+		}
+	}
+	for _, fix := range input.CompletedFixIssues {
+		out = append(out, fix.Title, fix.Body, fix.ValidationStatus)
+	}
+	return trimBlankStrings(out)
+}
+
+func reviewTextAlignsWithEvidence(value string, evidence []string) bool {
+	valueWords := traceableReviewRequirementWords(value)
+	if len(valueWords) < 2 {
+		return false
+	}
+	for _, source := range evidence {
+		sourceWords := traceableReviewRequirementWords(source)
+		matches := 0
+		for word := range valueWords {
+			if _, ok := sourceWords[word]; ok {
+				matches++
+			}
+		}
+		required := (len(valueWords) + 1) / 2
+		if required < 2 {
+			required = 2
+		}
+		if matches >= required {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewRequirementsMateriallyOverlap(left, right string) bool {
+	leftWords := traceableReviewRequirementWords(left)
+	matches := 0
+	for word := range traceableReviewRequirementWords(right) {
+		if _, ok := leftWords[word]; ok {
+			matches++
+		}
+	}
+	return matches >= 2
+}
+
+func traceableReviewRequirementWords(value string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for word := range canonicalReviewRequirementWords(normalizeReviewSynthesisFingerprintText(value)) {
+		switch word {
+		case "both", "cannot", "could", "from", "into", "remain", "remains", "requirement", "platform", "property",
+			"recorded", "safety", "shall", "should", "their", "there", "these", "this", "those", "while", "with":
+			continue
+		case "visible":
+			word = "visibility"
+		case "records":
+			word = "record"
+		case "stores":
+			word = "store"
+		}
+		if len(word) >= 4 {
+			out[word] = struct{}{}
+		}
+	}
+	return out
 }
 
 func reviewTextCoversRequirement(criteria, requirement string) bool {
