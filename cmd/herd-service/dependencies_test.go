@@ -56,20 +56,13 @@ func TestBuildServiceDependenciesProductionWiresDefaultWorkflowProcessor(t *test
 	require.NotNil(t, deps.WorkflowEventsRoute)
 }
 
-func TestProductionWorkflowEventProcessorConfigPreservesHerdDefaults(t *testing.T) {
-	base := *config.Default()
-	processor := productionWorkflowEventProcessor{
-		Config: config.Config{ControlPlaneURL: "https://control.example.test"},
-	}
+func TestProductionWorkflowEventProcessorRequiresDurableRepositoryConfig(t *testing.T) {
+	processor := productionWorkflowEventProcessor{}
 
-	got := processor.workflowConfig()
+	_, err := processor.repositoryWorkflowConfig(store.Repository{Owner: "octo", Name: "herd"})
 
-	assert.Equal(t, "https://control.example.test", got.ControlPlaneURL)
-	assert.Equal(t, base.Integrator.Strategy, got.Integrator.Strategy)
-	assert.Equal(t, base.Integrator.OnConflict, got.Integrator.OnConflict)
-	assert.Equal(t, base.Integrator.RequireCI, got.Integrator.RequireCI)
-	assert.Equal(t, base.Integrator.Review, got.Integrator.Review)
-	assert.Equal(t, base.Integrator.ReviewDiff, got.Integrator.ReviewDiff)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no durable workflow configuration")
 }
 
 func TestProductionWorkflowEventProcessorMonitorPatrolRunsReconciler(t *testing.T) {
@@ -109,6 +102,7 @@ func TestProductionWorkflowEventProcessorDispatchesReviewForChangesRequested(t *
 		Owner:          "octo",
 		Name:           "herd",
 		DefaultBranch:  "main",
+		Metadata:       repositoryConfigMetadata(t, "octo", "herd", nil),
 	})
 	require.NoError(t, err)
 	workflows := &recordingWorkflowClient{}
@@ -120,7 +114,6 @@ func TestProductionWorkflowEventProcessorDispatchesReviewForChangesRequested(t *
 	processor := productionWorkflowEventProcessor{
 		Store:      st,
 		Dispatcher: cpdispatch.Dispatcher{Store: st, GitHub: workflows},
-		Config:     *config.Default(),
 		PlatformFactory: func(context.Context, store.Repository) (platform.Platform, error) {
 			return pl, nil
 		},
@@ -158,6 +151,7 @@ func TestProductionWorkflowEventProcessorNoOpsNonBatchReviewSubmitted(t *testing
 		Owner:          "octo",
 		Name:           "herd",
 		DefaultBranch:  "main",
+		Metadata:       repositoryConfigMetadata(t, "octo", "herd", nil),
 	})
 	require.NoError(t, err)
 	workflows := &recordingWorkflowClient{}
@@ -169,7 +163,6 @@ func TestProductionWorkflowEventProcessorNoOpsNonBatchReviewSubmitted(t *testing
 	processor := productionWorkflowEventProcessor{
 		Store:      st,
 		Dispatcher: cpdispatch.Dispatcher{Store: st, GitHub: workflows},
-		Config:     *config.Default(),
 		PlatformFactory: func(context.Context, store.Repository) (platform.Platform, error) {
 			return pl, nil
 		},
@@ -188,6 +181,91 @@ func TestProductionWorkflowEventProcessorNoOpsNonBatchReviewSubmitted(t *testing
 	jobs, err := st.ListReconcileJobs(ctx, time.Now().Add(time.Hour), 10)
 	require.NoError(t, err)
 	assert.Empty(t, jobs)
+}
+
+func TestProductionWorkflowEventProcessorUsesDurableReviewConfiguration(t *testing.T) {
+	tests := []struct {
+		name           string
+		configure      func(*config.Config)
+		wantDispatches int
+		wantRunner     string
+		wantTimeout    string
+	}{
+		{
+			name: "review disabled",
+			configure: func(cfg *config.Config) {
+				cfg.Integrator.Review = false
+			},
+		},
+		{
+			name: "non default worker settings",
+			configure: func(cfg *config.Config) {
+				cfg.Workers.RunnerLabel = "repo-review-runner"
+				cfg.Workers.TimeoutMinutes = 91
+				cfg.Integrator.ReviewMaxFixCycles = 7
+				cfg.Integrator.ReviewFixSeverity = "high"
+			},
+			wantDispatches: 1,
+			wantRunner:     "repo-review-runner",
+			wantTimeout:    "91",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := store.NewMemoryStore()
+			repo, err := st.UpsertRepository(ctx, store.Repository{
+				GitHubID:       3003,
+				InstallationID: 9,
+				Owner:          "octo",
+				Name:           "herd",
+				DefaultBranch:  "main",
+				Metadata:       repositoryConfigMetadata(t, "octo", "herd", tt.configure),
+			})
+			require.NoError(t, err)
+			workflows := &recordingWorkflowClient{}
+			pl := newFakeCommandPlatform([]*platform.PullRequest{{
+				Number: 849, Head: "herd/batch/106-review-strategy", HeadSHA: "head",
+			}})
+			processor := productionWorkflowEventProcessor{
+				Store:      st,
+				Dispatcher: cpdispatch.Dispatcher{Store: st, GitHub: workflows},
+				PlatformFactory: func(context.Context, store.Repository) (platform.Platform, error) {
+					return pl, nil
+				},
+			}
+
+			err = processor.ProcessWorkflowEvent(ctx, repo, workflowevents.Event{
+				Kind: workflowevents.KindIntegratorEvent, Action: "review_submitted",
+				PRNumber: 849, HeadSHA: "head", ReviewState: "changes_requested",
+			})
+
+			if tt.wantDispatches == 0 {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "GitHub App")
+			}
+			require.Len(t, workflows.dispatches, tt.wantDispatches)
+			if tt.wantDispatches > 0 {
+				assert.Equal(t, tt.wantRunner, workflows.dispatches[0].inputs["runner_label"])
+				assert.Equal(t, tt.wantTimeout, workflows.dispatches[0].inputs["timeout_minutes"])
+			}
+		})
+	}
+}
+
+func repositoryConfigMetadata(t *testing.T, owner, name string, configure func(*config.Config)) json.RawMessage {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Platform.Owner = owner
+	cfg.Platform.Repo = name
+	if configure != nil {
+		configure(cfg)
+	}
+	raw, err := json.Marshal(map[string]any{"configuration": cfg})
+	require.NoError(t, err)
+	return raw
 }
 
 func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {

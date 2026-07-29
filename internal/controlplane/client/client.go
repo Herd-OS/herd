@@ -19,11 +19,12 @@ const registerRepositoryPath = "/api/v1/github/repositories/register"
 const maxCallbackPayloadBytes = 1 << 20
 
 type RegisterRepositoryRequest struct {
-	Repository string `json:"repository"`
-	Owner      string `json:"owner"`
-	Name       string `json:"name"`
-	SetupToken string `json:"setup_token"`
-	AppLogin   string `json:"app_login,omitempty"`
+	Repository    string          `json:"repository"`
+	Owner         string          `json:"owner"`
+	Name          string          `json:"name"`
+	SetupToken    string          `json:"setup_token"`
+	AppLogin      string          `json:"app_login,omitempty"`
+	Configuration json.RawMessage `json:"configuration"`
 }
 
 type RegisterRepositoryResponse struct {

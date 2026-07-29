@@ -143,6 +143,7 @@ func (s *MemoryStore) UpsertRepository(_ context.Context, r Repository) (Reposit
 		for existingKey, existing := range s.repositories {
 			if existing.GitHubID == r.GitHubID {
 				r.ID = existing.ID
+				r.Metadata = mergeRepositoryMetadata(existing.Metadata, r.Metadata)
 				delete(s.repositories, existingKey)
 				s.repositories[key] = r
 				return r, nil
@@ -151,6 +152,7 @@ func (s *MemoryStore) UpsertRepository(_ context.Context, r Repository) (Reposit
 	}
 	if existing, ok := s.repositories[key]; ok && r.ID == 0 {
 		r.ID = existing.ID
+		r.Metadata = mergeRepositoryMetadata(existing.Metadata, r.Metadata)
 	}
 	if r.ID == 0 {
 		r.ID = s.nextRepoID
@@ -158,6 +160,24 @@ func (s *MemoryStore) UpsertRepository(_ context.Context, r Repository) (Reposit
 	}
 	s.repositories[key] = r
 	return r, nil
+}
+
+func mergeRepositoryMetadata(existing, update json.RawMessage) json.RawMessage {
+	merged := map[string]any{}
+	if len(existing) > 0 {
+		_ = json.Unmarshal(existing, &merged)
+	}
+	var values map[string]any
+	if len(update) > 0 && json.Unmarshal(update, &values) == nil {
+		for key, value := range values {
+			merged[key] = value
+		}
+	}
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return metadataOrEmpty(update)
+	}
+	return metadataOrEmpty(out)
 }
 
 func (s *MemoryStore) GetRepository(_ context.Context, owner string, name string) (Repository, error) {

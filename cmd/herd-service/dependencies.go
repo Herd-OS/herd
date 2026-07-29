@@ -128,17 +128,11 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		}
 	}
 	if opts.WorkflowEventProcessor == nil {
-		workflowCfg := *config.Default()
-		workflowCfg.ControlPlaneURL = cfg.PublicURL
 		opts.WorkflowEventProcessor = productionWorkflowEventProcessor{
-			Store:             st,
-			TokenSource:       tokenSource,
-			AppLogin:          appLogin,
-			Dispatcher:        workflowDispatcher,
-			Config:            workflowCfg,
-			ControlPlaneURL:   cfg.PublicURL,
-			DefaultRunner:     config.Default().Workers.RunnerLabel,
-			DefaultTimeoutMin: config.Default().Workers.TimeoutMinutes,
+			Store:       st,
+			TokenSource: tokenSource,
+			AppLogin:    appLogin,
+			Dispatcher:  workflowDispatcher,
 		}
 	}
 	if opts.ArtifactStore == nil {
@@ -191,15 +185,11 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 }
 
 type productionWorkflowEventProcessor struct {
-	Store             productionWorkflowEventStore
-	TokenSource       appauth.TokenSource
-	AppLogin          string
-	Dispatcher        cpdispatch.Dispatcher
-	Config            config.Config
-	ControlPlaneURL   string
-	DefaultRunner     string
-	DefaultTimeoutMin int
-	PlatformFactory   func(context.Context, store.Repository) (platform.Platform, error)
+	Store           productionWorkflowEventStore
+	TokenSource     appauth.TokenSource
+	AppLogin        string
+	Dispatcher      cpdispatch.Dispatcher
+	PlatformFactory func(context.Context, store.Repository) (platform.Platform, error)
 }
 
 type productionWorkflowEventStore interface {
@@ -218,6 +208,10 @@ func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Conte
 	if event.Kind != workflowevents.KindIntegratorEvent {
 		return fmt.Errorf("unsupported production workflow event kind %q", event.Kind)
 	}
+	cfg, err := p.repositoryWorkflowConfig(repo)
+	if err != nil {
+		return err
+	}
 	pl, err := p.platform(ctx, repo)
 	if err != nil {
 		return err
@@ -233,14 +227,14 @@ func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Conte
 		if event.BatchNumber <= 0 {
 			return fmt.Errorf("workflow event batch_number is required for %s", event.Action)
 		}
-		_, err := svc.AdvanceBatch(ctx, event.BatchNumber, p.workflowConfig())
+		_, err := svc.AdvanceBatch(ctx, event.BatchNumber, cfg)
 		return err
 	case "review_submitted":
 		if event.ReviewState == "approved" {
-			_, err := svc.MergeApprovedBatchPR(ctx, event.PRNumber, event.HeadSHA, p.workflowConfig())
+			_, err := svc.MergeApprovedBatchPR(ctx, event.PRNumber, event.HeadSHA, cfg)
 			return err
 		}
-		return p.dispatchReviewForSubmittedReview(ctx, repo, pl, event)
+		return p.dispatchReviewForSubmittedReview(ctx, repo, pl, event, cfg)
 	case "pull_request_closed":
 		if event.PRNumber <= 0 {
 			return fmt.Errorf("workflow event pr_number is required for pull_request_closed")
@@ -252,7 +246,7 @@ func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Conte
 	}
 }
 
-func (p productionWorkflowEventProcessor) dispatchReviewForSubmittedReview(ctx context.Context, repo store.Repository, pl platform.Platform, event workflowevents.Event) error {
+func (p productionWorkflowEventProcessor) dispatchReviewForSubmittedReview(ctx context.Context, repo store.Repository, pl platform.Platform, event workflowevents.Event, cfg *config.Config) error {
 	if event.PRNumber <= 0 {
 		return fmt.Errorf("workflow event pr_number is required for review_submitted")
 	}
@@ -271,7 +265,6 @@ func (p productionWorkflowEventProcessor) dispatchReviewForSubmittedReview(ctx c
 	if headSHA == "" {
 		headSHA = pr.HeadSHA
 	}
-	cfg := p.workflowConfig()
 	reviewSvc := review.ReviewService{
 		Status: review.StatusService{
 			Store:  p.Store,
@@ -324,24 +317,24 @@ func (p productionWorkflowEventProcessor) runMonitorPatrol(ctx context.Context, 
 	return err
 }
 
-func (p productionWorkflowEventProcessor) workflowConfig() *config.Config {
-	cfg := p.Config
-	if cfg.Integrator.Strategy == "" {
-		cfg.Integrator = config.Default().Integrator
+func (p productionWorkflowEventProcessor) repositoryWorkflowConfig(repo store.Repository) (*config.Config, error) {
+	var metadata struct {
+		Configuration json.RawMessage `json:"configuration"`
 	}
-	if cfg.Monitor.PatrolIntervalMinutes == 0 {
-		cfg.Monitor = config.Default().Monitor
+	if len(repo.Metadata) == 0 || json.Unmarshal(repo.Metadata, &metadata) != nil || len(metadata.Configuration) == 0 {
+		return nil, fmt.Errorf("repository %s/%s has no durable workflow configuration", repo.Owner, repo.Name)
 	}
-	if cfg.ControlPlaneURL == "" {
-		cfg.ControlPlaneURL = p.ControlPlaneURL
+	cfg := config.Default()
+	if err := json.Unmarshal(metadata.Configuration, cfg); err != nil {
+		return nil, fmt.Errorf("decode durable workflow configuration for %s/%s: %w", repo.Owner, repo.Name, err)
 	}
-	if cfg.Workers.RunnerLabel == "" {
-		cfg.Workers.RunnerLabel = p.DefaultRunner
+	if validationErr := config.Validate(cfg); validationErr != nil {
+		return nil, fmt.Errorf("validate durable workflow configuration for %s/%s: %w", repo.Owner, repo.Name, validationErr)
 	}
-	if cfg.Workers.TimeoutMinutes == 0 {
-		cfg.Workers.TimeoutMinutes = p.DefaultTimeoutMin
+	if cfg.Platform.Owner != repo.Owner || cfg.Platform.Repo != repo.Name {
+		return nil, fmt.Errorf("durable workflow configuration does not match repository %s/%s", repo.Owner, repo.Name)
 	}
-	return &cfg
+	return cfg, nil
 }
 
 func (p productionWorkflowEventProcessor) platform(ctx context.Context, repo store.Repository) (platform.Platform, error) {

@@ -42,6 +42,7 @@ type Store interface {
 	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
 	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
 	RecordJobResult(ctx context.Context, r store.JobResult) (created bool, err error)
+	GetJob(ctx context.Context, jobID string) (store.Job, error)
 }
 
 // Dispatcher dispatches hosted-service workflow jobs to self-hosted runners.
@@ -205,7 +206,8 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			recovered, recoveredOK = s.recoverWorkflowDispatchIntent(ctx, dispatchReq)
 			if recoveredOK &&
 				recovered.Request.HeadSHA != batchHeadSHA &&
-				!s.hasIssueStatusTransitionIntent(ctx, issueNumber, status, recovered.Result, recovered.Request.HeadSHA) {
+				(!s.hasIssueStatusTransitionIntent(ctx, issueNumber, status, recovered.Result, recovered.Request.HeadSHA) ||
+					!s.dispatchAttemptActive(ctx, recovered.Result.JobID)) {
 				recoveredOK = false
 			}
 		}
@@ -244,6 +246,22 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		}
 	}
 	return dispatched, nil
+}
+
+func (s Service) dispatchAttemptActive(ctx context.Context, jobID string) bool {
+	if strings.TrimSpace(jobID) == "" {
+		return false
+	}
+	job, err := s.Store.GetJob(ctx, jobID)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(job.Status)) {
+	case "failed", "failure", "timed_out", "cancelled", "completed", "success":
+		return false
+	default:
+		return true
+	}
 }
 
 func (s Service) hasIssueStatusTransitionIntent(ctx context.Context, issueNumber int, status string, result cpdispatch.DispatchResult, fallback string) bool {

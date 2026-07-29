@@ -12,6 +12,7 @@ import (
 	"time"
 
 	ghapi "github.com/google/go-github/v68/github"
+	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -159,6 +160,48 @@ func TestRegisterHandlerValidRegistration(t *testing.T) {
 	for _, attempt := range st.attempts {
 		assert.NotContains(t, attempt.Error, "gho_human")
 		assert.NotContains(t, string(attempt.Metadata), "gho_human")
+	}
+}
+
+func TestValidatedRegistrationConfiguration(t *testing.T) {
+	valid := config.Default()
+	valid.Platform.Owner = "octo"
+	valid.Platform.Repo = "herd"
+	validRaw, err := json.Marshal(valid)
+	require.NoError(t, err)
+	mismatch := *valid
+	mismatch.Platform.Repo = "other"
+	mismatchRaw, err := json.Marshal(mismatch)
+	require.NoError(t, err)
+	invalid := *valid
+	invalid.Workers.TimeoutMinutes = 0
+	invalidRaw, err := json.Marshal(invalid)
+	require.NoError(t, err)
+	tests := []struct {
+		name    string
+		raw     json.RawMessage
+		wantErr string
+	}{
+		{name: "valid", raw: validRaw},
+		{name: "missing", wantErr: "required"},
+		{name: "null", raw: json.RawMessage(`null`), wantErr: "required"},
+		{name: "malformed", raw: json.RawMessage(`{`), wantErr: "malformed"},
+		{name: "invalid", raw: invalidRaw, wantErr: "timeout_minutes"},
+		{name: "repository mismatch", raw: mismatchRaw, wantErr: "does not match"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validatedRegistrationConfiguration(tt.raw, "octo", "herd")
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "octo", got.Platform.Owner)
+			assert.Equal(t, "herd", got.Platform.Repo)
+		})
 	}
 }
 
@@ -449,6 +492,19 @@ func TestDefaultGitHubVerifiersUseSetupTokenForAdminAndAppAuthForInstallationDis
 }
 
 func registerRequest(body string) *http.Request {
+	var request map[string]any
+	if json.Unmarshal([]byte(body), &request) == nil {
+		if _, ok := request["configuration"]; !ok {
+			cfg := config.Default()
+			cfg.Platform.Owner = "octo"
+			cfg.Platform.Repo = "herd"
+			request["configuration"] = cfg
+			encoded, err := json.Marshal(request)
+			if err == nil {
+				body = string(encoded)
+			}
+		}
+	}
 	return httptest.NewRequest(http.MethodPost, "/api/v1/github/repositories/register", bytes.NewBufferString(body))
 }
 

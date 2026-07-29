@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -29,8 +30,10 @@ const defaultAppLogin = "herd-os"
 type initOptions struct {
 	SkipLabels      bool
 	SkipWorkflows   bool
+	LocalOnly       bool
 	ControlPlaneURL string
 	AppLogin        string
+	Configuration   json.RawMessage
 }
 
 type repositoryRegistrar interface {
@@ -51,7 +54,7 @@ var (
 )
 
 func newInitCmd() *cobra.Command {
-	var skipLabels, skipWorkflows, checkOnly, dryRun bool
+	var skipLabels, skipWorkflows, localOnly, checkOnly, dryRun bool
 	var controlPlaneURL, appLogin string
 
 	cmd := &cobra.Command{
@@ -66,6 +69,7 @@ func newInitCmd() *cobra.Command {
 			return runInitWithOptions(initOptions{
 				SkipLabels:      skipLabels,
 				SkipWorkflows:   skipWorkflows,
+				LocalOnly:       localOnly,
 				ControlPlaneURL: controlPlaneURL,
 				AppLogin:        appLogin,
 			})
@@ -75,6 +79,7 @@ func newInitCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&skipLabels, "skip-labels", false, "Don't create labels")
 	cmd.Flags().BoolVar(&skipWorkflows, "skip-workflows", false, "Don't install workflow files")
+	cmd.Flags().BoolVar(&localOnly, "local-only", false, "Write managed files without control-plane registration or runner bootstrap credentials")
 	cmd.Flags().BoolVar(&checkOnly, "check", false, "Compare what `herd init` would write against on-disk files; exit 1 if any drift is detected. Writes nothing.")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Alias for --check")
 	cmd.Flags().StringVar(&controlPlaneURL, "control-plane-url", "", "Herd control-plane URL for self-hosted installs (default: hosted HerdOS API)")
@@ -157,6 +162,13 @@ func runInitWithOptions(opts initOptions) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	if validationErr := config.Validate(renderConfig); validationErr != nil {
+		return validationErr
+	}
+	opts.Configuration, err = json.Marshal(renderConfig)
+	if err != nil {
+		return fmt.Errorf("encoding repository configuration: %w", err)
+	}
 
 	// 3. Create .herd/ directory with role instruction files
 	herdDir := filepath.Join(dir, ".herd")
@@ -225,7 +237,7 @@ func runInitWithOptions(opts initOptions) error {
 }
 
 func initRequiresHostedRegistration(opts initOptions) bool {
-	return !opts.SkipLabels || !opts.SkipWorkflows
+	return !opts.LocalOnly && (!opts.SkipLabels || !opts.SkipWorkflows)
 }
 
 func checkPrerequisites(dir string) error {
@@ -386,11 +398,12 @@ func registerRepositoryForInit(ctx context.Context, owner, repo string, opts ini
 		return cpclient.RegisterRepositoryResponse{}, err
 	}
 	resp, err := registrar.RegisterRepository(ctx, cpclient.RegisterRepositoryRequest{
-		Repository: owner + "/" + repo,
-		Owner:      owner,
-		Name:       repo,
-		SetupToken: setupToken,
-		AppLogin:   opts.AppLogin,
+		Repository:    owner + "/" + repo,
+		Owner:         owner,
+		Name:          repo,
+		SetupToken:    setupToken,
+		AppLogin:      opts.AppLogin,
+		Configuration: opts.Configuration,
 	})
 	if err != nil {
 		safeErr := redactSetupTokenError(err, setupToken)

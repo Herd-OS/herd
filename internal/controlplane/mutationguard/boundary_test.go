@@ -138,6 +138,8 @@ func TestRunMutationBoundaryPreflightFailureIsRetryable(t *testing.T) {
 		Now: fixedBoundaryTime,
 	})
 	require.Error(t, err)
+	var preCallErr mutations.PreCallError
+	require.ErrorAs(t, err, &preCallErr)
 	assert.Equal(t, mutations.PhaseFailedPreCall, st.attempts["k"].Status)
 	require.Equal(t, mutations.PhaseFailedPreCall, st.idem["k"].Status)
 	assert.Equal(t, "marshal inputs", st.idem["k"].ResultRef)

@@ -171,7 +171,7 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Rep
 				default_branch = $5,
 				private = $6,
 				updated_at = $7,
-				metadata = $8
+				metadata = repositories.metadata || $8::jsonb
 			WHERE github_id = $1
 			RETURNING id`, updateArgs...).Scan(&r.ID)
 		if err == nil {
@@ -188,7 +188,7 @@ func (s *PostgresStore) UpsertRepository(ctx context.Context, r Repository) (Rep
 			default_branch = $5,
 			private = $6,
 			updated_at = $7,
-			metadata = $8
+			metadata = repositories.metadata || $8::jsonb
 		WHERE owner = $3 AND name = $4
 		RETURNING id`, updateArgs...).Scan(&r.ID)
 	if err == nil {

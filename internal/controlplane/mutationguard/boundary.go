@@ -72,7 +72,7 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 	}
 	replay, existing, err := recordIntent(ctx, st, req)
 	if err != nil {
-		return RunResult{}, err
+		return RunResult{}, preCallError("record mutation intent", err)
 	}
 	if existing {
 		if result, handled, err := convergeExisting(ctx, st, req, replay); handled || err != nil {
@@ -83,14 +83,14 @@ func Run(ctx context.Context, st Store, req RunRequest) (RunResult, error) {
 		if err := req.Preflight(); err != nil {
 			_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseFailedPreCall, nil, err.Error(), now(req.Now))
 			_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseFailedPreCall+":"+err.Error())
-			return RunResult{}, err
+			return RunResult{}, preCallError("mutation preflight", err)
 		}
 	}
 	start, err := st.TryStartGitHubMutationAttempt(ctx, req.Key, []string{mutations.PhaseIntentRecorded, mutations.PhaseFailedPreCall}, now(req.Now))
 	if err != nil {
 		_ = st.CompleteGitHubMutationAttempt(ctx, req.Key, mutations.PhaseFailedPreCall, nil, err.Error(), now(req.Now))
 		_ = st.FailIdempotencyKey(ctx, req.Key, mutations.PhaseFailedPreCall+":"+err.Error())
-		return RunResult{}, fmt.Errorf("mark mutation call started: %w", err)
+		return RunResult{}, preCallError("mark mutation call started", err)
 	}
 	if !start.Started {
 		if mutations.IsCompleted(start.Attempt.Status) {
@@ -242,4 +242,15 @@ func now(fn func() time.Time) time.Time {
 		return fn().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func preCallError(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var existing mutations.PreCallError
+	if errors.As(err, &existing) {
+		return err
+	}
+	return mutations.PreCallError{Op: op, Err: err}
 }

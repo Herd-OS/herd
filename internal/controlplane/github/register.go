@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -14,6 +15,7 @@ import (
 
 	ghapi "github.com/google/go-github/v68/github"
 	"github.com/herd-os/herd/internal/appauth"
+	"github.com/herd-os/herd/internal/config"
 	cpclient "github.com/herd-os/herd/internal/controlplane/client"
 	"github.com/herd-os/herd/internal/controlplane/store"
 	"golang.org/x/oauth2"
@@ -143,6 +145,12 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "owner, name, and setup_token are required"})
 		return
 	}
+	repositoryConfig, err := validatedRegistrationConfiguration(req.Configuration, req.Owner, req.Name)
+	if err != nil {
+		h.recordAttempt(r.Context(), 0, 0, req.Owner, req.Name, "rejected", err.Error())
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if requestedApp := normalizeAppLogin(req.AppLogin); requestedApp != "" && h.appLogin != "" && requestedApp != h.appLogin {
 		h.recordAttempt(r.Context(), 0, 0, req.Owner, req.Name, "rejected", "requested app_login does not match this Herd control plane")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "app_login does not match this Herd control plane; install the configured Herd GitHub App and retry `herd init`"})
@@ -214,7 +222,11 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Private:        setupRepo.Private,
 		RegisteredAt:   now,
 		UpdatedAt:      now,
-		Metadata:       mustJSON(map[string]any{"full_name": setupRepo.FullName, "registered_by": "setup"}),
+		Metadata: mustJSON(map[string]any{
+			"full_name":     setupRepo.FullName,
+			"registered_by": "setup",
+			"configuration": repositoryConfig,
+		}),
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store repository registration: storage unavailable"})
@@ -242,6 +254,23 @@ func (h RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		RunnerBootstrapToken: plainToken,
 		ControlPlaneURL:      h.controlPlaneURL,
 	})
+}
+
+func validatedRegistrationConfiguration(raw json.RawMessage, owner, name string) (*config.Config, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, fmt.Errorf("repository configuration is required")
+	}
+	cfg := config.Default()
+	if err := json.Unmarshal(raw, cfg); err != nil {
+		return nil, fmt.Errorf("repository configuration is malformed")
+	}
+	if validationErr := config.Validate(cfg); validationErr != nil {
+		return nil, validationErr
+	}
+	if cfg.Platform.Owner != owner || cfg.Platform.Repo != name {
+		return nil, fmt.Errorf("repository configuration platform does not match %s/%s", owner, name)
+	}
+	return cfg, nil
 }
 
 func setupVerificationErrorResponse(err error) (int, string) {

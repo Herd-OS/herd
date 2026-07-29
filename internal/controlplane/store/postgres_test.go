@@ -607,6 +607,25 @@ func TestMemoryStoreRecordGitHubMutationAttemptRejectsEmptyStatus(t *testing.T) 
 	require.ErrorIs(t, getErr, ErrNotFound)
 }
 
+func TestMemoryStoreUpsertRepositoryPreservesDurableMetadataFields(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemoryStore()
+	first, err := st.UpsertRepository(ctx, Repository{
+		GitHubID: 3003, Owner: "octo", Name: "herd",
+		Metadata: json.RawMessage(`{"configuration":{"Version":1},"registered_by":"setup"}`),
+	})
+	require.NoError(t, err)
+
+	updated, err := st.UpsertRepository(ctx, Repository{
+		GitHubID: 3003, Owner: "octo", Name: "herd",
+		Metadata: json.RawMessage(`{"full_name":"octo/herd"}`),
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, updated.ID)
+	assert.JSONEq(t, `{"configuration":{"Version":1},"registered_by":"setup","full_name":"octo/herd"}`, string(updated.Metadata))
+}
+
 func TestPostgresStoreRecordGitHubMutationAttemptRejectsEmptyStatus(t *testing.T) {
 	ctx := context.Background()
 	db := newMigratedPostgresDB(t, ctx)

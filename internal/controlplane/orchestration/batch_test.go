@@ -383,6 +383,7 @@ func TestDispatchReadyWorkersRepairsReadyIssueWhenHeadAdvancesAfterDispatchBefor
 		Metadata:  workflowDispatchMetadata(t, disp.requests[0]),
 		CreatedAt: fixedClock(),
 	}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", Status: "dispatching"}
 	fake.repo.branches["herd/batch/7-demo"] = "batch-head-2"
 	secondCount, secondErr := svc.DispatchReadyWorkers(ctx, req)
 
@@ -391,6 +392,69 @@ func TestDispatchReadyWorkersRepairsReadyIssueWhenHeadAdvancesAfterDispatchBefor
 	assert.Len(t, disp.requests, 1)
 	assert.Equal(t, []string{issues.StatusReady}, fake.issues.removed[1])
 	assert.Equal(t, []string{issues.StatusInProgress}, fake.issues.added[1])
+}
+
+func TestDispatchReadyWorkersFailedAttemptAtOldHeadDispatchesNewGeneration(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branches["herd/batch/7-demo"] = "new-head"
+	disp := &fakeDispatcher{}
+	st := newFakeStore()
+	svc := newTestService(fake, st, disp)
+	oldReq := cpdispatch.DispatchRequest{
+		RepoID: svc.Repo.ID, Kind: cpdispatch.JobKindWorker, WorkflowFile: "herd-worker.yml",
+		Ref: "main", BatchNumber: 7, IssueNumber: 1, BatchBranch: "herd/batch/7-demo",
+		HeadSHA: "old-head",
+	}
+	st.keys["old-dispatch"] = store.IdempotencyKey{
+		Key: "old-dispatch", Scope: "workflow_dispatch", Status: mutations.PhaseCompleted,
+		Metadata: workflowDispatchMetadata(t, oldReq), CreatedAt: fixedClock(),
+	}
+	st.keys[issueStatusTransitionKey(svc.Repo.ID, 1, issues.StatusReady, "remove", "job-1")] = store.IdempotencyKey{
+		Key: "old-ready-removal", Scope: "issue_label_remove", Status: mutations.PhaseCompleted,
+	}
+	st.jobs["job-1"] = store.Job{JobID: "job-1", Status: "failed", HeadSHA: "old-head"}
+
+	count, err := svc.DispatchReadyWorkers(ctx, DispatchReadyWorkersRequest{
+		BatchNumber: 7, BatchBranch: "herd/batch/7-demo", TierIssues: []int{1},
+		AllIssues: []*platform.Issue{{
+			Number: 1, Labels: []string{issues.StatusReady},
+			Body: "---\nherd:\n  version: 1\n---\n\n## Task\nRetry it\n",
+		}},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	require.Len(t, disp.requests, 1)
+	assert.Equal(t, "new-head", disp.requests[0].HeadSHA)
+}
+
+func TestDispatchAttemptActive(t *testing.T) {
+	tests := []struct {
+		name   string
+		jobID  string
+		status string
+		want   bool
+	}{
+		{name: "dispatching", jobID: "active", status: "dispatching", want: true},
+		{name: "blank status remains active", jobID: "blank", want: true},
+		{name: "failed", jobID: "failed", status: "failed"},
+		{name: "completed", jobID: "completed", status: "completed"},
+		{name: "missing job", jobID: "missing"},
+		{name: "missing identity"},
+	}
+	st := newFakeStore()
+	for _, tt := range tests {
+		if tt.jobID != "" && tt.name != "missing job" {
+			st.jobs[tt.jobID] = store.Job{JobID: tt.jobID, Status: tt.status}
+		}
+	}
+	svc := newTestService(newFakePlatform(), st, &fakeDispatcher{})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, svc.dispatchAttemptActive(context.Background(), tt.jobID))
+		})
+	}
 }
 
 func workflowDispatchMetadata(t *testing.T, req cpdispatch.DispatchRequest) json.RawMessage {
@@ -845,6 +909,7 @@ type fakeStore struct {
 	completeErrs         map[string][]error
 	recordMutationErrs   map[string][]error
 	completeMutationErrs map[string][]error
+	jobs                 map[string]store.Job
 }
 
 func newFakeStore() *fakeStore {
@@ -855,7 +920,16 @@ func newFakeStore() *fakeStore {
 		completeErrs:         map[string][]error{},
 		recordMutationErrs:   map[string][]error{},
 		completeMutationErrs: map[string][]error{},
+		jobs:                 map[string]store.Job{},
 	}
+}
+
+func (s *fakeStore) GetJob(_ context.Context, jobID string) (store.Job, error) {
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return store.Job{}, store.ErrNotFound
+	}
+	return job, nil
 }
 
 func (s *fakeStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {

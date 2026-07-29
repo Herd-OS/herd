@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/herd-os/herd/internal/appauth"
+	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/controlplane/artifacts"
 	cpclient "github.com/herd-os/herd/internal/controlplane/client"
 	"github.com/herd-os/herd/internal/controlplane/commands"
@@ -132,11 +133,17 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	repositoryConfig := config.Default()
+	repositoryConfig.Platform.Owner = "octo-org"
+	repositoryConfig.Platform.Repo = "herd"
+	repositoryConfigJSON, err := json.Marshal(repositoryConfig)
+	require.NoError(t, err)
 	registerResp := postJSON[cpclient.RegisterRepositoryResponse](t, handler, "/api/v1/github/repositories/register", cpclient.RegisterRepositoryRequest{
-		Owner:      "octo-org",
-		Name:       "herd",
-		SetupToken: "gho_setup",
-		AppLogin:   "herd-os",
+		Owner:         "octo-org",
+		Name:          "herd",
+		SetupToken:    "gho_setup",
+		AppLogin:      "herd-os",
+		Configuration: repositoryConfigJSON,
 	}, http.StatusCreated)
 	assert.Equal(t, int64(1), registerResp.RepositoryID)
 	assert.Equal(t, int64(42), registerResp.InstallationID)

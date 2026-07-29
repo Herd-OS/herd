@@ -536,6 +536,42 @@ func TestRunInitExistingSelfHostedConfigPersistsExplicitHostedControlPlaneURL(t 
 	assert.NotContains(t, string(env), "HERD_CONTROL_PLANE_URL=")
 }
 
+func TestRunInitLocalOnlyInstallsWorkflowsWithoutRegistrationCredentials(t *testing.T) {
+	dir := setupTestGitRepoWithCommit(t, "git@github.com:acme/widgets.git")
+	gitCmd(t, dir, "checkout", "-b", "herd/init-"+version)
+	oldAuth := newSetupAuthorizer
+	oldRegistrar := newRepositoryRegistrar
+	newSetupAuthorizer = func() setupAuthorizer {
+		panic("local-only init must not create an authorizer")
+	}
+	newRepositoryRegistrar = func(string) (repositoryRegistrar, error) {
+		panic("local-only init must not create a registrar")
+	}
+	t.Cleanup(func() {
+		newSetupAuthorizer = oldAuth
+		newRepositoryRegistrar = oldRegistrar
+	})
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() { _ = os.Chdir(oldWd) }()
+	require.NoError(t, os.Chdir(dir))
+
+	err = runInitWithOptions(initOptions{SkipLabels: true, LocalOnly: true})
+
+	require.NoError(t, err)
+	for _, name := range WorkflowFiles() {
+		_, statErr := os.Stat(filepath.Join(dir, ".github", "workflows", name))
+		require.NoError(t, statErr)
+	}
+	env, err := os.ReadFile(filepath.Join(dir, ".env"))
+	if !os.IsNotExist(err) {
+		require.NoError(t, err)
+		assert.NotContains(t, string(env), "HERD_RUNNER_BOOTSTRAP_TOKEN")
+		assert.NotContains(t, string(env), "HERD_GITHUB_TOKEN")
+		assert.NotContains(t, string(env), "GITHUB_TOKEN=")
+	}
+}
+
 func TestInstallWorkflows(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, installWorkflows(dir, config.Default()))

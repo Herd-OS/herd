@@ -240,14 +240,14 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	acceptedWorkerKey, err := h.acquireWorkerResultAcceptance(r.Context(), result, job, idempotencyKey)
 	if err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, mutationFailureRef(mutationspkg.PreCallError{Op: "accept worker result", Err: err}))
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
 	var applyMetadata map[string]any
 	patchReplayed, replayMetadata, replayErr := h.replayCompletedWorkerPatch(r.Context(), result, job)
 	if replayErr != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, replayErr.Error())
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, mutationFailureRef(mutationspkg.PreCallError{Op: "replay worker patch", Err: replayErr}))
 		writeJSON(w, http.StatusConflict, map[string]string{"error": replayErr.Error()})
 		return
 	}
@@ -258,7 +258,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if applyErr != nil {
 		if workerPatchConfigurationError(applyErr) {
-			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, applyErr.Error())
+			_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, mutationFailureRef(mutationspkg.PreCallError{Op: "configure worker patch", Err: applyErr}))
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": applyErr.Error()})
 			return
 		}
@@ -307,17 +307,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	acceptedReviewKey, err := h.acquireReviewResultAcceptance(r.Context(), result, job, idempotencyKey, payload, claims, applyMetadata)
 	if err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, mutationFailureRef(mutationspkg.PreCallError{Op: "accept review result", Err: err}))
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
 	if err := h.processReviewResult(r.Context(), result, job); err != nil {
-		message := err.Error()
-		var preCallErr mutationspkg.PreCallError
-		if errors.As(err, &preCallErr) {
-			message = mutationspkg.PhaseFailedPreCall + ":" + message
-		}
-		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, message)
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, mutationFailureRef(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
 		return
 	}
@@ -363,6 +358,21 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"kind":            envelope.Kind,
 		"idempotency_key": idempotencyKey,
 	})
+}
+
+// mutationFailureRef preserves the shared durable mutation boundary on outer
+// workflow/callback idempotency records. Only a typed PreCallError is safe to
+// redeliver automatically; every untyped error is conservatively treated as an
+// outcome that may have crossed the observable mutation boundary.
+func mutationFailureRef(err error) string {
+	if err == nil {
+		return ""
+	}
+	var preCallErr mutationspkg.PreCallError
+	if errors.As(err, &preCallErr) {
+		return mutationspkg.PhaseFailedPreCall + ":" + err.Error()
+	}
+	return err.Error()
 }
 
 func (h Handler) acquireWorkerResultAcceptance(ctx context.Context, result Result, job store.Job, resultKey string) (string, error) {
@@ -820,11 +830,11 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		return nil
 	}
 	if h.reviewProcessor == nil {
-		return fmt.Errorf("review result processor is not configured")
+		return mutationspkg.PreCallError{Op: "configure review result", Err: fmt.Errorf("review result processor is not configured")}
 	}
 	mutationStore, ok := h.store.(mutationguard.Store)
 	if !ok {
-		return fmt.Errorf("review result mutation store is not configured")
+		return mutationspkg.PreCallError{Op: "configure review result", Err: fmt.Errorf("review result mutation store is not configured")}
 	}
 	mutationKey := reviewResultMutationKey(result, job)
 	if _, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
@@ -833,7 +843,7 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		Status:    mutationspkg.PhaseIntentRecorded,
 		CreatedAt: h.now(),
 	}); err != nil {
-		return fmt.Errorf("acquire review result mutation idempotency key: %w", err)
+		return mutationspkg.PreCallError{Op: "acquire review result mutation idempotency key", Err: err}
 	}
 	repo := reviewRepositoryFromJob(job, reviewResult.Repository)
 	submission := reviewResultSubmission(reviewResult, job)

@@ -106,6 +106,125 @@ func TestHandlerDuplicateCallbacksAreIdempotent(t *testing.T) {
 	assert.Len(t, st.results, 1)
 }
 
+func TestHandlerRetriesAcceptanceStoreFailureOnExactRedelivery(t *testing.T) {
+	tests := []struct {
+		name    string
+		scope   string
+		payload func() string
+		job     store.Job
+		options func(*resultStore, time.Time) HandlerOptions
+	}{
+		{
+			name:    "worker result",
+			scope:   "worker_result_acceptance",
+			payload: func() string { return validWorkerPayload("job-1", "head") },
+			job:     store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837", Metadata: validJobMetadata()},
+			options: func(_ *resultStore, now time.Time) HandlerOptions {
+				patch := []byte{}
+				metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+				return HandlerOptions{
+					ArtifactStore: artifactMap(t, metadata, patch), PatchApplier: fixedPatchApplier{},
+					AppTokenSource: fakeAppTokenSource{}, Now: func() time.Time { return now },
+				}
+			},
+		},
+		{
+			name:    "review result",
+			scope:   "review_result_acceptance",
+			payload: validReviewPayload,
+			job:     store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head", Metadata: validReviewJobMetadata()},
+			options: func(_ *resultStore, now time.Time) HandlerOptions {
+				return HandlerOptions{ReviewProcessor: &capturingReviewProcessor{}, Now: func() time.Time { return now }}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+			st := newResultStore()
+			st.jobs["job-1"] = tt.job
+			st.acquireScopeErrs[tt.scope] = []error{errors.New("acceptance store unavailable")}
+			opts := tt.options(st, now)
+			opts.Store = st
+			claims := validClaims(now)
+			if tt.job.PRNumber > 0 {
+				claims = validReviewClaims(now)
+			}
+			opts.Validator = fixedOIDCValidator(claims)
+			opts.Audience = "herd-control-plane"
+			handler := NewHandler(opts)
+			payload := tt.payload()
+
+			first := httptest.NewRecorder()
+			handler.ServeHTTP(first, resultRequest("job-1", payload))
+			second := httptest.NewRecorder()
+			handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+			require.Equal(t, http.StatusConflict, first.Code)
+			require.Equal(t, http.StatusAccepted, second.Code)
+			assert.Len(t, st.results, 1)
+		})
+	}
+}
+
+func TestHandlerRetriesAfterMissingPreCallDependencyIsRestored(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    string
+		job        store.Job
+		firstOpts  HandlerOptions
+		secondOpts func(*testing.T) HandlerOptions
+	}{
+		{
+			name:      "worker patch dependency",
+			payload:   validWorkerPayload("job-1", "head"),
+			job:       store.Job{JobID: "job-1", HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837", Metadata: validJobMetadata()},
+			firstOpts: HandlerOptions{},
+			secondOpts: func(t *testing.T) HandlerOptions {
+				patch := []byte{}
+				metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patch.diff", patch)
+				return HandlerOptions{ArtifactStore: artifactMap(t, metadata, patch), PatchApplier: fixedPatchApplier{}, AppTokenSource: fakeAppTokenSource{}}
+			},
+		},
+		{
+			name:      "review processor dependency",
+			payload:   validReviewPayload(),
+			job:       store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head", Metadata: validReviewJobMetadata()},
+			firstOpts: HandlerOptions{},
+			secondOpts: func(*testing.T) HandlerOptions {
+				return HandlerOptions{ReviewProcessor: &capturingReviewProcessor{}}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+			st := newResultStore()
+			st.jobs["job-1"] = tt.job
+			build := func(opts HandlerOptions) http.Handler {
+				opts.Store = st
+				claims := validClaims(now)
+				if tt.job.PRNumber > 0 {
+					claims = validReviewClaims(now)
+				}
+				opts.Validator = fixedOIDCValidator(claims)
+				opts.Audience = "herd-control-plane"
+				opts.Now = func() time.Time { return now }
+				return NewHandler(opts)
+			}
+
+			first := httptest.NewRecorder()
+			build(tt.firstOpts).ServeHTTP(first, resultRequest("job-1", tt.payload))
+			second := httptest.NewRecorder()
+			build(tt.secondOpts(t)).ServeHTTP(second, resultRequest("job-1", tt.payload))
+
+			require.Equal(t, http.StatusInternalServerError, first.Code)
+			require.Equal(t, http.StatusAccepted, second.Code)
+			assert.Len(t, st.results, 1)
+		})
+	}
+}
+
 func TestHandlerPostCallUnknownCallbackRequiresDurableJobResult(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1462,8 +1581,8 @@ func TestHandlerRetryAfterPatchApplyCompletionFailureWithoutMutationReaderDoesNo
 	handler.ServeHTTP(second, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
-	require.Equal(t, http.StatusConflict, second.Code)
-	assert.Contains(t, second.Body.String(), "repair required")
+	require.Equal(t, http.StatusInternalServerError, second.Code)
+	assert.Contains(t, second.Body.String(), "mutation reader is not configured")
 	assert.Empty(t, applier.requests)
 	assert.Empty(t, inner.results)
 }
@@ -2073,14 +2192,16 @@ type resultStore struct {
 	mutationCompleteErrs []error
 	recordJobResultErrs  []error
 	completeIdemErrs     map[string][]error
+	acquireScopeErrs     map[string][]error
 	recordMutationErrs   []error
 }
 
 func newResultStore() *resultStore {
 	return &resultStore{
-		jobs: map[string]store.Job{},
-		seen: map[string]struct{}{},
-		idem: map[string]store.IdempotencyKey{},
+		jobs:             map[string]store.Job{},
+		seen:             map[string]struct{}{},
+		idem:             map[string]store.IdempotencyKey{},
+		acquireScopeErrs: map[string][]error{},
 	}
 }
 
@@ -2178,6 +2299,13 @@ func (s *resultStore) GetJobResult(_ context.Context, jobID string, idempotencyK
 func (s *resultStore) AcquireIdempotencyKey(_ context.Context, key store.IdempotencyKey) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.acquireScopeErrs[key.Scope]) > 0 {
+		err := s.acquireScopeErrs[key.Scope][0]
+		s.acquireScopeErrs[key.Scope] = s.acquireScopeErrs[key.Scope][1:]
+		if err != nil {
+			return false, err
+		}
+	}
 	if _, ok := s.idem[key.Key]; ok {
 		return false, nil
 	}
