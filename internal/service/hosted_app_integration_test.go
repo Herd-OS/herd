@@ -92,6 +92,11 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 		GitHub:     gh,
 		Dispatcher: commandDispatcher,
 	}
+	commandProcessor := commands.QueueProcessor{
+		Store:   st,
+		Handler: commandHandler,
+		Now:     func() time.Time { return time.Now().UTC().Add(time.Hour) },
+	}
 	jobResultsRoute := jobs.NewHandler(jobs.HandlerOptions{
 		Store: st,
 		Validator: hostedAppOIDCValidator{claims: jobs.OIDCClaims{
@@ -125,6 +130,7 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 		RunnerRegistrationTokenRoute: runnerRoute,
 		JobResultsRoute:              jobResultsRoute,
 		IssueCommentCommandHandler:   hostedAppInlineCommanderGuard{},
+		QueuedCommandProcessor:       commandProcessor,
 	})
 	require.NoError(t, err)
 
@@ -156,8 +162,12 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 	sendIssueCommentWebhook(t, handler, "delivery-review-command-replay", "@herd-os review", 123)
 	assert.Empty(t, gh.issueComments, "webhook route must only enqueue commands")
 	assert.Empty(t, workflows.dispatches, "webhook route must not dispatch workflows inline")
-	processQueuedIssueCommentCommand(t, ctx, st, commandHandler, registerResp.RepositoryID, 123, "review")
-	processQueuedIssueCommentCommand(t, ctx, st, commandHandler, registerResp.RepositoryID, 123, "review")
+	processed, err := commandProcessor.ProcessOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, processed)
+	processed, err = commandProcessor.ProcessOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, processed)
 	require.Len(t, gh.issueComments, 1)
 	assert.Contains(t, gh.issueComments[0], "Acknowledged `@herd-os review`.")
 	require.Len(t, workflows.dispatches, 1)
@@ -196,7 +206,9 @@ func TestHostedAppFlowWithIdempotencyAndMigrationRejections(t *testing.T) {
 	assert.Len(t, gh.statuses, 2)
 
 	sendIssueCommentWebhook(t, handler, "delivery-legacy", "/herd review", 456)
-	processQueuedIssueCommentCommand(t, ctx, st, commandHandler, registerResp.RepositoryID, 456, "migration")
+	processed, err = commandProcessor.ProcessOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, processed)
 	require.Len(t, gh.issueComments, 2)
 	assert.Contains(t, gh.issueComments[1], "@herd-os <command>")
 	assert.Len(t, workflows.dispatches, 1, "legacy slash command must not dispatch production work")
@@ -316,40 +328,6 @@ func sendIssueCommentWebhook(t *testing.T, handler http.Handler, deliveryID stri
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-}
-
-func processQueuedIssueCommentCommand(t *testing.T, ctx context.Context, st *store.MemoryStore, handler commands.Handler, repoID int64, commentID int64, commandKey string) {
-	t.Helper()
-	record, err := st.GetCommandRecord(ctx, repoID, commentID, commandKey)
-	require.NoError(t, err)
-	var metadata struct {
-		Action            string `json:"action"`
-		Raw               string `json:"raw"`
-		AuthorAssociation string `json:"author_association"`
-		IssueNumber       int    `json:"issue_number"`
-		PRNumber          int    `json:"pr_number"`
-	}
-	require.NoError(t, json.Unmarshal(record.Metadata, &metadata))
-	issueNumber := metadata.IssueNumber
-	if issueNumber == 0 {
-		issueNumber = metadata.PRNumber
-	}
-	event := commands.IssueComment{
-		Action:            metadata.Action,
-		Owner:             "octo-org",
-		Repo:              "herd",
-		IssueNumber:       issueNumber,
-		CommentID:         record.CommentID,
-		CommentBody:       metadata.Raw,
-		CommentAuthorType: "User",
-		SenderLogin:       record.Actor,
-		AuthorAssociation: metadata.AuthorAssociation,
-	}
-	if metadata.PRNumber > 0 {
-		event.PullRequestURL = "https://api.github.com/repos/octo-org/herd/pulls/7"
-	}
-	_, err = handler.HandleIssueComment(ctx, event)
-	require.NoError(t, err)
 }
 
 func signHostedAppPayload(secret string, payload []byte) string {

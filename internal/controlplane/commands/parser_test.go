@@ -213,6 +213,38 @@ func TestParseMentionCommand(t *testing.T) {
 			},
 		},
 		{
+			name:     "retry command without issue number",
+			appLogin: "herd-os",
+			body:     "@herd-os retry",
+			wantOK:   true,
+			want: ParsedCommand{
+				Kind: CommandRetry,
+				Raw:  "@herd-os retry",
+			},
+		},
+		{
+			name:     "retry command with issue number",
+			appLogin: "herd-os",
+			body:     "@herd-os retry 42",
+			wantOK:   true,
+			want: ParsedCommand{
+				Kind:   CommandRetry,
+				Args:   []string{"42"},
+				Prompt: "42",
+				Raw:    "@herd-os retry 42",
+			},
+		},
+		{
+			name:     "integrate command",
+			appLogin: "herd-os",
+			body:     "@herd-os integrate",
+			wantOK:   true,
+			want: ParsedCommand{
+				Kind: CommandIntegrate,
+				Raw:  "@herd-os integrate",
+			},
+		},
+		{
 			name:       "missing app login",
 			appLogin:   " ",
 			body:       "@herd-os review",

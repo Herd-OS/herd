@@ -15,6 +15,8 @@ const (
 	CommandFixCI            CommandKind = "fix-ci"
 	CommandResolveConflicts CommandKind = "resolve-conflicts"
 	CommandDispatch         CommandKind = "dispatch"
+	CommandRetry            CommandKind = "retry"
+	CommandIntegrate        CommandKind = "integrate"
 )
 
 var ErrUnknownCommand = errors.New("unknown herd-os command")
@@ -96,7 +98,7 @@ func commandPrompt(afterCommand, remainingBody string) string {
 
 func isSupportedCommand(kind CommandKind) bool {
 	switch kind {
-	case CommandFix, CommandReview, CommandFixCI, CommandResolveConflicts, CommandDispatch:
+	case CommandFix, CommandReview, CommandFixCI, CommandResolveConflicts, CommandDispatch, CommandRetry, CommandIntegrate:
 		return true
 	default:
 		return false

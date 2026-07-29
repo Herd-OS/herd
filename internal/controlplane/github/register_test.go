@@ -155,6 +155,14 @@ func TestRegisterHandlerFailures(t *testing.T) {
 			wantError:  "gh auth login",
 		},
 		{
+			name:       "setup verifier app not installed",
+			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
+			setup:      &fakeSetupVerifier{err: ErrAppInstallation},
+			app:        &fakeAppVerifier{},
+			wantStatus: http.StatusConflict,
+			wantError:  "GitHub App is not installed",
+		},
+		{
 			name:       "app not installed",
 			body:       `{"owner":"octo","name":"herd","setup_token":"gho_human"}`,
 			setup:      &fakeSetupVerifier{repo: SetupRepository{ID: 99, Admin: true}},

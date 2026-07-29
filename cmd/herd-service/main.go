@@ -56,6 +56,14 @@ func main() {
 			}
 		}()
 	}
+	stopCommands, commandsStarted := service.StartQueuedCommandLoop(ctx, cfg, deps)
+	if commandsStarted {
+		defer func() {
+			if err := stopCommands(); err != nil {
+				logger.Printf("stop queued command processor: %v", err)
+			}
+		}()
+	}
 
 	server := &http.Server{
 		Addr:              defaultAddr,

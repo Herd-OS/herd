@@ -113,6 +113,7 @@ func TestCommandWorkflowFileIsManagedWorkflow(t *testing.T) {
 		want string
 	}{
 		{name: "review", kind: cpdispatch.JobKindReview, want: "herd-review.yml"},
+		{name: "integrator", kind: cpdispatch.JobKindIntegrator, want: "herd-integrator.yml"},
 		{name: "review fix", kind: cpdispatch.JobKindReviewFix, want: "herd-worker.yml"},
 		{name: "ci fix", kind: cpdispatch.JobKindCIFix, want: "herd-worker.yml"},
 	}
@@ -124,6 +125,37 @@ func TestCommandWorkflowFileIsManagedWorkflow(t *testing.T) {
 			assert.Contains(t, managed, workflowFile)
 		})
 	}
+}
+
+func TestProductionRetryCommandResolvesIssueTarget(t *testing.T) {
+	p := newFakeCommandPlatform(nil)
+	p.issues.byNumber[42] = &platform.Issue{
+		Number:    42,
+		Labels:    []string{issues.StatusFailed},
+		Milestone: &platform.Milestone{Number: 7, Title: "Command Surface"},
+	}
+	p.repo.branchSHAs["herd/batch/7-command-surface"] = "batch-sha"
+	dispatcher := productionCommandDispatcher{
+		PlatformFactory: func(context.Context, commands.DispatchCommand) (platform.Platform, error) { return p, nil },
+	}
+
+	target, err := dispatcher.resolveCommandTarget(context.Background(), commands.DispatchCommand{
+		RepositoryID:   42,
+		InstallationID: 77,
+		Owner:          "octo",
+		Repo:           "herd",
+		IssueNumber:    42,
+		CommentID:      123,
+		Actor:          "maintainer",
+		Command:        commands.ParsedCommand{Kind: commands.CommandRetry},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 7, target.BatchNumber)
+	assert.Equal(t, 42, target.IssueNumber)
+	assert.Equal(t, "herd/batch/7-command-surface", target.BatchBranch)
+	assert.Equal(t, "batch-sha", target.HeadSHA)
+	assert.Equal(t, "batch-sha", target.BaseSHA)
 }
 
 func TestCommandTargetFromPullRequest(t *testing.T) {

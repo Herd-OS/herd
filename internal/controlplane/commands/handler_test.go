@@ -123,6 +123,41 @@ func TestEnqueueIssueCommentCommandIgnoresPRCommandsFromIssueComments(t *testing
 	}
 }
 
+func TestQueueProcessorProcessesQueuedCommandOnce(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	repo, err := st.UpsertRepository(ctx, store.Repository{InstallationID: 77, Owner: "octo-org", Name: "herd"})
+	require.NoError(t, err)
+	require.NotZero(t, repo.ID)
+	event := validComment("OWNER", "@herd-os review")
+	require.NoError(t, EnqueueIssueCommentCommand(ctx, st, "herd-os", event))
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	processor := QueueProcessor{
+		Store: st,
+		Handler: Handler{
+			AppLogin:   "herd-os",
+			Store:      st,
+			GitHub:     gh,
+			Dispatcher: dispatcher,
+		},
+		Now: func() time.Time { return time.Now().UTC().Add(time.Hour) },
+	}
+
+	processed, err := processor.ProcessOnce(ctx)
+	require.NoError(t, err)
+	processedAgain, retryErr := processor.ProcessOnce(ctx)
+	require.NoError(t, retryErr)
+
+	assert.Equal(t, 1, processed)
+	assert.Equal(t, 0, processedAgain)
+	assert.Len(t, gh.comments, 1)
+	assert.Len(t, dispatcher.dispatched, 1)
+	record, err := st.GetCommandRecord(ctx, repo.ID, event.CommentID, "review")
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", record.Status)
+}
+
 func TestHandlerIgnoresBotAuthoredComments(t *testing.T) {
 	tests := []IssueComment{
 		func() IssueComment {
@@ -251,6 +286,8 @@ func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
 		{body: "@herd-os fix update auth error handling", kind: CommandFix, wantIssue: 0, wantPR: 7},
 		{body: "@herd-os fix-ci failing tests mention missing env var", kind: CommandFixCI, wantIssue: 0, wantPR: 7},
 		{body: "@herd-os resolve-conflicts", kind: CommandResolveConflicts, wantIssue: 7, wantPR: 7},
+		{body: "@herd-os retry 42", kind: CommandRetry, wantIssue: 42, wantPR: 7},
+		{body: "@herd-os integrate", kind: CommandIntegrate, wantIssue: 7, wantPR: 7},
 	}
 
 	for _, tt := range tests {
@@ -327,8 +364,30 @@ func TestHandlerDispatchesDispatchCommandFromIssueComments(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsInvalidDispatchTarget(t *testing.T) {
-	tests := []string{"@herd-os dispatch nope", "@herd-os dispatch 0", "@herd-os dispatch -1"}
+func TestHandlerDispatchesRetryCommandFromIssueComments(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+	event := validComment("OWNER", "@herd-os retry 42")
+	event.PullRequestURL = ""
+
+	result, err := h.HandleIssueComment(context.Background(), event)
+	duplicate, duplicateErr := h.HandleIssueComment(context.Background(), event)
+
+	require.NoError(t, err)
+	require.NoError(t, duplicateErr)
+	assert.Equal(t, StatusAcknowledged, result.Status)
+	assert.Equal(t, StatusAcknowledged, duplicate.Status)
+	assert.Len(t, gh.comments, 1)
+	require.Len(t, dispatcher.dispatched, 1)
+	assert.Equal(t, CommandRetry, dispatcher.dispatched[0].Command.Kind)
+	assert.Equal(t, 42, dispatcher.dispatched[0].IssueNumber)
+	assert.Equal(t, 0, dispatcher.dispatched[0].PRNumber)
+}
+
+func TestHandlerRejectsInvalidNumericCommandTarget(t *testing.T) {
+	tests := []string{"@herd-os dispatch nope", "@herd-os dispatch 0", "@herd-os dispatch -1", "@herd-os retry nope", "@herd-os retry 0", "@herd-os retry -1"}
 	for _, body := range tests {
 		t.Run(body, func(t *testing.T) {
 			st := newFakeStore()
@@ -355,6 +414,7 @@ func TestHandlerDoesNotDispatchPRCommandsFromIssueComments(t *testing.T) {
 		{body: "@herd-os review", kind: CommandReview},
 		{body: "@herd-os fix", kind: CommandFix},
 		{body: "@herd-os fix-ci", kind: CommandFixCI},
+		{body: "@herd-os integrate", kind: CommandIntegrate},
 	}
 
 	for _, tt := range tests {

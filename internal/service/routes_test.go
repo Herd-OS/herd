@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -235,6 +236,22 @@ func TestStartReconcilerLoopStartsAndStopsWithContext(t *testing.T) {
 	assert.False(t, r.LastReport().StartedAt.IsZero())
 }
 
+func TestStartQueuedCommandLoopStartsAndStopsWithContext(t *testing.T) {
+	processor := &queuedCommandLoopTestProcessor{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stop, started := StartQueuedCommandLoop(ctx, Config{ReconcilerInterval: "10ms"}, Dependencies{QueuedCommandProcessor: processor})
+	require.True(t, started)
+	require.Eventually(t, func() bool {
+		processor.mu.Lock()
+		defer processor.mu.Unlock()
+		return processor.calls > 0
+	}, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, stop())
+}
+
 func validProductionConfig() Config {
 	return Config{
 		GitHubAppID:         123,
@@ -259,6 +276,7 @@ func productionTestDependencies(st Store) Dependencies {
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 		}),
 		IssueCommentCommandHandler: productionTestCommander{},
+		QueuedCommandProcessor:     productionTestQueuedCommandProcessor{},
 		WorkflowEventProcessor:     productionTestWorkflowProcessor{},
 	}
 }
@@ -273,4 +291,22 @@ type productionTestWorkflowProcessor struct{}
 
 func (productionTestWorkflowProcessor) ProcessWorkflowEvent(context.Context, store.Repository, workflowevents.Event) error {
 	return nil
+}
+
+type productionTestQueuedCommandProcessor struct{}
+
+func (productionTestQueuedCommandProcessor) ProcessOnce(context.Context) (int, error) {
+	return 0, nil
+}
+
+type queuedCommandLoopTestProcessor struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *queuedCommandLoopTestProcessor) ProcessOnce(context.Context) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	return 0, nil
 }

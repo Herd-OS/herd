@@ -226,6 +226,9 @@ func setupVerificationErrorResponse(err error) (int, string) {
 	if errors.Is(err, ErrRepoUnauthorized) {
 		return http.StatusForbidden, "repository registration requires a GitHub account with admin access; run `gh auth login -h github.com` as a repo admin and retry"
 	}
+	if errors.Is(err, ErrAppInstallation) {
+		return http.StatusConflict, "Herd GitHub App is not installed for this repository; install the App for the repository and retry `herd init`"
+	}
 	var rateLimitErr *ghapi.RateLimitError
 	if errors.As(err, &rateLimitErr) {
 		return http.StatusBadGateway, "verify GitHub setup credential: GitHub rate limit reached, retry repository registration"

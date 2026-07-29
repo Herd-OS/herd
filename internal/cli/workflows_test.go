@@ -796,13 +796,13 @@ func TestWorkerWorkflowTemplate_ExcludesProviderAuthEnv(t *testing.T) {
 	assert.Contains(t, s, "name: worker-branch", "worker workflow must upload artifact named by callback")
 	assert.NotContains(t, s, "name: worker.patch", "worker workflow must not upload patch bytes under a different artifact name")
 	assert.Contains(t, s, "echo \"sha=$(git rev-parse HEAD)\" >> \"$GITHUB_OUTPUT\"", "worker workflow must capture checked-out HEAD")
-	assert.Contains(t, s, "HERD_BASE_SHA: ${{ steps.checkout-base.outputs.sha }}", "worker workflow must use captured checkout HEAD")
+	assert.Contains(t, s, "HERD_PRE_WORKER_BASE_SHA: ${{ steps.checkout-base.outputs.sha }}", "worker workflow must use captured checkout HEAD")
 	assert.Contains(t, s, `export GIT_INDEX_FILE="$(mktemp)"`, "worker workflow must stage worker changes in a temporary index")
-	assert.Contains(t, s, `git read-tree "$HERD_BASE_SHA"`, "worker workflow must seed the temporary index from the checked-out base")
+	assert.Contains(t, s, `git read-tree "$HERD_PRE_WORKER_BASE_SHA"`, "worker workflow must seed the temporary index from the checked-out base")
 	assert.Contains(t, s, "git add -A", "worker workflow must stage all worker changes before packaging")
-	assert.Contains(t, s, "git diff --binary --cached \"$HERD_BASE_SHA\"", "worker workflow must package a binary git patch from the staged worker result")
+	assert.Contains(t, s, "git diff --binary --cached \"$HERD_PRE_WORKER_BASE_SHA\"", "worker workflow must package a binary git patch from the staged worker result")
 	assert.Contains(t, s, "format: \"git-diff-binary\"", "worker metadata must declare the artifact format expected by the service")
-	assert.Contains(t, s, "--arg base_sha \"$HERD_BASE_SHA\"", "worker result payload must use captured checkout HEAD")
+	assert.Contains(t, s, "--arg base_sha \"$HERD_PRE_WORKER_BASE_SHA\"", "worker result payload must use captured checkout HEAD")
 	assert.NotContains(t, s, "--arg base_sha \"${{ github.sha }}\"", "worker result payload must not use dispatch event SHA")
 	assert.Contains(t, s, "while true; do", "worker workflow must retry result callbacks")
 	loopIndex := strings.Index(s, "while true; do")
@@ -839,7 +839,7 @@ func TestWorkerWorkflowUsesCapturedCheckoutBaseForArtifactsAndResult(t *testing.
 		switch step.Name {
 		case "Checkout":
 			checkoutIndex = i
-		case "Record checkout base":
+		case "Record pre-worker base":
 			recordIndex = i
 			assert.Contains(t, step.Run, "git rev-parse HEAD")
 			assert.Contains(t, step.Run, "$GITHUB_OUTPUT")
@@ -856,18 +856,18 @@ func TestWorkerWorkflowUsesCapturedCheckoutBaseForArtifactsAndResult(t *testing.
 			packageIndex = i
 			assert.Equal(t, "success()", step.If)
 			require.NotNil(t, step.Env)
-			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_BASE_SHA"])
+			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_PRE_WORKER_BASE_SHA"])
 			assert.Contains(t, step.Run, `export GIT_INDEX_FILE="$(mktemp)"`)
-			assert.Contains(t, step.Run, `git read-tree "$HERD_BASE_SHA"`)
+			assert.Contains(t, step.Run, `git read-tree "$HERD_PRE_WORKER_BASE_SHA"`)
 			assert.Contains(t, step.Run, "git add -A")
-			assert.Contains(t, step.Run, "git diff --binary --cached \"$HERD_BASE_SHA\"")
-			assert.Contains(t, step.Run, "--arg base_sha \"$HERD_BASE_SHA\"")
+			assert.Contains(t, step.Run, "git diff --binary --cached \"$HERD_PRE_WORKER_BASE_SHA\"")
+			assert.Contains(t, step.Run, "--arg base_sha \"$HERD_PRE_WORKER_BASE_SHA\"")
 		case "Report result":
 			reportIndex = i
 			require.NotNil(t, step.Env)
-			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_BASE_SHA"])
+			assert.Equal(t, "${{ steps.checkout-base.outputs.sha }}", step.Env["HERD_PRE_WORKER_BASE_SHA"])
 			assert.Equal(t, "${{ inputs.batch_branch || github.event.repository.default_branch }}", step.Env["HERD_BATCH_BRANCH"])
-			assert.Contains(t, step.Run, "--arg base_sha \"$HERD_BASE_SHA\"")
+			assert.Contains(t, step.Run, "--arg base_sha \"$HERD_PRE_WORKER_BASE_SHA\"")
 			assert.Contains(t, step.Run, "--arg target_branch \"$HERD_BATCH_BRANCH\"")
 		}
 	}
@@ -929,7 +929,7 @@ func TestWorkerPatchArtifactUsesCheckedOutBaseWhenDispatchSHADiffers(t *testing.
 		"HERD_JOB_ID=job-1",
 		"HERD_REPOSITORY=acme/widgets",
 		"HERD_EXPECTED_HEAD_SHA="+strings.Repeat("a", 40),
-		"HERD_BASE_SHA="+checkedOutBase,
+		"HERD_PRE_WORKER_BASE_SHA="+checkedOutBase,
 		"GITHUB_SHA="+dispatchSHA,
 	)
 	output, err := cmd.CombinedOutput()
@@ -947,6 +947,9 @@ func TestWorkerPatchArtifactUsesCheckedOutBaseWhenDispatchSHADiffers(t *testing.
 	assert.NotEqual(t, dispatchSHA, metadata.BaseSHA)
 	assert.Equal(t, "herd-worker.patch", metadata.ArtifactName)
 	assert.FileExists(t, "/tmp/herd-worker-artifact/herd-worker.patch")
+	patch, err := os.ReadFile("/tmp/herd-worker-artifact/herd-worker.patch")
+	require.NoError(t, err)
+	assert.NotEmpty(t, patch)
 	assert.Empty(t, runWorkflowGit(t, repoDir, "diff", "--cached", "--name-only"), "packaging must not leave the checkout index staged")
 
 	applyDir := t.TempDir()

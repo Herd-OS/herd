@@ -164,11 +164,16 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		Audience:  cfg.OIDCAudience,
 		Processor: opts.WorkflowEventProcessor,
 	})
-	deps.IssueCommentCommandHandler = commands.Handler{
+	commandHandler := commands.Handler{
 		AppLogin:   appLogin,
 		Store:      st,
 		GitHub:     commandGitHub{store: st, tokenSource: tokenSource},
 		Dispatcher: opts.CommandDispatcher,
+	}
+	deps.IssueCommentCommandHandler = commandHandler
+	deps.QueuedCommandProcessor = commands.QueueProcessor{
+		Store:   st,
+		Handler: commandHandler,
 	}
 	return deps, nil
 }
@@ -903,12 +908,15 @@ func (d productionCommandDispatcher) resolveCommandTarget(ctx context.Context, c
 	if cmd.RepositoryID == 0 || cmd.InstallationID == 0 || strings.TrimSpace(cmd.Owner) == "" || strings.TrimSpace(cmd.Repo) == "" {
 		return commandTarget{}, fmt.Errorf("production command dispatch requires durable repository context")
 	}
-	if cmd.PRNumber <= 0 {
-		return commandTarget{}, fmt.Errorf("production command dispatch requires durable PR context")
-	}
 	p, err := d.commandPlatform(ctx, cmd)
 	if err != nil {
 		return commandTarget{}, err
+	}
+	if cmd.PRNumber <= 0 {
+		if cmd.Command.Kind == commands.CommandRetry {
+			return d.commandTargetFromIssue(ctx, p, cmd)
+		}
+		return commandTarget{}, fmt.Errorf("@herd-os %s can only be used on pull requests", cmd.Command.Kind)
 	}
 	pr, err := p.PullRequests().Get(ctx, cmd.PRNumber)
 	if err != nil {
@@ -932,6 +940,36 @@ func (d productionCommandDispatcher) resolveCommandTarget(ctx context.Context, c
 		return commandTarget{}, err
 	}
 	return target, nil
+}
+
+func (d productionCommandDispatcher) commandTargetFromIssue(ctx context.Context, p platform.Platform, cmd commands.DispatchCommand) (commandTarget, error) {
+	if cmd.IssueNumber <= 0 {
+		return commandTarget{}, fmt.Errorf("@herd-os retry requires an issue number")
+	}
+	issue, err := p.Issues().Get(ctx, cmd.IssueNumber)
+	if err != nil {
+		return commandTarget{}, fmt.Errorf("lookup issue #%d for retry command: %w", cmd.IssueNumber, err)
+	}
+	status := issues.StatusLabel(issue.Labels)
+	if status != issues.StatusFailed {
+		return commandTarget{}, fmt.Errorf("issue #%d is not failed (status: %s)", cmd.IssueNumber, status)
+	}
+	if issue.Milestone == nil {
+		return commandTarget{}, fmt.Errorf("issue #%d has no milestone", cmd.IssueNumber)
+	}
+	batchBranch := fmt.Sprintf("herd/batch/%d-%s", issue.Milestone.Number, planner.Slugify(issue.Milestone.Title))
+	headSHA, err := p.Repository().GetBranchSHA(ctx, batchBranch)
+	if err != nil {
+		return commandTarget{}, fmt.Errorf("lookup batch branch %s for retry command: %w", batchBranch, err)
+	}
+	return commandTarget{
+		BatchNumber: issue.Milestone.Number,
+		IssueNumber: cmd.IssueNumber,
+		BatchBranch: batchBranch,
+		BaseSHA:     headSHA,
+		HeadSHA:     headSHA,
+		Ref:         batchBranch,
+	}, nil
 }
 
 func commandTargetFromPullRequest(cmd commands.DispatchCommand, pr *platform.PullRequest) (commandTarget, error) {
@@ -1656,12 +1694,19 @@ func commandJobKind(kind commands.CommandKind) (cpdispatch.JobKind, error) {
 		return cpdispatch.JobKindReviewFix, nil
 	case commands.CommandFixCI:
 		return cpdispatch.JobKindCIFix, nil
+	case commands.CommandRetry:
+		return cpdispatch.JobKindWorker, nil
+	case commands.CommandIntegrate:
+		return cpdispatch.JobKindIntegrator, nil
 	default:
 		return "", fmt.Errorf("command %q is not dispatchable", kind)
 	}
 }
 
 func commandWorkflowFile(kind cpdispatch.JobKind) string {
+	if kind == cpdispatch.JobKindIntegrator {
+		return "herd-integrator.yml"
+	}
 	if kind == cpdispatch.JobKindReview {
 		return "herd-review.yml"
 	}

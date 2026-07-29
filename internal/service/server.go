@@ -24,8 +24,13 @@ type Dependencies struct {
 	JobResultsRoute              http.Handler
 	WorkflowEventsRoute          http.Handler
 	IssueCommentCommandHandler   cpgithub.IssueCommentCommandHandler
+	QueuedCommandProcessor       QueuedCommandProcessor
 	Reconciler                   *reconciler.Reconciler
 	WorkflowEventProcessor       workflowevents.Processor
+}
+
+type QueuedCommandProcessor interface {
+	ProcessOnce(ctx context.Context) (int, error)
 }
 
 type Store interface {
@@ -74,6 +79,9 @@ func validateProductionDependencies(cfg Config, deps Dependencies) error {
 	}
 	if deps.IssueCommentCommandHandler == nil {
 		errs = append(errs, errors.New("production issue-comment command handler is not configured"))
+	}
+	if deps.QueuedCommandProcessor == nil {
+		errs = append(errs, errors.New("production queued command processor is not configured"))
 	}
 	if deps.JobResultsRoute == nil {
 		errs = append(errs, errors.New("production job result processor route is not configured"))
@@ -127,6 +135,42 @@ func StartReconcilerLoop(ctx context.Context, cfg Config, deps Dependencies) (fu
 			err = nil
 		}
 		done <- err
+	}()
+	return func() error {
+		cancel()
+		return <-done
+	}, true
+}
+
+func StartQueuedCommandLoop(ctx context.Context, cfg Config, deps Dependencies) (func() error, bool) {
+	if deps.QueuedCommandProcessor == nil {
+		return func() error { return nil }, false
+	}
+	interval := time.Second
+	if strings.TrimSpace(cfg.ReconcilerInterval) != "" {
+		parsed, err := time.ParseDuration(cfg.ReconcilerInterval)
+		if err != nil {
+			return func() error { return err }, false
+		}
+		interval = parsed
+	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			if _, err := deps.QueuedCommandProcessor.ProcessOnce(loopCtx); err != nil && loopCtx.Err() == nil {
+				done <- err
+				return
+			}
+			select {
+			case <-loopCtx.Done():
+				done <- nil
+				return
+			case <-ticker.C:
+			}
+		}
 	}()
 	return func() error {
 		cancel()

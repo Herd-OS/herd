@@ -151,7 +151,7 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		} else {
 			metadataBody["issue_number"] = event.IssueNumber
 		}
-		if cmd.Kind == CommandDispatch {
+		if cmd.Kind == CommandDispatch || cmd.Kind == CommandRetry {
 			metadataBody["issue_number"] = targetIssueNumber
 		}
 	}
@@ -214,7 +214,7 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 }
 
 func resolveCommandIssueNumber(cmd ParsedCommand, event IssueComment) (int, error) {
-	if cmd.Kind != CommandDispatch {
+	if cmd.Kind != CommandDispatch && cmd.Kind != CommandRetry {
 		return event.IssueNumber, nil
 	}
 	if len(cmd.Args) == 0 {
@@ -222,7 +222,7 @@ func resolveCommandIssueNumber(cmd ParsedCommand, event IssueComment) (int, erro
 	}
 	n, err := strconv.Atoi(cmd.Args[0])
 	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("@herd-os dispatch requires a positive numeric issue number")
+		return 0, fmt.Errorf("@herd-os %s requires a positive numeric issue number", cmd.Kind)
 	}
 	return n, nil
 }
@@ -298,7 +298,7 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 		} else {
 			metadataBody["issue_number"] = event.IssueNumber
 		}
-		if cmd.Kind == CommandDispatch {
+		if cmd.Kind == CommandDispatch || cmd.Kind == CommandRetry {
 			metadataBody["issue_number"] = targetIssueNumber
 		}
 	}
@@ -557,7 +557,7 @@ func acknowledgement(appLogin string, cmd ParsedCommand) string {
 
 func shouldDispatch(kind CommandKind) bool {
 	switch kind {
-	case CommandReview, CommandFix, CommandFixCI, CommandResolveConflicts, CommandDispatch:
+	case CommandReview, CommandFix, CommandFixCI, CommandResolveConflicts, CommandDispatch, CommandRetry, CommandIntegrate:
 		return true
 	default:
 		return false
@@ -566,7 +566,7 @@ func shouldDispatch(kind CommandKind) bool {
 
 func commandRequiresPR(kind CommandKind) bool {
 	switch kind {
-	case CommandReview, CommandFix, CommandFixCI, CommandResolveConflicts:
+	case CommandReview, CommandFix, CommandFixCI, CommandResolveConflicts, CommandIntegrate:
 		return true
 	default:
 		return false
