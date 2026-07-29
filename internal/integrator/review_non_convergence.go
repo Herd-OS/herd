@@ -1327,7 +1327,7 @@ func sanitizedReviewSynthesisFilePaths(files []string) []string {
 func hasValidReviewSynthesisSymptomDescription(symptoms []agent.ReviewSynthesisSymptom) bool {
 	for _, symptom := range symptoms {
 		description := strings.TrimSpace(symptom.Description)
-		if description != "" && !isReviewFindingMetadataNoise(description) && normalizeReviewSynthesisFingerprintText(description) != "" {
+		if description != "" && !isReviewFindingMetadataNoise(description) && !isReviewFindingDismissalText(description) && normalizeReviewSynthesisFingerprintText(description) != "" {
 			return true
 		}
 	}
@@ -1358,7 +1358,7 @@ func sanitizedReviewSynthesisSymptoms(symptoms []agent.ReviewSynthesisSymptom) [
 	var sanitized []agent.ReviewSynthesisSymptom
 	for _, symptom := range symptoms {
 		description := strings.TrimSpace(symptom.Description)
-		if description == "" || isReviewFindingMetadataNoise(description) || normalizeReviewSynthesisFingerprintText(description) == "" {
+		if description == "" || isReviewFindingMetadataNoise(description) || isReviewFindingDismissalText(description) || normalizeReviewSynthesisFingerprintText(description) == "" {
 			continue
 		}
 		files := sanitizedReviewSynthesisFilePaths(symptom.AffectedFiles)
@@ -1643,7 +1643,7 @@ func representativeReviewFindings(cycles []reviewHistoryCycle, limit int) []stri
 		for _, severity := range []string{"HIGH", "MEDIUM", "LOW", "CRITERIA"} {
 			for _, finding := range cycle.FindingsBySeverity[severity] {
 				text := strings.TrimSpace(finding)
-				if text == "" || isReviewFindingMetadataNoise(text) {
+				if text == "" || isReviewFindingMetadataNoise(text) || isReviewFindingDismissalText(text) {
 					continue
 				}
 				key := strings.ToLower(text)
@@ -1849,6 +1849,28 @@ func isReviewFindingMetadataNoise(text string) bool {
 	}
 	lower := strings.ToLower(text)
 	return strings.HasPrefix(lower, "reviewed ") && strings.Contains(lower, "chunk")
+}
+
+func isReviewFindingDismissalText(text string) bool {
+	text = strings.TrimSpace(strings.TrimPrefix(text, "- "))
+	text = strings.Trim(text, "`*_ ")
+	text = strings.TrimSpace(strings.TrimRight(text, ".!"))
+	lower := strings.ToLower(text)
+	for _, phrase := range []string{
+		"no issue here",
+		"no issue found",
+		"no problem here",
+		"already fixed",
+		"false positive",
+		"not an issue",
+		"no change needed",
+		"no actionable issue",
+	} {
+		if lower == phrase || strings.HasPrefix(lower, phrase+":") {
+			return true
+		}
+	}
+	return false
 }
 
 func formatReviewCycleNumbers(cycles []reviewHistoryCycle) string {

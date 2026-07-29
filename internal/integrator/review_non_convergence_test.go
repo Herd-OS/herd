@@ -742,6 +742,74 @@ func TestBuildStrategyFixIssueBody(t *testing.T) {
 	}
 }
 
+func TestRepresentativeReviewFindingsFiltersDismissalText(t *testing.T) {
+	cycles := []reviewHistoryCycle{
+		{
+			Cycle: 1,
+			FindingsBySeverity: map[string][]string{
+				"HIGH": {
+					"No issue here",
+					"internal/controlplane/review.go: no durable guard prevents duplicate comments",
+				},
+				"MEDIUM": {
+					"False positive: stale branch metadata was ignored",
+					"internal/controlplane/dispatch.go: not validating post-call state can duplicate workflow dispatches",
+				},
+			},
+		},
+		{
+			Cycle: 2,
+			FindingsBySeverity: map[string][]string{
+				"HIGH": {
+					"Already fixed.",
+					"No actionable issue",
+					"internal/controlplane/jobs.go: missing pre-call state causes repeated fix workers",
+				},
+				"LOW": {
+					"No problem here!",
+				},
+			},
+		},
+	}
+
+	got := representativeReviewFindings(cycles, 5)
+	joined := strings.Join(got, "\n")
+
+	assert.Len(t, got, 3)
+	assert.Contains(t, joined, "Cycle 2 HIGH: internal/controlplane/jobs.go: missing pre-call state causes repeated fix workers")
+	assert.Contains(t, joined, "Cycle 1 HIGH: internal/controlplane/review.go: no durable guard prevents duplicate comments")
+	assert.Contains(t, joined, "Cycle 1 MEDIUM: internal/controlplane/dispatch.go: not validating post-call state can duplicate workflow dispatches")
+	for _, dismissal := range []string{"No issue here", "False positive", "Already fixed", "No actionable issue", "No problem here"} {
+		assert.NotContains(t, joined, dismissal)
+	}
+}
+
+func TestIsReviewFindingDismissalText(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "no issue here", text: "No issue here", want: true},
+		{name: "no issue found", text: "- **No issue found.**", want: true},
+		{name: "no problem here", text: "No problem here!", want: true},
+		{name: "already fixed with details", text: "Already fixed: prior commit added coverage", want: true},
+		{name: "false positive with details", text: "False positive: parser ignores stale metadata", want: true},
+		{name: "not an issue", text: "Not an issue", want: true},
+		{name: "no change needed", text: "No change needed", want: true},
+		{name: "no actionable issue", text: "No actionable issue", want: true},
+		{name: "actionable no guard", text: "internal/controlplane/review.go: no durable guard prevents duplicate comments"},
+		{name: "actionable not validating", text: "internal/controlplane/dispatch.go: not validating post-call state can duplicate workflow dispatches"},
+		{name: "actionable already fixed missing context", text: "internal/integrator/review.go: already fixed workers can still be redispatched after repair"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isReviewFindingDismissalText(tt.text))
+		})
+	}
+}
+
 func TestSynthesizedReviewStrategyFingerprintNormalizesRootCauseAndSymptoms(t *testing.T) {
 	a := highConfidenceReviewSynthesisResult()
 	b := highConfidenceReviewSynthesisResult()
