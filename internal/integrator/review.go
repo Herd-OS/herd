@@ -698,7 +698,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 						}, nil
 					}
 
-					strategyBody := buildSynthesizedStrategyFixIssueBody(ms, pr, nextCycle, synthesisResult, synthesisInput, fingerprint)
+					priorStrategyFixIssues := findPriorCompletedStrategyFixIssues(allIssues, pr.Number, fingerprint)
+					strategyBody := buildSynthesizedStrategyFixIssueBody(ms, pr, nextCycle, synthesisResult, synthesisInput, fingerprint, priorStrategyFixIssues)
 					truncatedBody, overflow := issues.TruncateIssueBody(strategyBody)
 					fixIssue, createErr := p.Issues().Create(postReviewCtx, buildSynthesizedStrategyFixIssueTitle(nextCycle, synthesisResult), truncatedBody,
 						[]string{issues.TypeFix, issues.StatusInProgress, issues.ReviewNonConverging}, &ms.Number)
@@ -759,6 +760,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				}, nil
 			}
 
+			analysis.PriorStrategyFixIssues = findPriorCompletedStrategyFixIssues(allIssues, pr.Number, analysis.Cluster.Fingerprint)
 			strategyBody := buildStrategyFixIssueBody(ms, pr, nextCycle, analysis)
 			truncatedBody, overflow := issues.TruncateIssueBody(strategyBody)
 			fixIssue, createErr := p.Issues().Create(postReviewCtx, buildStrategyFixIssueTitle(nextCycle, analysis.Cluster), truncatedBody,
