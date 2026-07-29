@@ -58,15 +58,33 @@ func TestSubmitReviewResultSetsStatusesAndReviews(t *testing.T) {
 func TestSubmitReviewResultStaleApprovedCallbackCannotMarkNewerHeadSuccess(t *testing.T) {
 	gh := &fakeReviewGitHub{pr: &platform.PullRequest{Number: 42, HeadSHA: "new-head", URL: "https://github.test/pr/42"}}
 	statusGH := &fakeStatusGitHub{}
-	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Mutations: newFakeReviewMutationStore()}
+	locks := newFakeLockStore()
+	repo := testRepo(true)
+	locks.locks[lockKey(repo.ID, 42, "old-head")] = store.ReviewLock{
+		RepositoryID: repo.ID,
+		PRNumber:     42,
+		HeadSHA:      "old-head",
+		Holder:       reviewLockHolder(repo.ID, 42, "old-head"),
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	locks.locks[lockKey(repo.ID, 42, "new-head")] = store.ReviewLock{
+		RepositoryID: repo.ID,
+		PRNumber:     42,
+		HeadSHA:      "new-head",
+		Holder:       reviewLockHolder(repo.ID, 42, "new-head"),
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	svc := ReviewService{GitHub: gh, Status: StatusService{Store: &fakeStatusStore{}, GitHub: statusGH}, Locks: locks, Mutations: newFakeReviewMutationStore()}
 
-	err := svc.SubmitReviewResult(context.Background(), testRepo(true), reviewResult(ResultStatusApproved, "old-head"))
+	err := svc.SubmitReviewResult(context.Background(), repo, reviewResult(ResultStatusApproved, "old-head"))
 
 	require.NoError(t, err)
 	assert.Empty(t, gh.reviews)
 	require.Len(t, statusGH.statuses, 1)
 	assert.Equal(t, "new-head", statusGH.statuses[0].sha)
 	assert.Equal(t, "pending", statusGH.statuses[0].status.State)
+	assert.NotContains(t, locks.locks, lockKey(repo.ID, 42, "old-head"))
+	assert.Contains(t, locks.locks, lockKey(repo.ID, 42, "new-head"))
 }
 
 func TestSubmitReviewResultDisabledReviewDoesNothing(t *testing.T) {

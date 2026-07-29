@@ -265,12 +265,28 @@ func TestHandlerDispatchesServiceCommandsAfterAcknowledgement(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, StatusAcknowledged, result.Status)
 			require.Len(t, gh.comments, 1)
+			assert.Equal(t, fmt.Sprintf("Acknowledged `@herd-os %s`.", tt.kind), gh.comments[0].body)
 			require.Len(t, dispatcher.dispatched, 1)
 			assert.Equal(t, tt.kind, dispatcher.dispatched[0].Command.Kind)
 			assert.Equal(t, tt.wantIssue, dispatcher.dispatched[0].IssueNumber)
 			assert.Equal(t, tt.wantPR, dispatcher.dispatched[0].PRNumber)
 		})
 	}
+}
+
+func TestHandlerAcknowledgementUsesConfiguredAppLogin(t *testing.T) {
+	st := newFakeStore()
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "custom-herd", Store: st, GitHub: gh, Dispatcher: dispatcher}
+
+	result, err := h.HandleIssueComment(context.Background(), validComment("OWNER", "@custom-herd review"))
+
+	require.NoError(t, err)
+	assert.Equal(t, StatusAcknowledged, result.Status)
+	require.Len(t, gh.comments, 1)
+	assert.Equal(t, "Acknowledged `@custom-herd review`.", gh.comments[0].body)
+	require.Len(t, dispatcher.dispatched, 1)
 }
 
 func TestHandlerDispatchesDispatchCommandFromIssueComments(t *testing.T) {

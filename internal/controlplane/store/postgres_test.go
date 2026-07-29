@@ -460,6 +460,23 @@ func TestMemoryStoreRecordGitHubMutationAttemptRejectsEmptyStatus(t *testing.T) 
 	require.ErrorIs(t, getErr, ErrNotFound)
 }
 
+func TestPostgresStoreRecordGitHubMutationAttemptRejectsEmptyStatus(t *testing.T) {
+	ctx := context.Background()
+	db := newMigratedPostgresDB(t, ctx)
+	s, err := NewPostgresStore(ctx, db)
+	require.NoError(t, err)
+
+	err = s.RecordGitHubMutationAttempt(ctx, GitHubMutationAttempt{
+		IdempotencyKey: "mutation-empty-status",
+		MutationType:   "workflow_dispatch",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "github mutation attempt status is required")
+	_, getErr := s.GetGitHubMutationAttempt(ctx, "mutation-empty-status")
+	require.ErrorIs(t, getErr, ErrNotFound)
+}
+
 func TestContainerErrorClassification(t *testing.T) {
 	tests := []struct {
 		name          string

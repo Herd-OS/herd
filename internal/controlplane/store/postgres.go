@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -501,11 +502,14 @@ func (s *PostgresStore) ListStartedIdempotencyKeys(ctx context.Context, scope st
 }
 
 func (s *PostgresStore) RecordGitHubMutationAttempt(ctx context.Context, a GitHubMutationAttempt) error {
+	if a.Status == "" {
+		return fmt.Errorf("github mutation attempt status is required")
+	}
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO github_mutation_attempts (idempotency_key, repository_id, mutation_type, status, request, response, error, created_at, completed_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (idempotency_key) DO NOTHING`,
-		a.IdempotencyKey, nullableInt64(a.RepositoryID), a.MutationType, defaultString(a.Status, "started"), metadataOrEmpty(a.Request), metadataOrEmpty(a.Response), a.Error, timeOrNow(a.CreatedAt), a.CompletedAt)
+		a.IdempotencyKey, nullableInt64(a.RepositoryID), a.MutationType, a.Status, metadataOrEmpty(a.Request), metadataOrEmpty(a.Response), a.Error, timeOrNow(a.CreatedAt), a.CompletedAt)
 	if err != nil {
 		return err
 	}
@@ -839,13 +843,6 @@ func requireAffected(result sql.Result) error {
 func nullableInt64(v int64) any {
 	if v == 0 {
 		return nil
-	}
-	return v
-}
-
-func defaultString(v string, fallback string) string {
-	if v == "" {
-		return fallback
 	}
 	return v
 }

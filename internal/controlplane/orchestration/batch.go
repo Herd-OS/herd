@@ -156,14 +156,11 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			continue
 		}
 		status := issues.StatusLabel(iss.Labels)
-		if status != issues.StatusReady && status != issues.StatusBlocked {
-			continue
-		}
 		batchHeadSHA, err := s.Platform.Repository().GetBranchSHA(ctx, req.BatchBranch)
 		if err != nil {
 			return dispatched, fmt.Errorf("resolve batch branch %s head before dispatching issue #%d: %w", req.BatchBranch, issueNumber, err)
 		}
-		result, err := s.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
+		dispatchReq := cpdispatch.DispatchRequest{
 			RepoID:          s.Repo.ID,
 			Owner:           s.Repo.Owner,
 			Repo:            s.Repo.Name,
@@ -181,7 +178,13 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			TimeoutMinutes:  cfg.Workers.TimeoutMinutes,
 			ControlPlaneURL: cfg.EffectiveControlPlaneURL(),
 			Reason:          req.Reason,
-		})
+		}
+		if status != issues.StatusReady && status != issues.StatusBlocked {
+			if status != "" || !s.workflowDispatchIntentExists(ctx, dispatchReq) {
+				continue
+			}
+		}
+		result, err := s.Dispatcher.Dispatch(ctx, dispatchReq)
 		if err != nil {
 			return dispatched, fmt.Errorf("dispatch worker for issue #%d: %w", issueNumber, err)
 		}
@@ -210,6 +213,11 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 		}
 	}
 	return dispatched, nil
+}
+
+func (s Service) workflowDispatchIntentExists(ctx context.Context, req cpdispatch.DispatchRequest) bool {
+	_, err := s.Store.GetIdempotencyKey(ctx, cpdispatch.IdempotencyKey(req))
+	return err == nil
 }
 
 type DispatchReadyWorkersRequest struct {

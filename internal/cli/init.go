@@ -141,6 +141,17 @@ func runInitWithOptions(opts initOptions) error {
 		}
 		fmt.Println(display.Success("Created " + config.ConfigFile))
 	} else {
+		persistedConfig := existingConfig
+		nextControlPlaneURL := ""
+		if isSelfHostedControlPlane(opts.ControlPlaneURL) {
+			nextControlPlaneURL = opts.ControlPlaneURL
+		}
+		if persistedConfig.ControlPlaneURL != nextControlPlaneURL {
+			persistedConfig.ControlPlaneURL = nextControlPlaneURL
+			if err := config.Save(dir, &persistedConfig); err != nil {
+				return fmt.Errorf("updating config: %w", err)
+			}
+		}
 		fmt.Println(display.Success(config.ConfigFile + " already exists"))
 	}
 
@@ -149,9 +160,6 @@ func runInitWithOptions(opts initOptions) error {
 	cfg, err := config.Load(dir)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
-	}
-	if isSelfHostedControlPlane(opts.ControlPlaneURL) {
-		cfg.ControlPlaneURL = opts.ControlPlaneURL
 	}
 
 	// 3. Create .herd/ directory with role instruction files

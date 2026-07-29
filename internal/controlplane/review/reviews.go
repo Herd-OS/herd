@@ -214,10 +214,10 @@ func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, 
 	if err != nil {
 		return fmt.Errorf("get pull request head before Herd Review submission: %w", err)
 	}
+	defer s.releaseReviewLock(ctx, repo, result.PRNumber, result.HeadSHA)
 	if current.HeadSHA != "" && current.HeadSHA != result.HeadSHA {
 		return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, current.HeadSHA, ReviewStatusPending, "Herd Review pending for the latest PR head", targetURL(result, current.URL))
 	}
-	defer s.releaseReviewLock(ctx, repo, result.PRNumber, result.HeadSHA)
 
 	if result.Status == ResultStatusChangesRequested && repo.ReviewFixEnabled && s.Fixes != nil {
 		return s.handleChangesWithFixes(ctx, repo, result, current)

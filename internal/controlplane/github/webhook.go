@@ -286,7 +286,11 @@ func (h Handler) processIssueComment(ctx context.Context, e IssueCommentEvent) e
 	if err := commands.EnqueueIssueCommentCommand(ctx, queueStore, h.appLogin, event); err != nil {
 		return err
 	}
-	_ = h.issueCommentCommander
+	if h.issueCommentCommander != nil {
+		if _, err := h.issueCommentCommander.HandleIssueComment(ctx, event); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -166,7 +166,7 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		Status:      StatusAcknowledged,
 		Metadata:    metadata,
 	}
-	repo, dispatchPending, idempotencyKey, commandMetadata, err := h.recordAndAck(ctx, event, string(cmd.Kind), acknowledgement(cmd), record, dispatchable)
+	repo, dispatchPending, idempotencyKey, commandMetadata, err := h.recordAndAck(ctx, event, string(cmd.Kind), acknowledgement(h.AppLogin, cmd), record, dispatchable)
 	if err != nil {
 		return Result{}, err
 	}
@@ -549,8 +549,12 @@ func isLegacyHerdCommand(body string) bool {
 	return len(fields) > 0 && fields[0] == "/herd"
 }
 
-func acknowledgement(cmd ParsedCommand) string {
-	return fmt.Sprintf("Acknowledged `@herd-os %s`.", cmd.Kind)
+func acknowledgement(appLogin string, cmd ParsedCommand) string {
+	login := strings.TrimSpace(appLogin)
+	if login == "" {
+		login = "herd-os"
+	}
+	return fmt.Sprintf("Acknowledged `@%s %s`.", login, cmd.Kind)
 }
 
 func shouldDispatch(kind CommandKind) bool {

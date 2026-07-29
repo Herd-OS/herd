@@ -105,39 +105,41 @@ func TestDispatchReadyWorkers_RedeliveryRepairsLabelsAfterDispatchBeforeInProgre
 	fake := newFakePlatform()
 	fake.repo.branches["herd/batch/7-demo"] = "batch-head"
 	disp := &fakeDispatcher{}
-	svc := newTestService(fake, newFakeStore(), disp)
-	allIssues := []*platform.Issue{
-		{
-			Number: 1,
-			Title:  "Task",
-			Labels: []string{issues.StatusReady},
-			Body:   "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n",
-		},
+	st := newFakeStore()
+	st.completeErrs[issueStatusTransitionKey(123, 1, issues.StatusReady, "remove", "job-1")] = []error{errors.New("crash after ready removal")}
+	svc := newTestService(fake, st, disp)
+	readyIssue := &platform.Issue{
+		Number: 1,
+		Title:  "Task",
+		Labels: []string{issues.StatusReady},
+		Body:   "---\nherd:\n  version: 1\n---\n\n## Task\nDo it\n",
 	}
-	_, err := disp.Dispatch(ctx, cpdispatch.DispatchRequest{
-		RepoID:          svc.Repo.ID,
-		Owner:           svc.Repo.Owner,
-		Repo:            svc.Repo.Name,
-		InstallationID:  svc.Repo.InstallationID,
-		Kind:            cpdispatch.JobKindWorker,
-		WorkflowFile:    "herd-worker.yml",
-		Ref:             "main",
-		BatchNumber:     7,
-		IssueNumber:     1,
-		BatchBranch:     "herd/batch/7-demo",
-		BaseSHA:         "batch-head",
-		HeadSHA:         "batch-head",
-		ExpectedHeadSHA: "batch-head",
-	})
-	require.NoError(t, err)
 	req := DispatchReadyWorkersRequest{
 		BatchNumber: 7,
 		BatchBranch: "herd/batch/7-demo",
 		TierIssues:  []int{1},
-		AllIssues:   allIssues,
+		AllIssues:   []*platform.Issue{readyIssue},
 	}
 
 	count, dispatchErr := svc.DispatchReadyWorkers(ctx, req)
+	require.Error(t, dispatchErr)
+	assert.Equal(t, 0, count)
+	assert.Len(t, disp.requests, 1)
+	assert.Contains(t, fake.issues.removed[1], issues.StatusReady)
+	assert.Empty(t, fake.issues.added[1])
+	st.keys[cpdispatch.IdempotencyKey(disp.requests[0])] = store.IdempotencyKey{
+		Key:    cpdispatch.IdempotencyKey(disp.requests[0]),
+		Scope:  "workflow_dispatch",
+		Status: "completed",
+	}
+
+	req.AllIssues = []*platform.Issue{{
+		Number: 1,
+		Title:  "Task",
+		Labels: nil,
+		Body:   readyIssue.Body,
+	}}
+	count, dispatchErr = svc.DispatchReadyWorkers(ctx, req)
 
 	require.NoError(t, dispatchErr)
 	assert.Equal(t, 0, count)
@@ -425,9 +427,12 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		keys:      map[string]store.IdempotencyKey{},
-		mutations: map[string]store.GitHubMutationAttempt{},
-		results:   map[string]store.JobResult{},
+		keys:                 map[string]store.IdempotencyKey{},
+		mutations:            map[string]store.GitHubMutationAttempt{},
+		results:              map[string]store.JobResult{},
+		completeErrs:         map[string][]error{},
+		recordMutationErrs:   map[string][]error{},
+		completeMutationErrs: map[string][]error{},
 	}
 }
 

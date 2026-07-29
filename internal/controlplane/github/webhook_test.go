@@ -280,7 +280,8 @@ func TestHandlerIssueCommentCommandSink(t *testing.T) {
 	NewHandler("secret", store, log.New(io.Discard, "", 0), WithIssueCommentCommandHandler(commander)).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
-	require.Empty(t, commander.events)
+	require.Len(t, commander.events, 1)
+	assert.Equal(t, int64(123), commander.events[0].CommentID)
 	require.Len(t, store.commands, 1)
 	command := store.commands[0]
 	assert.Equal(t, int64(10), command.RepositoryID)
@@ -289,6 +290,39 @@ func TestHandlerIssueCommentCommandSink(t *testing.T) {
 	assert.Equal(t, "review", command.CommandName)
 	assert.Equal(t, commands.StatusAcknowledged, command.Status)
 	assert.Equal(t, "mona", command.Actor)
+}
+
+func TestHandlerIssueCommentCommandHandlerNotInvokedForDuplicateDelivery(t *testing.T) {
+	payload := []byte(`{
+		"action":"created",
+		"installation":{"id":42},
+		"repository":{"id":99,"name":"herd","owner":{"login":"octo-org"},"default_branch":"main"},
+		"issue":{"number":7,"pull_request":{"url":"https://api.github.com/repos/octo-org/herd/pulls/7"}},
+		"comment":{"id":123,"body":"@herd-os review","author_association":"OWNER","user":{"login":"mona","type":"User"}},
+		"sender":{"login":"mona","type":"User"}
+	}`)
+	store := &fakeStore{
+		repositoriesByName: map[string]store.Repository{
+			"octo-org/herd": {ID: 10, Owner: "octo-org", Name: "herd", InstallationID: 42},
+		},
+	}
+	commander := &fakeIssueCommentCommander{}
+	handler := NewHandler("secret", store, log.New(io.Discard, "", 0), WithIssueCommentCommandHandler(commander))
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+		req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-command-duplicate")
+		req.Header.Set("X-GitHub-Event", EventIssueComment)
+		req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusAccepted, rec.Code)
+	}
+
+	assert.Len(t, commander.events, 1)
+	assert.Len(t, store.commands, 1)
 }
 
 func TestHandlerIssueCommentMarkProcessedFailureDoesNotReenqueueOnRedelivery(t *testing.T) {
