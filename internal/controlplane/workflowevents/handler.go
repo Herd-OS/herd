@@ -175,7 +175,6 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if record, recordErr := h.store.GetCommandRecord(r.Context(), repo.ID, commentID, commandKey); recordErr == nil {
 			legacyPreProcessorCallStarted = record.Status == "acknowledged" && idemErr == nil && idem.Status == mutationspkg.PhaseCallStarted
 			if legacyPreProcessorCallStarted {
-				shouldProcess = true
 			} else if record.Status == "processing" || record.Status == "repair_required" {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
 				return
