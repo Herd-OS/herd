@@ -877,11 +877,44 @@ func TestHandlerRetriesWorkerPatchAfterApplyFailure(t *testing.T) {
 	handler.ServeHTTP(third, resultRequest("job-1", payload))
 
 	require.Equal(t, http.StatusConflict, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	require.Equal(t, http.StatusAccepted, third.Code)
+	assert.Len(t, applier.requests, 2)
+	assert.Equal(t, 1, applier.pushes)
+	assert.Len(t, st.results, 1)
+	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("e", 40))
+}
+
+func TestHandlerDoesNotRetryWorkerPatchAfterPushFailure(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{
+		result:  artifacts.ApplyResult{CommitSHA: strings.Repeat("e", 40)},
+		pushErr: assert.AnError,
+	}
+	st := newResultStore()
+	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+	})
+	payload := validWorkerPayload("job-1", "head")
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusConflict, first.Code)
 	require.Equal(t, http.StatusConflict, second.Code)
-	require.Equal(t, http.StatusConflict, third.Code)
 	assert.Contains(t, second.Body.String(), "unknown outcome")
-	assert.Contains(t, third.Body.String(), "unknown outcome")
 	assert.Len(t, applier.requests, 1)
+	assert.Equal(t, 1, applier.pushes)
 	assert.Empty(t, st.results)
 }
 
@@ -1573,8 +1606,11 @@ func (s *fakeAppTokenSource) InstallationTokenWithPermissions(_ context.Context,
 	return appauth.InstallationToken{Token: "token", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-func (a fixedPatchApplier) Apply(context.Context, artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
-	return a.result, a.err
+func (a fixedPatchApplier) Prepare(context.Context, artifacts.ApplyRequest) (artifacts.PreparedApply, error) {
+	if a.err != nil {
+		return artifacts.PreparedApply{}, a.err
+	}
+	return artifacts.NewPreparedApply(a.result.CommitSHA, func() error { return nil }, nil), nil
 }
 
 type recordingPatchApplier struct {
@@ -1582,16 +1618,32 @@ type recordingPatchApplier struct {
 	result   artifacts.ApplyResult
 	err      error
 	errs     []error
+	pushErr  error
+	pushErrs []error
+	pushes   int
 }
 
-func (a *recordingPatchApplier) Apply(_ context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
+func (a *recordingPatchApplier) Prepare(_ context.Context, req artifacts.ApplyRequest) (artifacts.PreparedApply, error) {
 	a.requests = append(a.requests, req)
 	if len(a.errs) > 0 {
 		err := a.errs[0]
 		a.errs = a.errs[1:]
-		return a.result, err
+		if err != nil {
+			return artifacts.PreparedApply{}, err
+		}
 	}
-	return a.result, a.err
+	if a.err != nil {
+		return artifacts.PreparedApply{}, a.err
+	}
+	return artifacts.NewPreparedApply(a.result.CommitSHA, func() error {
+		a.pushes++
+		if len(a.pushErrs) > 0 {
+			err := a.pushErrs[0]
+			a.pushErrs = a.pushErrs[1:]
+			return err
+		}
+		return a.pushErr
+	}, nil), nil
 }
 
 func workerBranchArtifact(t *testing.T, metadata artifacts.PatchMetadata, patch []byte) []byte {

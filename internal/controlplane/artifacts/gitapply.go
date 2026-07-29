@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,36 @@ type ApplyResult struct {
 	CommitSHA string `json:"commit_sha"`
 }
 
+// PreparedApply is a local, retryable patch preparation whose GitHub-visible
+// side effect has not happened yet. Callers that maintain durable mutation
+// state must complete all pre-call work with Prepare, record call_started, then
+// invoke Push exactly at that mutation boundary.
+type PreparedApply struct {
+	CommitSHA string
+	push      func() error
+	cleanup   func()
+}
+
+func NewPreparedApply(commitSHA string, push func() error, cleanup func()) PreparedApply {
+	return PreparedApply{CommitSHA: commitSHA, push: push, cleanup: cleanup}
+}
+
+func (p PreparedApply) Push() (ApplyResult, error) {
+	if p.push == nil {
+		return ApplyResult{}, fmt.Errorf("prepared patch push is not configured")
+	}
+	if err := p.push(); err != nil {
+		return ApplyResult{}, err
+	}
+	return ApplyResult{CommitSHA: p.CommitSHA}, nil
+}
+
+func (p PreparedApply) Cleanup() {
+	if p.cleanup != nil {
+		p.cleanup()
+	}
+}
+
 type PreCallError struct {
 	Err error
 }
@@ -67,93 +98,123 @@ func preCallError(err error) error {
 }
 
 func Apply(ctx context.Context, req ApplyRequest) (ApplyResult, error) {
+	prepared, err := Prepare(ctx, req)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	defer prepared.Cleanup()
+	return prepared.Push()
+}
+
+func Prepare(ctx context.Context, req ApplyRequest) (PreparedApply, error) {
 	if err := validateApplyRequest(req); err != nil {
-		return ApplyResult{}, preCallError(err)
+		return PreparedApply{}, preCallError(err)
 	}
 	root := req.TempDir
+	removeRoot := false
 	if root == "" {
 		var err error
 		root, err = os.MkdirTemp("", "herd-artifact-apply-*")
 		if err != nil {
-			return ApplyResult{}, preCallError(err)
+			return PreparedApply{}, preCallError(err)
 		}
-		defer func() {
-			_ = os.RemoveAll(root)
-		}()
+		removeRoot = true
 	} else if err := os.MkdirAll(root, 0755); err != nil {
-		return ApplyResult{}, preCallError(err)
+		return PreparedApply{}, preCallError(err)
 	}
+	cleanup := func() {
+		if removeRoot {
+			_ = os.RemoveAll(root)
+		}
+	}
+	success := false
+	defer func() {
+		if !success {
+			cleanup()
+		}
+	}()
 
 	cloneURL := req.CloneURL
 	var gitConfig []string
 	var gitEnv []string
 	var tokenValue string
-	if req.TokenSource != nil {
+	if req.TokenSource != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.CloneURL)), "https://") {
+		if err := validateTrustedGitHubCloneURL(req.CloneURL, req.Repository); err != nil {
+			return PreparedApply{}, preCallError(err)
+		}
 		token, err := req.TokenSource.InstallationToken(ctx, req.InstallationID)
 		if err != nil {
-			return ApplyResult{}, preCallError(fmt.Errorf("get installation token: %w", err))
+			return PreparedApply{}, preCallError(fmt.Errorf("get installation token: %w", err))
 		}
 		if strings.TrimSpace(token.Token) == "" {
-			return ApplyResult{}, preCallError(fmt.Errorf("empty installation token"))
+			return PreparedApply{}, preCallError(fmt.Errorf("empty installation token"))
 		}
 		tokenValue = token.Token
-		authEnv, cleanup, err := gitAuthEnv(root, req.CloneURL, token.Token)
+		authEnv, authCleanup, err := gitAuthEnv(root, req.CloneURL, token.Token)
 		if err != nil {
-			return ApplyResult{}, preCallError(err)
+			return PreparedApply{}, preCallError(err)
 		}
-		defer cleanup()
+		previousCleanup := cleanup
+		cleanup = func() {
+			authCleanup()
+			previousCleanup()
+		}
 		gitEnv = authEnv
 	}
 
 	repoDir := filepath.Join(root, "repo")
 	if err := herdgit.CloneWithConfigAndEnv(cloneURL, repoDir, gitConfig, gitEnv); err != nil {
-		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
+		return PreparedApply{}, preCallError(redactToken(err, tokenValue))
 	}
 	g := herdgit.NewWithConfigAndEnv(repoDir, gitConfig, gitEnv)
 	if err := g.Fetch("origin"); err != nil {
-		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
+		return PreparedApply{}, preCallError(redactToken(err, tokenValue))
 	}
 	current, err := g.RemoteBranchSHA("origin", req.TargetBranch)
 	if err != nil {
-		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
+		return PreparedApply{}, preCallError(redactToken(err, tokenValue))
 	}
 	if current != req.ExpectedHeadSHA {
-		return ApplyResult{}, preCallError(fmt.Errorf("target branch advanced: expected %s, got %s", req.ExpectedHeadSHA, current))
+		return PreparedApply{}, preCallError(fmt.Errorf("target branch advanced: expected %s, got %s", req.ExpectedHeadSHA, current))
 	}
 	if err := g.CheckoutDetached(req.BaseSHA); err != nil {
-		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
+		return PreparedApply{}, preCallError(redactToken(err, tokenValue))
 	}
 	if req.Artifact.Metadata.BaseSHA != req.BaseSHA {
-		return ApplyResult{}, preCallError(fmt.Errorf("stale patch base SHA: expected %s, got %s", req.BaseSHA, req.Artifact.Metadata.BaseSHA))
+		return PreparedApply{}, preCallError(fmt.Errorf("stale patch base SHA: expected %s, got %s", req.BaseSHA, req.Artifact.Metadata.BaseSHA))
 	}
 	patchFile := filepath.Join(root, "artifact.patch")
 	if err := os.WriteFile(patchFile, req.Artifact.Data, 0600); err != nil {
-		return ApplyResult{}, preCallError(err)
+		return PreparedApply{}, preCallError(err)
 	}
 	if err := g.ApplyBinaryPatch(patchFile); err != nil {
-		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
+		return PreparedApply{}, preCallError(redactToken(err, tokenValue))
 	}
 	if err := g.ConfigureIdentity(req.Identity.Name, req.Identity.Email); err != nil {
-		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
+		return PreparedApply{}, preCallError(redactToken(err, tokenValue))
 	}
 	dirty, err := g.IsDirty()
 	if err != nil {
-		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
+		return PreparedApply{}, preCallError(redactToken(err, tokenValue))
 	}
 	if !dirty {
-		return ApplyResult{}, preCallError(fmt.Errorf("patch artifact produced no changes"))
+		return PreparedApply{}, preCallError(fmt.Errorf("patch artifact produced no changes"))
 	}
 	if err := g.Commit(commitMessage(req)); err != nil {
-		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
+		return PreparedApply{}, preCallError(redactToken(err, tokenValue))
 	}
 	commitSHA, err := g.HeadSHA()
 	if err != nil {
-		return ApplyResult{}, preCallError(redactToken(err, tokenValue))
+		return PreparedApply{}, preCallError(redactToken(err, tokenValue))
 	}
-	if err := g.PushHEAD("origin", req.TargetBranch, req.ExpectedHeadSHA); err != nil {
-		return ApplyResult{}, redactToken(err, tokenValue)
-	}
-	return ApplyResult{CommitSHA: commitSHA}, nil
+	success = true
+	return PreparedApply{
+		CommitSHA: commitSHA,
+		cleanup:   cleanup,
+		push: func() error {
+			return redactToken(g.PushHEAD("origin", req.TargetBranch, req.ExpectedHeadSHA), tokenValue)
+		},
+	}, nil
 }
 
 func DefaultIdentity(appLogin, email string) CommitIdentity {
@@ -197,6 +258,31 @@ func validateApplyRequest(req ApplyRequest) error {
 	}
 	if req.TokenSource != nil && req.InstallationID == 0 {
 		return fmt.Errorf("installation ID is required")
+	}
+	return nil
+}
+
+func validateTrustedGitHubCloneURL(cloneURL, repository string) error {
+	parsed, err := url.Parse(strings.TrimSpace(cloneURL))
+	if err != nil {
+		return fmt.Errorf("parse clone URL: %w", err)
+	}
+	if parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, "github.com") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("clone URL must be a trusted GitHub HTTPS URL for %s", repository)
+	}
+	owner, name, ok := strings.Cut(strings.Trim(strings.TrimSpace(repository), "/"), "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return fmt.Errorf("repository must be owner/name")
+	}
+	path := strings.Trim(strings.TrimSpace(parsed.EscapedPath()), "/")
+	path, err = url.PathUnescape(path)
+	if err != nil {
+		return fmt.Errorf("decode clone URL path: %w", err)
+	}
+	want := owner + "/" + strings.TrimSuffix(name, ".git")
+	got := strings.TrimSuffix(path, ".git")
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("clone URL path %q does not match repository %q", got, want)
 	}
 	return nil
 }

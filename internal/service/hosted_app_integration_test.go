@@ -498,7 +498,7 @@ func (hostedAppTokenSource) InstallationToken(context.Context, int64) (appauth.I
 	return appauth.InstallationToken{Token: "token"}, nil
 }
 
-func (a *hostedAppPatchApplier) Apply(_ context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
+func (a *hostedAppPatchApplier) Prepare(_ context.Context, req artifacts.ApplyRequest) (artifacts.PreparedApply, error) {
 	a.requests = append(a.requests, req)
-	return a.result, nil
+	return artifacts.NewPreparedApply(a.result.CommitSHA, func() error { return nil }, nil), nil
 }

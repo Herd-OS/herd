@@ -51,7 +51,7 @@ type ReadTokenSource interface {
 }
 
 type PatchApplier interface {
-	Apply(ctx context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error)
+	Prepare(ctx context.Context, req artifacts.ApplyRequest) (artifacts.PreparedApply, error)
 }
 
 type ReviewProcessor interface {
@@ -60,8 +60,8 @@ type ReviewProcessor interface {
 
 type defaultPatchApplier struct{}
 
-func (defaultPatchApplier) Apply(ctx context.Context, req artifacts.ApplyRequest) (artifacts.ApplyResult, error) {
-	return artifacts.Apply(ctx, req)
+func (defaultPatchApplier) Prepare(ctx context.Context, req artifacts.ApplyRequest) (artifacts.PreparedApply, error) {
+	return artifacts.Prepare(ctx, req)
 }
 
 type Handler struct {
@@ -763,11 +763,7 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		}
 		return nil
 	}
-	if err := h.markPatchMutationCallStarted(ctx, idempotencyKey); err != nil {
-		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
-		return err
-	}
-	applyResult, err := h.patchApplier.Apply(ctx, artifacts.ApplyRequest{
+	prepared, err := h.patchApplier.Prepare(ctx, artifacts.ApplyRequest{
 		Repository:      worker.Repository,
 		CloneURL:        "https://github.com/" + worker.Repository + ".git",
 		InstallationID:  job.InstallationID,
@@ -782,12 +778,17 @@ func (h Handler) processWorkerPatch(ctx context.Context, result Result, job stor
 		Now:             h.now,
 	})
 	if err != nil {
-		var preCall artifacts.PreCallError
-		if errors.As(err, &preCall) {
-			_ = h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall, nil, err)
-			_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
-			return err
-		}
+		_ = h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall, nil, err)
+		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
+		return err
+	}
+	defer prepared.Cleanup()
+	if err := h.markPatchMutationCallStarted(ctx, idempotencyKey); err != nil {
+		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
+		return err
+	}
+	applyResult, err := prepared.Push()
+	if err != nil {
 		_ = h.completePatchMutation(ctx, idempotencyKey, mutationspkg.PhaseRepairRequired, nil, err)
 		_ = h.store.FailIdempotencyKey(ctx, idempotencyKey, err.Error())
 		return err

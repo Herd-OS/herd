@@ -85,11 +85,20 @@ func TestApplyCommitsWithAppIdentityAndTrailers(t *testing.T) {
 	assert.Equal(t, []byte{0x00, 0x01, 0xfe, 0xff}, []byte(readFile(t, filepath.Join(clone, "binary.bin"))))
 }
 
-func TestApplyAuthenticatedCloneErrorRedactsInstallationToken(t *testing.T) {
+func TestApplyTrustedAuthenticatedCloneErrorRedactsInstallationToken(t *testing.T) {
 	token := "ghs_secret_installation_token"
+	binDir := t.TempDir()
+	fakeGit := filepath.Join(binDir, "git")
+	script := "#!/bin/sh\n" +
+		"printf 'clone failed with token: ' >&2\n" +
+		"cat \"$HERD_GIT_ASKPASS_TOKEN_FILE\" >&2\n" +
+		"exit 1\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	_, err := Apply(context.Background(), ApplyRequest{
 		Repository:      "acme/widgets",
-		CloneURL:        "https://example.invalid/acme/widgets.git",
+		CloneURL:        "https://github.com/acme/widgets.git",
 		InstallationID:  123,
 		TargetBranch:    "main",
 		BaseSHA:         "base",
@@ -113,6 +122,39 @@ func TestApplyAuthenticatedCloneErrorRedactsInstallationToken(t *testing.T) {
 	assert.NotContains(t, err.Error(), token)
 	assert.NotContains(t, err.Error(), "x-access-token")
 	assert.NotContains(t, err.Error(), base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)))
+}
+
+func TestApplyRejectsUntrustedAuthenticatedCloneBeforeTokenMint(t *testing.T) {
+	root := t.TempDir()
+	source := &countingTokenSource{token: "ghs_secret_installation_token"}
+	_, err := Apply(context.Background(), ApplyRequest{
+		Repository:      "acme/widgets",
+		CloneURL:        "https://example.invalid/acme/widgets.git",
+		InstallationID:  123,
+		TargetBranch:    "main",
+		BaseSHA:         "base",
+		ExpectedHeadSHA: "base",
+		Artifact: ValidatedArtifact{
+			Metadata: PatchMetadata{
+				Repository:      "acme/widgets",
+				JobID:           "job-1",
+				BaseSHA:         "base",
+				ExpectedHeadSHA: "base",
+				Format:          FormatGitDiffBinary,
+			},
+			Data: []byte("diff --git a/file.txt b/file.txt\n"),
+		},
+		Identity:    DefaultIdentity("HerdOS", "herd@example.com"),
+		TokenSource: source,
+		TempDir:     root,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "trusted GitHub HTTPS URL")
+	assert.Equal(t, 0, source.calls)
+	assert.NoFileExists(t, filepath.Join(root, "git-token"))
+	assert.NoFileExists(t, filepath.Join(root, "git-askpass.sh"))
+	assert.NoDirExists(t, filepath.Join(root, "repo"))
 }
 
 func TestApplyRejectsEmptyInstallationTokenBeforeGitAuthSetup(t *testing.T) {
@@ -361,6 +403,16 @@ type fixedTokenSource struct {
 }
 
 func (s fixedTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+	return appauth.InstallationToken{Token: s.token}, nil
+}
+
+type countingTokenSource struct {
+	token string
+	calls int
+}
+
+func (s *countingTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+	s.calls++
 	return appauth.InstallationToken{Token: s.token}, nil
 }
 
