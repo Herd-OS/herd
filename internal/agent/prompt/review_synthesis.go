@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"text/template"
 
@@ -19,11 +20,16 @@ Use only the supplied current review history. Do not invent issues, files, comme
 
 Respond with JSON only — no markdown fencing, no surrounding text.`
 
+const ReviewSynthesisInputBudget = 64 * 1024
+const ReviewPromptTruncationMarker = "\n[TRUNCATED: deterministic review evidence budget reached]\n"
+
 const ReviewSynthesisPromptTemplate = `Synthesize whether this PR's review-fix loop is failing to converge.
 
 Your job is not to perform another code review. Do not use tools. Do not inspect the repository. Do not call gh, git, bash, or external commands. Do not create comments, issues, files, pull requests, commits, or labels. Do not mutate repository or GitHub state.
 
 Only group findings supported by the current review history below. Do not invent issues. Distinguish repeated symptoms from one root cause: repeated symptoms are evidence, but escalate only when the history supports one coherent, concrete subsystem, invariant, or state machine and a concrete strategy.
+
+Every recurring symptom must cite its supporting stable IDs in evidence_references. If requirement_reinterpretation is present, it must cite all requirements and findings used for that judgment in evidence_references. Optional source_excerpts must contain an exact substring of the cited source. Never cite an ID not supplied below.
 
 Read the cycles in the ascending chronological order supplied. A completed fix shown under a cycle happened after that cycle's findings and before the following review cycle. The following cycle's findings are the observed outcome of the preceding completed fix. Look for alternating fixes, symptoms that move between components, shared state machines, and common lifecycle, synchronization, durability, ownership, or linearization boundaries. Related behavior need not use identical text or occur on the same line, function, or file. Conversely, incompatible behaviors must not be grouped merely because their wording or locations overlap.
 
@@ -38,6 +44,16 @@ Reject generic metadata, broad directory coincidence, unrelated findings, empty 
 {{.CurrentPRMetadata}}
 {{else}}
 (none supplied)
+{{end}}
+
+## Stable Evidence Sources (authoritative)
+{{if .EvidenceSources}}{{range .EvidenceSources}}
+- ID: {{.ID}}
+  Kind: {{.Kind}}{{if .Cycle}}
+  Cycle: {{.Cycle}}{{end}}{{if .HeadSHA}}
+  Head SHA: {{.HeadSHA}}{{end}}
+  Source: {{.Excerpt}}
+{{end}}{{else}}(none supplied)
 {{end}}
 
 ## Recent Review Result Comments
@@ -97,21 +113,19 @@ Completed fixes after cycle {{.Cycle}} and before the following review cycle:
 - Validation result: {{.ValidationStatus}}
 - Files: {{range .FilesSummary}}{{.}} {{else}}(none){{end}}
 Task/body:
-{{if .Body}}{{.Body}}{{else}}(none supplied){{end}}
+{{if .ValidationStatus}}{{.ValidationStatus}}{{else}}(outcome unavailable){{end}}
 {{end}}{{else}}(none supplied)
 {{end}}
 {{end}}{{else}}(none supplied)
 {{end}}
 
-## Completed Review-Fix Issues (Global Backward-Compatible Summary)
+## Completed Review-Fix Outcomes
 {{if .CompletedFixIssues}}{{range .CompletedFixIssues}}
 ### #{{.Number}} {{.Title}}
 - Status label: {{.StatusLabel}}
 - Validation status: {{.ValidationStatus}}
 - Worker report: {{.WorkerReport}}
 - Files summary: {{range .FilesSummary}}{{.}} {{else}}(none){{end}}
-Body:
-{{.Body}}
 {{end}}{{else}}(none supplied)
 {{end}}
 
@@ -137,12 +151,12 @@ Body:
 Return strict JSON only. Do not include markdown fences, commentary, or extra keys.
 
 Normally, use this escalation shape without requirement_reinterpretation:
-{"should_escalate": true, "confidence": 0.86, "root_cause_title": "Shared review-fix strategy is missing the common state invariant", "root_cause_summary": "Cycles 2, 3, and 4 keep reporting different file-level symptoms that all point to one unsupported invariant in the shared review state transition.", "recurring_symptoms": [{"description": "Review keeps re-reporting stale findings after workers close targeted fixes.", "cycles": [2, 3, 4], "affected_files": ["internal/integrator/review.go"]}], "why_individual_fixes_are_not_converging": "Workers are fixing individual reports without a shared invariant, so each cycle moves the symptom instead of addressing the common state transition.", "proposed_strategy": "Create one strategy issue that defines the invariant, updates the shared helper, and validates all affected review paths together.", "acceptance_criteria": ["Define the invariant using the supplied review history only.", "Update the shared review path so all listed symptoms are resolved together.", "Add regression tests covering the recurring cycles and affected files."], "non_goals": ["Do not re-review unrelated files.", "Do not reopen completed fix issues unless current history proves they are still relevant."]}
+{"should_escalate": true, "confidence": 0.86, "root_cause_title": "Shared review-fix strategy is missing the common state invariant", "root_cause_summary": "Cycles 2, 3, and 4 keep reporting different file-level symptoms that all point to one unsupported invariant in the shared review state transition.", "recurring_symptoms": [{"description": "Review keeps re-reporting stale findings after workers close targeted fixes.", "cycles": [2, 3, 4], "affected_files": ["internal/integrator/review.go"], "evidence_references": ["cycle:2:finding:0", "cycle:3:finding:0", "cycle:4:finding:0"]}], "why_individual_fixes_are_not_converging": "Workers are fixing individual reports without a shared invariant, so each cycle moves the symptom instead of addressing the common state transition.", "proposed_strategy": "Create one strategy issue that defines the invariant, updates the shared helper, and validates all affected review paths together.", "acceptance_criteria": ["Define the invariant using the supplied review history only.", "Update the shared review path so all listed symptoms are resolved together.", "Add regression tests covering the recurring cycles and affected files."], "non_goals": ["Do not re-review unrelated files.", "Do not reopen completed fix issues unless current history proves they are still relevant."]}
 
-Omit requirement_reinterpretation for ordinary synthesis, including requirements that are merely difficult, expensive, or repeatedly implemented incorrectly. It is never a general license to relax difficult acceptance criteria or silently weaken correctness. Include it only when a literal implementation requirement is genuinely over-constrained, internally conflicting, or non-atomic under the platform consistency model. When included, all seven nested fields are mandatory. Identify the literal conflicting requirement and platform constraint; preserve a user-visible safety property; state a materially different corrected invariant; and give explicit, non-empty linearization and durability boundary lists. The proposed acceptance criteria must test both the corrected invariant and the preserved safety property.
+Omit requirement_reinterpretation for ordinary synthesis, including requirements that are merely difficult, expensive, or repeatedly implemented incorrectly. It is never a general license to relax difficult acceptance criteria or silently weaken correctness. Include it only when a literal implementation requirement is genuinely over-constrained, internally conflicting, or non-atomic under the platform consistency model. When included, every required nested field and evidence_references are mandatory. Identify the literal conflicting requirement and platform constraint; preserve a user-visible safety property; state a materially different corrected invariant; and give explicit, non-empty linearization and durability boundary lists. The proposed acceptance criteria must test both the corrected invariant and the preserved safety property.
 
 Exceptional escalation example with a justified reinterpretation:
-{"should_escalate": true, "confidence": 0.94, "root_cause_title": "Cross-store transition cannot be atomic at the required boundary", "root_cause_summary": "The supplied requirement demands one atomic transition across two stores whose platform commits independently.", "recurring_symptoms": [{"description": "Alternating fixes preserve one store while exposing partial state in the other.", "cycles": [2, 3, 4], "affected_files": ["internal/state/transition.go", "internal/store/durable.go"]}], "why_individual_fixes_are_not_converging": "Each fix chooses a different store as authoritative without defining recovery and visibility boundaries.", "proposed_strategy": "Use an intent record, make visibility linearize after both writes, and recover incomplete intents before serving state.", "acceptance_criteria": ["Concurrent readers never observe the protected resource as available after ownership is granted.", "Recovery completes or rolls back every durable intent before the corrected invariant is exposed."], "non_goals": ["Do not weaken exclusive ownership."], "requirement_reinterpretation": {"constraint_kind": "platform_non_atomic", "conflicting_requirement": "Commit both independent stores in one indivisible transaction.", "platform_consistency_constraint": "The platform has no atomic transaction spanning the two durable stores.", "preserved_safety_property": "Users never observe duplicate ownership of the protected resource.", "corrected_invariant": "A durable intent serializes ownership; visibility occurs only after both writes, and recovery resolves incomplete intents.", "linearization_boundaries": ["Durable intent creation serializes competing grants.", "The visibility marker linearizes successful ownership."], "durability_boundaries": ["The intent is durable before either store is mutated.", "Recovery resolves every durable intent before serving ownership state."]}}
+{"should_escalate": true, "confidence": 0.94, "root_cause_title": "Cross-store transition cannot be atomic at the required boundary", "root_cause_summary": "The supplied requirement demands one atomic transition across two stores whose platform commits independently.", "recurring_symptoms": [{"description": "Alternating fixes preserve one store while exposing partial state in the other.", "cycles": [2, 3, 4], "affected_files": ["internal/state/transition.go", "internal/store/durable.go"], "evidence_references": ["cycle:2:finding:0", "cycle:3:finding:0", "cycle:4:finding:0"]}], "why_individual_fixes_are_not_converging": "Each fix chooses a different store as authoritative without defining recovery and visibility boundaries.", "proposed_strategy": "Use an intent record, make visibility linearize after both writes, and recover incomplete intents before serving state.", "acceptance_criteria": ["Concurrent readers never observe the protected resource as available after ownership is granted.", "Recovery completes or rolls back every durable intent before the corrected invariant is exposed."], "non_goals": ["Do not weaken exclusive ownership."], "requirement_reinterpretation": {"constraint_kind": "platform_non_atomic", "conflicting_requirement": "Commit both independent stores in one indivisible transaction.", "platform_consistency_constraint": "The platform has no atomic transaction spanning the two durable stores.", "preserved_safety_property": "Users never observe duplicate ownership of the protected resource.", "corrected_invariant": "A durable intent serializes ownership; visibility occurs only after both writes, and recovery resolves incomplete intents.", "linearization_boundaries": ["Durable intent creation serializes competing grants.", "The visibility marker linearizes successful ownership."], "durability_boundaries": ["The intent is durable before either store is mutated.", "Recovery resolves every durable intent before serving ownership state."], "evidence_references": ["issue:1:task", "issue:1:criterion:0", "cycle:2:finding:0"]}}
 
 Non-escalation example (requirement_reinterpretation remains omitted):
 {"should_escalate": false, "confidence": 0.72, "reason": "The repeated findings do not yet support one root cause. The recent worker report and no-op verdict explain why the apparent recurrence is stale, so the next normal review-fix cycle should continue."}
@@ -161,6 +175,7 @@ type ReviewSynthesisPromptData struct {
 	CompletedFixIssues     []agent.ReviewSynthesisFixIssue
 	WorkerNoOpVerdicts     []string
 	AffectedFiles          []string
+	EvidenceSources        []agent.ReviewEvidenceSource
 	RoleInstructions       string
 }
 
@@ -183,6 +198,7 @@ func RenderReviewSynthesisPrompt(input agent.ReviewSynthesisInput, opts agent.Re
 		CompletedFixIssues:     input.CompletedFixIssues,
 		WorkerNoOpVerdicts:     input.WorkerNoOpVerdicts,
 		AffectedFiles:          input.AffectedFiles,
+		EvidenceSources:        input.EvidenceSources,
 		RoleInstructions:       opts.SystemPrompt,
 	}
 
@@ -190,7 +206,11 @@ func RenderReviewSynthesisPrompt(input agent.ReviewSynthesisInput, opts agent.Re
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("executing review synthesis template: %w", err)
 	}
-	return buf.String(), nil
+	rendered := buf.String()
+	if len(rendered) > ReviewSynthesisInputBudget {
+		rendered = rendered[:ReviewSynthesisInputBudget-len(ReviewPromptTruncationMarker)] + ReviewPromptTruncationMarker
+	}
+	return rendered, nil
 }
 
 func ParseReviewSynthesisOutput(output string) (*agent.ReviewSynthesisResult, error) {
@@ -201,9 +221,45 @@ func ParseReviewSynthesisOutput(output string) (*agent.ReviewSynthesisResult, er
 		}
 	}
 
-	var result agent.ReviewSynthesisResult
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &fields); err != nil {
 		return nil, fmt.Errorf("parsing review synthesis JSON: %w", err)
 	}
+	for _, required := range []string{"should_escalate", "confidence"} {
+		if _, ok := fields[required]; !ok {
+			return nil, fmt.Errorf("parsing review synthesis JSON: missing required field %q", required)
+		}
+	}
+	var result agent.ReviewSynthesisResult
+	decoder := json.NewDecoder(strings.NewReader(output))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		return nil, fmt.Errorf("parsing review synthesis JSON: %w", err)
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return nil, fmt.Errorf("parsing review synthesis JSON: %w", err)
+	}
+	if result.Confidence < 0 || result.Confidence > 1 {
+		return nil, fmt.Errorf("parsing review synthesis JSON: confidence outside [0,1]")
+	}
+	for _, symptom := range result.RecurringSymptoms {
+		if len(symptom.EvidenceReferences) == 0 {
+			return nil, fmt.Errorf("parsing review synthesis JSON: recurring symptom missing evidence_references")
+		}
+	}
+	if result.RequirementReinterpretation != nil && len(result.RequirementReinterpretation.EvidenceReferences) == 0 {
+		return nil, fmt.Errorf("parsing review synthesis JSON: requirement reinterpretation missing evidence_references")
+	}
 	return &result, nil
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }

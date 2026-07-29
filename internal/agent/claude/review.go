@@ -143,3 +143,30 @@ func (c *ClaudeAgent) SynthesizeReviewNonConvergence(ctx context.Context, input 
 	}
 	return result, nil
 }
+
+func (c *ClaudeAgent) VerifyReviewNonConvergence(ctx context.Context, input agent.ReviewVerificationInput, opts agent.ReviewSynthesisOptions) (*agent.ReviewVerificationResult, error) {
+	verificationPrompt, err := prompt.RenderReviewVerificationPrompt(input)
+	if err != nil {
+		return nil, fmt.Errorf("rendering review verification prompt: %w", err)
+	}
+	args := []string{"--dangerously-skip-permissions", "--system-prompt", prompt.ReviewVerificationSystemPrompt}
+	if c.Model != "" {
+		args = append(args, "--model", c.Model)
+	}
+	args = append(args, "-p")
+	var stdout, stderr bytes.Buffer
+	if err := process.Run(ctx, process.Command{
+		Path: c.BinaryPath, Args: args, Dir: opts.RepoRoot, Stdin: strings.NewReader(verificationPrompt),
+		Stdout: io.MultiWriter(os.Stdout, &stdout), Stderr: io.MultiWriter(os.Stderr, &stderr), ProcessGroup: true,
+	}); err != nil {
+		return nil, fmt.Errorf("agent review verification exited with error: %w\n%s", err, stderr.String())
+	}
+	if prompt.IsSuspiciousOutput(stdout.String()) {
+		return nil, fmt.Errorf("review verification agent returned suspicious output")
+	}
+	result, err := prompt.ParseReviewVerificationOutput(stdout.String())
+	if err != nil {
+		return nil, fmt.Errorf("parsing review verification output: %w", err)
+	}
+	return result, nil
+}

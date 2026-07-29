@@ -137,3 +137,26 @@ func (o *OpenCodeAgent) SynthesizeReviewNonConvergence(ctx context.Context, inpu
 	}
 	return result, nil
 }
+
+func (o *OpenCodeAgent) VerifyReviewNonConvergence(ctx context.Context, input agent.ReviewVerificationInput, opts agent.ReviewSynthesisOptions) (*agent.ReviewVerificationResult, error) {
+	verificationPrompt, err := prompt.RenderReviewVerificationPrompt(input)
+	if err != nil {
+		return nil, fmt.Errorf("rendering review verification prompt: %w", err)
+	}
+	message := prompt.ReviewVerificationSystemPrompt + "\n\n" + verificationPrompt
+	var stdout, stderr bytes.Buffer
+	if err := process.Run(ctx, process.Command{
+		Path: o.BinaryPath, Args: buildRunArgs(o.Model), Dir: opts.RepoRoot, Stdin: strings.NewReader(message),
+		Stdout: io.MultiWriter(os.Stdout, &stdout), Stderr: io.MultiWriter(os.Stderr, &stderr), ProcessGroup: true,
+	}); err != nil {
+		return nil, fmt.Errorf("agent review verification exited with error: %w\n%s", err, stderr.String())
+	}
+	if prompt.IsSuspiciousOutput(stdout.String()) {
+		return nil, fmt.Errorf("review verification agent returned suspicious output")
+	}
+	result, err := prompt.ParseReviewVerificationOutput(stdout.String())
+	if err != nil {
+		return nil, fmt.Errorf("parsing review verification output: %w", err)
+	}
+	return result, nil
+}

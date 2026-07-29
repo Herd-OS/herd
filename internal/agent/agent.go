@@ -16,12 +16,17 @@ type Agent interface {
 	Review(ctx context.Context, diff string, opts ReviewOptions) (*ReviewResult, error)
 
 	SynthesizeReviewNonConvergence(ctx context.Context, input ReviewSynthesisInput, opts ReviewSynthesisOptions) (*ReviewSynthesisResult, error)
-
 	// Discuss launches an interactive agent session with a fully rendered
 	// system prompt and an optional initial user prompt. Unlike Plan, it has
 	// no structured output — the agent is expected to converse with the user
 	// and may make changes if the user asks. Returns nil on a clean exit.
 	Discuss(ctx context.Context, opts DiscussOptions) error
+}
+
+// ReviewVerifier is implemented by configured providers that support the
+// independent, no-tools verification pass for low-volume review synthesis.
+type ReviewVerifier interface {
+	VerifyReviewNonConvergence(ctx context.Context, input ReviewVerificationInput, opts ReviewSynthesisOptions) (*ReviewVerificationResult, error)
 }
 
 // DiscussOptions configures an interactive discussion session.
@@ -141,6 +146,15 @@ type ReviewSynthesisInput struct {
 	CompletedFixIssues     []ReviewSynthesisFixIssue
 	WorkerNoOpVerdicts     []string
 	AffectedFiles          []string
+	EvidenceSources        []ReviewEvidenceSource
+}
+
+type ReviewEvidenceSource struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Cycle   int    `json:"cycle,omitempty"`
+	HeadSHA string `json:"head_sha,omitempty"`
+	Excerpt string `json:"excerpt"`
 }
 
 type ReviewSynthesisCycle struct {
@@ -181,6 +195,8 @@ type ReviewRequirementReinterpretation struct {
 	CorrectedInvariant            string                          `json:"corrected_invariant"`
 	LinearizationBoundaries       []string                        `json:"linearization_boundaries"`
 	DurabilityBoundaries          []string                        `json:"durability_boundaries"`
+	EvidenceReferences            []string                        `json:"evidence_references"`
+	SourceExcerpts                []ReviewSourceExcerpt           `json:"source_excerpts,omitempty"`
 }
 
 type ReviewSynthesisRequirement struct {
@@ -204,9 +220,16 @@ type ReviewSynthesisStrategyFixIssue struct {
 }
 
 type ReviewSynthesisSymptom struct {
-	Description   string   `json:"description"`
-	Cycles        []int    `json:"cycles"`
-	AffectedFiles []string `json:"affected_files"`
+	Description        string                `json:"description"`
+	Cycles             []int                 `json:"cycles"`
+	AffectedFiles      []string              `json:"affected_files"`
+	EvidenceReferences []string              `json:"evidence_references"`
+	SourceExcerpts     []ReviewSourceExcerpt `json:"source_excerpts,omitempty"`
+}
+
+type ReviewSourceExcerpt struct {
+	Reference string `json:"reference"`
+	Excerpt   string `json:"excerpt"`
 }
 
 type ReviewSynthesisResult struct {
@@ -221,4 +244,18 @@ type ReviewSynthesisResult struct {
 	NonGoals                           []string                           `json:"non_goals,omitempty"`
 	Reason                             string                             `json:"reason,omitempty"`
 	RequirementReinterpretation        *ReviewRequirementReinterpretation `json:"requirement_reinterpretation,omitempty"`
+}
+
+type ReviewVerificationInput struct {
+	PRNumber        int                    `json:"pr_number"`
+	BatchNumber     int                    `json:"batch_number"`
+	HeadSHA         string                 `json:"head_sha"`
+	EvidenceSources []ReviewEvidenceSource `json:"evidence_sources"`
+	Synthesis       ReviewSynthesisResult  `json:"synthesis"`
+}
+
+type ReviewVerificationResult struct {
+	Approved   bool    `json:"approved"`
+	Confidence float64 `json:"confidence"`
+	Reason     string  `json:"reason"`
 }

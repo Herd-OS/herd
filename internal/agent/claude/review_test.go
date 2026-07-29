@@ -145,7 +145,7 @@ func TestSynthesizeReviewNonConvergence_UsesPromptAndParsesOutput(t *testing.T) 
 	err := os.WriteFile(script, []byte(fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$@" > '%s'
 cat > '%s'
-echo '{"should_escalate":true,"confidence":0.88,"root_cause_title":"Shared invariant missing","recurring_symptoms":[{"description":"same bug","cycles":[2,3],"affected_files":["internal/foo.go"]}],"requirement_reinterpretation":{"constraint_kind":"internally_conflicting","conflicting_requirement":"conflicting literal requirement","platform_consistency_constraint":"single visibility boundary","preserved_safety_property":"users retain exclusive ownership","corrected_invariant":"visibility follows durable ownership","linearization_boundaries":["ownership grant"],"durability_boundaries":["grant persisted"]}}'
+echo '{"should_escalate":true,"confidence":0.88,"root_cause_title":"Shared invariant missing","recurring_symptoms":[{"description":"same bug","cycles":[2,3],"affected_files":["internal/foo.go"],"evidence_references":["cycle:2:finding:0"]}],"requirement_reinterpretation":{"constraint_kind":"internally_conflicting","conflicting_requirement":"conflicting literal requirement","platform_consistency_constraint":"single visibility boundary","preserved_safety_property":"users retain exclusive ownership","corrected_invariant":"visibility follows durable ownership","linearization_boundaries":["ownership grant"],"durability_boundaries":["grant persisted"],"evidence_references":["issue:1121:task"]}}'
 `, argvDump, stdinDump)), 0755)
 	require.NoError(t, err)
 
@@ -203,6 +203,26 @@ echo '{"should_escalate":true,"confidence":0.88,"root_cause_title":"Shared invar
 	argv := string(argvBytes)
 	assert.Contains(t, argv, "--system-prompt")
 	assert.Contains(t, argv, prompt.ReviewSynthesisSystemPrompt)
+}
+
+func TestVerifyReviewNonConvergence_UsesStrictOutput(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/verify-agent.sh"
+	require.NoError(t, os.WriteFile(script, []byte(`#!/bin/sh
+cat >/dev/null
+echo '{"approved":true,"confidence":0.96,"reason":"coherent recurring invariant"}'
+`), 0o755))
+
+	result, err := New(script, "").VerifyReviewNonConvergence(
+		context.Background(),
+		agent.ReviewVerificationInput{EvidenceSources: []agent.ReviewEvidenceSource{{ID: "cycle:1:finding:0", Excerpt: "finding"}}},
+		agent.ReviewSynthesisOptions{RepoRoot: dir},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Approved)
+	assert.Equal(t, .96, result.Confidence)
 }
 
 func TestSynthesizeReviewNonConvergence_InvalidOutputReturnsError(t *testing.T) {

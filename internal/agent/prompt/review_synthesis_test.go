@@ -87,7 +87,7 @@ func TestRenderReviewSynthesisPrompt_RequiredSectionsAndEvidence(t *testing.T) {
 		"## Original Batch Requirements",
 		"## Prior Strategy Fix Attempts",
 		"## Deduplicated Findings By Cycle",
-		"## Completed Review-Fix Issues (Global Backward-Compatible Summary)",
+		"## Completed Review-Fix Outcomes",
 		"## Worker No-Op Verdicts",
 		"## Affected Files/Packages",
 		"## Output Contract",
@@ -104,7 +104,6 @@ func TestRenderReviewSynthesisPrompt_RequiredSectionsAndEvidence(t *testing.T) {
 		"Concurrent grants remain exclusive.",
 		"Moved serialization to the durable store.",
 		"ownership race before fix",
-		"cycle 3 worker changed the shared state machine",
 		"validated-cycle-3",
 		"moved durability symptom after fix",
 		"#91",
@@ -113,6 +112,7 @@ func TestRenderReviewSynthesisPrompt_RequiredSectionsAndEvidence(t *testing.T) {
 	} {
 		assert.Contains(t, rendered, want)
 	}
+	assert.NotContains(t, rendered, "cycle 3 worker changed the shared state machine")
 
 	cycle3 := strings.Index(rendered, "### Cycle 3")
 	cycle3Fix := strings.Index(rendered, "#### Fix issue #90")
@@ -185,7 +185,7 @@ func TestReviewSynthesisPrompt_EvidenceAndCorrectnessGuardrails(t *testing.T) {
 				"merely difficult, expensive, or repeatedly implemented incorrectly",
 				"never a general license to relax difficult acceptance criteria",
 				"silently weaken correctness",
-				"all seven nested fields are mandatory",
+				"every required nested field and evidence_references are mandatory",
 				"preserve a user-visible safety property",
 				"materially different corrected invariant",
 				"explicit, non-empty linearization and durability boundary lists",
@@ -203,6 +203,30 @@ func TestReviewSynthesisPrompt_EvidenceAndCorrectnessGuardrails(t *testing.T) {
 	}
 }
 
+func TestRenderReviewSynthesisPrompt_DeterministicBudgetPreservesPriorityEvidence(t *testing.T) {
+	input := agent.ReviewSynthesisInput{
+		PRNumber: 1, BatchNumber: 2, HeadSHA: "head",
+		EvidenceSources: []agent.ReviewEvidenceSource{
+			{ID: "issue:10:criterion:0", Kind: "requirement_criterion", Excerpt: "Revoked grants cannot be used."},
+			{ID: "cycle:4:finding:0", Kind: "review_finding", Cycle: 4, Excerpt: "internal/state/recovery.go: stale authorization survives recovery"},
+		},
+		RecentReviewComments: []string{strings.Repeat("older nonessential prose ", 10000)},
+	}
+
+	first, err := RenderReviewSynthesisPrompt(input, agent.ReviewSynthesisOptions{})
+	require.NoError(t, err)
+	second, err := RenderReviewSynthesisPrompt(input, agent.ReviewSynthesisOptions{})
+	require.NoError(t, err)
+
+	assert.Equal(t, first, second)
+	assert.Len(t, first, ReviewSynthesisInputBudget)
+	assert.Contains(t, first, "issue:10:criterion:0")
+	assert.Contains(t, first, "Revoked grants cannot be used.")
+	assert.Contains(t, first, "cycle:4:finding:0")
+	assert.Contains(t, first, "stale authorization survives recovery")
+	assert.Contains(t, first, ReviewPromptTruncationMarker)
+}
+
 func TestParseReviewSynthesisOutput(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -214,7 +238,7 @@ func TestParseReviewSynthesisOutput(t *testing.T) {
 	}{
 		{
 			name:           "escalation with surrounding text",
-			output:         `text before {"should_escalate":true,"confidence":0.91,"root_cause_title":"Invariant missing","root_cause_summary":"same root cause","recurring_symptoms":[{"description":"same symptom","cycles":[2,3],"affected_files":["internal/foo.go"]}],"why_individual_fixes_are_not_converging":"fixes are too narrow","proposed_strategy":"fix shared helper","acceptance_criteria":["covers cycles"],"non_goals":["unrelated review"]} text after`,
+			output:         `text before {"should_escalate":true,"confidence":0.91,"root_cause_title":"Invariant missing","root_cause_summary":"same root cause","recurring_symptoms":[{"description":"same symptom","cycles":[2,3],"affected_files":["internal/foo.go"],"evidence_references":["cycle:2:finding:0"]}],"why_individual_fixes_are_not_converging":"fixes are too narrow","proposed_strategy":"fix shared helper","acceptance_criteria":["covers cycles"],"non_goals":["unrelated review"]} text after`,
 			wantEscalate:   true,
 			wantConfidence: 0.91,
 			wantSymptoms:   1,
@@ -310,7 +334,7 @@ func TestParseReviewSynthesisOutput_RequirementReinterpretation(t *testing.T) {
 }
 
 func reinterpretationJSON(kind agent.ReviewRequirementConstraintKind) string {
-	return `{"constraint_kind":"` + string(kind) + `","conflicting_requirement":"literal atomic commit","platform_consistency_constraint":"independent stores","preserved_safety_property":"exclusive ownership","corrected_invariant":"intent-based visibility","linearization_boundaries":["intent creation","visibility marker"],"durability_boundaries":["intent persisted","recovery completed"]}`
+	return `{"constraint_kind":"` + string(kind) + `","conflicting_requirement":"literal atomic commit","platform_consistency_constraint":"independent stores","preserved_safety_property":"exclusive ownership","corrected_invariant":"intent-based visibility","linearization_boundaries":["intent creation","visibility marker"],"durability_boundaries":["intent persisted","recovery completed"],"evidence_references":["issue:1:task"]}`
 }
 
 func constraintKindPointer(kind agent.ReviewRequirementConstraintKind) *agent.ReviewRequirementConstraintKind {

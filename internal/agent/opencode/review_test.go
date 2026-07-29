@@ -246,7 +246,7 @@ func TestSynthesizeReviewNonConvergence_PrependsSystemPromptAndParsesOutput(t *t
 	content := fmt.Sprintf(`#!/bin/sh
 printf '%%s\0' "$@" > '%s'
 cat > '%s'
-echo '{"should_escalate":true,"confidence":0.64,"root_cause_title":"Cross-store invariant","requirement_reinterpretation":{"constraint_kind":"over_constrained","conflicting_requirement":"instant visibility everywhere","platform_consistency_constraint":"replicas converge asynchronously","preserved_safety_property":"revoked grants cannot be used","corrected_invariant":"revocation linearizes before asynchronous cleanup","linearization_boundaries":["revocation marker"],"durability_boundaries":["marker persisted"]}}'
+echo '{"should_escalate":true,"confidence":0.64,"root_cause_title":"Cross-store invariant","requirement_reinterpretation":{"constraint_kind":"over_constrained","conflicting_requirement":"instant visibility everywhere","platform_consistency_constraint":"replicas converge asynchronously","preserved_safety_property":"revoked grants cannot be used","corrected_invariant":"revocation linearizes before asynchronous cleanup","linearization_boundaries":["revocation marker"],"durability_boundaries":["marker persisted"],"evidence_references":["issue:1121:task"]}}'
 `, argvDump, stdinDump)
 	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
 
@@ -302,6 +302,27 @@ echo '{"should_escalate":true,"confidence":0.64,"root_cause_title":"Cross-store 
 	assert.Equal(t, "run", argv[0])
 	assert.Contains(t, argv, "--model")
 	assert.Contains(t, argv, "anthropic/claude-sonnet-4")
+}
+
+func TestVerifyReviewNonConvergence_UsesStrictOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary not supported on Windows")
+	}
+	dir := t.TempDir()
+	script := dir + "/verify-opencode.sh"
+	require.NoError(t, os.WriteFile(script, []byte(`#!/bin/sh
+cat >/dev/null
+echo '{"approved":false,"confidence":0.98,"reason":"unrelated findings"}'
+`), 0o755))
+
+	result, err := New(script, "").VerifyReviewNonConvergence(
+		context.Background(), agent.ReviewVerificationInput{}, agent.ReviewSynthesisOptions{RepoRoot: dir},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Approved)
+	assert.Equal(t, .98, result.Confidence)
 }
 
 func TestSynthesizeReviewNonConvergence_InvalidOutputReturnsError(t *testing.T) {
