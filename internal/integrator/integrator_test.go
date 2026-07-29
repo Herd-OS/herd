@@ -657,7 +657,7 @@ func TestConsolidate_ActiveBatchLockSkipsSameBatchWorkerCompletion(t *testing.T)
 	assert.Equal(t, "active-sha", repoSvc.branchSHAs[lockBranch])
 }
 
-func TestRunWorkerCompletionCycle_DrainsPendingWorkerThenRunsReviewAndCI(t *testing.T) {
+func TestRunWorkerCompletionCycle_DrainsPendingWorkerThenDefersReviewAndCI(t *testing.T) {
 	ms := &platform.Milestone{Number: 1, Title: "Batch", ClosedIssues: 1}
 	batchBranch := "herd/batch/1-batch"
 	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
@@ -748,12 +748,11 @@ func TestRunWorkerCompletionCycle_DrainsPendingWorkerThenRunsReviewAndCI(t *test
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.NotNil(t, result.Review)
-	require.NotNil(t, result.CheckCI)
-	assert.True(t, result.Review.Approved)
-	assert.Equal(t, "success", result.CheckCI.Status)
 	assert.True(t, result.PendingDrained)
-	assert.Equal(t, 1, ag.calls, "worker-cycle should review after same-batch pending completions quiesce")
+	assert.True(t, result.SideEffectsDeferred)
+	assert.Nil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
+	assert.Equal(t, 0, ag.calls, "worker-cycle should defer review until later triggers can observe a clean batch head")
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, issueSvc.removedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-task-a")
@@ -761,7 +760,7 @@ func TestRunWorkerCompletionCycle_DrainsPendingWorkerThenRunsReviewAndCI(t *test
 	assert.NotNil(t, prInner.created)
 }
 
-func TestRunWorkerCompletionCycle_RunsReviewAndCIAfterCleanFinalDrain(t *testing.T) {
+func TestRunWorkerCompletionCycle_FinalUnlockPendingDefersReviewAndCI(t *testing.T) {
 	ms := &platform.Milestone{Number: 1, Title: "Batch", ClosedIssues: 2}
 	batchBranch := "herd/batch/1-batch"
 	dir, g := initMultiWorkerRepo(t, batchBranch, []struct {
@@ -852,15 +851,15 @@ func TestRunWorkerCompletionCycle_RunsReviewAndCIAfterCleanFinalDrain(t *testing
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.NotNil(t, result.Review)
-	require.NotNil(t, result.CheckCI)
-	assert.True(t, result.Review.Approved)
-	assert.Equal(t, "failure", result.CheckCI.Status)
-	assert.Equal(t, 1, ag.calls)
+	assert.True(t, result.SideEffectsDeferred)
+	assert.Nil(t, result.Review)
+	assert.Nil(t, result.CheckCI)
+	assert.Equal(t, 0, ag.calls)
 	assert.Contains(t, issueSvc.addedLabels[43], issues.IntegratorPending)
 	assert.Contains(t, repoSvc.deletedBranches, "herd/worker/42-task-a")
 	assert.NotContains(t, repoSvc.deletedBranches, "herd/worker/43-task-b")
 	assert.True(t, repoSvc.branchExists["herd/worker/43-task-b"])
+	assert.Empty(t, prSvc.reviews)
 }
 
 func TestRecoverStrandedCompletedBatch_DrainsPendingWorkerBeforeOpeningPR(t *testing.T) {

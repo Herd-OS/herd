@@ -18,13 +18,14 @@ type WorkerCompletionCycleParams struct {
 }
 
 type WorkerCompletionCycleResult struct {
-	Consolidate      *ConsolidateResult
-	Advance          *AdvanceResult
-	Review           *ReviewResult
-	CheckCI          *CheckCIResult
-	BatchLockSkipped bool
-	SkipReason       string
-	PendingDrained   bool
+	Consolidate         *ConsolidateResult
+	Advance             *AdvanceResult
+	Review              *ReviewResult
+	CheckCI             *CheckCIResult
+	BatchLockSkipped    bool
+	SkipReason          string
+	PendingDrained      bool
+	SideEffectsDeferred bool
 }
 
 func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git, cfg *config.Config, params WorkerCompletionCycleParams) (*WorkerCompletionCycleResult, error) {
@@ -92,24 +93,7 @@ func RunWorkerCompletionCycle(ctx context.Context, p platform.Platform, ag agent
 			continue
 		}
 
-		reviewResult, err := Review(lockedCtx, p, ag, g, cfg, ReviewParams{
-			RunID:    params.RunID,
-			RepoRoot: params.RepoRoot,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.Review = reviewResult
-
-		checkCIResult, err := CheckCI(lockedCtx, p, cfg, CheckCIParams{
-			RunID:    params.RunID,
-			RepoRoot: params.RepoRoot,
-		})
-		if err != nil {
-			return nil, err
-		}
-		result.CheckCI = checkCIResult
-
+		result.SideEffectsDeferred = true
 		return result, nil
 	}
 
