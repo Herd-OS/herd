@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -214,6 +215,60 @@ func TestApplyBranchOperationCreateTransientLookupFailsPreCallUntilRedelivery(t 
 	secondErr := svc.ApplyBranchOperation(ctx, req)
 	require.NoError(t, secondErr)
 	assert.Equal(t, "fresh", fake.repo.branches["herd/worker/1-task"])
+}
+
+func TestApplyBranchOperationValidatesOperationBeforeMutationAttempt(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		invalid   BranchOperationRequest
+		corrected BranchOperationRequest
+		wantErr   string
+	}{
+		{
+			name:      "create without from sha",
+			invalid:   BranchOperationRequest{OperationKind: "create", BranchName: "herd/worker/1-task"},
+			corrected: BranchOperationRequest{OperationKind: "create", BranchName: "herd/worker/1-task", FromSHA: "base"},
+			wantErr:   "from SHA is required",
+		},
+		{
+			name:      "update without new sha",
+			invalid:   BranchOperationRequest{OperationKind: "update", BranchName: "herd/worker/1-task", ExpectedHeadSHA: "old"},
+			corrected: BranchOperationRequest{OperationKind: "update", BranchName: "herd/worker/1-task", ExpectedHeadSHA: "old", NewSHA: "new"},
+			wantErr:   "new SHA is required",
+		},
+		{
+			name:      "unsupported operation kind",
+			invalid:   BranchOperationRequest{OperationKind: "rename", BranchName: "herd/worker/1-task"},
+			corrected: BranchOperationRequest{OperationKind: "delete", BranchName: "herd/worker/1-task", ExpectedHeadSHA: "old"},
+			wantErr:   "unsupported branch operation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakePlatform()
+			if tt.corrected.OperationKind != "create" {
+				fake.repo.branches["herd/worker/1-task"] = "old"
+			}
+			st := newFakeStore()
+			svc := newTestService(fake, st, nil)
+
+			err := svc.ApplyBranchOperation(ctx, tt.invalid)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Empty(t, st.mutations)
+
+			err = svc.ApplyBranchOperation(ctx, tt.corrected)
+			require.NoError(t, err)
+			assert.NotEmpty(t, st.mutations)
+			for _, attempt := range st.mutations {
+				assert.NotEqual(t, mutations.PhaseCallStarted, attempt.Status)
+				assert.NotEqual(t, mutations.PhaseRepairRequired, attempt.Status)
+			}
+		})
+	}
 }
 
 func TestMergePR_RequiresExpectedHeadAndSuccessfulStatus(t *testing.T) {

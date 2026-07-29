@@ -137,5 +137,9 @@ func rawQuotedPrompt(raw string) string {
 	if end < 0 {
 		return ""
 	}
-	return quoted[:end]
+	firstLinePrompt := quoted[:end]
+	if trailingPrompt := strings.TrimSpace(quoted[end+1:]); trailingPrompt != "" {
+		firstLinePrompt = strings.TrimSpace(firstLinePrompt + " " + trailingPrompt)
+	}
+	return firstLinePrompt
 }

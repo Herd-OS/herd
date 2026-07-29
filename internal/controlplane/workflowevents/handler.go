@@ -288,6 +288,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.processor != nil {
 		if err := h.processor.ProcessWorkflowEvent(r.Context(), repo, event); err != nil {
+			var preCallErr mutationspkg.PreCallError
+			if errors.As(err, &preCallErr) {
+				_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process workflow event"})
+				return
+			}
 			_ = h.markWorkflowEventRepairRequired(r.Context(), repo.ID, commentID, commandKey, metadata)
 			_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseRepairRequired+":"+err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process workflow event"})

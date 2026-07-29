@@ -215,6 +215,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !shouldProcess {
+		if err := h.repairResultAcceptance(r.Context(), result, job, idempotencyKey); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "repair result acceptance"})
+			return
+		}
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"status":          "accepted",
 			"created":         false,
@@ -316,24 +320,22 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record job result"})
 		return
 	}
-	if err := h.store.CompleteIdempotencyKey(r.Context(), callbackKey, idempotencyKey); err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete job result idempotency"})
-		return
-	}
 	if acceptedReviewKey != "" {
 		if err := h.store.CompleteIdempotencyKey(r.Context(), acceptedReviewKey, idempotencyKey); err != nil {
-			_ = h.store.FailIdempotencyKey(r.Context(), acceptedReviewKey, err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete review result acceptance"})
 			return
 		}
 	}
 	if acceptedWorkerKey != "" {
 		if err := h.store.CompleteIdempotencyKey(r.Context(), acceptedWorkerKey, idempotencyKey); err != nil {
-			_ = h.store.FailIdempotencyKey(r.Context(), acceptedWorkerKey, err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete worker result acceptance"})
 			return
 		}
+	}
+	if err := h.store.CompleteIdempotencyKey(r.Context(), callbackKey, idempotencyKey); err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete job result idempotency"})
+		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":          "accepted",
@@ -371,6 +373,9 @@ func (h Handler) acquireWorkerResultAcceptance(ctx context.Context, result Resul
 		return "", fmt.Errorf("get worker result acceptance: %w", err)
 	}
 	if record.ResultRef == resultKey {
+		if mutationspkg.IsPreCallRetryable(record.Status) {
+			return key, nil
+		}
 		return "", nil
 	}
 	if record.Status == mutationspkg.PhaseCompleted || record.Status == "completed" {
@@ -405,6 +410,9 @@ func (h Handler) acquireReviewResultAcceptance(ctx context.Context, result Resul
 		return "", fmt.Errorf("get review result acceptance: %w", err)
 	}
 	if record.ResultRef == resultKey {
+		if mutationspkg.IsPreCallRetryable(record.Status) {
+			return key, nil
+		}
 		return "", nil
 	}
 	if record.Status == mutationspkg.PhaseCompleted || record.Status == "completed" {
@@ -414,6 +422,34 @@ func (h Handler) acquireReviewResultAcceptance(ctx context.Context, result Resul
 		return "", fmt.Errorf("review result acceptance for job %q is pending repair", job.JobID)
 	}
 	return "", fmt.Errorf("conflicting review result is already pending for job %q", job.JobID)
+}
+
+func (h Handler) repairResultAcceptance(ctx context.Context, result Result, job store.Job, resultKey string) error {
+	if _, ok := result.(ReviewCompletedResult); ok {
+		if err := h.repairResultAcceptanceKey(ctx, reviewResultAcceptanceKey(job), resultKey); err != nil {
+			return err
+		}
+	}
+	if worker, ok := result.(WorkerCompletedResult); ok && worker.Status == StatusSuccess {
+		if err := h.repairResultAcceptanceKey(ctx, workerResultAcceptanceKey(job), resultKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h Handler) repairResultAcceptanceKey(ctx context.Context, key string, resultKey string) error {
+	record, err := h.store.GetIdempotencyKey(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if record.ResultRef != resultKey || !mutationspkg.IsPreCallRetryable(record.Status) {
+		return nil
+	}
+	return h.store.CompleteIdempotencyKey(ctx, key, resultKey)
 }
 
 type ReviewReadTokenResponse struct {
@@ -644,7 +680,13 @@ func (h Handler) processReviewResult(ctx context.Context, result Result, job sto
 		RepositoryID: job.RepositoryID,
 		MutationType: "review_result_process",
 		Request:      request,
-		Response:     func(string) json.RawMessage { return request },
+		ResultRef: func(raw json.RawMessage) string {
+			if len(raw) == 0 {
+				return ""
+			}
+			return "review_result:processed"
+		},
+		Response: func(string) json.RawMessage { return request },
 		Preflight: func() error {
 			var err error
 			prepared, err = h.reviewProcessor.PrepareSubmitReviewResult(ctx, repo, submission)

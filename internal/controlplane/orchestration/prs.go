@@ -120,6 +120,19 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 	if req.OperationKind == "" {
 		return fmt.Errorf("operation kind is required")
 	}
+	switch req.OperationKind {
+	case "create":
+		if req.FromSHA == "" {
+			return fmt.Errorf("from SHA is required for branch create")
+		}
+	case "update":
+		if req.NewSHA == "" {
+			return fmt.Errorf("new SHA is required for branch update")
+		}
+	case "delete":
+	default:
+		return fmt.Errorf("unsupported branch operation %q", req.OperationKind)
+	}
 	if (req.OperationKind == "delete" || req.OperationKind == "update") && req.ExpectedHeadSHA == "" {
 		return fmt.Errorf("expected head SHA is required for branch %s", req.OperationKind)
 	}
@@ -156,9 +169,6 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 	_, err := s.withIdempotencyPhased(ctx, key, "branch_"+req.OperationKind, preflight, nil, func() (string, error) {
 		switch req.OperationKind {
 		case "create":
-			if req.FromSHA == "" {
-				return "", fmt.Errorf("from SHA is required for branch create")
-			}
 			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)
 			if err == nil {
 				if current != req.FromSHA {
@@ -171,9 +181,6 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 			}
 			return "branch:" + req.BranchName, s.Platform.Repository().CreateBranch(ctx, req.BranchName, req.FromSHA)
 		case "update":
-			if req.NewSHA == "" {
-				return "", fmt.Errorf("new SHA is required for branch update")
-			}
 			updater, ok := s.Platform.Repository().(branchUpdater)
 			if !ok {
 				return "", fmt.Errorf("repository client does not support branch update")

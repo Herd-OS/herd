@@ -1507,6 +1507,69 @@ func TestHandlerRetryAfterCompleteCallbackFailureDoesNotReapplyPatch(t *testing.
 	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("a", 40))
 }
 
+func TestHandlerRetryAfterWorkerAcceptanceCompletionFailureDoesNotReapplyPatch(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("a", 40)}}
+	st := newResultStore()
+	payload := validWorkerPayload("job-1", "head")
+	job := store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	st.jobs["job-1"] = job
+	resultKey := ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload))
+	acceptanceKey := workerResultAcceptanceKey(job)
+	st.completeIdemErrs = map[string][]error{acceptanceKey: {assert.AnError, nil}}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, applier.requests, 1)
+	assert.Len(t, st.results, 1)
+	assert.Equal(t, "completed", st.idem[acceptanceKey].Status)
+	assert.Equal(t, "completed", st.idem["job_result:"+resultKey].Status)
+}
+
+func TestHandlerRepairsDanglingWorkerAcceptanceOnCompletedCallbackRedelivery(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	payload := validWorkerPayload("job-1", "head")
+	resultKey := ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload))
+	job := store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	st.jobs["job-1"] = job
+	acceptanceKey := workerResultAcceptanceKey(job)
+	st.idem["job_result:"+resultKey] = store.IdempotencyKey{Key: "job_result:" + resultKey, Scope: "job_result_callback", Status: mutationspkg.PhaseCompleted, ResultRef: resultKey, CreatedAt: now}
+	st.idem[acceptanceKey] = store.IdempotencyKey{Key: acceptanceKey, Scope: "worker_result_acceptance", Status: mutationspkg.PhaseIntentRecorded, ResultRef: resultKey, CreatedAt: now}
+	applier := &recordingPatchApplier{}
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactStore{},
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Empty(t, applier.requests)
+	assert.Empty(t, st.results)
+	assert.Equal(t, "completed", st.idem[acceptanceKey].Status)
+}
+
 func assertJobResultCommitSHA(t *testing.T, result store.JobResult, want string) {
 	t.Helper()
 	var metadata struct {
@@ -1642,6 +1705,65 @@ func TestHandlerRetriesReviewResultAfterProcessorPreCallFailure(t *testing.T) {
 	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationCompletions[2].status)
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusApproved, st.results[0].Status)
+}
+
+func TestHandlerRetryAfterReviewAcceptanceCompletionFailureDoesNotResubmit(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	job := store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	st.jobs["job-1"] = job
+	payload := validReviewPayload()
+	resultKey := ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload))
+	acceptanceKey := reviewResultAcceptanceKey(job)
+	st.completeIdemErrs = map[string][]error{acceptanceKey: {assert.AnError, nil}}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, resultRequest("job-1", payload))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, processor.calls, 1)
+	assert.Len(t, st.results, 1)
+	assert.Equal(t, "completed", st.idem[acceptanceKey].Status)
+	assert.Equal(t, "completed", st.idem["job_result:"+resultKey].Status)
+}
+
+func TestHandlerRepairsDanglingReviewAcceptanceOnCompletedCallbackRedelivery(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	payload := validReviewPayload()
+	resultKey := ResultIdempotencyKey(parsedResultPayload(t, payload), []byte(payload))
+	job := store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
+	st.jobs["job-1"] = job
+	acceptanceKey := reviewResultAcceptanceKey(job)
+	st.idem["job_result:"+resultKey] = store.IdempotencyKey{Key: "job_result:" + resultKey, Scope: "job_result_callback", Status: mutationspkg.PhaseCompleted, ResultRef: resultKey, CreatedAt: now}
+	st.idem[acceptanceKey] = store.IdempotencyKey{Key: acceptanceKey, Scope: "review_result_acceptance", Status: mutationspkg.PhaseIntentRecorded, ResultRef: resultKey, CreatedAt: now}
+	processor := &capturingReviewProcessor{}
+	handler := NewHandler(HandlerOptions{
+		Store:           st,
+		Validator:       fixedOIDCValidator(validClaims(now)),
+		Audience:        "herd-control-plane",
+		Now:             func() time.Time { return now },
+		ReviewProcessor: processor,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Empty(t, processor.calls)
+	assert.Empty(t, st.results)
+	assert.Equal(t, "completed", st.idem[acceptanceKey].Status)
 }
 
 func TestHandlerConcurrentDuplicateReviewResultsSubmitOnce(t *testing.T) {

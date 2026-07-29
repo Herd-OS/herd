@@ -371,6 +371,7 @@ func gitEnv(config []string, env []string) []string {
 		}
 		out = append(out, entry)
 	}
+	out = append(out, "GIT_CONFIG_NOSYSTEM=1")
 	configIndex := 0
 	for _, entry := range config {
 		if strings.TrimSpace(entry) == "" {
@@ -400,7 +401,7 @@ func inheritedGitConfigEnv(entry string) bool {
 	if !ok {
 		key = entry
 	}
-	return key == "GIT_CONFIG_COUNT" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_")
+	return key == "GIT_CONFIG" || strings.HasPrefix(key, "GIT_CONFIG_")
 }
 
 func gitCommandDisplay(args []string) string {

@@ -190,6 +190,71 @@ func TestGitEnvStripsSuppliedCommandScopedConfig(t *testing.T) {
 	assert.Contains(t, captured, "GIT_CONFIG_VALUE_0=HerdOS")
 }
 
+func TestGitEnvStripsConfigControlEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, configPath string, capturePath string)
+	}{
+		{
+			name: "inherited",
+			run: func(t *testing.T, configPath string, _ string) {
+				t.Setenv("GIT_CONFIG_GLOBAL", configPath)
+				t.Setenv("GIT_CONFIG_SYSTEM", configPath)
+				t.Setenv("GIT_CONFIG", configPath)
+			},
+		},
+		{
+			name: "supplied",
+			run: func(t *testing.T, configPath string, capturePath string) {
+				err := CloneWithConfigAndEnv("https://github.com/acme/widgets.git", filepath.Join(t.TempDir(), "repo"),
+					[]string{"user.name=HerdOS"},
+					[]string{
+						"GIT_CONFIG_GLOBAL=" + configPath,
+						"GIT_CONFIG_SYSTEM=" + configPath,
+						"GIT_CONFIG=" + configPath,
+						"HERD_GIT_ARGV_CAPTURE=" + capturePath,
+					})
+
+				require.Error(t, err)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			capturePath := filepath.Join(t.TempDir(), "env.txt")
+			token := "ghs_config_control_installation_token"
+			configPath := filepath.Join(t.TempDir(), "gitconfig")
+			require.NoError(t, os.WriteFile(configPath, []byte("[http \"https://github.com/\"]\n\textraHeader = Authorization: Bearer "+token+"\n"), 0600))
+			fakeGit := filepath.Join(binDir, "git")
+			script := "#!/bin/sh\n" +
+				"env | sort | grep -E '^(GIT_CONFIG|HERD_GIT)_' > \"$HERD_GIT_ARGV_CAPTURE\"\n" +
+				"exit 1\n"
+			require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0700))
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("HERD_GIT_ARGV_CAPTURE", capturePath)
+
+			tt.run(t, configPath, capturePath)
+			if tt.name == "inherited" {
+				err := CloneWithConfig("https://github.com/acme/widgets.git", filepath.Join(t.TempDir(), "repo"),
+					"user.name=HerdOS")
+				require.Error(t, err)
+			}
+
+			captured := string(mustReadFile(t, capturePath))
+			assert.NotContains(t, captured, "GIT_CONFIG_GLOBAL=")
+			assert.NotContains(t, captured, "GIT_CONFIG_SYSTEM=")
+			assert.NotContains(t, captured, "GIT_CONFIG="+configPath)
+			assert.NotContains(t, captured, configPath)
+			assert.NotContains(t, captured, token)
+			assert.NotContains(t, strings.ToLower(captured), "authorization: bearer")
+			assert.Contains(t, captured, "GIT_CONFIG_NOSYSTEM=1")
+			assert.Contains(t, captured, "GIT_CONFIG_KEY_0=user.name")
+		})
+	}
+}
+
 func TestCurrentBranch(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

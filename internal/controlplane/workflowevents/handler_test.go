@@ -125,11 +125,11 @@ func TestHandlerDuplicateWorkflowEventDoesNotProcessAgain(t *testing.T) {
 	assert.Len(t, processor.calls, 1)
 }
 
-func TestHandlerRetriesWorkflowEventAfterProcessorFailure(t *testing.T) {
+func TestHandlerRetriesWorkflowEventAfterProcessorPreCallFailure(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newEventStore()
 	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
-	processor := &capturingProcessor{errs: []error{errors.New("temporary failure"), nil}}
+	processor := &capturingProcessor{errs: []error{mutationspkg.PreCallError{Op: "create client", Err: errors.New("temporary failure")}, nil}}
 	handler := NewHandler(HandlerOptions{
 		Store:     st,
 		Validator: fixedValidator(validEventClaims(now)),
@@ -142,14 +142,39 @@ func TestHandlerRetriesWorkflowEventAfterProcessorFailure(t *testing.T) {
 	handler.ServeHTTP(first, eventRequest(validEventPayload()))
 	second := httptest.NewRecorder()
 	handler.ServeHTTP(second, eventRequest(validEventPayload()))
-	third := httptest.NewRecorder()
-	handler.ServeHTTP(third, eventRequest(validEventPayload()))
+
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	require.Equal(t, http.StatusAccepted, second.Code)
+	assert.Len(t, processor.calls, 2)
+	for _, record := range st.idem {
+		assert.Equal(t, "completed", record.Status)
+	}
+}
+
+func TestHandlerProcessorPostCallFailureRequiresRepair(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	st := newEventStore()
+	st.repos["octo/herd"] = store.Repository{ID: 7, Owner: "octo", Name: "herd"}
+	processor := &capturingProcessor{errs: []error{errors.New("post-call outcome unknown"), nil}}
+	handler := NewHandler(HandlerOptions{
+		Store:     st,
+		Validator: fixedValidator(validEventClaims(now)),
+		Audience:  "herd-control-plane",
+		Now:       func() time.Time { return now },
+		Processor: processor,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, eventRequest(validEventPayload()))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, eventRequest(validEventPayload()))
 
 	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusConflict, second.Code)
-	require.Equal(t, http.StatusConflict, third.Code)
 	assert.Contains(t, second.Body.String(), "unknown")
 	assert.Len(t, processor.calls, 1)
+	require.Len(t, st.commands, 1)
+	assert.Equal(t, "repair_required", st.commands[0].Status)
 }
 
 func TestHandlerCompletionFailureRedeliveryDoesNotProcessAgain(t *testing.T) {

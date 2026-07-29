@@ -22,10 +22,22 @@ func TestQueuedCommentBodyReplaysPromptsWithoutDuplication(t *testing.T) {
 			wantPrompt: "update auth handling\ninclude regression tests",
 		},
 		{
+			name:       "quoted fix prompt with trailing same-line text and remaining lines",
+			raw:        `@herd-os fix "update auth" include tests`,
+			prompt:     "update auth include tests\nkeep multiline context",
+			wantPrompt: "update auth include tests\nkeep multiline context",
+		},
+		{
 			name:       "quoted fix-ci prompt with remaining lines",
 			raw:        `@herd-os fix-ci "update auth handling"`,
 			prompt:     "update auth handling\ninclude regression tests",
 			wantPrompt: "update auth handling\ninclude regression tests",
+		},
+		{
+			name:       "quoted fix-ci prompt with trailing same-line text and remaining lines",
+			raw:        `@herd-os fix-ci "update auth" include tests`,
+			prompt:     "update auth include tests\nkeep multiline context",
+			wantPrompt: "update auth include tests\nkeep multiline context",
 		},
 		{
 			name:       "unquoted multiline prompt",
