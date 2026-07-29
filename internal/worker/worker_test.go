@@ -620,6 +620,60 @@ func TestWorkerNoOpPath_RejectsMissingVerdictBlock(t *testing.T) {
 	assert.True(t, foundExplanation, "must post a Worker failed comment explaining the missing verdict block")
 }
 
+func TestExec_BatchFinalizationScrubsCommittedReviewFixArtifact(t *testing.T) {
+	repoDir := initTestRepoWithBatchBranch(t)
+
+	issueSvc := &mockIssueService{
+		getResult: &platform.Issue{
+			Number: 1053, Title: "Scrub Review",
+			Milestone: &platform.Milestone{Number: 1, Title: "Batch"},
+		},
+	}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       &mockPRService{},
+		workflows: &mockWorkflowService{},
+		repo:      &mockRepoService{defaultBranch: "main", branchSHAErr: fmt.Errorf("not found")},
+	}
+
+	ag := &commitAgent{
+		commitFunc: func() {
+			require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".herd"), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".herd", "review-fixes-1053.md"), []byte("temporary review notes"), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".herd", "worker.md"), []byte("legitimate worker instructions"), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "real-code.txt"), []byte("real change"), 0644))
+			gitRunT(t, repoDir, "git", "add", ".")
+			gitRunT(t, repoDir, "git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-m", "agent work")
+		},
+		execResult: &agent.ExecResult{Summary: "Implemented real code change"},
+	}
+
+	result, err := Exec(context.Background(), mock, ag, &config.Config{}, ExecParams{
+		IssueNumber: 1053,
+		RepoRoot:    repoDir,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	gitRunT(t, repoDir, "git", "fetch", "origin")
+	tree := gitOutputT(t, repoDir, "git", "ls-tree", "-r", "--name-only", "origin/herd/worker/1053-scrub-review")
+	assert.Contains(t, tree, "real-code.txt")
+	assert.Contains(t, tree, ".herd/worker.md")
+	assert.NotContains(t, tree, ".herd/review-fixes-1053.md")
+
+	history := gitOutputT(t, repoDir, "git", "log", "--name-status", "--oneline", "origin/herd/worker/1053-scrub-review")
+	assert.Contains(t, history, "Remove transient Herd artifacts for #1053")
+	assert.Contains(t, history, "D\t.herd/review-fixes-1053.md")
+
+	foundCleanupComment := false
+	for _, c := range issueSvc.comments {
+		if strings.Contains(c, "Removed transient Herd artifact(s)") && strings.Contains(c, ".herd/review-fixes-1053.md") {
+			foundCleanupComment = true
+		}
+	}
+	assert.True(t, foundCleanupComment, "batch finalization should report scrubbed transient artifacts")
+}
+
 // hangingAgent blocks until the context is cancelled, simulating Claude Code
 // hanging after completing work.
 type hangingAgent struct {
@@ -974,6 +1028,9 @@ func TestExec_BatchTimeoutWithUncommittedWork(t *testing.T) {
 
 	ag := &hangingAgent{
 		commitFunc: func() {
+			require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".herd"), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".herd", "review-fixes-123.md"), []byte("temporary review notes"), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".herd", "worker.md"), []byte("legitimate worker instructions"), 0644))
 			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "checkpoint.txt"), []byte("partial"), 0644))
 		},
 	}
@@ -993,15 +1050,23 @@ func TestExec_BatchTimeoutWithUncommittedWork(t *testing.T) {
 	gitRunT(t, repoDir, "git", "fetch", "origin")
 	log := gitOutputT(t, repoDir, "git", "log", "--oneline", "origin/herd/worker/42-test")
 	assert.Contains(t, log, "Checkpoint timed-out work for #42")
-	assert.Contains(t, gitOutputT(t, repoDir, "git", "ls-tree", "-r", "--name-only", "origin/herd/worker/42-test"), "checkpoint.txt")
+	tree := gitOutputT(t, repoDir, "git", "ls-tree", "-r", "--name-only", "origin/herd/worker/42-test")
+	assert.Contains(t, tree, "checkpoint.txt")
+	assert.Contains(t, tree, ".herd/worker.md")
+	assert.NotContains(t, tree, ".herd/review-fixes-123.md")
 
 	foundCheckpointComment := false
+	foundCleanupComment := false
 	for _, c := range issueSvc.comments {
 		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "checkpointed and pushed") && strings.Contains(c, "retryable") {
 			foundCheckpointComment = true
 		}
+		if strings.Contains(c, "Removed transient Herd artifact(s)") && strings.Contains(c, ".herd/review-fixes-123.md") {
+			foundCleanupComment = true
+		}
 	}
 	assert.True(t, foundCheckpointComment, "timeout checkpoint should be reported on the issue as retryable")
+	assert.True(t, foundCleanupComment, "timeout checkpoint should report scrubbed transient artifacts")
 	assert.Contains(t, issueSvc.addedLabels, issues.StatusFailed)
 	assert.NotContains(t, issueSvc.addedLabels, issues.StatusDone)
 	assert.True(t, mock.workflows.dispatched)
@@ -1056,6 +1121,50 @@ func TestRunValidation_NoGoMod(t *testing.T) {
 	assert.True(t, result.TestOK)
 	assert.True(t, result.VetOK)
 	assert.True(t, result.LintOK)
+}
+
+func TestGitHasStagedChanges(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		want  bool
+	}{
+		{
+			name: "clean",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+			},
+			want: false,
+		},
+		{
+			name: "untracked only",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("untracked"), 0644))
+			},
+			want: false,
+		},
+		{
+			name: "staged",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("staged"), 0644))
+				gitRunT(t, dir, "git", "add", "staged.txt")
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := initTestRepo(t)
+			tt.setup(t, dir)
+
+			got, err := gitHasStagedChanges(git.New(dir))
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 func TestRunValidation_ValidGoProject(t *testing.T) {
@@ -2244,6 +2353,9 @@ func TestExecStandalone_TimeoutWithUncommittedWork(t *testing.T) {
 
 	ag := &hangingAgent{
 		commitFunc: func() {
+			require.NoError(t, os.MkdirAll(filepath.Join(work, ".herd"), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(work, ".herd", "review-fixes-594.md"), []byte("temporary review notes"), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(work, ".herd", "worker.md"), []byte("legitimate worker instructions"), 0644))
 			require.NoError(t, os.WriteFile(filepath.Join(work, "standalone-checkpoint.txt"), []byte("partial"), 0644))
 		},
 	}
@@ -2264,15 +2376,23 @@ func TestExecStandalone_TimeoutWithUncommittedWork(t *testing.T) {
 	gitRunT(t, work, "git", "fetch", "origin")
 	log := gitOutputT(t, work, "git", "log", "--oneline", "origin/"+targetBranch)
 	assert.Contains(t, log, "Checkpoint timed-out work for #594")
-	assert.Contains(t, gitOutputT(t, work, "git", "ls-tree", "-r", "--name-only", "origin/"+targetBranch), "standalone-checkpoint.txt")
+	tree := gitOutputT(t, work, "git", "ls-tree", "-r", "--name-only", "origin/"+targetBranch)
+	assert.Contains(t, tree, "standalone-checkpoint.txt")
+	assert.Contains(t, tree, ".herd/worker.md")
+	assert.NotContains(t, tree, ".herd/review-fixes-594.md")
 
 	foundIssueReport := false
+	foundCleanupComment := false
 	for _, c := range issueSvc.comments {
 		if strings.Contains(c, "Worker timed out") && strings.Contains(c, "checkpointed and pushed") && strings.Contains(c, "retryable") {
 			foundIssueReport = true
 		}
+		if strings.Contains(c, "Removed transient Herd artifact(s)") && strings.Contains(c, ".herd/review-fixes-594.md") {
+			foundCleanupComment = true
+		}
 	}
 	assert.True(t, foundIssueReport, "standalone timeout checkpoint should post a retryable issue report")
+	assert.True(t, foundCleanupComment, "standalone timeout checkpoint should report scrubbed transient artifacts")
 
 	foundPRComment := false
 	for _, c := range prSvc.comments {
