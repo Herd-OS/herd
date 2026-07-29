@@ -224,10 +224,11 @@ func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T)
 	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
 
 	expectedGroups := map[string]string{
-		"integrate":                    "herd-integrate-${{ github.event.workflow_run.head_branch || github.ref }}",
-		"check-ci-workflow-completion": "herd-integrate-${{ github.event.workflow_run.head_branch || github.ref }}",
+		"integrate":                    "herd-integrate-worker-${{ github.event.workflow_run.id }}",
+		"check-ci-workflow-completion": "herd-integrate-ci-${{ github.event.workflow_run.head_branch || github.ref }}",
 		"advance-on-close":             "herd-advance-${{ github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number }}",
 		"re-review":                    "herd-re-review-${{ github.event.pull_request.number }}",
+		"cleanup":                      "herd-cleanup-${{ github.event.pull_request.number }}",
 		"handle-comment":               "herd-comment-${{ github.event.issue.milestone && github.event.issue.milestone.number || github.event.issue.number }}",
 	}
 
@@ -242,6 +243,17 @@ func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T)
 		})
 	}
 
+	integrate := workflow.Jobs["integrate"]
+	require.NotNil(t, integrate.Concurrency)
+	assert.NotContains(t, integrate.Concurrency.Group, "github.event.workflow_run.head_branch || github.ref")
+	assert.NotEqual(t, "herd-integrate-${{ github.event.workflow_run.head_branch || github.ref }}", integrate.Concurrency.Group)
+	assert.NotContains(t, integrate.Concurrency.Group, "herd-integrate-main")
+
+	checkCIOnCompletion := workflow.Jobs["check-ci-on-completion"]
+	require.NotNil(t, checkCIOnCompletion.Concurrency)
+	assert.Equal(t, "herd-check-ci-${{ github.event.check_run.check_suite.head_branch || github.ref }}", checkCIOnCompletion.Concurrency.Group)
+	assert.True(t, checkCIOnCompletion.Concurrency.CancelInProgress)
+
 	for jobName, job := range workflow.Jobs {
 		if !jobInvokesIntegratorReview(job) {
 			continue
@@ -254,7 +266,7 @@ func TestIntegratorWorkflow_ReviewCapableJobsHaveScopedConcurrency(t *testing.T)
 	}
 }
 
-func TestIntegratorWorkflow_ConfiguredCIReviewRetrySharesWorkerCompletionConcurrency(t *testing.T) {
+func TestIntegratorWorkflow_ConfiguredCIReviewRetryRemainsBranchScoped(t *testing.T) {
 	cfg := config.Default()
 	cfg.Integrator.CIWorkflows = []string{"CI"}
 	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
@@ -269,7 +281,9 @@ func TestIntegratorWorkflow_ConfiguredCIReviewRetrySharesWorkerCompletionConcurr
 	checkCIWorkflowCompletion := workflow.Jobs["check-ci-workflow-completion"]
 	require.NotNil(t, integrate.Concurrency)
 	require.NotNil(t, checkCIWorkflowCompletion.Concurrency)
-	assert.Equal(t, integrate.Concurrency.Group, checkCIWorkflowCompletion.Concurrency.Group)
+	assert.NotEqual(t, integrate.Concurrency.Group, checkCIWorkflowCompletion.Concurrency.Group)
+	assert.Equal(t, "herd-integrate-worker-${{ github.event.workflow_run.id }}", integrate.Concurrency.Group)
+	assert.Equal(t, "herd-integrate-ci-${{ github.event.workflow_run.head_branch || github.ref }}", checkCIWorkflowCompletion.Concurrency.Group)
 	assert.NotContains(t, checkCIWorkflowCompletion.Concurrency.Group, "herd-check-ci")
 	assert.Contains(t, checkCIWorkflowCompletion.Concurrency.Group, "github.event.workflow_run.head_branch")
 	assert.True(t, jobInvokesIntegratorReview(checkCIWorkflowCompletion))
@@ -278,6 +292,26 @@ func TestIntegratorWorkflow_ConfiguredCIReviewRetrySharesWorkerCompletionConcurr
 	require.NotEqual(t, -1, checkCIIndex)
 	require.NotEqual(t, -1, reviewIndex)
 	assert.Less(t, checkCIIndex, reviewIndex)
+}
+
+func TestIntegratorWorkflow_WorkerCompletionConcurrencyIsRunScoped(t *testing.T) {
+	cfg := config.Default()
+	wf := workflowFile{SrcName: "herd-integrator.yml.tmpl", DestName: "herd-integrator.yml", Template: true}
+
+	rendered, err := RenderWorkflow(wf, cfg)
+	require.NoError(t, err)
+
+	var workflow githubActionsWorkflow
+	require.NoError(t, yaml.Unmarshal(rendered, &workflow))
+
+	integrate := workflow.Jobs["integrate"]
+	require.NotNil(t, integrate.Concurrency)
+	assert.Equal(t, "herd-integrate-worker-${{ github.event.workflow_run.id }}", integrate.Concurrency.Group)
+	assert.False(t, integrate.Concurrency.CancelInProgress)
+	assert.NotContains(t, integrate.Concurrency.Group, "github.event.workflow_run.head_branch || github.ref")
+	assert.NotContains(t, integrate.Concurrency.Group, "github.ref")
+	assert.NotContains(t, string(rendered), "group: herd-integrate-${{ github.event.workflow_run.head_branch || github.ref }}")
+	assert.Contains(t, string(rendered), "same-batch safety is enforced by the durable batch lock")
 }
 
 func jobInvokesIntegratorReview(job githubActionsJob) bool {

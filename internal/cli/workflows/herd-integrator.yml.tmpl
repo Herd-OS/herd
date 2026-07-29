@@ -33,7 +33,8 @@ jobs:
 {{else}}
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped'
 {{end}}    concurrency:
-      group: herd-integrate-${{`{{`}} github.event.workflow_run.head_branch || github.ref {{`}}`}}
+      # Herd resolves worker metadata inside the job; same-batch safety is enforced by the durable batch lock.
+      group: herd-integrate-worker-${{`{{`}} github.event.workflow_run.id {{`}}`}}
       cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
@@ -63,7 +64,7 @@ jobs:
   check-ci-workflow-completion:
     if: vars.HERD_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped' && startsWith(github.event.workflow_run.head_branch, 'herd/batch/') && github.event.workflow_run.path != '.github/workflows/herd-worker.yml'
     concurrency:
-      group: herd-integrate-${{`{{`}} github.event.workflow_run.head_branch || github.ref {{`}}`}}
+      group: herd-integrate-ci-${{`{{`}} github.event.workflow_run.head_branch || github.ref {{`}}`}}
       cancel-in-progress: false
     runs-on: [self-hosted, '${{`{{`}} vars.HERD_RUNNER_LABEL || ''herd-worker'' {{`}}`}}']
     steps:
