@@ -328,6 +328,22 @@ func (s *MemoryStore) GetIdempotencyKey(_ context.Context, key string) (Idempote
 	return record, nil
 }
 
+func (s *MemoryStore) ListIdempotencyKeys(_ context.Context, scope string, limit int) ([]IdempotencyKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []IdempotencyKey
+	for _, record := range s.idempotencyKeys {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		if record.Scope != scope {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

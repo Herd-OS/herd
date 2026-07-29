@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/controlplane/mutations"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 )
@@ -131,7 +132,10 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 		if req.OperationKind == "create" {
 			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)
 			if err != nil {
-				return nil
+				if platform.IsNotFound(err) {
+					return nil
+				}
+				return mutations.PreCallError{Err: err}
 			}
 			if current != req.FromSHA {
 				return fmt.Errorf("branch %s already exists at %s, expected create source %s", req.BranchName, current, req.FromSHA)
@@ -161,6 +165,9 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 					return "", fmt.Errorf("branch %s already exists at %s, expected create source %s", req.BranchName, current, req.FromSHA)
 				}
 				return "branch:" + req.BranchName, nil
+			}
+			if !platform.IsNotFound(err) {
+				return "", mutations.PreCallError{Err: err}
 			}
 			return "branch:" + req.BranchName, s.Platform.Repository().CreateBranch(ctx, req.BranchName, req.FromSHA)
 		case "update":

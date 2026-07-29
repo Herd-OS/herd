@@ -103,7 +103,7 @@ func TestRecordWorkerCallback_ClassifiesStaleAndDeduplicates(t *testing.T) {
 func TestDispatchReadyWorkers_RedeliveryRepairsLabelsAfterDispatchBeforeInProgressFailure(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
-	fake.repo.branches["herd/batch/7-demo"] = "batch-head"
+	fake.repo.branches["herd/batch/7-demo"] = "batch-head-a"
 	disp := &fakeDispatcher{}
 	st := newFakeStore()
 	st.completeErrs[issueStatusTransitionKey(123, 1, issues.StatusReady, "remove", "job-1")] = []error{errors.New("crash after ready removal")}
@@ -128,10 +128,12 @@ func TestDispatchReadyWorkers_RedeliveryRepairsLabelsAfterDispatchBeforeInProgre
 	assert.Contains(t, fake.issues.removed[1], issues.StatusReady)
 	assert.Empty(t, fake.issues.added[1])
 	st.keys[cpdispatch.IdempotencyKey(disp.requests[0])] = store.IdempotencyKey{
-		Key:    cpdispatch.IdempotencyKey(disp.requests[0]),
-		Scope:  "workflow_dispatch",
-		Status: "completed",
+		Key:      cpdispatch.IdempotencyKey(disp.requests[0]),
+		Scope:    "workflow_dispatch",
+		Status:   "completed",
+		Metadata: json.RawMessage(`{"repo_id":123,"job_kind":"worker","batch_number":7,"issue_number":1,"head_sha":"batch-head-a"}`),
 	}
+	fake.repo.branches["herd/batch/7-demo"] = "batch-head-b"
 
 	req.AllIssues = []*platform.Issue{{
 		Number: 1,
@@ -476,6 +478,20 @@ func (s *fakeStore) GetIdempotencyKey(_ context.Context, key string) (store.Idem
 		return store.IdempotencyKey{}, store.ErrNotFound
 	}
 	return record, nil
+}
+
+func (s *fakeStore) ListIdempotencyKeys(_ context.Context, scope string, limit int) ([]store.IdempotencyKey, error) {
+	var out []store.IdempotencyKey
+	for _, record := range s.keys {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		if record.Scope != scope {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out, nil
 }
 
 func (s *fakeStore) CompleteIdempotencyKey(_ context.Context, key string, resultRef string) error {
@@ -841,7 +857,7 @@ func (s *fakeRepoService) GetBranchSHA(_ context.Context, name string) (string, 
 	}
 	sha, ok := s.branches[name]
 	if !ok {
-		return "", fmt.Errorf("branch not found")
+		return "", platform.ErrNotFound
 	}
 	return sha, nil
 }

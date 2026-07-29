@@ -33,6 +33,7 @@ const (
 type Store interface {
 	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
+	ListIdempotencyKeys(ctx context.Context, scope string, limit int) ([]store.IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
@@ -183,9 +184,11 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			Reason:          req.Reason,
 		}
 		if status != issues.StatusReady && status != issues.StatusBlocked {
-			if !s.workflowDispatchIntentExists(ctx, dispatchReq) {
+			recovered, ok := s.recoverWorkflowDispatchIntent(ctx, dispatchReq)
+			if !ok {
 				continue
 			}
+			dispatchReq = recovered
 		}
 		result, err := s.Dispatcher.Dispatch(ctx, dispatchReq)
 		if err != nil {
@@ -221,6 +224,42 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 func (s Service) workflowDispatchIntentExists(ctx context.Context, req cpdispatch.DispatchRequest) bool {
 	_, err := s.Store.GetIdempotencyKey(ctx, cpdispatch.IdempotencyKey(req))
 	return err == nil
+}
+
+func (s Service) recoverWorkflowDispatchIntent(ctx context.Context, req cpdispatch.DispatchRequest) (cpdispatch.DispatchRequest, bool) {
+	if s.workflowDispatchIntentExists(ctx, req) {
+		return req, true
+	}
+	if req.IssueNumber <= 0 || req.BatchNumber <= 0 {
+		return cpdispatch.DispatchRequest{}, false
+	}
+	records, err := s.Store.ListIdempotencyKeys(ctx, "workflow_dispatch", 500)
+	if err != nil {
+		return cpdispatch.DispatchRequest{}, false
+	}
+	for _, record := range records {
+		var metadata struct {
+			RepoID      int64              `json:"repo_id"`
+			JobKind     cpdispatch.JobKind `json:"job_kind"`
+			BatchNumber int                `json:"batch_number"`
+			IssueNumber int                `json:"issue_number"`
+			HeadSHA     string             `json:"head_sha"`
+		}
+		if len(record.Metadata) > 0 &&
+			json.Unmarshal(record.Metadata, &metadata) == nil &&
+			metadata.RepoID == req.RepoID &&
+			metadata.JobKind == req.Kind &&
+			metadata.BatchNumber == req.BatchNumber &&
+			metadata.IssueNumber == req.IssueNumber &&
+			strings.TrimSpace(metadata.HeadSHA) != "" {
+			recovered := req
+			recovered.BaseSHA = metadata.HeadSHA
+			recovered.HeadSHA = metadata.HeadSHA
+			recovered.ExpectedHeadSHA = metadata.HeadSHA
+			return recovered, true
+		}
+	}
+	return cpdispatch.DispatchRequest{}, false
 }
 
 type DispatchReadyWorkersRequest struct {

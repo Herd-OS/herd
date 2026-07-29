@@ -38,6 +38,7 @@ type Store interface {
 	RecordJobResult(ctx context.Context, r JobResult) (created bool, err error)
 	AcquireIdempotencyKey(ctx context.Context, key IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
+	ListIdempotencyKeys(ctx context.Context, scope string, limit int) ([]IdempotencyKey, error)
 	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
 	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
 	RecordCommand(ctx context.Context, c CommandRecord) (created bool, err error)

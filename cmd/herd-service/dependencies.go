@@ -63,6 +63,7 @@ type productionDependencyOptions struct {
 type productionStore interface {
 	service.Store
 	jobs.Store
+	orchestration.Store
 	cpdispatch.Store
 	review.StatusStore
 	review.StatusIdempotencyStore

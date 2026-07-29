@@ -12,6 +12,12 @@ func IsRefUpdateConflict(err error) bool {
 	return errors.Is(err, ErrRefUpdateConflict)
 }
 
+var ErrNotFound = errors.New("platform resource not found")
+
+func IsNotFound(err error) bool {
+	return errors.Is(err, ErrNotFound)
+}
+
 var ErrPullRequestDiffTooLarge = errors.New("pull request diff too large")
 
 func IsPullRequestDiffTooLarge(err error) bool {

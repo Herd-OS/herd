@@ -394,6 +394,33 @@ func (s *PostgresStore) GetIdempotencyKey(ctx context.Context, key string) (Idem
 	return record, nil
 }
 
+func (s *PostgresStore) ListIdempotencyKeys(ctx context.Context, scope string, limit int) ([]IdempotencyKey, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT key, scope, status, result_ref, expires_at, metadata, created_at, completed_at
+		FROM idempotency_keys
+		WHERE scope = $1
+		ORDER BY created_at DESC
+		LIMIT $2`, scope, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []IdempotencyKey
+	for rows.Next() {
+		var record IdempotencyKey
+		var metadata []byte
+		if err := rows.Scan(&record.Key, &record.Scope, &record.Status, &record.ResultRef, &record.ExpiresAt, &metadata, &record.CreatedAt, &record.CompletedAt); err != nil {
+			return nil, err
+		}
+		record.Metadata = json.RawMessage(metadata)
+		out = append(out, record)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresStore) CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE idempotency_keys

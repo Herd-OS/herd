@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -238,6 +239,10 @@ func (s *repositoryService) DeleteBranch(ctx context.Context, name string) error
 func (s *repositoryService) GetBranchSHA(ctx context.Context, name string) (string, error) {
 	ref, _, err := s.c.gh.Git.GetRef(ctx, s.c.owner, s.c.repo, "refs/heads/"+name)
 	if err != nil {
+		var responseErr *gh.ErrorResponse
+		if errors.As(err, &responseErr) && responseErr.Response != nil && responseErr.Response.StatusCode == http.StatusNotFound {
+			return "", fmt.Errorf("getting branch SHA for %s: %w", name, platform.ErrNotFound)
+		}
 		return "", fmt.Errorf("getting branch SHA for %s: %w", name, err)
 	}
 	return ref.GetObject().GetSHA(), nil

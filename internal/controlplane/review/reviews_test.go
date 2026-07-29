@@ -191,7 +191,7 @@ func TestSubmitReviewResultRetryAfterStatusFailureDoesNotDuplicateReview(t *test
 	}
 }
 
-func TestSubmitPRReviewOnceChangedSummaryCreatesDistinctReviewSubmission(t *testing.T) {
+func TestSubmitPRReviewOnceChangedSummaryUsesDurableSubmissionIdentity(t *testing.T) {
 	gh := &fakeReviewGitHub{}
 	mutations := newFakeReviewMutationStore()
 	svc := ReviewService{GitHub: gh, Mutations: mutations}
@@ -207,13 +207,12 @@ func TestSubmitPRReviewOnceChangedSummaryCreatesDistinctReviewSubmission(t *test
 	require.NoError(t, firstErr)
 	require.NoError(t, secondErr)
 	require.NoError(t, duplicateErr)
-	require.Len(t, gh.reviews, 2)
+	require.Len(t, gh.reviews, 1)
 	assert.Equal(t, "summary", gh.reviews[0].body)
-	assert.Equal(t, "corrected summary", gh.reviews[1].body)
-	assert.NotEqual(t, reviewSubmissionKey(repo, first, platform.ReviewApprove), reviewSubmissionKey(repo, second, platform.ReviewApprove))
+	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewApprove), reviewSubmissionKey(repo, second, platform.ReviewApprove))
 }
 
-func TestReviewSubmissionKeyUsesCanonicalVisiblePayloadHash(t *testing.T) {
+func TestReviewSubmissionKeyUsesDurableJobIdentity(t *testing.T) {
 	repo := testRepo(true)
 	first := reviewResult(ResultStatusChangesRequested, "head")
 	first.Findings = []Finding{{Fingerprint: "b", Severity: "high", Description: "second"}, {Fingerprint: "a", Severity: "medium", Description: "first"}}
@@ -222,7 +221,7 @@ func TestReviewSubmissionKeyUsesCanonicalVisiblePayloadHash(t *testing.T) {
 	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
 
 	second.Summary = "updated summary"
-	assert.NotEqual(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
+	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
 }
 
 func TestSubmitPRReviewOnceStartedRecordDoesNotCreateReview(t *testing.T) {

@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -191,6 +192,28 @@ func TestApplyBranchOperationCreateRejectsExistingWrongSHARecovery(t *testing.T)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expected create source fresh")
 	assert.Equal(t, "stale", fake.repo.branches["herd/worker/1-task"])
+}
+
+func TestApplyBranchOperationCreateTransientLookupFailsPreCallUntilRedelivery(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branchErrs = []error{errors.New("github unavailable"), nil}
+	st := newFakeStore()
+	svc := newTestService(fake, st, nil)
+	req := BranchOperationRequest{
+		OperationKind: "create",
+		BranchName:    "herd/worker/1-task",
+		FromSHA:       "fresh",
+	}
+
+	firstErr := svc.ApplyBranchOperation(ctx, req)
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "github unavailable")
+	assert.Empty(t, fake.repo.branches)
+
+	secondErr := svc.ApplyBranchOperation(ctx, req)
+	require.NoError(t, secondErr)
+	assert.Equal(t, "fresh", fake.repo.branches["herd/worker/1-task"])
 }
 
 func TestMergePR_RequiresExpectedHeadAndSuccessfulStatus(t *testing.T) {
