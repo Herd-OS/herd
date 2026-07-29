@@ -18,6 +18,7 @@ const (
 	StatusIgnored      = "ignored"
 	StatusQueued       = "queued"
 	StatusAcknowledged = "acknowledged"
+	StatusDispatching  = "dispatching"
 )
 
 type Store interface {
@@ -195,6 +196,9 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 		if h.Dispatcher == nil {
 			return Result{}, fmt.Errorf("command dispatcher is not configured")
 		}
+		if err := h.markCommandDispatching(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
+			return Result{}, err
+		}
 		if err := h.Dispatcher.DispatchCommand(ctx, DispatchCommand{
 			RepositoryID:   repo.ID,
 			InstallationID: repo.InstallationID,
@@ -212,12 +216,11 @@ func (h Handler) HandleIssueComment(ctx context.Context, event IssueComment) (Re
 			}
 			return Result{}, fmt.Errorf("dispatch command: %w", err)
 		}
-		if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
-			_ = h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed")
-			return Result{}, err
-		}
 		if err := h.Store.CompleteIdempotencyKey(ctx, idempotencyKey, "dispatch:completed"); err != nil {
 			return Result{}, fmt.Errorf("complete command idempotency key: %w", err)
+		}
+		if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, string(cmd.Kind), commandMetadata); err != nil {
+			return Result{}, err
 		}
 	}
 	return Result{Status: StatusAcknowledged, Command: cmd}, nil
@@ -420,6 +423,9 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 				}
 				return repo, false, idempotencyKey, ackMetadata, nil
 			}
+			if dispatchable && commandRecord.Status == StatusDispatching {
+				return store.Repository{}, false, "", nil, fmt.Errorf("command dispatch %q outcome is unknown after dispatch started; repair required", idempotencyKey)
+			}
 			_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata)
 			if dispatchable {
 				return repo, true, idempotencyKey, ackMetadata, nil
@@ -535,6 +541,13 @@ func parseAckResultRef(resultRef string) (int64, bool) {
 	}
 	id, err := strconv.ParseInt(raw, 10, 64)
 	return id, err == nil && id > 0
+}
+
+func (h Handler) markCommandDispatching(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
+	if err := h.Store.UpdateCommandStatus(ctx, repoID, commentID, commandKey, StatusDispatching, metadata); err != nil {
+		return fmt.Errorf("mark command dispatching: %w", err)
+	}
+	return nil
 }
 
 func (h Handler) markCommandDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {

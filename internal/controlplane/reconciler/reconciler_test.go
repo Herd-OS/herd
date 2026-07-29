@@ -378,6 +378,24 @@ func TestRunOnceDoesNotFailUnknownStartedMutationAttempts(t *testing.T) {
 	}
 }
 
+func TestLastReportConcurrentAccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := seedReconcilerStore(t, now)
+	r := &Reconciler{Store: st, Now: func() time.Time { return now }, Config: Config{Interval: time.Millisecond, JobTimeout: time.Minute}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.Run(ctx)
+	}()
+	for i := 0; i < 100; i++ {
+		_ = r.LastReport()
+	}
+	cancel()
+	<-done
+}
+
 func seedReconcilerStore(t *testing.T, now time.Time) *store.MemoryStore {
 	t.Helper()
 	ctx := context.Background()

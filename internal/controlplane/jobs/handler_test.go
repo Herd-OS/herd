@@ -249,7 +249,7 @@ func TestHandlerBindsHostedReviewReadTokenRunIDOnFirstExchange(t *testing.T) {
 	})
 
 	first := httptest.NewRecorder()
-	handler.ServeHTTP(first, readTokenRequest("job-1"))
+	handler.ServeHTTP(first, readTokenRequest())
 
 	require.Equal(t, http.StatusOK, first.Code)
 	updated, err := st.GetJob(context.Background(), "job-1")
@@ -266,12 +266,78 @@ func TestHandlerBindsHostedReviewReadTokenRunIDOnFirstExchange(t *testing.T) {
 		AppTokenSource: source,
 	})
 	second := httptest.NewRecorder()
-	secondHandler.ServeHTTP(second, readTokenRequest("job-1"))
+	secondHandler.ServeHTTP(second, readTokenRequest())
 
 	require.Equal(t, http.StatusUnauthorized, second.Code)
 	assert.Contains(t, second.Body.String(), "run ID")
 	assert.Equal(t, int64(9), source.installationID)
 	assert.Equal(t, []int64{3003}, source.repositoryIDs)
+}
+
+func TestHandlerConcurrentHostedReviewReadTokenRunIDBindMintsOnce(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	source := &concurrentReadTokenSource{token: appauth.InstallationToken{
+		Token:     "ghs_read_token",
+		ExpiresAt: now.Add(time.Hour),
+	}}
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		RepositoryID:   7,
+		InstallationID: 9,
+		PRNumber:       42,
+		HeadSHA:        "head",
+		WorkerBranch:   "herd/worker/837",
+		Metadata:       json.RawMessage(`{"kind":"review","repository":"acme/widgets","github_repository_id":3003,"ref":"refs/heads/herd/worker/837","workflow_file":"herd-review.yml"}`),
+	}
+	firstClaims := validReviewClaims(now)
+	secondClaims := firstClaims
+	secondClaims.RunID = "67890"
+	first := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(firstClaims),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		AppTokenSource: source,
+	})
+	second := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(secondClaims),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		AppTokenSource: source,
+	})
+	recorders := make([]*httptest.ResponseRecorder, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		recorders[0] = httptest.NewRecorder()
+		first.ServeHTTP(recorders[0], readTokenRequest())
+	}()
+	go func() {
+		defer wg.Done()
+		recorders[1] = httptest.NewRecorder()
+		second.ServeHTTP(recorders[1], readTokenRequest())
+	}()
+	wg.Wait()
+
+	codes := []int{recorders[0].Code, recorders[1].Code}
+	assert.Contains(t, codes, http.StatusOK)
+	assert.Contains(t, []int{http.StatusConflict, http.StatusUnauthorized}, nonOKStatus(codes))
+	updated, err := st.GetJob(context.Background(), "job-1")
+	require.NoError(t, err)
+	assert.Contains(t, string(updated.Metadata), `"workflow_run_id":`)
+	assert.Equal(t, 1, source.mintCount)
+}
+
+func nonOKStatus(codes []int) int {
+	for _, code := range codes {
+		if code != http.StatusOK {
+			return code
+		}
+	}
+	return 0
 }
 
 func TestHandlerRejectsHostedReviewReadTokenWithoutRepositoryScope(t *testing.T) {
@@ -306,9 +372,9 @@ func TestHandlerRejectsHostedReviewReadTokenWithoutRepositoryScope(t *testing.T)
 	assert.Empty(t, source.repositoryIDs)
 }
 
-func readTokenRequest(jobID string) *http.Request {
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID+"/review-read-token", nil)
-	req.SetPathValue("job_id", jobID)
+func readTokenRequest() *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/job-1/review-read-token", nil)
+	req.SetPathValue("job_id", "job-1")
 	req.Header.Set("Authorization", "Bearer oidc")
 	return req
 }
@@ -1711,6 +1777,29 @@ func (s *resultStore) UpdateJobStatus(_ context.Context, jobID string, status st
 	return nil
 }
 
+func (s *resultStore) BindJobWorkflowRunID(_ context.Context, jobID string, runID string, updatedAt time.Time) (store.Job, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return store.Job{}, false, store.ErrNotFound
+	}
+	metadata := metadataMap(job.Metadata)
+	existing := firstMetadataString(metadata, "workflow_run_id")
+	if existing != "" && existing != runID {
+		return job, false, nil
+	}
+	metadata["workflow_run_id"] = runID
+	out, err := json.Marshal(metadata)
+	if err != nil {
+		return store.Job{}, false, err
+	}
+	job.Metadata = out
+	job.UpdatedAt = updatedAt
+	s.jobs[jobID] = job
+	return job, true, nil
+}
+
 func withDefaultJobRepositoryMetadata(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
 		return validJobMetadata()
@@ -2040,6 +2129,29 @@ func (s *fakeAppTokenSource) InstallationTokenWithPermissions(_ context.Context,
 	s.installationID = installationID
 	s.repositoryIDs = append([]int64(nil), repositoryIDs...)
 	s.permissions = &permissions
+	if strings.TrimSpace(s.token.Token) != "" {
+		return s.token, nil
+	}
+	return appauth.InstallationToken{Token: "token", ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+type concurrentReadTokenSource struct {
+	mu        sync.Mutex
+	token     appauth.InstallationToken
+	mintCount int
+}
+
+func (s *concurrentReadTokenSource) InstallationToken(context.Context, int64) (appauth.InstallationToken, error) {
+	if strings.TrimSpace(s.token.Token) != "" {
+		return s.token, nil
+	}
+	return appauth.InstallationToken{Token: "token"}, nil
+}
+
+func (s *concurrentReadTokenSource) InstallationTokenWithPermissions(context.Context, int64, []int64, gh.InstallationPermissions) (appauth.InstallationToken, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mintCount++
 	if strings.TrimSpace(s.token.Token) != "" {
 		return s.token, nil
 	}

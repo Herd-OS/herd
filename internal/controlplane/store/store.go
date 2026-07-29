@@ -35,6 +35,7 @@ type Store interface {
 	MarkRunnerBootstrapTokenUsed(ctx context.Context, tokenID int64, usedAt time.Time) error
 	CreateJob(ctx context.Context, j Job) error
 	GetJob(ctx context.Context, jobID string) (Job, error)
+	BindJobWorkflowRunID(ctx context.Context, jobID string, runID string, updatedAt time.Time) (Job, bool, error)
 	RecordJobResult(ctx context.Context, r JobResult) (created bool, err error)
 	AcquireIdempotencyKey(ctx context.Context, key IdempotencyKey) (created bool, err error)
 	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)

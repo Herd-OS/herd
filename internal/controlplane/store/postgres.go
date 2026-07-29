@@ -357,6 +357,32 @@ func (s *PostgresStore) UpdateJobStatus(ctx context.Context, jobID string, statu
 	return requireAffected(result)
 }
 
+func (s *PostgresStore) BindJobWorkflowRunID(ctx context.Context, jobID string, runID string, updatedAt time.Time) (Job, bool, error) {
+	var job Job
+	var metadata []byte
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE jobs
+		SET metadata = jsonb_set(metadata, '{workflow_run_id}', to_jsonb($2::text), true),
+		    updated_at = $3
+		WHERE job_id = $1
+		  AND COALESCE(metadata->>'workflow_run_id', '') IN ('', $2)
+		RETURNING id, job_id, repository_id, installation_id, pr_number, head_sha, base_sha, status, worker_branch, metadata, created_at, updated_at`,
+		jobID, runID, timeOrNow(updatedAt)).Scan(
+		&job.ID, &job.JobID, &job.RepositoryID, &job.InstallationID, &job.PRNumber, &job.HeadSHA, &job.BaseSHA, &job.Status, &job.WorkerBranch, &metadata, &job.CreatedAt, &job.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		existing, getErr := s.GetJob(ctx, jobID)
+		if getErr != nil {
+			return Job{}, false, getErr
+		}
+		return existing, false, nil
+	}
+	if err != nil {
+		return Job{}, false, err
+	}
+	job.Metadata = json.RawMessage(metadata)
+	return job, true, nil
+}
+
 func (s *PostgresStore) AcquireIdempotencyKey(ctx context.Context, key IdempotencyKey) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO idempotency_keys (key, scope, status, result_ref, expires_at, metadata, created_at, completed_at)

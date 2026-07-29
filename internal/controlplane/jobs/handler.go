@@ -51,6 +51,10 @@ type JobStatusUpdater interface {
 	UpdateJobStatus(ctx context.Context, jobID string, status string, metadata json.RawMessage, updatedAt time.Time) error
 }
 
+type WorkflowRunBinder interface {
+	BindJobWorkflowRunID(ctx context.Context, jobID string, runID string, updatedAt time.Time) (store.Job, bool, error)
+}
+
 type ReadTokenSource interface {
 	InstallationTokenWithPermissions(ctx context.Context, installationID int64, repositoryIDs []int64, permissions gh.InstallationPermissions) (appauth.InstallationToken, error)
 }
@@ -506,25 +510,22 @@ func (h Handler) bindReadTokenRunID(ctx context.Context, job store.Job, runID st
 	if runID == "" {
 		return store.Job{}, ExpectedOIDCIdentity{}, fmt.Errorf("OIDC run ID is required")
 	}
-	metadata := metadataMap(job.Metadata)
-	metadata["workflow_run_id"] = runID
-	updated, err := json.Marshal(metadata)
-	if err != nil {
-		return store.Job{}, ExpectedOIDCIdentity{}, fmt.Errorf("bind job OIDC run ID metadata: %w", err)
-	}
-	updater, ok := h.store.(JobStatusUpdater)
+	binder, ok := h.store.(WorkflowRunBinder)
 	if !ok {
 		return store.Job{}, ExpectedOIDCIdentity{}, fmt.Errorf("job OIDC run ID binder is not configured")
 	}
-	if err := updater.UpdateJobStatus(ctx, job.JobID, job.Status, updated, h.now()); err != nil {
+	bound, ok, err := binder.BindJobWorkflowRunID(ctx, job.JobID, runID, h.now())
+	if err != nil {
 		return store.Job{}, ExpectedOIDCIdentity{}, fmt.Errorf("bind job OIDC run ID: %w", err)
 	}
-	job.Metadata = updated
-	expected, err := StrictExpectedIdentityFromJob(job)
+	if !ok {
+		return store.Job{}, ExpectedOIDCIdentity{}, fmt.Errorf("OIDC run ID conflicts with job workflow_run_id")
+	}
+	expected, err := StrictExpectedIdentityFromJob(bound)
 	if err != nil {
 		return store.Job{}, ExpectedOIDCIdentity{}, err
 	}
-	return job, expected, nil
+	return bound, expected, nil
 }
 
 func validateHostedReviewReadTokenJob(job store.Job) error {

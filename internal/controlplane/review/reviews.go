@@ -2,13 +2,10 @@ package review
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -277,6 +274,9 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		record, err := s.Mutations.GetIdempotencyKey(ctx, key)
 		if err != nil {
 			return fmt.Errorf("get review submission idempotency: %w", err)
+		}
+		if len(record.Metadata) > 0 && !sameReviewSubmissionRequest(record.Metadata, request) {
+			return fmt.Errorf("conflicting duplicate review submission for durable job/head %q", key)
 		}
 		if repaired, repairErr := s.repairCompletedReviewSubmission(ctx, key); repaired || repairErr != nil {
 			return repairErr
@@ -591,40 +591,23 @@ func reviewBody(result ReviewCompletedResult) string {
 }
 
 func reviewSubmissionKey(repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) string {
-	// Review submissions are GitHub-visible mutations. The durable job/head
-	// tuple identifies the callback boundary, while the canonical content hash
-	// keeps materially different review output from being replayed as an exact
-	// duplicate.
-	return fmt.Sprintf("review_submission:%d:%d:%s:%s:%s:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.Status, event, result.JobID, reviewSubmissionContentHash(result))
+	// Review submissions are GitHub-visible mutations. A durable job/PR/head can
+	// create at most one App-authored PR review; exact payload redeliveries
+	// replay this key, while materially different payloads conflict unless a
+	// future explicit supersede path records a new operation identity.
+	return fmt.Sprintf("review_submission:%d:%d:%s:%s:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.Status, event, result.JobID)
 }
 
-func reviewSubmissionContentHash(result ReviewCompletedResult) string {
-	findings := append([]Finding(nil), result.Findings...)
-	sort.Slice(findings, func(i, j int) bool {
-		left := findings[i]
-		right := findings[j]
-		for _, less := range []int{
-			strings.Compare(left.Fingerprint, right.Fingerprint),
-			strings.Compare(left.Severity, right.Severity),
-			strings.Compare(left.Description, right.Description),
-		} {
-			if less != 0 {
-				return less < 0
-			}
-		}
+func sameReviewSubmissionRequest(left, right json.RawMessage) bool {
+	var leftBody reviewSubmissionRequest
+	var rightBody reviewSubmissionRequest
+	if len(left) == 0 || len(right) == 0 {
 		return false
-	})
-	payload, _ := json.Marshal(struct {
-		Body     string    `json:"body"`
-		Summary  string    `json:"summary"`
-		Findings []Finding `json:"findings"`
-	}{
-		Body:     reviewBody(result),
-		Summary:  strings.TrimSpace(result.Summary),
-		Findings: findings,
-	})
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:])
+	}
+	if json.Unmarshal(left, &leftBody) != nil || json.Unmarshal(right, &rightBody) != nil {
+		return false
+	}
+	return leftBody == rightBody
 }
 
 func reviewSubmissionFailureCommentKey(repo Repository, result ReviewCompletedResult) string {

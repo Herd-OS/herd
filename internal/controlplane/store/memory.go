@@ -304,6 +304,34 @@ func (s *MemoryStore) UpdateJobStatus(_ context.Context, jobID string, status st
 	return nil
 }
 
+func (s *MemoryStore) BindJobWorkflowRunID(_ context.Context, jobID string, runID string, updatedAt time.Time) (Job, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return Job{}, false, ErrNotFound
+	}
+	metadata := map[string]any{}
+	if len(job.Metadata) > 0 {
+		if err := json.Unmarshal(job.Metadata, &metadata); err != nil {
+			return Job{}, false, err
+		}
+	}
+	existing, _ := metadata["workflow_run_id"].(string)
+	if existing != "" && existing != runID {
+		return job, false, nil
+	}
+	metadata["workflow_run_id"] = runID
+	out, err := json.Marshal(metadata)
+	if err != nil {
+		return Job{}, false, err
+	}
+	job.Metadata = metadataOrEmpty(out)
+	job.UpdatedAt = timeOrNow(updatedAt)
+	s.jobs[jobID] = job
+	return job, true, nil
+}
+
 func (s *MemoryStore) AcquireIdempotencyKey(_ context.Context, key IdempotencyKey) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

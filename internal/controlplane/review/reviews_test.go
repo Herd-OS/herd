@@ -191,7 +191,7 @@ func TestSubmitReviewResultRetryAfterStatusFailureDoesNotDuplicateReview(t *test
 	}
 }
 
-func TestSubmitPRReviewOnceChangedSummaryUsesDurableSubmissionIdentity(t *testing.T) {
+func TestSubmitPRReviewOnceChangedSummaryConflictsWithDurableSubmissionIdentity(t *testing.T) {
 	gh := &fakeReviewGitHub{}
 	mutations := newFakeReviewMutationStore()
 	svc := ReviewService{GitHub: gh, Mutations: mutations}
@@ -205,15 +205,15 @@ func TestSubmitPRReviewOnceChangedSummaryUsesDurableSubmissionIdentity(t *testin
 	duplicateErr := svc.submitPRReviewOnce(context.Background(), repo, second, platform.ReviewApprove)
 
 	require.NoError(t, firstErr)
-	require.NoError(t, secondErr)
-	require.NoError(t, duplicateErr)
-	require.Len(t, gh.reviews, 2)
+	require.Error(t, secondErr)
+	require.Error(t, duplicateErr)
+	assert.Contains(t, secondErr.Error(), "conflicting duplicate review submission")
+	require.Len(t, gh.reviews, 1)
 	assert.Equal(t, "summary", gh.reviews[0].body)
-	assert.Equal(t, "corrected summary", gh.reviews[1].body)
-	assert.NotEqual(t, reviewSubmissionKey(repo, first, platform.ReviewApprove), reviewSubmissionKey(repo, second, platform.ReviewApprove))
+	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewApprove), reviewSubmissionKey(repo, second, platform.ReviewApprove))
 }
 
-func TestReviewSubmissionKeyUsesCanonicalVisibleContentIdentity(t *testing.T) {
+func TestReviewSubmissionKeyUsesDurableJobHeadIdentity(t *testing.T) {
 	repo := testRepo(true)
 	first := reviewResult(ResultStatusChangesRequested, "head")
 	first.Findings = []Finding{{Fingerprint: "b", Severity: "high", Description: "second"}, {Fingerprint: "a", Severity: "medium", Description: "first"}}
@@ -225,11 +225,11 @@ func TestReviewSubmissionKeyUsesCanonicalVisibleContentIdentity(t *testing.T) {
 	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
 
 	second.Findings[0].Description = "updated first"
-	assert.NotEqual(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
+	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
 
 	second = first
 	second.Summary = "updated summary"
-	assert.NotEqual(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
+	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewRequestChanges), reviewSubmissionKey(repo, second, platform.ReviewRequestChanges))
 }
 
 func TestSubmitPRReviewOnceStartedRecordDoesNotCreateReview(t *testing.T) {
@@ -309,7 +309,6 @@ func TestSubmitPRReviewOnceRetryAfterMutationCompletionFailureRepairsStartedAtte
 	repo := testRepo(true)
 	result := reviewResult(ResultStatusApproved, "head")
 	redelivery := result
-	redelivery.Summary = "corrected summary"
 	key := reviewSubmissionKey(repo, result, platform.ReviewApprove)
 
 	firstErr := svc.submitPRReviewOnce(context.Background(), repo, result, platform.ReviewApprove)

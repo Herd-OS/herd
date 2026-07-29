@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/herd-os/herd/internal/controlplane/mutations"
@@ -67,6 +68,7 @@ type Reconciler struct {
 	Logger     *log.Logger
 	Now        func() time.Time
 	Config     Config
+	lastMu     sync.RWMutex
 	lastReport Report
 }
 
@@ -86,7 +88,9 @@ func (r *Reconciler) RunOnce(ctx context.Context) (Report, error) {
 	r.runMutationAttempts(ctx, cfg, now, &report, &errs)
 
 	report.CompletedAt = r.now()
+	r.lastMu.Lock()
 	r.lastReport = report
+	r.lastMu.Unlock()
 	return report, errors.Join(errs...)
 }
 
@@ -110,6 +114,8 @@ func (r *Reconciler) Run(ctx context.Context) error {
 }
 
 func (r *Reconciler) LastReport() Report {
+	r.lastMu.RLock()
+	defer r.lastMu.RUnlock()
 	return r.lastReport
 }
 
