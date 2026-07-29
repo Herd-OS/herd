@@ -402,7 +402,11 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 				return repo, false, idempotencyKey, commandRecord.Metadata, nil
 			}
 		}
-		if existing.Status == mutations.PhaseIntentRecorded || existing.Status == "failed" || strings.HasPrefix(existing.ResultRef, mutations.PhaseFailedPreCall+":") || mutations.IsPreCallRetryable(existing.Status) {
+		canConverge, convergeErr := h.acknowledgementMutationCanConverge(ctx, idempotencyKey)
+		if convergeErr != nil {
+			return store.Repository{}, false, "", nil, convergeErr
+		}
+		if existing.Status != "completed" && (existing.Status == mutations.PhaseIntentRecorded || strings.HasPrefix(existing.ResultRef, mutations.PhaseFailedPreCall+":") || mutations.IsPreCallRetryable(existing.Status) || canConverge) {
 			return h.addAcknowledgement(ctx, repo, event, commandKey, ackBody, idempotencyKey, record.Metadata, dispatchable)
 		}
 		if existing.Status != "completed" {
@@ -433,6 +437,17 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 		return store.Repository{}, false, "", nil, fmt.Errorf("record command: %w", err)
 	}
 	return h.addAcknowledgement(ctx, repo, event, commandKey, ackBody, idempotencyKey, record.Metadata, dispatchable)
+}
+
+func (h Handler) acknowledgementMutationCanConverge(ctx context.Context, idempotencyKey string) (bool, error) {
+	attempt, err := h.Store.GetGitHubMutationAttempt(ctx, idempotencyKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get acknowledgement mutation attempt: %w", err)
+	}
+	return mutations.IsCompleted(attempt.Status) || mutations.IsPostCallUnknown(attempt.Status) || mutations.IsPreCallRetryable(attempt.Status), nil
 }
 
 func (h Handler) addAcknowledgement(ctx context.Context, repo store.Repository, event IssueComment, commandKey, ackBody, idempotencyKey string, metadata json.RawMessage, dispatchable bool) (store.Repository, bool, string, json.RawMessage, error) {
