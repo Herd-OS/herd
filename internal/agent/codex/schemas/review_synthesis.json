@@ -21,7 +21,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["description", "cycles", "affected_files"],
+        "required": ["description", "cycles", "affected_files", "evidence_references"],
         "properties": {
           "description": {
             "type": "string"
@@ -36,6 +36,23 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "evidence_references": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string"}
+          },
+          "source_excerpts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["reference", "excerpt"],
+              "properties": {
+                "reference": {"type": "string"},
+                "excerpt": {"type": "string"}
+              }
             }
           }
         }
@@ -69,7 +86,8 @@
         "preserved_safety_property",
         "corrected_invariant",
         "linearization_boundaries",
-        "durability_boundaries"
+        "durability_boundaries",
+        "evidence_references"
       ],
       "properties": {
         "constraint_kind": {
@@ -104,6 +122,23 @@
           "minItems": 1,
           "items": {
             "type": "string"
+          }
+        },
+        "evidence_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"}
+        },
+        "source_excerpts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["reference", "excerpt"],
+            "properties": {
+              "reference": {"type": "string"},
+              "excerpt": {"type": "string"}
+            }
           }
         }
       }

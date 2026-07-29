@@ -679,7 +679,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				cancel()
 				if synthesisErr != nil {
 					fmt.Printf("Review non-convergence synthesis fallback: %v\n", synthesisErr)
-				} else if decision, reason := evaluateReviewSynthesis(synthesisResult, synthesisInput, cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence, analysis); decision != reviewSynthesisDecisionEscalate {
+				} else if decision, reason := evaluateReviewSynthesis(synthesisResult, cfg.Integrator.ReviewNonConvergence.SynthesisMinConfidence, analysis); decision != reviewSynthesisDecisionEscalate {
 					fmt.Printf("Review non-convergence synthesis fallback: %s\n", reason)
 				} else {
 					fmt.Printf("Review non-convergence synthesis decision: route=high-volume decision=escalate confidence=%.2f\n", synthesisResult.Confidence)
@@ -816,6 +816,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 				fmt.Println("Review non-convergence synthesis invocation: route=low-volume")
 				synthesisCtx, cancel := context.WithTimeout(ctx, reviewSynthesisTimeout)
 				synthesisInput := buildReviewSynthesisInput(pr, ms, currentHeadSHA, prComments, history, allIssues, workerNoOpVerdicts, reviewOpts.CurrentPRMetadata)
+				synthesisInput = lowVolumeReviewSynthesisInput(synthesisInput, oscillation)
 				synthesisResult, synthesisErr := ag.SynthesizeReviewNonConvergence(synthesisCtx, synthesisInput, agent.ReviewSynthesisOptions{
 					RepoRoot: params.RepoRoot, SystemPrompt: reviewOpts.SystemPrompt,
 				})
@@ -828,6 +829,8 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 						confidence = synthesisResult.Confidence
 					}
 					fmt.Printf("Review non-convergence synthesis decision: route=low-volume decision=%s confidence=%.2f reason=%s\n", decision, confidence, reason)
+				} else if approved, reason := verifyLowVolumeReviewSynthesis(ctx, ag, synthesisInput, synthesisResult, params.RepoRoot); !approved {
+					fmt.Printf("Review non-convergence verification decision: route=low-volume decision=fallback reason=%s\n", reason)
 				} else {
 					fingerprint := synthesizedReviewStrategyFingerprint(synthesisResult)
 					fmt.Printf("Review non-convergence synthesis decision: route=low-volume decision=escalate confidence=%.2f\n", synthesisResult.Confidence)

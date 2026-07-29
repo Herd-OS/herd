@@ -611,33 +611,33 @@ The route requires synthesis to be enabled and at least
 Its evidence must span at least three completed fix cycles, and every review in
 the evidence chain, including the latest review, must name a distinct head SHA.
 This proves that a fix completed between reviews instead of treating repeated
-comments on one unchanged head as oscillation. HerdOS then looks for a concrete
-recurring subsystem together with recurring architectural evidence about an
-invariant, lifecycle/state machine, ownership or publication boundary,
-consistency/linearization, durability/recovery, or synchronization. This can
-identify alternating fixes that restore one behavior while breaking another,
-or symptoms that move between endpoints while the underlying state transition
-remains unresolved.
+comments on one unchanged head as oscillation. The deterministic candidate
+gate then requires real actionable findings, after path and coverage metadata
+are removed, to recur in one normalized subsystem across the required
+completed cycles and the latest review. This gate deliberately does not infer
+shared behavior or root cause from words or package location.
 
-The evidence input is restricted to actionable findings. Broad directory
-coincidence, package matching alone, unrelated findings merely located in the
-same package, generic root-cause words, synthetic aggregation or coverage
-labels, and empty, no-issue, or generated-summary evidence are rejected. Chunk
-labels, coverage headings, `none`, bare fractions such as `1/9`,
-files-reviewed/source metadata, and other review metadata cannot establish a
-subsystem or architectural recurrence.
+Requirements and findings receive deterministic evidence IDs such as
+`issue:1121:criterion:0` and `cycle:4:finding:1`. Synthesis symptoms and
+requirement reinterpretations must cite these IDs. HerdOS validates every ID,
+eligible cycle, and optional exact excerpt against the bounded current-batch
+input. Requirements and findings have highest prompt-budget priority; concise
+fix outcomes follow, and repeated fix bodies are omitted.
 
-Low-volume escalation is synthesis-required. The result must be accepted after
-confidence, coherence, recurring-symptom, three-cycle span, subsystem and
-architectural alignment, acceptance-criteria, safety, and fingerprint checks.
-There is no deterministic strategy fallback: disabled synthesis, an agent
-error or timeout, invalid or unsafe output, low confidence, incoherence,
-rejection, or a non-escalation decision returns to ordinary endpoint review
-fixes. Accepted low-volume issues use
+Low-volume escalation is synthesis-required. After strict schema and
+provenance validation, HerdOS makes a fresh bounded no-tools call through the
+configured agent provider. This independent verifier decides whether the cited
+findings share one architectural behavior/root cause, whether the strategy and
+criteria address it, and whether any requirement reinterpretation preserves
+and entails the cited user-visible safety property. Only an explicit,
+high-confidence approval can create a strategy issue. There is no deterministic
+strategy fallback: disabled synthesis, either agent call timing out or failing,
+malformed or nil output, invalid provenance, rejection, ambiguity, or low
+confidence returns to ordinary endpoint review fixes. Accepted issues use
 `Review strategy fix: <architectural root cause>`.
 
 Synthesis may include requirement reinterpretation only as an agent-proposed,
-strictly validated exception when literal implementation wording is genuinely
+independently verified exception when literal implementation wording is genuinely
 over-constrained, internally conflicting, or unrealizable under the platform's
 consistency model. It must identify the conflicting requirement and platform
 consistency constraint, preserve a concrete user-visible safety property,
@@ -645,7 +645,7 @@ define a materially different corrected invariant, specify explicit
 linearization and durability boundaries, and add regression criteria covering
 both the corrected invariant and preserved safety property. This mechanism
 cannot weaken correctness, relax a merely difficult requirement, or
-reinterpret requirements deterministically; failure of any validation returns
+reinterpret requirements through lexical matching; failure of any validation returns
 the low-volume review to ordinary endpoint fixes.
 
 When eligibility fails, HerdOS posts or renders the normal HerdOS Agent Review

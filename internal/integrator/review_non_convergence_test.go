@@ -903,7 +903,7 @@ func TestEvaluateReviewSynthesisSafetyGates(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, reason := evaluateReviewSynthesis(tt.result(), agent.ReviewSynthesisInput{}, 0.75, func() reviewConvergenceAnalysis {
+			got, reason := evaluateReviewSynthesis(tt.result(), 0.75, func() reviewConvergenceAnalysis {
 				if tt.name == "missing cycles and attempts" || tt.name == "noisy symptoms do not contribute cycles" {
 					return reviewConvergenceAnalysis{CompletedFixIssues: []int{951}}
 				}
@@ -914,7 +914,7 @@ func TestEvaluateReviewSynthesisSafetyGates(t *testing.T) {
 		})
 	}
 
-	got, reason := evaluateReviewSynthesis(base, agent.ReviewSynthesisInput{}, 0.75, reviewConvergenceAnalysis{CompletedFixIssues: []int{951}})
+	got, reason := evaluateReviewSynthesis(base, 0.75, reviewConvergenceAnalysis{CompletedFixIssues: []int{951}})
 	assert.Equal(t, reviewSynthesisDecisionEscalate, got)
 	assert.Contains(t, reason, "passed")
 }
@@ -1135,7 +1135,7 @@ func TestBuildSynthesizedStrategyFixIssueBodySanitizesMixedRecurringSymptoms(t *
 			AffectedFiles: []string{"internal/controlplane/dispatch/retry.go"},
 		},
 	}
-	decision, reason := evaluateReviewSynthesis(result, agent.ReviewSynthesisInput{}, 0.75, reviewConvergenceAnalysis{CompletedFixIssues: []int{951, 952}})
+	decision, reason := evaluateReviewSynthesis(result, 0.75, reviewConvergenceAnalysis{CompletedFixIssues: []int{951, 952}})
 	require.Equal(t, reviewSynthesisDecisionFallback, decision)
 	assert.Contains(t, reason, "1 sanitized recurring symptom")
 }
@@ -1172,7 +1172,7 @@ func TestBuildSynthesizedStrategyFixIssueBodyAllowsTwoCleanSanitizedSymptoms(t *
 		AffectedFiles: []string{"internal/controlplane/dispatch/fallback.go", "Chunk 1/9", "Diff Coverage"},
 	}
 
-	decision, reason := evaluateReviewSynthesis(result, agent.ReviewSynthesisInput{}, 0.75, reviewConvergenceAnalysis{CompletedFixIssues: []int{951, 952}})
+	decision, reason := evaluateReviewSynthesis(result, 0.75, reviewConvergenceAnalysis{CompletedFixIssues: []int{951, 952}})
 	require.Equal(t, reviewSynthesisDecisionEscalate, decision)
 	assert.Contains(t, reason, "passed")
 

@@ -66,13 +66,13 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 			}
 			return c
 		}, minCycles: 3, enabled: true},
-		{name: "unrelated concept", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+		{name: "unrelated concept remains a conservative candidate", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			c[3].FindingsBySeverity["MEDIUM"] = []string{
 				"internal/integrator/review.go: spelling is inconsistent",
 				"internal/integrator/review.go: comment needs punctuation",
 			}
 			return c
-		}, minCycles: 3, enabled: true},
+		}, minCycles: 3, enabled: true, want: true},
 		{name: "broad directory", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			for i := range c {
 				c[i].FindingsBySeverity["MEDIUM"] = []string{"docs/guide.md: state machine invariant is violated", "docs/readme.md: lifecycle transition is invalid"}
@@ -83,7 +83,7 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 			c[3].FindingsBySeverity["MEDIUM"] = []string{"Files reviewed: 3", "No issue found"}
 			return c
 		}, minCycles: 3, enabled: true},
-		{name: "generic architectural tokens only", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+		{name: "generic architectural tokens remain a conservative candidate", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			for i := range c {
 				c[i].FindingsBySeverity["MEDIUM"] = []string{
 					"internal/integrator/review.go: durable repair race lock atomic",
@@ -91,31 +91,8 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 				}
 			}
 			return c
-		}, minCycles: 3, enabled: true},
-		{name: "generic architectural tokens plus filler verbs", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
-			for i := range c {
-				c[i].FindingsBySeverity["MEDIUM"] = []string{
-					"internal/integrator/review.go: durable repair race lock atomic behavior fails",
-					"internal/integrator/review_non_convergence.go: durable repair race lock atomic thing continues",
-				}
-			}
-			return c
-		}, minCycles: 3, enabled: true},
-		{name: "unrelated same subsystem findings with identical families", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
-			values := []string{
-				"internal/integrator/review.go: durable recovery race synchronization loses the lease token",
-				"internal/integrator/review.go: durable recovery race synchronization duplicates the audit row",
-				"internal/integrator/review.go: durable recovery race synchronization bypasses the cache generation",
-				"internal/integrator/review.go: durable recovery race synchronization ignores the webhook receipt",
-			}
-			for i := range c {
-				c[i].FindingsBySeverity["MEDIUM"] = []string{values[i]}
-			}
-			c[len(c)-1].FindingsBySeverity["MEDIUM"] = append(c[len(c)-1].FindingsBySeverity["MEDIUM"],
-				"internal/integrator/review_non_convergence.go: durable recovery race synchronization rejects the unrelated queue item")
-			return c
-		}, minCycles: 3, enabled: true},
-		{name: "unrelated findings in one package", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+		}, minCycles: 3, enabled: true, want: true},
+		{name: "unrelated findings in one package remain a conservative candidate", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			values := [][]string{
 				{"internal/integrator/review.go: lifecycle transition publishes before ownership is stored"},
 				{"internal/integrator/review.go: lifecycle transition loses durable recovery metadata"},
@@ -129,8 +106,8 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 				c[i].FindingsBySeverity["MEDIUM"] = values[i]
 			}
 			return c
-		}, minCycles: 3, enabled: true},
-		{name: "alternating unrelated behaviors in one package", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+		}, minCycles: 3, enabled: true, want: true},
+		{name: "alternating unrelated behaviors in one package remain a conservative candidate", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			values := [][]string{
 				{"internal/integrator/review.go: ownership boundary publishes an external side effect before authority is recorded"},
 				{"internal/integrator/review.go: lifecycle transition races synchronization during cleanup"},
@@ -144,8 +121,8 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 				c[i].FindingsBySeverity["MEDIUM"] = values[i]
 			}
 			return c
-		}, minCycles: 3, enabled: true},
-		{name: "subsystem and architecture split across findings", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+		}, minCycles: 3, enabled: true, want: true},
+		{name: "subsystem and architecture split across findings remains a conservative candidate", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			for i := range c {
 				c[i].FindingsBySeverity["MEDIUM"] = []string{
 					"internal/integrator/review.go: parser drops the requested label",
@@ -153,7 +130,7 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 				}
 			}
 			return c
-		}, minCycles: 3, enabled: true},
+		}, minCycles: 3, enabled: true, want: true},
 	}
 
 	for _, test := range tests {
@@ -164,7 +141,6 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 			assert.NotEmpty(t, got.Rationale)
 			if test.want {
 				assert.Equal(t, []string{"internal/integrator"}, got.RecurringSubsystems)
-				assert.Contains(t, got.RecurringArchitecturalTerms, "lifecycle-state")
 				assert.True(t, got.DistinctHeadSHAsConfirmed)
 				assert.True(t, got.CompletedFixChainConfirmed)
 				assert.Len(t, got.EvidenceCycles, 3)
@@ -187,7 +163,7 @@ func TestAnalyzeLowVolumeReviewOscillation_AlternatingBehavioralClusters(t *test
 
 			require.True(t, eligibility.Eligible)
 			assert.Equal(t, []string{"internal/integrator"}, eligibility.RecurringSubsystems)
-			assert.Subset(t, eligibility.RecurringArchitecturalTerms, []string{"durability-recovery", "ownership-boundary", "side-effect-publication"})
+			assert.Empty(t, eligibility.RecurringArchitecturalTerms)
 			assert.Equal(t, []int{1, 2, 3}, reviewHistoryCycleNumbers(eligibility.EvidenceCycles))
 			assert.True(t, eligibility.DistinctHeadSHAsConfirmed)
 			assert.True(t, eligibility.CompletedFixChainConfirmed)
@@ -235,7 +211,7 @@ func TestEvaluateLowVolumeReviewSynthesis(t *testing.T) {
 			for i := range r.RecurringSymptoms {
 				r.RecurringSymptoms[i].AffectedFiles = []string{"internal/worker/run.go"}
 			}
-		}, want: reviewSynthesisDecisionFallback},
+		}, want: reviewSynthesisDecisionEscalate},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -248,15 +224,76 @@ func TestEvaluateLowVolumeReviewSynthesis(t *testing.T) {
 	}
 }
 
+func TestValidateLowVolumeSynthesisProvenance(t *testing.T) {
+	eligibility := analyzeLowVolumeReviewOscillation(lowVolumeOscillationCycles(), 3, true)
+	require.True(t, eligibility.Eligible)
+	tests := []struct {
+		name   string
+		mutate func(*agent.ReviewSynthesisResult, *agent.ReviewSynthesisInput)
+	}{
+		{
+			name: "missing reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences = nil
+			},
+		},
+		{
+			name: "foreign reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "issue:999:task"
+			},
+		},
+		{
+			name: "stale cycle reference",
+			mutate: func(result *agent.ReviewSynthesisResult, input *agent.ReviewSynthesisInput) {
+				input.EvidenceSources = append(input.EvidenceSources, agent.ReviewEvidenceSource{
+					ID: "cycle:99:finding:0", Kind: "review_finding", Cycle: 99, Excerpt: "stale finding",
+				})
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "cycle:99:finding:0"
+				result.RecurringSymptoms[0].Cycles = append(result.RecurringSymptoms[0].Cycles, 99)
+			},
+		},
+		{
+			name: "duplicate reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences = append(
+					result.RecurringSymptoms[0].EvidenceReferences,
+					result.RecurringSymptoms[0].EvidenceReferences[0],
+				)
+			},
+		},
+		{
+			name: "inexact excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "cycle:1:finding:0", Excerpt: "generated prose not in source",
+				}}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := lowVolumeSynthesisResult()
+			input := validReviewSynthesisInput()
+			test.mutate(result, &input)
+
+			ok, reason := validateLowVolumeSynthesisProvenance(result, input, eligibility)
+
+			assert.False(t, ok)
+			assert.NotEmpty(t, reason)
+		})
+	}
+}
+
 func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 	valid := lowVolumeSynthesisResult()
 	valid.RequirementReinterpretation = validReviewReinterpretation()
-	ok, reason := validateReviewRequirementReinterpretation(valid, validReviewSynthesisInput())
+	ok, reason := validateReviewRequirementReinterpretation(valid)
 	assert.True(t, ok)
 	assert.Empty(t, reason)
 
 	t.Run("omitted", func(t *testing.T) {
-		ok, reason := validateReviewRequirementReinterpretation(lowVolumeSynthesisResult(), agent.ReviewSynthesisInput{})
+		ok, reason := validateReviewRequirementReinterpretation(lowVolumeSynthesisResult())
 		assert.True(t, ok)
 		assert.Empty(t, reason)
 	})
@@ -269,7 +306,7 @@ func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 			result := lowVolumeSynthesisResult()
 			result.RequirementReinterpretation = validReviewReinterpretation()
 			result.RequirementReinterpretation.ConstraintKind = kind
-			ok, reason := validateReviewRequirementReinterpretation(result, validReviewSynthesisInput())
+			ok, reason := validateReviewRequirementReinterpretation(result)
 			assert.True(t, ok)
 			assert.Empty(t, reason)
 		})
@@ -285,62 +322,14 @@ func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 		{name: "blank scalar", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
 			v.CorrectedInvariant = ""
 		}},
-		{name: "equivalent invariant", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.CorrectedInvariant = v.ConflictingRequirement
-		}},
 		{name: "missing linearization", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
 			v.LinearizationBoundaries = nil
 		}},
 		{name: "missing durability", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
 			v.DurabilityBoundaries = nil
 		}},
-		{name: "generic safety", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.PreservedSafetyProperty = "good behavior"
-		}},
-		{name: "criteria omit safety", mutate: func(_ *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			r.AcceptanceCriteria = []string{"The intent visibility invariant is tested.", "Recovery is tested."}
-		}},
-		{name: "fabricated conflicting requirement", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.ConflictingRequirement = "atomically rotate unrelated encryption credentials"
-		}},
-		{name: "unsupported platform constraint", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.PlatformConsistencyConstraint = "the remote ledger only supports eventual settlement"
-		}},
-		{name: "generic pseudo safety", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.PreservedSafetyProperty = "user data remains consistent and durable"
-		}},
-		{name: "self consistent generated criteria without original safety", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			v.PreservedSafetyProperty = "unauthorized audit deletion is prevented"
-			v.CorrectedInvariant = "the corrected workflow prevents unauthorized audit deletion"
-			r.AcceptanceCriteria = []string{
-				"The corrected workflow prevents unauthorized audit deletion.",
-				"Unauthorized audit deletion is prevented and tested.",
-			}
-		}},
-		{name: "negated preserved property repeated throughout", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			v.PreservedSafetyProperty = "exclusive ownership is not guaranteed"
-			v.CorrectedInvariant = "intent visibility precedes publication but exclusive ownership is not guaranteed"
-			r.AcceptanceCriteria = []string{"Intent visibility is tested and exclusive ownership is not guaranteed."}
-		}},
-		{name: "exception qualified property", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			v.PreservedSafetyProperty = "exclusive ownership remains user-visible except when recovery runs"
-			v.CorrectedInvariant = "exclusive ownership remains user-visible except when recovery runs"
-			r.AcceptanceCriteria = []string{"Exclusive ownership remains user-visible except when recovery runs."}
-		}},
-		{name: "weakened modal property", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			v.PreservedSafetyProperty = "exclusive ownership may not remain user-visible"
-			v.CorrectedInvariant = "exclusive ownership may not remain user-visible after publication"
-			r.AcceptanceCriteria = []string{"Exclusive ownership may not remain user-visible after publication."}
-		}},
-		{name: "corrected invariant weakens property", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			v.CorrectedInvariant = "intent visibility precedes publication but exclusive ownership is not guaranteed"
-			r.AcceptanceCriteria = []string{"The corrected invariant is tested and exclusive ownership remains user-visible."}
-		}},
-		{name: "criteria assert safety violation", mutate: func(_ *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			r.AcceptanceCriteria = []string{
-				"Intent visibility precedes publication.",
-				"Exclusive ownership is not guaranteed and this behavior is tested.",
-			}
+		{name: "missing evidence references", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
+			v.EvidenceReferences = nil
 		}},
 	}
 	for _, test := range tests {
@@ -348,7 +337,7 @@ func TestValidateReviewRequirementReinterpretation(t *testing.T) {
 			result := lowVolumeSynthesisResult()
 			result.RequirementReinterpretation = validReviewReinterpretation()
 			test.mutate(result.RequirementReinterpretation, result)
-			ok, reason := validateReviewRequirementReinterpretation(result, validReviewSynthesisInput())
+			ok, reason := validateReviewRequirementReinterpretation(result)
 			assert.False(t, ok)
 			assert.NotEmpty(t, reason)
 		})
@@ -366,8 +355,6 @@ func TestValidateReviewRequirementReinterpretation_AcceptsTraceableSafetyVocabul
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			input := validReviewSynthesisInput()
-			input.OriginalRequirements[0].AcceptanceCriteria = []string{test.property}
 			result := lowVolumeSynthesisResult()
 			result.RequirementReinterpretation = validReviewReinterpretation()
 			result.RequirementReinterpretation.PreservedSafetyProperty = test.property
@@ -377,43 +364,10 @@ func TestValidateReviewRequirementReinterpretation_AcceptsTraceableSafetyVocabul
 				"Recovery tests verify that " + test.property + ".",
 			}
 
-			ok, reason := validateReviewRequirementReinterpretation(result, input)
+			ok, reason := validateReviewRequirementReinterpretation(result)
 
 			assert.True(t, ok, reason)
 			assert.Empty(t, reason)
-		})
-	}
-}
-
-func TestValidateReviewRequirementReinterpretation_RejectsSemanticSafetyInversions(t *testing.T) {
-	tests := []struct {
-		name      string
-		source    string
-		inversion string
-	}{
-		{name: "revoked grant remains usable", source: "revoked grants cannot be used", inversion: "revoked grants remain usable"},
-		{name: "duplicate ownership allowed", source: "duplicate ownership is rejected", inversion: "duplicate ownership is allowed"},
-		{name: "stale authorization accepted", source: "stale authorization is rejected before access", inversion: "stale authorization is accepted before access"},
-		{name: "deleted record may reappear", source: "deleted records never reappear after recovery", inversion: "deleted records may reappear after recovery"},
-		{name: "contradiction repeats source vocabulary", source: "revoked grants cannot be used", inversion: "revoked grants remain usable although revoked grants cannot be used"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := validReviewSynthesisInput()
-			input.OriginalRequirements[0].AcceptanceCriteria = []string{test.source}
-			result := lowVolumeSynthesisResult()
-			result.RequirementReinterpretation = validReviewReinterpretation()
-			result.RequirementReinterpretation.PreservedSafetyProperty = test.inversion
-			result.RequirementReinterpretation.CorrectedInvariant = "the corrected transition guarantees that " + test.inversion
-			result.AcceptanceCriteria = []string{
-				"The corrected transition enforces that " + test.inversion + ".",
-				"Recovery tests repeat that " + test.inversion + ".",
-			}
-
-			ok, reason := validateReviewRequirementReinterpretation(result, input)
-
-			assert.False(t, ok)
-			assert.NotEmpty(t, reason)
 		})
 	}
 }
@@ -461,13 +415,12 @@ func TestBuildLowVolumeSynthesizedStrategyFixIssueTitle(t *testing.T) {
 }
 
 func lowVolumeOscillationCycles() []reviewHistoryCycle {
-	recurring := "internal/integrator/review.go: lifecycle transition publishes visibility before the ownership record is committed"
 	findings := [][]string{
-		{recurring},
-		{recurring},
-		{recurring},
+		{"internal/integrator/review.go: lifecycle state transition can publish before ownership is recorded"},
+		{"internal/integrator/review.go: state machine moves to done before publication becomes visible"},
+		{"internal/integrator/review_non_convergence.go: terminal state transition violates the publication invariant"},
 		{
-			recurring,
+			"internal/integrator/review.go: publication lifecycle transition loses the durable state invariant",
 			"internal/integrator/review_non_convergence.go: state machine visibility is inconsistent after handoff",
 		},
 	}
@@ -546,8 +499,8 @@ func lowVolumeSynthesisResult() *agent.ReviewSynthesisResult {
 		RootCauseSummary: "The lifecycle state transition publishes side effects before the ownership invariant is durable.",
 		ProposedStrategy: "Define one linearized lifecycle transition and durable recovery state.",
 		RecurringSymptoms: []agent.ReviewSynthesisSymptom{
-			{Description: "Publication precedes the durable state transition", Cycles: []int{1, 2, 3}, AffectedFiles: []string{"internal/integrator/review.go"}},
-			{Description: "Recovery sees an inconsistent lifecycle state", Cycles: []int{1, 2, 3}, AffectedFiles: []string{"internal/integrator/review_non_convergence.go"}},
+			{Description: "Publication precedes the durable state transition", Cycles: []int{1, 2, 3}, AffectedFiles: []string{"internal/integrator/review.go"}, EvidenceReferences: []string{"cycle:1:finding:0", "cycle:2:finding:0", "cycle:3:finding:0"}},
+			{Description: "Recovery sees an inconsistent lifecycle state", Cycles: []int{1, 2, 3}, AffectedFiles: []string{"internal/integrator/review_non_convergence.go"}, EvidenceReferences: []string{"cycle:1:finding:0", "cycle:2:finding:0", "cycle:3:finding:0"}},
 		},
 		AcceptanceCriteria: []string{
 			"The intent visibility corrected invariant is enforced and tested.",
@@ -565,15 +518,23 @@ func validReviewReinterpretation() *agent.ReviewRequirementReinterpretation {
 		CorrectedInvariant:            "intent visibility precedes external publication while exclusive ownership remains user-visible",
 		LinearizationBoundaries:       []string{"intent creation commit", "external visibility marker"},
 		DurabilityBoundaries:          []string{"intent record persisted", "recovery state completed"},
+		EvidenceReferences:            []string{"issue:1:criterion:0", "cycle:1:finding:0"},
 	}
 }
 
 func validReviewSynthesisInput() agent.ReviewSynthesisInput {
 	return agent.ReviewSynthesisInput{
+		EvidenceSources: []agent.ReviewEvidenceSource{
+			{ID: "issue:1:criterion:0", Kind: "requirement_criterion", Excerpt: "Exclusive ownership remains user-visible during intent publication."},
+			{ID: "cycle:1:finding:0", Kind: "review_finding", Cycle: 1, Excerpt: "publication finding"},
+			{ID: "cycle:2:finding:0", Kind: "review_finding", Cycle: 2, Excerpt: "recovery finding"},
+			{ID: "cycle:3:finding:0", Kind: "review_finding", Cycle: 3, Excerpt: "publication finding"},
+		},
 		OriginalRequirements: []agent.ReviewSynthesisRequirement{
 			{
-				Title: "Atomic intent publication",
-				Task:  "Atomically publish both independent records even though the platform stores cannot commit atomically.",
+				IssueNumber: 1,
+				Title:       "Atomic intent publication",
+				Task:        "Atomically publish both independent records even though the platform stores cannot commit atomically.",
 				AcceptanceCriteria: []string{
 					"Exclusive ownership remains user-visible during intent publication.",
 				},

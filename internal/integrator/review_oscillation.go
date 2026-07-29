@@ -1,6 +1,7 @@
 package integrator
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"sort"
@@ -19,6 +20,7 @@ type reviewOscillationEligibility struct {
 	CompletedCycleCount         int
 	LatestFindingCount          int
 	EvidenceCycles              []reviewHistoryCycle
+	LatestCycle                 int
 	RecurringSubsystems         []string
 	RecurringArchitecturalTerms []string
 	DistinctHeadSHAsConfirmed   bool
@@ -54,6 +56,7 @@ func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompleted
 	}
 
 	latest := cycles[len(cycles)-1]
+	out.LatestCycle = latest.Cycle
 	latestFindings := sanitizedDistinctReviewFindings(latest)
 	out.LatestFindingCount = len(latestFindings)
 	if out.LatestFindingCount < reviewOscillationMinLatestFindings {
@@ -91,89 +94,52 @@ func analyzeLowVolumeReviewOscillation(cycles []reviewHistoryCycle, minCompleted
 	}
 	out.DistinctHeadSHAsConfirmed = true
 
-	latestClusters := reviewFindingEvidenceClusters(latestFindings)
-	if len(latestClusters) == 0 {
-		return fail("latest review has no concrete package/subsystem or ownership boundary")
-	}
-
-	clusterCycles := map[string][]reviewHistoryCycle{}
-	for _, cycle := range completed {
-		for key := range reviewFindingEvidenceClusters(sanitizedDistinctReviewFindings(cycle)) {
-			if _, inLatest := latestClusters[key]; inLatest {
-				clusterCycles[key] = append(clusterCycles[key], cycle)
+	latestSubsystems := actionableReviewSubsystems(latestFindings)
+	for _, subsystem := range sortedStringSet(latestSubsystems) {
+		var evidence []reviewHistoryCycle
+		for _, cycle := range completed {
+			if _, recurs := actionableReviewSubsystems(sanitizedDistinctReviewFindings(cycle))[subsystem]; recurs {
+				evidence = append(evidence, cycle)
 			}
 		}
-	}
-
-	evidenceByCycle := map[int]reviewHistoryCycle{}
-	subsystemSet := map[string]struct{}{}
-	termSet := map[string]struct{}{}
-	for key, matching := range clusterCycles {
-		if len(matching) < reviewOscillationMinEvidenceCycles {
-			continue
-		}
-		cluster := latestClusters[key]
-		subsystemSet[cluster.subsystem] = struct{}{}
-		termSet[cluster.firstTerm] = struct{}{}
-		termSet[cluster.secondTerm] = struct{}{}
-		for _, cycle := range matching {
-			evidenceByCycle[cycle.Cycle] = cycle
+		if len(evidence) >= requiredCompleted {
+			out.RecurringSubsystems = append(out.RecurringSubsystems, subsystem)
+			out.EvidenceCycles = evidence
+			break
 		}
 	}
-	out.RecurringSubsystems = sortedStringSet(subsystemSet)
-	out.RecurringArchitecturalTerms = sortedStringSet(termSet)
 	if len(out.RecurringSubsystems) == 0 {
-		evidence, subsystem, terms, ok := reviewAlternatingBehavioralCluster(completed, latest)
-		if !ok {
-			return fail("no same-finding or alternating compatible architectural behavior cluster recurs in one subsystem across the latest review and three completed evidence cycles")
-		}
-		out.EvidenceCycles = evidence
-		out.RecurringSubsystems = []string{subsystem}
-		out.RecurringArchitecturalTerms = terms
-		out.Eligible = true
-		out.Rationale = "low-volume findings alternate between compatible architectural behaviors in one subsystem across distinct reviewed heads after a completed fix chain"
-		return out
-	}
-
-	for _, cycle := range completed {
-		if evidence, ok := evidenceByCycle[cycle.Cycle]; ok {
-			out.EvidenceCycles = append(out.EvidenceCycles, evidence)
-		}
+		return fail("no actionable finding recurs in one normalized subsystem across the required completed cycles and latest review")
 	}
 	out.Eligible = true
-	out.Rationale = "low-volume findings recur across distinct reviewed heads after a completed fix chain with matching subsystem and architectural evidence"
+	out.Rationale = "low-volume actionable findings recur in one normalized subsystem across distinct reviewed heads after a completed fix chain; semantic coherence is deferred to synthesis and independent verification"
 	return out
 }
 
 func evaluateLowVolumeReviewSynthesis(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput, minConfidence float64, eligibility reviewOscillationEligibility) (reviewSynthesisDecision, string) {
-	analysis := reviewConvergenceAnalysis{CompletedFixIssues: completedFixNumbers(eligibility.EvidenceCycles)}
-	if decision, reason := evaluateReviewSynthesis(result, input, minConfidence, analysis); decision != reviewSynthesisDecisionEscalate {
-		return decision, reason
-	}
 	if !eligibility.Eligible {
 		return reviewSynthesisDecisionFallback, "deterministic low-volume oscillation analysis was not eligible"
 	}
-	title := sanitizedReviewSynthesisRootCauseTitle(result.RootCauseTitle)
-	if !isMeaningfulLowVolumeRootCause(title, result) {
-		return reviewSynthesisDecisionFallback, "synthesis root cause is generic, package-only, or unrelated to the recurring architectural evidence"
+	if result == nil {
+		return reviewSynthesisDecisionFallback, "synthesis returned nil result"
 	}
-	if !synthesisSymptomsReferenceEvidenceCycles(result.RecurringSymptoms, eligibility.EvidenceCycles) {
-		return reviewSynthesisDecisionFallback, "synthesis symptoms contain invalid or duplicate cycle references, or do not span three evidence cycles"
+	if !result.ShouldEscalate {
+		return reviewSynthesisDecisionFallback, fallbackString(result.Reason, "synthesis chose not to escalate")
 	}
-	symptoms := sanitizedReviewSynthesisSymptoms(result.RecurringSymptoms)
-	if !synthesisSymptomsAlignWithSubsystems(symptoms, eligibility.RecurringSubsystems) {
-		return reviewSynthesisDecisionFallback, "synthesis affected files do not align with recurring subsystems"
+	if result.Confidence < minConfidence {
+		return reviewSynthesisDecisionFallback, fmt.Sprintf("synthesis confidence %.2f below threshold %.2f", result.Confidence, minConfidence)
 	}
-	if !synthesisRootCauseAlignsWithArchitecture(result, eligibility.RecurringArchitecturalTerms) {
-		return reviewSynthesisDecisionFallback, "synthesis root cause does not align with recurring architectural evidence"
+	if strings.TrimSpace(result.RootCauseTitle) == "" || len(sanitizedReviewSynthesisSymptoms(result.RecurringSymptoms)) == 0 ||
+		strings.TrimSpace(result.ProposedStrategy) == "" || len(trimBlankStrings(result.AcceptanceCriteria)) == 0 {
+		return reviewSynthesisDecisionFallback, "synthesis omitted required strategy fields"
 	}
-	if !meaningfulLowVolumeAcceptanceCriteria(result.AcceptanceCriteria) {
-		return reviewSynthesisDecisionFallback, "synthesis acceptance criteria are not meaningful"
+	if ok, reason := validateLowVolumeSynthesisProvenance(result, input, eligibility); !ok {
+		return reviewSynthesisDecisionFallback, reason
 	}
-	return reviewSynthesisDecisionEscalate, "low-volume synthesis passed deterministic alignment and safety gates"
+	return reviewSynthesisDecisionEscalate, "low-volume synthesis passed deterministic schema and provenance gates"
 }
 
-func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput) (bool, string) {
+func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResult) (bool, string) {
 	if result == nil || result.RequirementReinterpretation == nil {
 		return true, ""
 	}
@@ -197,65 +163,257 @@ func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResu
 			return false, "requirement reinterpretation has invalid " + scalar.name
 		}
 	}
-	if triviallyEquivalentReviewRequirement(value.ConflictingRequirement, value.CorrectedInvariant) {
-		return false, "corrected invariant is equivalent to the conflicting requirement"
-	}
 	if len(concreteReviewBoundaries(value.LinearizationBoundaries)) == 0 {
 		return false, "requirement reinterpretation has no concrete linearization boundary"
 	}
 	if len(concreteReviewBoundaries(value.DurabilityBoundaries)) == 0 {
 		return false, "requirement reinterpretation has no concrete durability boundary"
 	}
-	originalEvidence := reviewOriginalRequirementEvidence(input.OriginalRequirements)
-	acceptanceCriteriaEvidence := reviewOriginalAcceptanceCriteriaEvidence(input.OriginalRequirements)
-	if !isClearlyPreservedSafetyProperty(value.PreservedSafetyProperty, acceptanceCriteriaEvidence) {
-		return false, "requirement reinterpretation does not preserve a clear user-visible safety property traceable to the original requirements"
-	}
-	if !reviewTextAlignsWithEvidence(value.ConflictingRequirement, originalEvidence) {
-		return false, "conflicting requirement is not traceable to an original requirement"
-	}
-	if !reviewTextAlignsWithEvidence(value.PreservedSafetyProperty, originalEvidence) {
-		return false, "preserved safety property is not traceable to an original requirement"
-	}
-	if !reviewSafetyPropertyAlignsAffirmatively(value.PreservedSafetyProperty, acceptanceCriteriaEvidence) {
-		return false, "preserved safety property is not affirmatively aligned with an original user-visible safety property"
-	}
-	if !reviewTextAlignsWithEvidence(value.PlatformConsistencyConstraint, reviewPlatformConstraintEvidence(input)) {
-		return false, "platform consistency constraint is not supported by supplied specification or review history"
-	}
-	if !reviewSafetyTextEntails(value.PreservedSafetyProperty, value.CorrectedInvariant) {
-		return false, "corrected invariant does not affirmatively entail the preserved safety property"
-	}
-	criteria := strings.Join(trimBlankStrings(result.AcceptanceCriteria), " ")
-	if !reviewTextCoversRequirement(criteria, value.CorrectedInvariant) || !reviewTextCoversRequirement(criteria, value.PreservedSafetyProperty) {
-		return false, "acceptance criteria do not cover both the corrected invariant and preserved safety property"
-	}
-	if !reviewSafetyTextEntails(value.PreservedSafetyProperty, criteria) {
-		return false, "acceptance criteria do not affirmatively entail the preserved safety property"
+	if len(value.EvidenceReferences) == 0 {
+		return false, "requirement reinterpretation has no evidence references"
 	}
 	return true, ""
 }
 
-func synthesisSymptomsReferenceEvidenceCycles(symptoms []agent.ReviewSynthesisSymptom, evidence []reviewHistoryCycle) bool {
-	allowed := make(map[int]struct{}, len(evidence))
-	for _, cycle := range evidence {
-		allowed[cycle.Cycle] = struct{}{}
-	}
-	represented := map[int]struct{}{}
-	for _, symptom := range symptoms {
-		withinSymptom := map[int]struct{}{}
-		for _, cycle := range symptom.Cycles {
-			if _, ok := allowed[cycle]; !ok {
-				return false
+func actionableReviewSubsystems(findings []string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, finding := range findings {
+		description := finding
+		files := reviewFilePathsFromText(finding)
+		for _, file := range files {
+			description = strings.ReplaceAll(description, file, " ")
+		}
+		if isReviewFindingMetadataNoise(description) || isReviewFindingDismissalText(description) ||
+			len(strings.Fields(normalizeReviewSynthesisFingerprintText(description))) < 3 {
+			continue
+		}
+		for _, file := range files {
+			if subsystem := normalizeReviewPackagePath(file); isConcreteReviewPackageCluster(subsystem) {
+				out[subsystem] = struct{}{}
 			}
-			if _, duplicate := withinSymptom[cycle]; duplicate {
-				return false
-			}
-			withinSymptom[cycle] = struct{}{}
-			represented[cycle] = struct{}{}
 		}
 	}
-	return len(represented) >= reviewOscillationMinEvidenceCycles
+	return out
+}
+
+func validateLowVolumeSynthesisProvenance(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput, eligibility reviewOscillationEligibility) (bool, string) {
+	sources := make(map[string]agent.ReviewEvidenceSource, len(input.EvidenceSources))
+	for _, source := range input.EvidenceSources {
+		if strings.TrimSpace(source.ID) == "" {
+			return false, "input contains evidence without a stable reference"
+		}
+		if _, duplicate := sources[source.ID]; duplicate {
+			return false, "input contains duplicate evidence reference " + source.ID
+		}
+		sources[source.ID] = source
+	}
+	eligibleCycles := map[int]struct{}{}
+	for _, cycle := range eligibility.EvidenceCycles {
+		eligibleCycles[cycle.Cycle] = struct{}{}
+	}
+	eligibleCycles[eligibility.LatestCycle] = struct{}{}
+	check := func(reference string, excerpts []agent.ReviewSourceExcerpt) bool {
+		source, ok := sources[reference]
+		if !ok {
+			return false
+		}
+		if source.Kind == "truncation_marker" {
+			return false
+		}
+		if source.Cycle > 0 {
+			if _, eligible := eligibleCycles[source.Cycle]; !eligible {
+				return false
+			}
+		}
+		for _, excerpt := range excerpts {
+			if excerpt.Reference == reference && (strings.TrimSpace(excerpt.Excerpt) == "" || !strings.Contains(source.Excerpt, excerpt.Excerpt)) {
+				return false
+			}
+		}
+		return true
+	}
+	represented := map[int]struct{}{}
+	for _, symptom := range result.RecurringSymptoms {
+		if len(symptom.EvidenceReferences) == 0 {
+			return false, "synthesis symptom has no evidence references"
+		}
+		cyclesSeen := map[int]struct{}{}
+		for _, cycle := range symptom.Cycles {
+			if _, duplicate := cyclesSeen[cycle]; duplicate {
+				return false, "synthesis symptom contains a duplicate cycle reference"
+			}
+			cyclesSeen[cycle] = struct{}{}
+		}
+		seen := map[string]struct{}{}
+		for _, reference := range symptom.EvidenceReferences {
+			if _, duplicate := seen[reference]; duplicate {
+				return false, "synthesis symptom contains a duplicate evidence reference"
+			}
+			seen[reference] = struct{}{}
+			if !check(reference, symptom.SourceExcerpts) {
+				return false, "synthesis contains missing, foreign, stale, duplicate, or inexact evidence reference"
+			}
+			source := sources[reference]
+			if source.Cycle == 0 {
+				return false, "synthesis symptom references non-finding evidence"
+			}
+			if !containsInt(symptom.Cycles, source.Cycle) {
+				return false, "synthesis symptom cycle does not match its evidence reference"
+			}
+			represented[source.Cycle] = struct{}{}
+		}
+	}
+	if len(represented) < reviewOscillationMinEvidenceCycles {
+		return false, "synthesis evidence does not span three eligible cycles"
+	}
+	if value := result.RequirementReinterpretation; value != nil {
+		if ok, reason := validateReviewRequirementReinterpretation(result); !ok {
+			return false, reason
+		}
+		seen := map[string]struct{}{}
+		hasRequirement := false
+		for _, reference := range value.EvidenceReferences {
+			if _, duplicate := seen[reference]; duplicate {
+				return false, "requirement reinterpretation contains a duplicate evidence reference"
+			}
+			seen[reference] = struct{}{}
+			if !check(reference, value.SourceExcerpts) {
+				return false, "requirement reinterpretation contains missing, foreign, stale, duplicate, or inexact evidence reference"
+			}
+			if sources[reference].Cycle == 0 {
+				hasRequirement = true
+			}
+		}
+		if !hasRequirement {
+			return false, "requirement reinterpretation does not cite an original requirement"
+		}
+	}
+	return true, ""
+}
+
+func verifyLowVolumeReviewSynthesis(ctx context.Context, configured agent.Agent, input agent.ReviewSynthesisInput, result *agent.ReviewSynthesisResult, repoRoot string) (bool, string) {
+	verifier, ok := configured.(agent.ReviewVerifier)
+	if !ok {
+		return false, "configured agent provider does not support independent verification"
+	}
+	referenced := map[string]struct{}{}
+	for _, symptom := range result.RecurringSymptoms {
+		for _, reference := range symptom.EvidenceReferences {
+			referenced[reference] = struct{}{}
+		}
+	}
+	if result.RequirementReinterpretation != nil {
+		for _, reference := range result.RequirementReinterpretation.EvidenceReferences {
+			referenced[reference] = struct{}{}
+		}
+	}
+	var evidence []agent.ReviewEvidenceSource
+	for _, source := range input.EvidenceSources {
+		if _, cited := referenced[source.ID]; cited {
+			evidence = append(evidence, source)
+		}
+	}
+	verificationInput := agent.ReviewVerificationInput{
+		PRNumber: input.PRNumber, BatchNumber: input.BatchNumber, HeadSHA: input.HeadSHA,
+		EvidenceSources: evidence, Synthesis: *result,
+	}
+	verifyCtx, cancel := context.WithTimeout(ctx, reviewVerificationTimeout)
+	defer cancel()
+	verification, err := verifier.VerifyReviewNonConvergence(verifyCtx, verificationInput, agent.ReviewSynthesisOptions{RepoRoot: repoRoot})
+	if err != nil {
+		return false, err.Error()
+	}
+	if verification == nil {
+		return false, "verification returned nil result"
+	}
+	if !verification.Approved {
+		return false, fallbackString(verification.Reason, "verification rejected the synthesis")
+	}
+	if verification.Confidence < reviewVerificationMinConfidence {
+		return false, fmt.Sprintf("verification confidence %.2f below threshold %.2f", verification.Confidence, reviewVerificationMinConfidence)
+	}
+	if strings.TrimSpace(verification.Reason) == "" {
+		return false, "verification returned an empty reason"
+	}
+	return true, verification.Reason
+}
+
+func lowVolumeReviewSynthesisInput(input agent.ReviewSynthesisInput, eligibility reviewOscillationEligibility) agent.ReviewSynthesisInput {
+	allowed := map[int]struct{}{eligibility.LatestCycle: {}}
+	for _, cycle := range eligibility.EvidenceCycles {
+		allowed[cycle.Cycle] = struct{}{}
+	}
+	var cycles []agent.ReviewSynthesisCycle
+	var fixes []agent.ReviewSynthesisFixIssue
+	fixNumbers := map[int]struct{}{}
+	for _, cycle := range input.Cycles {
+		if _, ok := allowed[cycle.Cycle]; !ok {
+			continue
+		}
+		cycles = append(cycles, cycle)
+		for _, fix := range cycle.CompletedFixIssues {
+			if _, duplicate := fixNumbers[fix.Number]; !duplicate {
+				fixNumbers[fix.Number] = struct{}{}
+				fix.Body = ""
+				fixes = append(fixes, fix)
+			}
+		}
+	}
+	var sources []agent.ReviewEvidenceSource
+	for _, source := range input.EvidenceSources {
+		if source.Cycle == 0 {
+			sources = append(sources, source)
+			continue
+		}
+		if _, ok := allowed[source.Cycle]; ok {
+			sources = append(sources, source)
+		}
+	}
+	input.Cycles = cycles
+	input.CompletedFixIssues = fixes
+	input.EvidenceSources = boundedLowVolumeEvidenceSources(sources)
+	return input
+}
+
+func boundedLowVolumeEvidenceSources(sources []agent.ReviewEvidenceSource) []agent.ReviewEvidenceSource {
+	const requirementBudget = 16 * 1024
+	const findingBudget = 24 * 1024
+	requirements := make([]agent.ReviewEvidenceSource, 0, len(sources))
+	findings := make([]agent.ReviewEvidenceSource, 0, len(sources))
+	for _, source := range sources {
+		if source.Cycle == 0 {
+			requirements = append(requirements, source)
+		} else {
+			findings = append(findings, source)
+		}
+	}
+	appendWithinBudget := func(out []agent.ReviewEvidenceSource, values []agent.ReviewEvidenceSource, budget int, kind string) []agent.ReviewEvidenceSource {
+		used := 0
+		for index, source := range values {
+			cost := len(source.ID) + len(source.Kind) + len(source.Excerpt) + 64
+			if used+cost > budget {
+				out = append(out, agent.ReviewEvidenceSource{
+					ID: "truncation:" + kind, Kind: "truncation_marker",
+					Excerpt: fmt.Sprintf("[TRUNCATED: %d additional %s evidence sources omitted by deterministic budget]", len(values)-index, kind),
+				})
+				break
+			}
+			out = append(out, source)
+			used += cost
+		}
+		return out
+	}
+	out := appendWithinBudget(nil, requirements, requirementBudget, "requirement")
+	return appendWithinBudget(out, findings, findingBudget, "finding")
+}
+
+func containsInt(values []int, wanted int) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func buildLowVolumeSynthesizedStrategyFixIssueTitle(result *agent.ReviewSynthesisResult) string {
@@ -310,18 +468,6 @@ func reviewCycleHasCompletedFix(cycle reviewHistoryCycle) bool {
 	return false
 }
 
-func reviewFindingSubsystemSet(findings []string) map[string]struct{} {
-	out := map[string]struct{}{}
-	for _, finding := range findings {
-		for _, file := range reviewFilePathsFromText(finding) {
-			if subsystem := normalizeReviewPackagePath(file); isConcreteReviewPackageCluster(subsystem) {
-				out[subsystem] = struct{}{}
-			}
-		}
-	}
-	return out
-}
-
 func reviewFindingArchitecturalTermSet(findings []string) map[string]struct{} {
 	out := map[string]struct{}{}
 	for _, finding := range findings {
@@ -336,240 +482,6 @@ func reviewFindingArchitecturalTermSet(findings []string) map[string]struct{} {
 		}
 	}
 	return out
-}
-
-type reviewFindingEvidenceCluster struct {
-	subsystem  string
-	firstTerm  string
-	secondTerm string
-	behavior   string
-}
-
-func reviewFindingEvidenceClusters(findings []string) map[string]reviewFindingEvidenceCluster {
-	out := map[string]reviewFindingEvidenceCluster{}
-	for _, finding := range findings {
-		subsystems := reviewFindingSubsystemSet([]string{finding})
-		terms := concreteReviewFindingArchitecturalTerms(finding)
-		behavior := reviewFindingBehavioralIdentity(finding)
-		if len(subsystems) == 0 || len(terms) < 2 || behavior == "" {
-			continue
-		}
-		sortedTerms := sortedStringSet(terms)
-		for subsystem := range subsystems {
-			for i := 0; i < len(sortedTerms)-1; i++ {
-				for j := i + 1; j < len(sortedTerms); j++ {
-					cluster := reviewFindingEvidenceCluster{subsystem: subsystem, firstTerm: sortedTerms[i], secondTerm: sortedTerms[j], behavior: behavior}
-					key := strings.Join([]string{cluster.subsystem, cluster.firstTerm, cluster.secondTerm, cluster.behavior}, "\x00")
-					out[key] = cluster
-				}
-			}
-		}
-	}
-	return out
-}
-
-type reviewBehavioralConceptSet struct {
-	subsystem string
-	terms     []string
-}
-
-func reviewAlternatingBehavioralCluster(completed []reviewHistoryCycle, latest reviewHistoryCycle) ([]reviewHistoryCycle, string, []string, bool) {
-	if len(completed) < reviewOscillationMinEvidenceCycles {
-		return nil, "", nil, false
-	}
-	evidence := append([]reviewHistoryCycle(nil), completed[len(completed)-reviewOscillationMinEvidenceCycles:]...)
-	chain := append(append([]reviewHistoryCycle(nil), evidence...), latest)
-	setsByCycle := make([]map[string]reviewBehavioralConceptSet, len(chain))
-	for i, cycle := range chain {
-		setsByCycle[i] = reviewFindingBehavioralConceptSets(sanitizedDistinctReviewFindings(cycle))
-		if len(setsByCycle[i]) == 0 {
-			return nil, "", nil, false
-		}
-	}
-
-	for _, firstKey := range sortedReviewBehavioralConceptSetKeys(setsByCycle[0]) {
-		first := setsByCycle[0][firstKey]
-		for _, secondKey := range sortedReviewBehavioralConceptSetKeys(setsByCycle[1]) {
-			second := setsByCycle[1][secondKey]
-			if firstKey == secondKey || first.subsystem != second.subsystem || !reviewBehavioralConceptSetsCompatible(first.terms, second.terms) {
-				continue
-			}
-			matches := true
-			for i := 2; i < len(setsByCycle); i++ {
-				wanted := firstKey
-				if i%2 == 1 {
-					wanted = secondKey
-				}
-				if _, ok := setsByCycle[i][wanted]; !ok {
-					matches = false
-					break
-				}
-			}
-			if matches {
-				terms := sliceStringSet(first.terms)
-				for _, term := range second.terms {
-					terms[term] = struct{}{}
-				}
-				return evidence, first.subsystem, sortedStringSet(terms), true
-			}
-		}
-	}
-	return nil, "", nil, false
-}
-
-func sortedReviewBehavioralConceptSetKeys(values map[string]reviewBehavioralConceptSet) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-func reviewFindingBehavioralConceptSets(findings []string) map[string]reviewBehavioralConceptSet {
-	out := map[string]reviewBehavioralConceptSet{}
-	for _, finding := range findings {
-		behavior := reviewFindingBehavioralIdentity(finding)
-		if behavior == "" {
-			continue
-		}
-		subsystems := reviewFindingSubsystemSet([]string{finding})
-		terms := sortedStringSet(reviewFindingArchitecturalTermSet([]string{finding}))
-		var conceptSets [][]string
-		for i := 0; i < len(terms)-1; i++ {
-			for j := i + 1; j < len(terms); j++ {
-				conceptSets = append(conceptSets, []string{terms[i], terms[j]})
-			}
-		}
-		if reviewFindingMatchesMultipleFamilyKeywords(finding, "durability-recovery") {
-			conceptSets = append(conceptSets, []string{"durability-recovery"})
-		}
-		for subsystem := range subsystems {
-			for _, conceptTerms := range conceptSets {
-				key := subsystem + "\x00" + strings.Join(conceptTerms, "\x00") + "\x00" + behavior
-				out[key] = reviewBehavioralConceptSet{subsystem: subsystem, terms: conceptTerms}
-			}
-		}
-	}
-	return out
-}
-
-func reviewFindingMatchesMultipleFamilyKeywords(finding, family string) bool {
-	normalized := " " + normalizeReviewSynthesisFingerprintText(finding) + " "
-	matches := 0
-	for _, keyword := range reviewArchitecturalConceptKeywords[family] {
-		if strings.Contains(normalized, " "+normalizeReviewSynthesisFingerprintText(keyword)+" ") {
-			matches++
-		}
-	}
-	return matches >= 2
-}
-
-func reviewBehavioralConceptSetsCompatible(left, right []string) bool {
-	leftSet := sliceStringSet(left)
-	rightSet := sliceStringSet(right)
-	union := sliceStringSet(left)
-	for _, term := range right {
-		union[term] = struct{}{}
-	}
-	for term := range union {
-		switch term {
-		case "consistency-linearization", "durability-recovery", "invariant", "lifecycle-state", "ownership-boundary", "side-effect-publication":
-		default:
-			return false
-		}
-	}
-	if stringSetIntersects(leftSet, rightSet) {
-		return true
-	}
-	_, ownership := union["ownership-boundary"]
-	_, publication := union["side-effect-publication"]
-	_, durability := union["durability-recovery"]
-	return ownership && publication && durability
-}
-
-func concreteReviewFindingArchitecturalTerms(finding string) map[string]struct{} {
-	terms := reviewFindingArchitecturalTermSet([]string{finding})
-	if len(terms) < 2 || !reviewFindingHasConcreteArchitecturalDescription(finding) {
-		return nil
-	}
-	return terms
-}
-
-func reviewFindingHasConcreteArchitecturalDescription(finding string) bool {
-	return reviewFindingBehavioralIdentity(finding) != ""
-}
-
-func reviewFindingBehavioralIdentity(finding string) string {
-	description := finding
-	for _, file := range reviewFilePathsFromText(finding) {
-		description = strings.ReplaceAll(description, file, " ")
-	}
-	architecturalWords := map[string]struct{}{}
-	for _, keywords := range reviewArchitecturalConceptKeywords {
-		for _, keyword := range keywords {
-			for _, word := range strings.Fields(normalizeReviewSynthesisFingerprintText(keyword)) {
-				architecturalWords[word] = struct{}{}
-			}
-		}
-	}
-	behaviorWords := map[string]struct{}{}
-	hasConcreteRelation := false
-	for _, word := range strings.Fields(normalizeReviewSynthesisFingerprintText(description)) {
-		if len(word) < 4 {
-			continue
-		}
-		if _, architectural := architecturalWords[word]; architectural {
-			continue
-		}
-		switch word {
-		case "after", "again", "arbitrary", "because", "behavior", "behaviour", "continues", "despite", "fails",
-			"failure", "finding", "issue", "problem", "review", "still", "thing", "works", "wrong":
-			continue
-		default:
-			behaviorWords[word] = struct{}{}
-			switch word {
-			case "accepts", "bypasses", "conflicts", "diverges", "duplicates", "emits", "ignores", "inconsistent",
-				"leaks", "loses", "missing", "moves", "precedes", "publishes", "reappears", "records", "rejects",
-				"repeats", "resurrects", "skips", "violates":
-				hasConcreteRelation = true
-			}
-		}
-	}
-	if len(behaviorWords) < 2 || !hasConcreteRelation {
-		return ""
-	}
-	return strings.Join(sortedStringSet(behaviorWords), " ")
-}
-
-func completedFixNumbers(cycles []reviewHistoryCycle) []int {
-	var out []int
-	for _, cycle := range cycles {
-		for _, fix := range cycle.FixIssues {
-			if fix.StatusLabel == issues.StatusDone || isSuccessfulWorkerReport(fix) {
-				out = appendUniqueInt(out, fix.Number)
-			}
-		}
-	}
-	return out
-}
-
-func synthesisSymptomsAlignWithSubsystems(symptoms []agent.ReviewSynthesisSymptom, recurring []string) bool {
-	wanted := sliceStringSet(recurring)
-	for _, symptom := range symptoms {
-		aligned := false
-		for _, file := range symptom.AffectedFiles {
-			if subsystem := normalizeReviewPackagePath(file); subsystem != "" {
-				if _, ok := wanted[subsystem]; ok {
-					aligned = true
-				}
-			}
-		}
-		if !aligned {
-			return false
-		}
-	}
-	return len(symptoms) > 0
 }
 
 func isMeaningfulLowVolumeRootCause(title string, result *agent.ReviewSynthesisResult) bool {
@@ -623,31 +535,6 @@ func isMeaningfulLowVolumeRootCause(title string, result *agent.ReviewSynthesisR
 	return false
 }
 
-func synthesisRootCauseAlignsWithArchitecture(result *agent.ReviewSynthesisResult, recurring []string) bool {
-	if result == nil {
-		return false
-	}
-	terms := reviewFindingArchitecturalTermSet([]string{result.RootCauseTitle + " " + result.RootCauseSummary + " " + result.ProposedStrategy})
-	return stringSetIntersects(terms, sliceStringSet(recurring))
-}
-
-func meaningfulLowVolumeAcceptanceCriteria(criteria []string) bool {
-	clean := trimBlankStrings(criteria)
-	if len(clean) < 2 {
-		return false
-	}
-	architectural := false
-	for _, criterion := range clean {
-		if len(significantReviewWords(criterion)) < 2 || isReviewFindingMetadataNoise(criterion) || isReviewFindingDismissalText(criterion) {
-			return false
-		}
-		if len(reviewFindingArchitecturalTermSet([]string{criterion})) > 0 {
-			architectural = true
-		}
-	}
-	return architectural
-}
-
 func isConcreteReviewReinterpretationText(value string) bool {
 	value = strings.TrimSpace(value)
 	normalized := normalizeReviewSynthesisFingerprintText(value)
@@ -677,343 +564,6 @@ func concreteReviewBoundaries(values []string) []string {
 	return out
 }
 
-func triviallyEquivalentReviewRequirement(left, right string) bool {
-	a := normalizeReviewSynthesisFingerprintText(left)
-	b := normalizeReviewSynthesisFingerprintText(right)
-	if a == b || strings.Contains(a, b) || strings.Contains(b, a) {
-		return true
-	}
-	leftWords := canonicalReviewRequirementWords(a)
-	rightWords := canonicalReviewRequirementWords(b)
-	if len(leftWords) == 0 || len(rightWords) == 0 {
-		return false
-	}
-	matches := 0
-	for word := range leftWords {
-		if _, ok := rightWords[word]; ok {
-			matches++
-		}
-	}
-	shorter := len(leftWords)
-	if len(rightWords) < shorter {
-		shorter = len(rightWords)
-	}
-	return matches*5 >= shorter*4
-}
-
-func canonicalReviewRequirementWords(value string) map[string]struct{} {
-	out := map[string]struct{}{}
-	for _, word := range strings.Fields(value) {
-		switch word {
-		case "the", "a", "an", "must", "should", "shall":
-			continue
-		case "atomically":
-			word = "atomic"
-		}
-		if strings.HasSuffix(word, "ing") && len(word) > 6 {
-			word = strings.TrimSuffix(word, "ing")
-		}
-		out[word] = struct{}{}
-	}
-	return out
-}
-
-func isClearlyPreservedSafetyProperty(value string, originalEvidence []string) bool {
-	normalized := normalizeReviewSynthesisFingerprintText(value)
-	if reviewSafetyTextIsAmbiguous(normalized) || !isConcreteReviewReinterpretationText(value) ||
-		!reviewSafetyTextIsAffirmative(normalized) || !reviewTextAlignsWithEvidence(value, originalEvidence) {
-		return false
-	}
-	for _, source := range originalEvidence {
-		if reviewSafetyTextEntails(source, value) {
-			return true
-		}
-	}
-	return false
-}
-
-func reviewSafetyTextIsAffirmative(value string) bool {
-	normalized := normalizeReviewSynthesisFingerprintText(value)
-	for _, phrase := range []string{
-		" cannot ", " must ", " never ", " no ", " only ", " always ", " exactly once", " without ",
-		"prevent", "reject", "deny", "remain", "preserv", "protect", "retain", "surviv", "visible",
-	} {
-		if strings.Contains(" "+normalized+" ", phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func reviewSafetyTextIsAmbiguous(value string) bool {
-	normalized := normalizeReviewSynthesisFingerprintText(value)
-	for _, phrase := range []string{
-		"not guaranteed", "not required", "need not", "does not ensure", "do not ensure", "cannot ensure",
-		"may not", "might not", "can fail", "may fail", "might fail", "can be violated", "may be violated",
-		"best effort", "when possible", "where possible", "if possible", "to the extent possible",
-		"subject to", "not always",
-	} {
-		if strings.Contains(normalized, phrase) {
-			return true
-		}
-	}
-	for _, word := range strings.Fields(normalized) {
-		switch word {
-		case "can", "could", "may", "might", "should", "sometimes", "usually", "generally", "except", "unless":
-			return true
-		}
-	}
-	return false
-}
-
-func reviewSafetyPropertyAlignsAffirmatively(property string, evidence []string) bool {
-	if !isClearlyPreservedSafetyProperty(property, evidence) {
-		return false
-	}
-	for _, source := range evidence {
-		if reviewSafetyTextEntails(source, property) {
-			return true
-		}
-	}
-	return false
-}
-
-type reviewSafetyRelation struct {
-	subjects       []string
-	hazards        []string
-	safePredicates []string
-	unsafeClauses  []string
-}
-
-var reviewSafetyRelations = []reviewSafetyRelation{
-	{subjects: []string{"revoked grant", "revoked grants"}, hazards: []string{"used", "usable", "use"}, safePredicates: []string{"reject", "deny", "prevent"}, unsafeClauses: []string{"remain usable", "remains usable", "are usable", "is usable"}},
-	{subjects: []string{"duplicate ownership", "multiple ownership"}, hazards: []string{"allowed", "accepted", "permit"}, safePredicates: []string{"reject", "deny", "prevent", "exclusive"}, unsafeClauses: []string{"ownership is allowed", "ownership remains allowed", "ownership is accepted"}},
-	{subjects: []string{"stale authorization", "stale authorisation"}, hazards: []string{"accepted", "allowed", "permit", "access"}, safePredicates: []string{"reject", "deny", "prevent"}, unsafeClauses: []string{"authorization is accepted", "authorisation is accepted", "authorization is allowed", "authorisation is allowed"}},
-	{subjects: []string{"deleted record", "deleted records"}, hazards: []string{"reappear", "resurrect", "restored"}, safePredicates: []string{"prevent", "reject", "deny"}, unsafeClauses: []string{"may reappear", "might reappear", "can reappear", "may resurrect", "might resurrect", "can resurrect"}},
-}
-
-type reviewSafetyPolarity int
-
-const (
-	reviewSafetyPolarityUnknown reviewSafetyPolarity = iota
-	reviewSafetyPolarityProtected
-	reviewSafetyPolarityUnsafe
-)
-
-func reviewSafetyTextEntails(source, candidate string) bool {
-	if reviewSafetyTextIsAmbiguous(candidate) || !reviewRequirementsMateriallyOverlap(source, candidate) {
-		return false
-	}
-	if !reviewSafetyCoreIsPreserved(source, candidate) {
-		return false
-	}
-	sourceNormalized := normalizeReviewSynthesisFingerprintText(source)
-	candidateNormalized := normalizeReviewSynthesisFingerprintText(candidate)
-	matchedRelation := false
-	for _, relation := range reviewSafetyRelations {
-		sourcePolarity := reviewSafetyRelationPolarity(sourceNormalized, relation)
-		if sourcePolarity == reviewSafetyPolarityUnknown {
-			continue
-		}
-		matchedRelation = true
-		if sourcePolarity != reviewSafetyPolarityProtected ||
-			reviewSafetyRelationPolarity(candidateNormalized, relation) != reviewSafetyPolarityProtected {
-			return false
-		}
-	}
-	if reviewSafetyTextHasUnsafeRelation(candidateNormalized) {
-		return false
-	}
-	if matchedRelation {
-		return true
-	}
-	return reviewSafetyTextIsAffirmative(candidateNormalized)
-}
-
-func reviewSafetyCoreIsPreserved(source, candidate string) bool {
-	sourceWords := traceableReviewRequirementWords(source)
-	candidateWords := traceableReviewRequirementWords(candidate)
-	for _, contextual := range []string{
-		"after", "before", "corrected", "during", "enforce", "enforces", "guarantee", "guarantees",
-		"intent", "publication", "recovery", "test", "tested", "tests", "transition", "verify", "verifies",
-	} {
-		delete(sourceWords, contextual)
-	}
-	if len(sourceWords) < 2 {
-		return false
-	}
-	for word := range sourceWords {
-		if _, ok := candidateWords[word]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-func reviewSafetyTextHasUnsafeRelation(value string) bool {
-	for _, relation := range reviewSafetyRelations {
-		if reviewSafetyRelationPolarity(value, relation) == reviewSafetyPolarityUnsafe {
-			return true
-		}
-	}
-	return false
-}
-
-func reviewSafetyRelationPolarity(value string, relation reviewSafetyRelation) reviewSafetyPolarity {
-	if !reviewSafetyContainsAny(value, relation.subjects) {
-		return reviewSafetyPolarityUnknown
-	}
-	if reviewSafetyContainsAny(value, relation.unsafeClauses) {
-		return reviewSafetyPolarityUnsafe
-	}
-	hazard := reviewSafetyContainsAny(value, relation.hazards)
-	safePredicate := reviewSafetyContainsAny(value, relation.safePredicates)
-	denied := reviewSafetyContainsAny(value, []string{
-		" cannot ", " can not ", " must not ", " never ", " not ", " no ", " reject", "deni", "prevent", "forbid",
-	})
-	permitted := reviewSafetyContainsAny(value, []string{
-		" allow", " accept", " may ", " might ", " could ", " permit",
-	})
-	if hazard && permitted {
-		return reviewSafetyPolarityUnsafe
-	}
-	if safePredicate || (hazard && denied) {
-		return reviewSafetyPolarityProtected
-	}
-	if hazard {
-		return reviewSafetyPolarityUnsafe
-	}
-	return reviewSafetyPolarityUnknown
-}
-
-func reviewSafetyContainsAny(value string, phrases []string) bool {
-	padded := " " + value + " "
-	for _, phrase := range phrases {
-		if strings.Contains(padded, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func reviewOriginalRequirementEvidence(requirements []agent.ReviewSynthesisRequirement) []string {
-	var out []string
-	for _, requirement := range requirements {
-		out = append(out, requirement.Title, requirement.Task, requirement.ImplementationDetails, requirement.Context)
-		out = append(out, requirement.AcceptanceCriteria...)
-	}
-	return trimBlankStrings(out)
-}
-
-func reviewOriginalAcceptanceCriteriaEvidence(requirements []agent.ReviewSynthesisRequirement) []string {
-	var out []string
-	for _, requirement := range requirements {
-		out = append(out, requirement.AcceptanceCriteria...)
-	}
-	return trimBlankStrings(out)
-}
-
-func reviewPlatformConstraintEvidence(input agent.ReviewSynthesisInput) []string {
-	out := reviewOriginalRequirementEvidence(input.OriginalRequirements)
-	out = append(out, input.CurrentPRMetadata)
-	out = append(out, input.RecentReviewComments...)
-	out = append(out, input.WorkerNoOpVerdicts...)
-	for _, cycle := range input.Cycles {
-		out = append(out, cycle.ChunkCoverageSummary)
-		for _, findings := range cycle.FindingsBySeverity {
-			out = append(out, findings...)
-		}
-		for _, fix := range cycle.CompletedFixIssues {
-			out = append(out, fix.Title, fix.Body, fix.ValidationStatus)
-		}
-	}
-	for _, fix := range input.CompletedFixIssues {
-		out = append(out, fix.Title, fix.Body, fix.ValidationStatus)
-	}
-	return trimBlankStrings(out)
-}
-
-func reviewTextAlignsWithEvidence(value string, evidence []string) bool {
-	valueWords := traceableReviewRequirementWords(value)
-	if len(valueWords) < 2 {
-		return false
-	}
-	for _, source := range evidence {
-		sourceWords := traceableReviewRequirementWords(source)
-		matches := 0
-		for word := range valueWords {
-			if _, ok := sourceWords[word]; ok {
-				matches++
-			}
-		}
-		required := (len(valueWords) + 1) / 2
-		if required < 2 {
-			required = 2
-		}
-		if matches >= required {
-			return true
-		}
-	}
-	return false
-}
-
-func reviewRequirementsMateriallyOverlap(left, right string) bool {
-	if reviewSafetyTextIsAmbiguous(left) || reviewSafetyTextIsAmbiguous(right) {
-		return false
-	}
-	leftWords := traceableReviewRequirementWords(left)
-	matches := 0
-	for word := range traceableReviewRequirementWords(right) {
-		if _, ok := leftWords[word]; ok {
-			matches++
-		}
-	}
-	return matches >= 2
-}
-
-func traceableReviewRequirementWords(value string) map[string]struct{} {
-	out := map[string]struct{}{}
-	for word := range canonicalReviewRequirementWords(normalizeReviewSynthesisFingerprintText(value)) {
-		switch word {
-		case "both", "cannot", "could", "from", "into", "remain", "remains", "requirement", "platform", "property",
-			"recorded", "safety", "shall", "should", "their", "there", "these", "this", "those", "while", "with":
-			continue
-		case "visible":
-			word = "visibility"
-		case "records":
-			word = "record"
-		case "stores":
-			word = "store"
-		}
-		if len(word) >= 4 {
-			out[word] = struct{}{}
-		}
-	}
-	return out
-}
-
-func reviewTextCoversRequirement(criteria, requirement string) bool {
-	criteriaWords := sliceStringSet(significantReviewWords(criteria))
-	requirementWords := significantReviewWords(requirement)
-	matches := 0
-	for _, word := range requirementWords {
-		if _, ok := criteriaWords[word]; ok {
-			matches++
-		}
-	}
-	return matches >= 2
-}
-
-func significantReviewWords(value string) []string {
-	var out []string
-	for _, word := range strings.Fields(normalizeReviewSynthesisFingerprintText(value)) {
-		if len(word) >= 5 {
-			out = append(out, word)
-		}
-	}
-	return out
-}
-
 func normalizedSortedReviewStrings(values []string) []string {
 	set := map[string]struct{}{}
 	for _, value := range values {
@@ -1038,21 +588,4 @@ func formatReviewRequirementReinterpretation(value *agent.ReviewRequirementReint
 	b.WriteString("- Linearization boundaries:\n" + formatBullets(concreteReviewBoundaries(value.LinearizationBoundaries)) + "\n")
 	b.WriteString("- Durability boundaries:\n" + formatBullets(concreteReviewBoundaries(value.DurabilityBoundaries)))
 	return b.String()
-}
-
-func sliceStringSet(values []string) map[string]struct{} {
-	out := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		out[value] = struct{}{}
-	}
-	return out
-}
-
-func stringSetIntersects(left, right map[string]struct{}) bool {
-	for value := range left {
-		if _, ok := right[value]; ok {
-			return true
-		}
-	}
-	return false
 }

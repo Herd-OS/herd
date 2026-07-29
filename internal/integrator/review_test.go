@@ -456,15 +456,21 @@ func TestReconcileReviewFindingsWithLivePRStatePreservesRootFileFindings(t *test
 // --- Mock Agent ---
 
 type mockReviewAgent struct {
-	reviewResult     *agent.ReviewResult
-	reviewErr        error
-	onReview         func()
-	synthesisResult  *agent.ReviewSynthesisResult
-	synthesisErr     error
-	onSynthesis      func(context.Context)
-	synthesisCalls   int
-	synthesisInput   agent.ReviewSynthesisInput
-	synthesisOptions agent.ReviewSynthesisOptions
+	reviewResult       *agent.ReviewResult
+	reviewErr          error
+	onReview           func()
+	synthesisResult    *agent.ReviewSynthesisResult
+	synthesisErr       error
+	onSynthesis        func(context.Context)
+	synthesisCalls     int
+	synthesisInput     agent.ReviewSynthesisInput
+	synthesisOptions   agent.ReviewSynthesisOptions
+	verificationResult *agent.ReviewVerificationResult
+	verificationErr    error
+	verificationNil    bool
+	onVerification     func(context.Context)
+	verificationCalls  int
+	verificationInput  agent.ReviewVerificationInput
 	// results, when non-nil, returns scripted ReviewResults on successive
 	// calls. After the slice is exhausted, the last entry is repeated.
 	results  []*agent.ReviewResult
@@ -507,6 +513,23 @@ func (m *mockReviewAgent) SynthesizeReviewNonConvergence(ctx context.Context, in
 		return nil, err
 	}
 	return m.synthesisResult, m.synthesisErr
+}
+func (m *mockReviewAgent) VerifyReviewNonConvergence(ctx context.Context, input agent.ReviewVerificationInput, _ agent.ReviewSynthesisOptions) (*agent.ReviewVerificationResult, error) {
+	m.verificationCalls++
+	m.verificationInput = input
+	if m.onVerification != nil {
+		m.onVerification(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if m.verificationNil {
+		return nil, m.verificationErr
+	}
+	if m.verificationResult == nil && m.verificationErr == nil {
+		return &agent.ReviewVerificationResult{Approved: true, Confidence: 0.99, Reason: "coherent recurring root cause and aligned strategy"}, nil
+	}
+	return m.verificationResult, m.verificationErr
 }
 func (m *mockReviewAgent) Discuss(_ context.Context, _ agent.DiscussOptions) error {
 	return nil
@@ -7492,18 +7515,18 @@ func TestReview_NonConvergenceConcreteRepeatedClusterStillEscalates(t *testing.T
 
 func TestReview_LowVolumeAlternatingOscillationCreatesOneStrategyFixAndDispatch(t *testing.T) {
 	currentFindings := []agent.ReviewFinding{
-		{Severity: "MEDIUM", Description: "internal/integrator/review_oscillation.go: durable recovery repair loses the crash marker for the attempted transition"},
-		{Severity: "MEDIUM", Description: "internal/integrator/review.go: durable recovery can repeat after a crash because the attempt marker is missing"},
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/recovery.go: durable recovery repair loses the crash marker for the attempted transition"},
+		{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/state.go: durable recovery can repeat after a crash because the attempt marker is missing"},
 	}
 	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
 	fx.setHistoryWithFindingsAndHeadSHAs(t,
 		[]int{2, 2, 2, 2, 2},
 		[]string{
-			"internal/integrator/review.go: ownership boundary publishes an external side effect before authority is recorded",
-			"internal/integrator/review_oscillation.go: durable recovery repair loses the crash marker for the attempted transition",
-			"internal/integrator/review.go: ownership boundary publishes an external side effect before authority is recorded",
-			"internal/integrator/review_oscillation.go: durable recovery repair loses the crash marker for the attempted transition",
-			"internal/integrator/review.go: ownership boundary publishes an external side effect before authority is recorded",
+			"internal/controlplane/dispatch/ownership.go: ownership boundary publishes an external side effect before authority is recorded",
+			"internal/controlplane/dispatch/recovery.go: durable recovery repair loses the crash marker for the attempted transition",
+			"internal/controlplane/dispatch/ownership.go: ownership boundary publishes an external side effect before authority is recorded",
+			"internal/controlplane/dispatch/recovery.go: durable recovery repair loses the crash marker for the attempted transition",
+			"internal/controlplane/dispatch/ownership.go: ownership boundary publishes an external side effect before authority is recorded",
 		},
 		[]string{"review-head-34", "review-head-35", "review-head-36", "review-head-37", "review-head-38"},
 	)
@@ -7511,17 +7534,19 @@ func TestReview_LowVolumeAlternatingOscillationCreatesOneStrategyFixAndDispatch(
 		ShouldEscalate:   true,
 		Confidence:       0.95,
 		RootCauseTitle:   "publication durability ordering gap",
-		RootCauseSummary: "Ownership publication and durable recovery alternate because the integrator review transition has no single commit boundary.",
+		RootCauseSummary: "Ownership publication and durable recovery alternate because the dispatch transition has no single commit boundary.",
 		RecurringSymptoms: []agent.ReviewSynthesisSymptom{
 			{
-				Description:   "Ownership publication precedes the durable state.",
-				Cycles:        []int{36, 37, 38},
-				AffectedFiles: []string{"internal/integrator/review.go"},
+				Description:        "Ownership publication precedes the durable state.",
+				Cycles:             []int{36, 37, 38},
+				AffectedFiles:      []string{"internal/controlplane/dispatch/ownership.go"},
+				EvidenceReferences: []string{"cycle:36:finding:0", "cycle:37:finding:0", "cycle:38:finding:0"},
 			},
 			{
-				Description:   "Recovery repairs the missing publication state.",
-				Cycles:        []int{36, 37, 38},
-				AffectedFiles: []string{"internal/integrator/review_oscillation.go"},
+				Description:        "Recovery repairs the missing publication state.",
+				Cycles:             []int{36, 37, 38},
+				AffectedFiles:      []string{"internal/controlplane/dispatch/recovery.go"},
+				EvidenceReferences: []string{"cycle:36:finding:0", "cycle:37:finding:0", "cycle:38:finding:0"},
 			},
 		},
 		WhyIndividualFixesAreNotConverging: "Each fix moves the boundary between ownership publication and durable recovery.",
@@ -7543,164 +7568,201 @@ func TestReview_LowVolumeAlternatingOscillationCreatesOneStrategyFixAndDispatch(
 	require.Len(t, fx.wf.dispatched, 1)
 	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
 	assert.Equal(t, []int{9601}, result.FixIssues)
+	assert.Equal(t, 1, fx.ag.verificationCalls)
+	assert.NotEmpty(t, fx.ag.verificationInput.EvidenceSources)
+
+	fx.issueSvc.listResult = append(fx.issueSvc.listResult, &platform.Issue{
+		Number: 9601, State: "open", Title: fx.createdIssues[0].title,
+		Body: fx.createdIssues[0].body, Labels: append([]string(nil), fx.createdIssues[0].labels...),
+	})
+	commentsBefore := len(fx.prSvc.comments)
+	reviewsBefore := len(fx.prSvc.reviews)
+	rerun, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+	require.NoError(t, err)
+	require.NotNil(t, rerun)
+	assert.Equal(t, 1, fx.ag.synthesisCalls)
+	assert.Equal(t, 1, fx.ag.verificationCalls)
+	assert.Len(t, fx.createdIssues, 1)
+	assert.Len(t, fx.wf.dispatched, 1)
+	assert.Len(t, fx.prSvc.comments, commentsBefore)
+	assert.Len(t, fx.prSvc.reviews, reviewsBefore)
 }
 
-func TestReview_LowVolumeSynthesisFallbacksCreateOrdinaryFix(t *testing.T) {
+func TestReview_LowVolumeSynthesisAndVerificationFallbacks(t *testing.T) {
 	tests := []struct {
-		name      string
-		wantCalls int
-		configure func(*testing.T, *reviewNonConvergenceIntegrationFixture)
+		name             string
+		configure        func(*testing.T, *reviewNonConvergenceIntegrationFixture)
+		wantSynthesis    int
+		wantVerification int
 	}{
-		{name: "synthesis disabled", wantCalls: 0, configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
-			fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false
-		}},
-		{name: "timeout", wantCalls: 1, configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
-			previous := reviewSynthesisTimeout
-			reviewSynthesisTimeout = time.Millisecond
-			fx.ag.onSynthesis = func(ctx context.Context) { <-ctx.Done() }
-			t.Cleanup(func() { reviewSynthesisTimeout = previous })
-		}},
-		{name: "agent error", wantCalls: 1, configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
-			fx.ag.synthesisErr = errors.New("synthesis unavailable")
-		}},
-		{name: "malformed output", wantCalls: 1, configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
-			fx.ag.synthesisResult.RootCauseTitle = ""
-		}},
-		{name: "nil output", wantCalls: 1, configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+		{
+			name: "synthesis disabled",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.cfg.Integrator.ReviewNonConvergence.SynthesisEnabled = false
+			},
+		},
+		{
+			name: "synthesis error or malformed output",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisErr = errors.New("strict synthesis decoding failed")
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name:          "synthesis nil output",
+			configure:     func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {},
+			wantSynthesis: 1,
+		},
+		{
+			name: "synthesis declines escalation",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = &agent.ReviewSynthesisResult{ShouldEscalate: false, Confidence: .99, Reason: "unrelated evidence"}
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "synthesis timeout",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				previous := reviewSynthesisTimeout
+				reviewSynthesisTimeout = time.Millisecond
+				fx.ag.onSynthesis = func(ctx context.Context) { <-ctx.Done() }
+				t.Cleanup(func() { reviewSynthesisTimeout = previous })
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "missing evidence reference",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RecurringSymptoms[0].EvidenceReferences = nil
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "foreign evidence reference",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RecurringSymptoms[0].EvidenceReferences[0] = "issue:9999:task"
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "stale evidence reference",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RecurringSymptoms[0].EvidenceReferences[0] = "cycle:1:finding:0"
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "duplicate evidence reference",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RecurringSymptoms[0].EvidenceReferences = append(
+					fx.ag.synthesisResult.RecurringSymptoms[0].EvidenceReferences,
+					fx.ag.synthesisResult.RecurringSymptoms[0].EvidenceReferences[0],
+				)
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "verifier error or malformed output",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.verificationErr = errors.New("strict verification decoding failed")
+			},
+			wantSynthesis: 1, wantVerification: 1,
+		},
+		{
+			name: "verifier nil output",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.verificationNil = true
+			},
+			wantSynthesis: 1, wantVerification: 1,
+		},
+		{
+			name: "verifier rejects unrelated same-subsystem findings",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.verificationResult = &agent.ReviewVerificationResult{Approved: false, Confidence: .98, Reason: "the cited findings are unrelated"}
+			},
+			wantSynthesis: 1, wantVerification: 1,
+		},
+		{
+			name: "verifier rejects generic keyword and filler findings",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RootCauseTitle = "generic durable atomic behavior"
+				fx.ag.verificationResult = &agent.ReviewVerificationResult{Approved: false, Confidence: .98, Reason: "generic vocabulary does not establish a recurring behavior"}
+			},
+			wantSynthesis: 1, wantVerification: 1,
+		},
+		{
+			name: "verifier rejects semantic inversion",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.AcceptanceCriteria = []string{
+					"Revoked grants remain usable; duplicate ownership is allowed.",
+					"Stale authorization is accepted and deleted records may reappear.",
+				}
+				fx.ag.verificationResult = &agent.ReviewVerificationResult{Approved: false, Confidence: .99, Reason: "the criteria contradict the cited safety property"}
+			},
+			wantSynthesis: 1, wantVerification: 1,
+		},
+		{
+			name: "verifier low confidence",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.verificationResult = &agent.ReviewVerificationResult{Approved: true, Confidence: .89, Reason: "ambiguous relationship"}
+			},
+			wantSynthesis: 1, wantVerification: 1,
+		},
+		{
+			name: "verifier timeout",
+			configure: func(t *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				previous := reviewVerificationTimeout
+				reviewVerificationTimeout = time.Millisecond
+				fx.ag.onVerification = func(ctx context.Context) { <-ctx.Done() }
+				t.Cleanup(func() { reviewVerificationTimeout = previous })
+			},
+			wantSynthesis: 1, wantVerification: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fx := newReviewNonConvergenceIntegrationFixture(t, []agent.ReviewFinding{
+				{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/current.go: publication can precede durable ownership"},
+				{Severity: "MEDIUM", Description: "internal/controlplane/dispatch/recovery.go: recovery can repeat an incomplete transition"},
+			})
+			fx.setHistoryWithFindingsAndHeadSHAs(t,
+				[]int{2, 2, 2, 2, 2},
+				[]string{
+					"internal/controlplane/dispatch/state.go: durable transition loses its publication marker",
+					"internal/controlplane/dispatch/state.go: ownership transition publishes before persistence",
+					"internal/controlplane/dispatch/state.go: recovery repeats the transition after a crash",
+					"internal/controlplane/dispatch/state.go: publication precedes durable ownership",
+					"internal/controlplane/dispatch/state.go: repair lacks one transition boundary",
+				},
+				[]string{"fallback-head-34", "fallback-head-35", "fallback-head-36", "fallback-head-37", "fallback-head-38"},
+			)
 			fx.ag.synthesisResult = nil
-		}},
-		{name: "should escalate false", wantCalls: 1, configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
-			fx.ag.synthesisResult.ShouldEscalate = false
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fx := newLowVolumeIntegratorReviewFixture(t)
-			tt.configure(t, fx)
+			test.configure(t, fx)
 
 			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
 
 			require.NoError(t, err)
-			assertLowVolumeOrdinaryFixAndMarkerIdempotency(t, fx, result, tt.wantCalls)
-		})
-	}
-}
-
-func TestReview_LowVolumeReinterpretationFailuresCreateOrdinaryFix(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(*agent.ReviewRequirementReinterpretation, *agent.ReviewSynthesisResult)
-	}{
-		{name: "unknown constraint kind", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.ConstraintKind = "unknown"
-		}},
-		{name: "blank corrected invariant", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.CorrectedInvariant = ""
-		}},
-		{name: "equivalent corrected invariant", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.CorrectedInvariant = v.ConflictingRequirement
-		}},
-		{name: "missing linearization boundary", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.LinearizationBoundaries = nil
-		}},
-		{name: "missing durability boundary", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.DurabilityBoundaries = nil
-		}},
-		{name: "untraceable conflicting requirement", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.ConflictingRequirement = "atomically rotate unrelated encryption credentials"
-		}},
-		{name: "unsupported platform constraint", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.PlatformConsistencyConstraint = "the remote ledger only supports eventual settlement"
-		}},
-		{name: "generic preserved safety", mutate: func(v *agent.ReviewRequirementReinterpretation, _ *agent.ReviewSynthesisResult) {
-			v.PreservedSafetyProperty = "good behavior remains visible"
-		}},
-		{name: "preserved safety inversion", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			v.PreservedSafetyProperty = "revoked grants remain usable"
-			v.CorrectedInvariant = "the corrected transition guarantees revoked grants remain usable"
-			r.AcceptanceCriteria = []string{"Revoked grants remain usable.", "Recovery verifies revoked grants remain usable."}
-		}},
-		{name: "corrected invariant inversion", mutate: func(v *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			v.CorrectedInvariant = "the corrected transition guarantees revoked grants remain usable"
-			r.AcceptanceCriteria = []string{"Revoked grants cannot be used.", "Recovery verifies revoked grants cannot be used."}
-		}},
-		{name: "acceptance criteria inversion", mutate: func(_ *agent.ReviewRequirementReinterpretation, r *agent.ReviewSynthesisResult) {
-			r.AcceptanceCriteria = []string{"Revoked grants remain usable.", "Recovery verifies revoked grants remain usable."}
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fx := newLowVolumeIntegratorReviewFixture(t)
-			tt.mutate(fx.ag.synthesisResult.RequirementReinterpretation, fx.ag.synthesisResult)
-
-			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
-
-			require.NoError(t, err)
-			assertLowVolumeOrdinaryFixAndMarkerIdempotency(t, fx, result, 1)
-		})
-	}
-}
-
-func TestReview_LowVolumeInvalidEvidenceNeverInvokesSynthesis(t *testing.T) {
-	tests := []struct {
-		name    string
-		history []string
-		current []agent.ReviewFinding
-	}{
-		{
-			name:    "generic families with filler verbs",
-			history: []string{"internal/integrator/review.go: durable repair race lock atomic behavior fails"},
-			current: []agent.ReviewFinding{
-				{Severity: "MEDIUM", Description: "internal/integrator/review.go: durable repair race lock atomic behavior fails"},
-				{Severity: "MEDIUM", Description: "internal/integrator/review_oscillation.go: durable repair race lock atomic thing continues"},
-			},
-		},
-		{
-			name: "unrelated behaviors sharing subsystem and families",
-			history: []string{
-				"internal/integrator/review.go: durable recovery race synchronization loses the lease token",
-				"internal/integrator/review.go: durable recovery race synchronization duplicates the audit row",
-				"internal/integrator/review.go: durable recovery race synchronization bypasses the cache generation",
-				"internal/integrator/review.go: durable recovery race synchronization ignores the webhook receipt",
-				"internal/integrator/review.go: durable recovery race synchronization emits the queue signal",
-			},
-			current: []agent.ReviewFinding{
-				{Severity: "MEDIUM", Description: "internal/integrator/review.go: durable recovery race synchronization rejects the unrelated queue item"},
-				{Severity: "MEDIUM", Description: "internal/integrator/review_oscillation.go: durable recovery race synchronization skips the unrelated timer entry"},
-			},
-		},
-		{
-			name:    "metadata only",
-			history: []string{"internal/integrator/review.go: Chunk 1/9 Diff Coverage durable recovery race synchronization loses marker"},
-			current: []agent.ReviewFinding{
-				{Severity: "MEDIUM", Description: "Chunk 1/9: Diff Coverage"},
-				{Severity: "MEDIUM", Description: "Files reviewed: internal/integrator/review.go"},
-			},
-		},
-		{
-			name:    "architecture and subsystem split across findings",
-			history: []string{"internal/integrator/review.go: parser drops the requested label"},
-			current: []agent.ReviewFinding{
-				{Severity: "MEDIUM", Description: "internal/integrator/review.go: parser drops the requested label"},
-				{Severity: "MEDIUM", Description: "durable recovery race synchronization loses marker"},
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fx := newReviewNonConvergenceIntegrationFixture(t, tt.current)
-			findings := tt.history
-			if len(findings) == 1 {
-				findings = []string{findings[0], findings[0], findings[0], findings[0], findings[0]}
-			}
-			fx.setHistoryWithFindingsAndHeadSHAs(t, []int{2, 2, 2, 2, 2}, findings,
-				[]string{"integrator-head-34", "integrator-head-35", "integrator-head-36", "integrator-head-37", "integrator-head-38"})
-			fx.ag.synthesisResult = validLowVolumeIntegratorSynthesisResult()
-
-			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
-
-			require.NoError(t, err)
-			assertLowVolumeOrdinaryFixAndMarkerIdempotency(t, fx, result, 0)
+			require.NotNil(t, result)
+			assert.Equal(t, test.wantSynthesis, fx.ag.synthesisCalls)
+			assert.Equal(t, test.wantVerification, fx.ag.verificationCalls)
+			require.Len(t, fx.createdIssues, 1)
+			assert.Contains(t, fx.createdIssues[0].title, "Review fixes")
+			assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
+			require.Len(t, fx.wf.dispatched, 1)
+			assert.NotContains(t, requireCommentContaining(t, fx.prSvc.comments, "HerdOS Agent Review"), "Synthesized root cause")
+			require.Len(t, fx.prSvc.reviews, 1)
 		})
 	}
 }
@@ -8473,96 +8535,6 @@ func assertReviewNonConvergenceNormalFixFallback(t *testing.T, fx *reviewNonConv
 	assert.NotContains(t, fx.prSvc.reviews[0].body, "Strategy-level fix worker dispatched")
 }
 
-func newLowVolumeIntegratorReviewFixture(t *testing.T) *reviewNonConvergenceIntegrationFixture {
-	t.Helper()
-	current := []agent.ReviewFinding{
-		{Severity: "MEDIUM", Description: "internal/integrator/review_oscillation.go: durable recovery repair loses the crash marker for the attempted transition"},
-		{Severity: "MEDIUM", Description: "internal/integrator/review.go: durable recovery repair loses the crash marker before the attempted transition is recorded"},
-	}
-	fx := newReviewNonConvergenceIntegrationFixture(t, current)
-	fx.setHistoryWithFindingsAndHeadSHAs(t,
-		[]int{2, 2, 2, 2, 2},
-		[]string{
-			"internal/integrator/review.go: ownership boundary publishes an external side effect before authority is recorded",
-			"internal/integrator/review_oscillation.go: durable recovery repair loses the crash marker for the attempted transition",
-			"internal/integrator/review.go: ownership boundary publishes an external side effect before authority is recorded",
-			"internal/integrator/review_oscillation.go: durable recovery repair loses the crash marker for the attempted transition",
-			"internal/integrator/review.go: ownership boundary publishes an external side effect before authority is recorded",
-		},
-		[]string{"integrator-head-34", "integrator-head-35", "integrator-head-36", "integrator-head-37", "integrator-head-38"},
-	)
-	fx.issueSvc.listResult[0].Title = "Atomic revocation publication"
-	fx.issueSvc.listResult[0].Body = issues.RenderBody(issues.IssueBody{
-		FrontMatter:           issues.FrontMatter{Version: 1, Batch: 111},
-		Task:                  "Atomically publish both independent records while revoked grants cannot be used.",
-		ImplementationDetails: "The platform stores cannot commit atomically.",
-		Criteria:              []string{"Revoked grants cannot be used."},
-		Context:               "Intent publication must preserve revocation safety.",
-	})
-	fx.ag.synthesisResult = validLowVolumeIntegratorSynthesisResult()
-	return fx
-}
-
-func validLowVolumeIntegratorSynthesisResult() *agent.ReviewSynthesisResult {
-	return &agent.ReviewSynthesisResult{
-		ShouldEscalate:   true,
-		Confidence:       0.95,
-		RootCauseTitle:   "publication durability ordering gap",
-		RootCauseSummary: "Ownership publication and durable recovery alternate because the integrator transition has no single commit boundary.",
-		RecurringSymptoms: []agent.ReviewSynthesisSymptom{
-			{Description: "Ownership publication precedes durable state.", Cycles: []int{36, 37, 38}, AffectedFiles: []string{"internal/integrator/review.go"}},
-			{Description: "Recovery repairs missing publication state.", Cycles: []int{36, 37, 38}, AffectedFiles: []string{"internal/integrator/review_oscillation.go"}},
-		},
-		WhyIndividualFixesAreNotConverging: "Each fix moves the boundary between ownership publication and durable recovery.",
-		ProposedStrategy:                   "Define one durable ownership and publication transition with an explicit recovery boundary.",
-		AcceptanceCriteria: []string{
-			"The corrected transition enforces that revoked grants cannot be used.",
-			"Recovery tests verify that revoked grants cannot be used.",
-		},
-		RequirementReinterpretation: &agent.ReviewRequirementReinterpretation{
-			ConstraintKind:                agent.ReviewRequirementOverConstrained,
-			ConflictingRequirement:        "atomically publish both independent records",
-			PlatformConsistencyConstraint: "the platform stores cannot commit atomically",
-			PreservedSafetyProperty:       "revoked grants cannot be used",
-			CorrectedInvariant:            "the corrected transition guarantees that revoked grants cannot be used",
-			LinearizationBoundaries:       []string{"intent creation commit", "external visibility marker"},
-			DurabilityBoundaries:          []string{"intent record persisted", "recovery state completed"},
-		},
-	}
-}
-
-func assertLowVolumeOrdinaryFixAndMarkerIdempotency(t *testing.T, fx *reviewNonConvergenceIntegrationFixture, result *ReviewResult, wantSynthesisCalls int) {
-	t.Helper()
-	require.NotNil(t, result)
-	assert.Equal(t, []int{9601}, result.FixIssues)
-	assert.Equal(t, 39, result.FixCycle)
-	assert.Equal(t, wantSynthesisCalls, fx.ag.synthesisCalls)
-	require.Len(t, fx.createdIssues, 1)
-	assert.Equal(t, "Review fixes (cycle 39)", fx.createdIssues[0].title)
-	assert.Contains(t, fx.createdIssues[0].labels, issues.TypeFix)
-	assert.Contains(t, fx.createdIssues[0].labels, issues.StatusInProgress)
-	assert.NotContains(t, fx.createdIssues[0].labels, issues.ReviewNonConverging)
-	assert.NotContains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
-	require.Len(t, fx.wf.dispatched, 1)
-	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
-	require.Len(t, fx.prSvc.reviews, 1)
-	assert.Contains(t, fx.prSvc.reviews[0].body, "Found 2 actionable issues")
-	assert.NotContains(t, fx.prSvc.reviews[0].body, "Strategy")
-	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Synthesized root cause"))
-	assert.Empty(t, commentsContaining(fx.prSvc.comments, "Strategy fix issue"))
-
-	markerComment := requireCommentContaining(t, fx.prSvc.comments, "<!-- herd:review-result")
-	assert.Equal(t, 1, strings.Count(markerComment, reviewResultMarkerPrefix))
-	marker, ok := parseReviewResultMarker(markerComment)
-	require.True(t, ok)
-	assert.Equal(t, 849, marker.PRNumber)
-	assert.Equal(t, 111, marker.BatchNumber)
-	assert.Equal(t, fx.headSHA, marker.HeadSHA)
-	assert.Equal(t, reviewResultStatusChangesRequested, marker.Status)
-	assert.Equal(t, 39, marker.Cycle)
-	assert.Equal(t, 2, marker.FindingsCount)
-}
-
 type reviewNonConvergenceIntegrationFixture struct {
 	dir           string
 	g             *git.Git
@@ -8723,14 +8695,16 @@ func highConfidenceReviewSynthesisResult() *agent.ReviewSynthesisResult {
 		RootCauseSummary: "Workflow dispatch, retry, and repair code still make GitHub-visible mutations before a shared durable idempotency decision.",
 		RecurringSymptoms: []agent.ReviewSynthesisSymptom{
 			{
-				Description:   "Started workflow retry can dispatch twice before the durable record is repaired.",
-				Cycles:        []int{35, 37, 39},
-				AffectedFiles: []string{"internal/controlplane/dispatch/retry.go", "internal/controlplane/dispatch/review.go"},
+				Description:        "Started workflow retry can dispatch twice before the durable record is repaired.",
+				Cycles:             []int{35, 37, 39},
+				AffectedFiles:      []string{"internal/controlplane/dispatch/retry.go", "internal/controlplane/dispatch/review.go"},
+				EvidenceReferences: []string{"cycle:35:finding:0", "cycle:37:finding:0", "cycle:39:finding:0"},
 			},
 			{
-				Description:   "Unknown-state repair paths update labels before converging on one dispatch outcome.",
-				Cycles:        []int{36, 38, 39},
-				AffectedFiles: []string{"internal/controlplane/dispatch/repair.go", "internal/controlplane/dispatch/review.go"},
+				Description:        "Unknown-state repair paths update labels before converging on one dispatch outcome.",
+				Cycles:             []int{36, 38, 39},
+				AffectedFiles:      []string{"internal/controlplane/dispatch/repair.go", "internal/controlplane/dispatch/review.go"},
+				EvidenceReferences: []string{"cycle:36:finding:0", "cycle:38:finding:0", "cycle:39:finding:0"},
 			},
 		},
 		WhyIndividualFixesAreNotConverging: "Prior fixes patched individual call sites while leaving the shared idempotency invariant undefined.",

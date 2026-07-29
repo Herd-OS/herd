@@ -199,7 +199,7 @@ for a in "$@"; do
   prev="$a"
 done
 if [ -n "$schema" ]; then cp "$schema" '%s'; fi
-if [ -n "$out" ]; then printf '%%s' '{"should_escalate":true,"confidence":0.93,"root_cause_title":"Shared review state","recurring_symptoms":[{"description":"same stale finding","cycles":[2,3],"affected_files":["internal/review.go"]}],"requirement_reinterpretation":{"constraint_kind":"platform_non_atomic","conflicting_requirement":"one atomic cross-store commit","platform_consistency_constraint":"stores commit independently","preserved_safety_property":"exclusive ownership","corrected_invariant":"durable intent gates visibility","linearization_boundaries":["intent creation","visibility marker"],"durability_boundaries":["intent persisted","recovery completed"]}}' > "$out"; fi
+if [ -n "$out" ]; then printf '%%s' '{"should_escalate":true,"confidence":0.93,"root_cause_title":"Shared review state","recurring_symptoms":[{"description":"same stale finding","cycles":[2,3],"affected_files":["internal/review.go"],"evidence_references":["cycle:2:finding:0"]}],"requirement_reinterpretation":{"constraint_kind":"platform_non_atomic","conflicting_requirement":"one atomic cross-store commit","platform_consistency_constraint":"stores commit independently","preserved_safety_property":"exclusive ownership","corrected_invariant":"durable intent gates visibility","linearization_boundaries":["intent creation","visibility marker"],"durability_boundaries":["intent persisted","recovery completed"],"evidence_references":["issue:1121:task"]}}' > "$out"; fi
 `, argvDump, stdinDump, schemaCopy)
 	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
 
@@ -278,7 +278,8 @@ func TestSynthesizeReviewNonConvergence_SchemaEnforcement(t *testing.T) {
 		`"preserved_safety_property":"exclusive ownership",` +
 		`"corrected_invariant":"durable intent gates visibility",` +
 		`"linearization_boundaries":["intent creation"],` +
-		`"durability_boundaries":["intent persisted"]}`
+		`"durability_boundaries":["intent persisted"],` +
+		`"evidence_references":["issue:1:task"]}`
 	tests := []struct {
 		name    string
 		output  string
@@ -335,6 +336,33 @@ func TestSynthesizeReviewNonConvergence_SchemaEnforcement(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, result)
+		})
+	}
+}
+
+func TestVerifyReviewNonConvergence_StructuredOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		wantErr bool
+	}{
+		{name: "approved", output: `{"approved":true,"confidence":0.96,"reason":"coherent recurring invariant"}`},
+		{name: "unknown field rejected", output: `{"approved":true,"confidence":0.96,"reason":"ok","extra":true}`, wantErr: true},
+		{name: "missing reason rejected", output: `{"approved":true,"confidence":0.96}`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			binary, _, _ := writeFakeCodex(t, test.output, "", 0)
+			result, err := NewAgent(binary, "", "", "").VerifyReviewNonConvergence(
+				context.Background(), agent.ReviewVerificationInput{}, agent.ReviewSynthesisOptions{RepoRoot: t.TempDir()},
+			)
+			if test.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, result.Approved)
 		})
 	}
 }

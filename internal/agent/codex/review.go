@@ -188,3 +188,47 @@ func (c *CodexAgent) SynthesizeReviewNonConvergence(ctx context.Context, input a
 	}
 	return result, nil
 }
+
+func (c *CodexAgent) VerifyReviewNonConvergence(ctx context.Context, input agent.ReviewVerificationInput, opts agent.ReviewSynthesisOptions) (*agent.ReviewVerificationResult, error) {
+	verificationPrompt, err := prompt.RenderReviewVerificationPrompt(input)
+	if err != nil {
+		return nil, fmt.Errorf("rendering review verification prompt: %w", err)
+	}
+	message := prompt.ReviewVerificationSystemPrompt + "\n\n" + verificationPrompt
+	schemaFile, err := writeSchemaFile("review_verification.json")
+	if err != nil {
+		return nil, fmt.Errorf("review verification: writing schema file: %w", err)
+	}
+	defer func() { _ = os.Remove(schemaFile) }()
+	outFile, err := os.CreateTemp("", "codex-review-verification-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("review verification: creating output temp file: %w", err)
+	}
+	outPath := outFile.Name()
+	_ = outFile.Close()
+	defer func() { _ = os.Remove(outPath) }()
+	args := append(c.buildExecBaseArgs(), "--output-schema", schemaFile, "--output-last-message", outPath, "-")
+	var stdout, stderr bytes.Buffer
+	if err := agentprocess.Run(ctx, agentprocess.Command{
+		Path: c.BinaryPath, Args: args, Dir: opts.RepoRoot, Env: childEnv(),
+		Stdin: strings.NewReader(message), Stdout: io.MultiWriter(os.Stdout, &stdout),
+		Stderr: io.MultiWriter(os.Stderr, &stderr), ProcessGroup: true,
+	}); err != nil {
+		return nil, fmt.Errorf("agent review verification exited with error: %w\n%s", err, stderr.String())
+	}
+	output := stdout.String()
+	if data, readErr := os.ReadFile(outPath); readErr == nil && strings.TrimSpace(string(data)) != "" {
+		output = string(data)
+	}
+	if prompt.IsSuspiciousOutput(output) {
+		return nil, fmt.Errorf("review verification agent returned suspicious output")
+	}
+	if err := validateStructuredOutput("review_verification.json", output); err != nil {
+		return nil, fmt.Errorf("review verification output violates schema: %w", err)
+	}
+	result, err := prompt.ParseReviewVerificationOutput(output)
+	if err != nil {
+		return nil, fmt.Errorf("parsing review verification output: %w", err)
+	}
+	return result, nil
+}

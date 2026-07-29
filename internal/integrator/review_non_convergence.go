@@ -91,6 +91,9 @@ const reviewNonConvergenceFingerprintMarkerPrefix = "<!-- herd:review-nonconverg
 const reviewNonConvergenceFingerprintMarkerSuffix = " -->"
 
 var reviewSynthesisTimeout = 90 * time.Second
+var reviewVerificationTimeout = 45 * time.Second
+
+const reviewVerificationMinConfidence = 0.90
 
 var (
 	reviewCycleRE          = regexp.MustCompile(`(?i)\bcycle\s+(\d+)\b`)
@@ -640,6 +643,15 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 		}
 		sort.Strings(synthCycle.AffectedFiles)
 		input.Cycles = append(input.Cycles, synthCycle)
+		for findingIndex, finding := range sanitizedDistinctReviewFindings(cycle) {
+			input.EvidenceSources = append(input.EvidenceSources, agent.ReviewEvidenceSource{
+				ID:      fmt.Sprintf("cycle:%d:finding:%d", cycle.Cycle, findingIndex),
+				Kind:    "review_finding",
+				Cycle:   cycle.Cycle,
+				HeadSHA: cycle.HeadSHA,
+				Excerpt: boundedReviewEvidenceExcerpt(finding),
+			})
+		}
 	}
 
 	fixByCycle := map[int][]agent.ReviewSynthesisFixIssue{}
@@ -668,6 +680,25 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 				AcceptanceCriteria:    append([]string(nil), parsed.Criteria...),
 				Context:               parsed.Context,
 			})
+			requirementSources := []struct {
+				id, kind, text string
+			}{
+				{fmt.Sprintf("issue:%d:task", issue.Number), "requirement_task", parsed.Task},
+				{fmt.Sprintf("issue:%d:implementation", issue.Number), "requirement_implementation", parsed.ImplementationDetails},
+				{fmt.Sprintf("issue:%d:context", issue.Number), "requirement_context", parsed.Context},
+			}
+			for criterionIndex, criterion := range parsed.Criteria {
+				requirementSources = append(requirementSources, struct{ id, kind, text string }{
+					fmt.Sprintf("issue:%d:criterion:%d", issue.Number, criterionIndex), "requirement_criterion", criterion,
+				})
+			}
+			for _, source := range requirementSources {
+				if strings.TrimSpace(source.text) != "" {
+					input.EvidenceSources = append(input.EvidenceSources, agent.ReviewEvidenceSource{
+						ID: source.id, Kind: source.kind, Excerpt: boundedReviewEvidenceExcerpt(source.text),
+					})
+				}
+			}
 			continue
 		}
 		if fm.BatchPR != input.PRNumber || fm.FixCycle <= 0 || fm.CIFixCycle > 0 || fm.ConflictResolution {
@@ -725,10 +756,29 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 		})
 	}
 	input.AffectedFiles = sortedStringSet(affectedFiles)
+	sort.SliceStable(input.EvidenceSources, func(i, j int) bool {
+		leftRequirement := input.EvidenceSources[i].Cycle == 0
+		rightRequirement := input.EvidenceSources[j].Cycle == 0
+		if leftRequirement != rightRequirement {
+			return leftRequirement
+		}
+		return input.EvidenceSources[i].ID < input.EvidenceSources[j].ID
+	})
 	return input
 }
 
-func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, input agent.ReviewSynthesisInput, minConfidence float64, analysis reviewConvergenceAnalysis) (reviewSynthesisDecision, string) {
+const reviewEvidenceExcerptBudget = 4096
+
+func boundedReviewEvidenceExcerpt(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= reviewEvidenceExcerptBudget {
+		return value
+	}
+	const marker = "\n[TRUNCATED: deterministic review evidence budget reached]\n"
+	return value[:reviewEvidenceExcerptBudget-len(marker)] + marker
+}
+
+func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence float64, analysis reviewConvergenceAnalysis) (reviewSynthesisDecision, string) {
 	if result == nil {
 		return reviewSynthesisDecisionFallback, "synthesis returned nil result"
 	}
@@ -763,7 +813,7 @@ func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, input agent.Re
 	if synthesizedReviewStrategyFingerprint(result) == "" {
 		return reviewSynthesisDecisionFallback, "synthesis fingerprint is empty"
 	}
-	if ok, reason := validateReviewRequirementReinterpretation(result, input); !ok {
+	if ok, reason := validateReviewRequirementReinterpretation(result); !ok {
 		return reviewSynthesisDecisionFallback, reason
 	}
 	return reviewSynthesisDecisionEscalate, "synthesis passed safety gates"
