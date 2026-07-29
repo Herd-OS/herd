@@ -45,12 +45,20 @@ type AdvanceParams struct {
 
 // AdvanceResult holds the result of a tier advancement.
 type AdvanceResult struct {
-	TierComplete    bool
-	AllComplete     bool
-	DispatchedCount int
-	BatchPRNumber   int
+	TierComplete     bool
+	AllComplete      bool
+	DispatchedCount  int
+	BatchPRNumber    int
 	BatchLockSkipped bool
 	SkipReason       string
+}
+
+// StrandedBatch is a completed open milestone whose batch branch exists but
+// has no pull request for that branch.
+type StrandedBatch struct {
+	MilestoneNumber int
+	MilestoneTitle  string
+	BatchBranch     string
 }
 
 // ReviewParams holds the parameters for reviewing a batch PR.
@@ -675,6 +683,100 @@ func buildTiersFromIssues(allIssues []*platform.Issue) ([][]int, error) {
 // Manual tasks are completed by closing them rather than adding labels.
 func isIssueComplete(issue *platform.Issue) bool {
 	return issue.State == "closed" || issues.HasLabel(issue.Labels, issues.StatusDone)
+}
+
+// FindStrandedCompletedBatches finds open milestones where every issue is
+// complete, the expected batch branch exists, and no pull request exists for
+// that exact head branch.
+func FindStrandedCompletedBatches(ctx context.Context, p platform.Platform) ([]StrandedBatch, error) {
+	milestones, err := p.Milestones().List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing milestones: %w", err)
+	}
+
+	var stranded []StrandedBatch
+	for _, ms := range milestones {
+		if ms == nil || ms.State == "closed" {
+			continue
+		}
+		allIssues, err := p.Issues().List(ctx, platform.IssueFilters{
+			State:     "all",
+			Milestone: &ms.Number,
+		})
+		if err != nil {
+			fmt.Printf("Warning: failed to list issues for milestone #%d while finding stranded batches: %v\n", ms.Number, err)
+			continue
+		}
+		if !hasCompleteIssueList(allIssues, ms) {
+			continue
+		}
+		allComplete := true
+		for _, issue := range allIssues {
+			if !isIssueComplete(issue) {
+				allComplete = false
+				break
+			}
+		}
+		if !allComplete {
+			continue
+		}
+
+		batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
+		if _, err := p.Repository().GetBranchSHA(ctx, batchBranch); err != nil {
+			continue
+		}
+
+		prs, err := p.PullRequests().List(ctx, platform.PRFilters{State: "all", Head: batchBranch})
+		if err != nil {
+			fmt.Printf("Warning: failed to list PRs for batch branch %s while finding stranded batches: %v\n", batchBranch, err)
+			continue
+		}
+		if hasPullRequestForHead(prs, batchBranch) {
+			continue
+		}
+
+		stranded = append(stranded, StrandedBatch{
+			MilestoneNumber: ms.Number,
+			MilestoneTitle:  ms.Title,
+			BatchBranch:     batchBranch,
+		})
+	}
+
+	return stranded, nil
+}
+
+// RecoverStrandedCompletedBatch opens the missing batch PR through the normal
+// AdvanceByBatch path. It first honors an active batch lock so patrol recovery
+// does not race an integrator already working on the same batch.
+func RecoverStrandedCompletedBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.Config, batchNumber int) (*AdvanceResult, bool, error) {
+	state, ok, err := DescribeBatchLock(ctx, p.Repository(), batchNumber)
+	if err != nil {
+		return nil, false, fmt.Errorf("describing batch lock for batch #%d: %w", batchNumber, err)
+	}
+	if ok && IsBatchLockActive(state, timeNowUTC()) {
+		return &AdvanceResult{
+			BatchLockSkipped: true,
+			SkipReason:       batchLockSkipReason(ctx, p.Repository(), batchNumber, state.BatchBranch, 0),
+		}, false, nil
+	}
+
+	result, err := AdvanceByBatch(ctx, p, g, cfg, batchNumber)
+	if err != nil {
+		return nil, false, err
+	}
+	if result.BatchLockSkipped {
+		return result, false, nil
+	}
+	return result, result.AllComplete && result.BatchPRNumber > 0, nil
+}
+
+func hasPullRequestForHead(prs []*platform.PullRequest, head string) bool {
+	for _, pr := range prs {
+		if pr != nil && pr.Head == head {
+			return true
+		}
+	}
+	return false
 }
 
 // AdvanceByBatch triggers tier advancement for a batch by milestone number.

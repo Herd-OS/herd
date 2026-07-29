@@ -373,6 +373,7 @@ type mockRepoService struct {
 	defaultBranch          string
 	defaultBranchErr       error
 	branchExists           map[string]bool
+	missingBranches        map[string]bool
 	branchSHAs             map[string]string
 	commitMessages         map[string]string
 	commitParents          map[string]string
@@ -493,6 +494,9 @@ func (m *mockRepoService) GetBranchSHA(ctx context.Context, name string) (string
 	if m.onGetBranchSHA != nil {
 		m.onGetBranchSHA(name)
 	}
+	if m.missingBranches != nil && m.missingBranches[name] {
+		return "", fmt.Errorf("branch %s not found", name)
+	}
 	if m.branchExists != nil {
 		if m.branchExists[name] {
 			if m.branchSHAs != nil && m.branchSHAs[name] != "" {
@@ -512,6 +516,7 @@ func (m *mockRepoService) GetBranchSHA(ctx context.Context, name string) (string
 
 type mockMilestoneService struct {
 	getResult      map[int]*platform.Milestone
+	listResult     []*platform.Milestone
 	updatedNumbers []int
 	updatedStates  []string
 }
@@ -528,7 +533,7 @@ func (m *mockMilestoneService) Get(_ context.Context, number int) (*platform.Mil
 	return nil, fmt.Errorf("milestone #%d not found", number)
 }
 func (m *mockMilestoneService) List(_ context.Context) ([]*platform.Milestone, error) {
-	return nil, nil
+	return m.listResult, nil
 }
 func (m *mockMilestoneService) Update(_ context.Context, number int, changes platform.MilestoneUpdate) (*platform.Milestone, error) {
 	m.updatedNumbers = append(m.updatedNumbers, number)
@@ -606,14 +611,14 @@ func TestConsolidate_ActiveBatchLockSkipsSameBatchWorkerCompletion(t *testing.T)
 	repoSvc := &mockRepoService{
 		defaultBranch: "main",
 		branchExists: map[string]bool{
-			"herd/batch/1-batch": true,
+			"herd/batch/1-batch":  true,
 			"herd/worker/42-test": true,
-			lockBranch:           true,
+			lockBranch:            true,
 		},
 		branchSHAs: map[string]string{
-			"herd/batch/1-batch": "batch-sha",
+			"herd/batch/1-batch":  "batch-sha",
 			"herd/worker/42-test": "worker-sha",
-			lockBranch:           "active-sha",
+			lockBranch:            "active-sha",
 		},
 		commitMessages: map[string]string{
 			"active-sha": mustBatchLockCommitMessage(t, active),
@@ -2325,6 +2330,249 @@ func TestAdvanceByBatch(t *testing.T) {
 	assert.Equal(t, 1, result.DispatchedCount)
 	assert.Len(t, wf.dispatched, 1)
 	assert.Equal(t, "11", wf.dispatched[0]["issue_number"])
+}
+
+func TestFindStrandedCompletedBatches_DetectionSkips(t *testing.T) {
+	batchBranch := "herd/batch/1-batch"
+	doneIssue := &platform.Issue{
+		Number: 10,
+		Title:  "Task A",
+		Labels: []string{issues.StatusDone},
+		Body:   "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n",
+	}
+
+	tests := []struct {
+		name           string
+		milestone      *platform.Milestone
+		issues         []*platform.Issue
+		prs            []*platform.PullRequest
+		missingBranch  bool
+		expectStranded bool
+	}{
+		{
+			name: "complete open milestone with branch and no PR",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 1,
+			},
+			issues:         []*platform.Issue{doneIssue},
+			expectStranded: true,
+		},
+		{
+			name: "open PR already exists",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 1,
+			},
+			issues: []*platform.Issue{doneIssue},
+			prs:    []*platform.PullRequest{{Number: 42, State: "open", Head: batchBranch}},
+		},
+		{
+			name: "closed PR already exists",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 1,
+			},
+			issues: []*platform.Issue{doneIssue},
+			prs:    []*platform.PullRequest{{Number: 42, State: "closed", Head: batchBranch}},
+		},
+		{
+			name: "merged PR already exists",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 1,
+			},
+			issues: []*platform.Issue{doneIssue},
+			prs:    []*platform.PullRequest{{Number: 42, State: "merged", Head: batchBranch}},
+		},
+		{
+			name: "incomplete failed issue",
+			milestone: &platform.Milestone{
+				Number:     1,
+				Title:      "Batch",
+				State:      "open",
+				OpenIssues: 1,
+			},
+			issues: []*platform.Issue{{Number: 10, Title: "Task A", State: "open", Labels: []string{issues.StatusFailed}}},
+		},
+		{
+			name: "incomplete in-progress issue",
+			milestone: &platform.Milestone{
+				Number:     1,
+				Title:      "Batch",
+				State:      "open",
+				OpenIssues: 1,
+			},
+			issues: []*platform.Issue{{Number: 10, Title: "Task A", State: "open", Labels: []string{issues.StatusInProgress}}},
+		},
+		{
+			name: "incomplete ready issue",
+			milestone: &platform.Milestone{
+				Number:     1,
+				Title:      "Batch",
+				State:      "open",
+				OpenIssues: 1,
+			},
+			issues: []*platform.Issue{{Number: 10, Title: "Task A", State: "open", Labels: []string{issues.StatusReady}}},
+		},
+		{
+			name: "incomplete blocked issue",
+			milestone: &platform.Milestone{
+				Number:     1,
+				Title:      "Batch",
+				State:      "open",
+				OpenIssues: 1,
+			},
+			issues: []*platform.Issue{{Number: 10, Title: "Task A", State: "open", Labels: []string{issues.StatusBlocked}}},
+		},
+		{
+			name: "partial issue list",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 2,
+			},
+			issues: []*platform.Issue{doneIssue},
+		},
+		{
+			name: "closed milestone",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "closed",
+				ClosedIssues: 1,
+			},
+			issues: []*platform.Issue{doneIssue},
+		},
+		{
+			name: "missing batch branch",
+			milestone: &platform.Milestone{
+				Number:       1,
+				Title:        "Batch",
+				State:        "open",
+				ClosedIssues: 1,
+			},
+			issues:        []*platform.Issue{doneIssue},
+			missingBranch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &mockRepoService{defaultBranch: "main"}
+			if tt.missingBranch {
+				repo.missingBranches = map[string]bool{batchBranch: true}
+			}
+			mock := &mockPlatform{
+				issues: &mockIssueService{listResult: tt.issues},
+				prs:    &mockPRService{listResult: tt.prs},
+				repo:   repo,
+				milestones: &mockMilestoneService{
+					listResult: []*platform.Milestone{tt.milestone},
+				},
+			}
+
+			stranded, err := FindStrandedCompletedBatches(context.Background(), mock)
+			require.NoError(t, err)
+			if tt.expectStranded {
+				require.Len(t, stranded, 1)
+				assert.Equal(t, StrandedBatch{MilestoneNumber: 1, MilestoneTitle: "Batch", BatchBranch: batchBranch}, stranded[0])
+				return
+			}
+			assert.Empty(t, stranded)
+		})
+	}
+}
+
+func TestRecoverStrandedCompletedBatch_SkipsActiveBatchLock(t *testing.T) {
+	now := time.Now().UTC()
+	batchBranch := "herd/batch/1-batch"
+	active := lockedBatchLockState(1, batchBranch, 99, "active-lock", now)
+	activeMessage := mustBatchLockCommitMessage(t, active)
+	repo := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			BatchLockBranch(1): true,
+		},
+		branchSHAs: map[string]string{
+			BatchLockBranch(1): "active-lock-sha",
+		},
+		commitMessages: map[string]string{
+			"active-lock-sha": activeMessage,
+		},
+	}
+	mock := &mockPlatform{
+		issues:     newMockIssueService(),
+		prs:        &mockPRService{},
+		workflows:  &mockWorkflowService{},
+		repo:       repo,
+		milestones: &mockMilestoneService{},
+	}
+
+	result, recovered, err := RecoverStrandedCompletedBatch(context.Background(), mock, nil, &config.Config{}, 1)
+	require.NoError(t, err)
+	assert.False(t, recovered)
+	require.NotNil(t, result)
+	assert.True(t, result.BatchLockSkipped)
+	assert.Contains(t, result.SkipReason, "active")
+}
+
+func TestRecoverStrandedCompletedBatch_OpenPRAndIdempotent(t *testing.T) {
+	g := setupBatchRepo(t)
+	batchBranch := "herd/batch/1-batch"
+	issueSvc := newMockIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{
+			Number: 10,
+			Title:  "Task A",
+			State:  "closed",
+			Body:   "---\nherd:\n  version: 1\n  batch: 1\n---\n\n## Task\nDo A\n",
+		},
+	}
+	prSvc := &mockPRService{}
+	mock := &mockPlatform{
+		issues:    issueSvc,
+		prs:       prSvc,
+		workflows: &mockWorkflowService{},
+		repo: &mockRepoService{
+			defaultBranch: "main",
+		},
+		milestones: &mockMilestoneService{
+			getResult: map[int]*platform.Milestone{
+				1: {Number: 1, Title: "Batch", State: "open", ClosedIssues: 1},
+			},
+			listResult: []*platform.Milestone{
+				{Number: 1, Title: "Batch", State: "open", ClosedIssues: 1},
+			},
+		},
+	}
+
+	stranded, err := FindStrandedCompletedBatches(context.Background(), mock)
+	require.NoError(t, err)
+	require.Len(t, stranded, 1)
+
+	result, recovered, err := RecoverStrandedCompletedBatch(context.Background(), mock, g, &config.Config{}, 1)
+	require.NoError(t, err)
+	assert.True(t, recovered)
+	require.NotNil(t, result)
+	assert.True(t, result.AllComplete)
+	assert.Equal(t, 100, result.BatchPRNumber)
+	require.NotNil(t, prSvc.created)
+	assert.Equal(t, batchBranch, prSvc.created.Head)
+
+	prSvc.listResult = []*platform.PullRequest{prSvc.created}
+	stranded, err = FindStrandedCompletedBatches(context.Background(), mock)
+	require.NoError(t, err)
+	assert.Empty(t, stranded)
 }
 
 func TestAdvance_AllComplete_PRAlreadyExists(t *testing.T) {

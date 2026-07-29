@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/herd-os/herd/internal/config"
+	"github.com/herd-os/herd/internal/git"
 	"github.com/herd-os/herd/internal/monitor"
 	"github.com/herd-os/herd/internal/platform/github"
 	"github.com/spf13/cobra"
@@ -38,13 +39,14 @@ func newPatrolCmd() *cobra.Command {
 				return fmt.Errorf("creating GitHub client: %w", err)
 			}
 
-			result, err := monitor.Patrol(cmd.Context(), client, cfg)
+			g := git.New(".")
+			result, err := monitor.PatrolWithGit(cmd.Context(), client, g, cfg)
 			if err != nil {
 				return err
 			}
 
-			fmt.Printf("Patrol complete: %d stale, %d failed, %d redispatched, %d escalated, %d stuck PRs, %d CI failures\n",
-				result.StaleIssues, result.FailedIssues, result.RedispatchedCount, result.EscalatedCount, result.StuckPRs, result.CIFailures)
+			fmt.Printf("Patrol complete: %d stale, %d failed, %d redispatched, %d escalated, %d stuck PRs, %d CI failures, %d stranded batches recovered, %d stranded batches lock-skipped\n",
+				result.StaleIssues, result.FailedIssues, result.RedispatchedCount, result.EscalatedCount, result.StuckPRs, result.CIFailures, result.StrandedBatchesRecovered, result.StrandedBatchesSkippedLocked)
 			return nil
 		},
 	}
