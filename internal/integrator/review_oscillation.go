@@ -223,15 +223,15 @@ func validateReviewRequirementReinterpretation(result *agent.ReviewSynthesisResu
 	if !reviewTextAlignsWithEvidence(value.PlatformConsistencyConstraint, reviewPlatformConstraintEvidence(input)) {
 		return false, "platform consistency constraint is not supported by supplied specification or review history"
 	}
-	if !reviewRequirementsMateriallyOverlap(value.CorrectedInvariant, value.PreservedSafetyProperty) {
-		return false, "corrected invariant does not materially preserve the original safety property"
+	if !reviewSafetyTextEntails(value.PreservedSafetyProperty, value.CorrectedInvariant) {
+		return false, "corrected invariant does not affirmatively entail the preserved safety property"
 	}
 	criteria := strings.Join(trimBlankStrings(result.AcceptanceCriteria), " ")
 	if !reviewTextCoversRequirement(criteria, value.CorrectedInvariant) || !reviewTextCoversRequirement(criteria, value.PreservedSafetyProperty) {
 		return false, "acceptance criteria do not cover both the corrected invariant and preserved safety property"
 	}
-	if !reviewRequirementsMateriallyOverlap(criteria, value.PreservedSafetyProperty) {
-		return false, "acceptance criteria do not affirmatively preserve the original safety property"
+	if !reviewSafetyTextEntails(value.PreservedSafetyProperty, criteria) {
+		return false, "acceptance criteria do not affirmatively entail the preserved safety property"
 	}
 	return true, ""
 }
@@ -342,6 +342,7 @@ type reviewFindingEvidenceCluster struct {
 	subsystem  string
 	firstTerm  string
 	secondTerm string
+	behavior   string
 }
 
 func reviewFindingEvidenceClusters(findings []string) map[string]reviewFindingEvidenceCluster {
@@ -349,15 +350,16 @@ func reviewFindingEvidenceClusters(findings []string) map[string]reviewFindingEv
 	for _, finding := range findings {
 		subsystems := reviewFindingSubsystemSet([]string{finding})
 		terms := concreteReviewFindingArchitecturalTerms(finding)
-		if len(subsystems) == 0 || len(terms) < 2 {
+		behavior := reviewFindingBehavioralIdentity(finding)
+		if len(subsystems) == 0 || len(terms) < 2 || behavior == "" {
 			continue
 		}
 		sortedTerms := sortedStringSet(terms)
 		for subsystem := range subsystems {
 			for i := 0; i < len(sortedTerms)-1; i++ {
 				for j := i + 1; j < len(sortedTerms); j++ {
-					cluster := reviewFindingEvidenceCluster{subsystem: subsystem, firstTerm: sortedTerms[i], secondTerm: sortedTerms[j]}
-					key := strings.Join([]string{cluster.subsystem, cluster.firstTerm, cluster.secondTerm}, "\x00")
+					cluster := reviewFindingEvidenceCluster{subsystem: subsystem, firstTerm: sortedTerms[i], secondTerm: sortedTerms[j], behavior: behavior}
+					key := strings.Join([]string{cluster.subsystem, cluster.firstTerm, cluster.secondTerm, cluster.behavior}, "\x00")
 					out[key] = cluster
 				}
 			}
@@ -427,7 +429,8 @@ func sortedReviewBehavioralConceptSetKeys(values map[string]reviewBehavioralConc
 func reviewFindingBehavioralConceptSets(findings []string) map[string]reviewBehavioralConceptSet {
 	out := map[string]reviewBehavioralConceptSet{}
 	for _, finding := range findings {
-		if !reviewFindingHasConcreteArchitecturalDescription(finding) {
+		behavior := reviewFindingBehavioralIdentity(finding)
+		if behavior == "" {
 			continue
 		}
 		subsystems := reviewFindingSubsystemSet([]string{finding})
@@ -443,7 +446,7 @@ func reviewFindingBehavioralConceptSets(findings []string) map[string]reviewBeha
 		}
 		for subsystem := range subsystems {
 			for _, conceptTerms := range conceptSets {
-				key := subsystem + "\x00" + strings.Join(conceptTerms, "\x00")
+				key := subsystem + "\x00" + strings.Join(conceptTerms, "\x00") + "\x00" + behavior
 				out[key] = reviewBehavioralConceptSet{subsystem: subsystem, terms: conceptTerms}
 			}
 		}
@@ -494,6 +497,10 @@ func concreteReviewFindingArchitecturalTerms(finding string) map[string]struct{}
 }
 
 func reviewFindingHasConcreteArchitecturalDescription(finding string) bool {
+	return reviewFindingBehavioralIdentity(finding) != ""
+}
+
+func reviewFindingBehavioralIdentity(finding string) string {
 	description := finding
 	for _, file := range reviewFilePathsFromText(finding) {
 		description = strings.ReplaceAll(description, file, " ")
@@ -506,6 +513,8 @@ func reviewFindingHasConcreteArchitecturalDescription(finding string) bool {
 			}
 		}
 	}
+	behaviorWords := map[string]struct{}{}
+	hasConcreteRelation := false
 	for _, word := range strings.Fields(normalizeReviewSynthesisFingerprintText(description)) {
 		if len(word) < 4 {
 			continue
@@ -514,13 +523,23 @@ func reviewFindingHasConcreteArchitecturalDescription(finding string) bool {
 			continue
 		}
 		switch word {
-		case "finding", "issue", "problem", "review":
+		case "after", "again", "arbitrary", "because", "behavior", "behaviour", "continues", "despite", "fails",
+			"failure", "finding", "issue", "problem", "review", "still", "thing", "works", "wrong":
 			continue
 		default:
-			return true
+			behaviorWords[word] = struct{}{}
+			switch word {
+			case "accepts", "bypasses", "conflicts", "diverges", "duplicates", "emits", "ignores", "inconsistent",
+				"leaks", "loses", "missing", "moves", "precedes", "publishes", "reappears", "records", "rejects",
+				"repeats", "resurrects", "skips", "violates":
+				hasConcreteRelation = true
+			}
 		}
 	}
-	return false
+	if len(behaviorWords) < 2 || !hasConcreteRelation {
+		return ""
+	}
+	return strings.Join(sortedStringSet(behaviorWords), " ")
 }
 
 func completedFixNumbers(cycles []reviewHistoryCycle) []int {
@@ -701,12 +720,12 @@ func canonicalReviewRequirementWords(value string) map[string]struct{} {
 
 func isClearlyPreservedSafetyProperty(value string, originalEvidence []string) bool {
 	normalized := normalizeReviewSynthesisFingerprintText(value)
-	if reviewSafetyTextIsWeakened(normalized) || !isConcreteReviewReinterpretationText(value) ||
+	if reviewSafetyTextIsAmbiguous(normalized) || !isConcreteReviewReinterpretationText(value) ||
 		!reviewSafetyTextIsAffirmative(normalized) || !reviewTextAlignsWithEvidence(value, originalEvidence) {
 		return false
 	}
 	for _, source := range originalEvidence {
-		if !reviewSafetyTextIsWeakened(source) && reviewRequirementsMateriallyOverlap(source, value) {
+		if reviewSafetyTextEntails(source, value) {
 			return true
 		}
 	}
@@ -726,7 +745,7 @@ func reviewSafetyTextIsAffirmative(value string) bool {
 	return false
 }
 
-func reviewSafetyTextIsWeakened(value string) bool {
+func reviewSafetyTextIsAmbiguous(value string) bool {
 	normalized := normalizeReviewSynthesisFingerprintText(value)
 	for _, phrase := range []string{
 		"not guaranteed", "not required", "need not", "does not ensure", "do not ensure", "cannot ensure",
@@ -752,10 +771,125 @@ func reviewSafetyPropertyAlignsAffirmatively(property string, evidence []string)
 		return false
 	}
 	for _, source := range evidence {
-		if reviewSafetyTextIsWeakened(source) {
+		if reviewSafetyTextEntails(source, property) {
+			return true
+		}
+	}
+	return false
+}
+
+type reviewSafetyRelation struct {
+	subjects       []string
+	hazards        []string
+	safePredicates []string
+	unsafeClauses  []string
+}
+
+var reviewSafetyRelations = []reviewSafetyRelation{
+	{subjects: []string{"revoked grant", "revoked grants"}, hazards: []string{"used", "usable", "use"}, safePredicates: []string{"reject", "deny", "prevent"}, unsafeClauses: []string{"remain usable", "remains usable", "are usable", "is usable"}},
+	{subjects: []string{"duplicate ownership", "multiple ownership"}, hazards: []string{"allowed", "accepted", "permit"}, safePredicates: []string{"reject", "deny", "prevent", "exclusive"}, unsafeClauses: []string{"ownership is allowed", "ownership remains allowed", "ownership is accepted"}},
+	{subjects: []string{"stale authorization", "stale authorisation"}, hazards: []string{"accepted", "allowed", "permit", "access"}, safePredicates: []string{"reject", "deny", "prevent"}, unsafeClauses: []string{"authorization is accepted", "authorisation is accepted", "authorization is allowed", "authorisation is allowed"}},
+	{subjects: []string{"deleted record", "deleted records"}, hazards: []string{"reappear", "resurrect", "restored"}, safePredicates: []string{"prevent", "reject", "deny"}, unsafeClauses: []string{"may reappear", "might reappear", "can reappear", "may resurrect", "might resurrect", "can resurrect"}},
+}
+
+type reviewSafetyPolarity int
+
+const (
+	reviewSafetyPolarityUnknown reviewSafetyPolarity = iota
+	reviewSafetyPolarityProtected
+	reviewSafetyPolarityUnsafe
+)
+
+func reviewSafetyTextEntails(source, candidate string) bool {
+	if reviewSafetyTextIsAmbiguous(candidate) || !reviewRequirementsMateriallyOverlap(source, candidate) {
+		return false
+	}
+	if !reviewSafetyCoreIsPreserved(source, candidate) {
+		return false
+	}
+	sourceNormalized := normalizeReviewSynthesisFingerprintText(source)
+	candidateNormalized := normalizeReviewSynthesisFingerprintText(candidate)
+	matchedRelation := false
+	for _, relation := range reviewSafetyRelations {
+		sourcePolarity := reviewSafetyRelationPolarity(sourceNormalized, relation)
+		if sourcePolarity == reviewSafetyPolarityUnknown {
 			continue
 		}
-		if reviewRequirementsMateriallyOverlap(source, property) {
+		matchedRelation = true
+		if sourcePolarity != reviewSafetyPolarityProtected ||
+			reviewSafetyRelationPolarity(candidateNormalized, relation) != reviewSafetyPolarityProtected {
+			return false
+		}
+	}
+	if reviewSafetyTextHasUnsafeRelation(candidateNormalized) {
+		return false
+	}
+	if matchedRelation {
+		return true
+	}
+	return reviewSafetyTextIsAffirmative(candidateNormalized)
+}
+
+func reviewSafetyCoreIsPreserved(source, candidate string) bool {
+	sourceWords := traceableReviewRequirementWords(source)
+	candidateWords := traceableReviewRequirementWords(candidate)
+	for _, contextual := range []string{
+		"after", "before", "corrected", "during", "enforce", "enforces", "guarantee", "guarantees",
+		"intent", "publication", "recovery", "test", "tested", "tests", "transition", "verify", "verifies",
+	} {
+		delete(sourceWords, contextual)
+	}
+	if len(sourceWords) < 2 {
+		return false
+	}
+	for word := range sourceWords {
+		if _, ok := candidateWords[word]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func reviewSafetyTextHasUnsafeRelation(value string) bool {
+	for _, relation := range reviewSafetyRelations {
+		if reviewSafetyRelationPolarity(value, relation) == reviewSafetyPolarityUnsafe {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewSafetyRelationPolarity(value string, relation reviewSafetyRelation) reviewSafetyPolarity {
+	if !reviewSafetyContainsAny(value, relation.subjects) {
+		return reviewSafetyPolarityUnknown
+	}
+	if reviewSafetyContainsAny(value, relation.unsafeClauses) {
+		return reviewSafetyPolarityUnsafe
+	}
+	hazard := reviewSafetyContainsAny(value, relation.hazards)
+	safePredicate := reviewSafetyContainsAny(value, relation.safePredicates)
+	denied := reviewSafetyContainsAny(value, []string{
+		" cannot ", " can not ", " must not ", " never ", " not ", " no ", " reject", "deni", "prevent", "forbid",
+	})
+	permitted := reviewSafetyContainsAny(value, []string{
+		" allow", " accept", " may ", " might ", " could ", " permit",
+	})
+	if hazard && permitted {
+		return reviewSafetyPolarityUnsafe
+	}
+	if safePredicate || (hazard && denied) {
+		return reviewSafetyPolarityProtected
+	}
+	if hazard {
+		return reviewSafetyPolarityUnsafe
+	}
+	return reviewSafetyPolarityUnknown
+}
+
+func reviewSafetyContainsAny(value string, phrases []string) bool {
+	padded := " " + value + " "
+	for _, phrase := range phrases {
+		if strings.Contains(padded, phrase) {
 			return true
 		}
 	}
@@ -824,7 +958,7 @@ func reviewTextAlignsWithEvidence(value string, evidence []string) bool {
 }
 
 func reviewRequirementsMateriallyOverlap(left, right string) bool {
-	if reviewSafetyTextIsWeakened(left) || reviewSafetyTextIsWeakened(right) {
+	if reviewSafetyTextIsAmbiguous(left) || reviewSafetyTextIsAmbiguous(right) {
 		return false
 	}
 	leftWords := traceableReviewRequirementWords(left)

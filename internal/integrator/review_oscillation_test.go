@@ -92,6 +92,29 @@ func TestAnalyzeLowVolumeReviewOscillation_Prerequisites(t *testing.T) {
 			}
 			return c
 		}, minCycles: 3, enabled: true},
+		{name: "generic architectural tokens plus filler verbs", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			for i := range c {
+				c[i].FindingsBySeverity["MEDIUM"] = []string{
+					"internal/integrator/review.go: durable repair race lock atomic behavior fails",
+					"internal/integrator/review_non_convergence.go: durable repair race lock atomic thing continues",
+				}
+			}
+			return c
+		}, minCycles: 3, enabled: true},
+		{name: "unrelated same subsystem findings with identical families", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
+			values := []string{
+				"internal/integrator/review.go: durable recovery race synchronization loses the lease token",
+				"internal/integrator/review.go: durable recovery race synchronization duplicates the audit row",
+				"internal/integrator/review.go: durable recovery race synchronization bypasses the cache generation",
+				"internal/integrator/review.go: durable recovery race synchronization ignores the webhook receipt",
+			}
+			for i := range c {
+				c[i].FindingsBySeverity["MEDIUM"] = []string{values[i]}
+			}
+			c[len(c)-1].FindingsBySeverity["MEDIUM"] = append(c[len(c)-1].FindingsBySeverity["MEDIUM"],
+				"internal/integrator/review_non_convergence.go: durable recovery race synchronization rejects the unrelated queue item")
+			return c
+		}, minCycles: 3, enabled: true},
 		{name: "unrelated findings in one package", mutate: func(c []reviewHistoryCycle) []reviewHistoryCycle {
 			values := [][]string{
 				{"internal/integrator/review.go: lifecycle transition publishes before ownership is stored"},
@@ -362,6 +385,39 @@ func TestValidateReviewRequirementReinterpretation_AcceptsTraceableSafetyVocabul
 	}
 }
 
+func TestValidateReviewRequirementReinterpretation_RejectsSemanticSafetyInversions(t *testing.T) {
+	tests := []struct {
+		name      string
+		source    string
+		inversion string
+	}{
+		{name: "revoked grant remains usable", source: "revoked grants cannot be used", inversion: "revoked grants remain usable"},
+		{name: "duplicate ownership allowed", source: "duplicate ownership is rejected", inversion: "duplicate ownership is allowed"},
+		{name: "stale authorization accepted", source: "stale authorization is rejected before access", inversion: "stale authorization is accepted before access"},
+		{name: "deleted record may reappear", source: "deleted records never reappear after recovery", inversion: "deleted records may reappear after recovery"},
+		{name: "contradiction repeats source vocabulary", source: "revoked grants cannot be used", inversion: "revoked grants remain usable although revoked grants cannot be used"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := validReviewSynthesisInput()
+			input.OriginalRequirements[0].AcceptanceCriteria = []string{test.source}
+			result := lowVolumeSynthesisResult()
+			result.RequirementReinterpretation = validReviewReinterpretation()
+			result.RequirementReinterpretation.PreservedSafetyProperty = test.inversion
+			result.RequirementReinterpretation.CorrectedInvariant = "the corrected transition guarantees that " + test.inversion
+			result.AcceptanceCriteria = []string{
+				"The corrected transition enforces that " + test.inversion + ".",
+				"Recovery tests repeat that " + test.inversion + ".",
+			}
+
+			ok, reason := validateReviewRequirementReinterpretation(result, input)
+
+			assert.False(t, ok)
+			assert.NotEmpty(t, reason)
+		})
+	}
+}
+
 func TestLowVolumeTitleBodyAndFingerprint(t *testing.T) {
 	result := lowVolumeSynthesisResult()
 	assert.Equal(t, "Review strategy fix: state machine publication invariant", buildLowVolumeSynthesizedStrategyFixIssueTitle(result))
@@ -405,12 +461,13 @@ func TestBuildLowVolumeSynthesizedStrategyFixIssueTitle(t *testing.T) {
 }
 
 func lowVolumeOscillationCycles() []reviewHistoryCycle {
+	recurring := "internal/integrator/review.go: lifecycle transition publishes visibility before the ownership record is committed"
 	findings := [][]string{
-		{"internal/integrator/review.go: lifecycle state transition can publish before ownership is recorded"},
-		{"internal/integrator/review.go: state machine moves to done before publication becomes visible"},
-		{"internal/integrator/review_non_convergence.go: terminal state transition violates the publication invariant"},
+		{recurring},
+		{recurring},
+		{recurring},
 		{
-			"internal/integrator/review.go: publication lifecycle transition loses the durable state invariant",
+			recurring,
 			"internal/integrator/review_non_convergence.go: state machine visibility is inconsistent after handoff",
 		},
 	}
