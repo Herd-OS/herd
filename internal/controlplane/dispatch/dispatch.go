@@ -211,6 +211,7 @@ func (d Dispatcher) dispatchWithJob(ctx context.Context, req DispatchRequest, id
 		"pr_number":         req.PRNumber,
 		"batch_branch":      req.BatchBranch,
 		"base_sha":          dispatchBaseSHA(req),
+		"head_sha":          req.HeadSHA,
 		"repository":        req.Owner + "/" + req.Repo,
 		"github_repo_id":    req.GitHubRepoID,
 		"owner":             req.Owner,

@@ -140,11 +140,13 @@ func TestProductionWorkflowEventProcessorDispatchesReviewForChangesRequested(t *
 	assert.Equal(t, "herd-review.yml", workflows.dispatches[0].workflowFile)
 	assert.Equal(t, "main", workflows.dispatches[0].ref)
 	assert.Equal(t, "849", workflows.dispatches[0].inputs["pr_number"])
-	assert.Equal(t, "head", workflows.dispatches[0].inputs["head_sha"])
+	assert.Equal(t, "head", workflows.dispatches[0].inputs["expected_head_sha"])
+	assert.NotContains(t, workflows.dispatches[0].inputs, "head_sha")
 	jobs, err := st.ListReconcileJobs(ctx, time.Now().Add(time.Hour), 10)
 	require.NoError(t, err)
 	require.Len(t, jobs, 1)
 	assert.Equal(t, "review", stringFromMetadata(jobs[0].Job.Metadata, "kind"))
+	assert.Equal(t, "head", stringFromMetadata(jobs[0].Job.Metadata, "head_sha"))
 }
 
 func TestProductionWorkflowEventProcessorNoOpsNonBatchReviewSubmitted(t *testing.T) {
@@ -524,7 +526,10 @@ func TestProductionResolveConflictsCommand(t *testing.T) {
 				assert.NotContains(t, p.issues.created[0].Body, "full PR conversation")
 				assert.Equal(t, "herd/batch/7-command-surface", workflow.dispatches[0].ref)
 				assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
-				assert.Equal(t, "7", workflow.dispatches[0].inputs["pr_number"])
+				assert.NotContains(t, workflow.dispatches[0].inputs, "pr_number")
+				job, err := d.Dispatcher.Store.GetJob(context.Background(), workflow.dispatches[0].inputs["job_id"])
+				require.NoError(t, err)
+				assert.Equal(t, float64(7), numberFromMetadata(job.Metadata, "pr_number"))
 			}
 		})
 	}
@@ -901,7 +906,10 @@ func TestProductionFixCommandsCreateTrackingIssueAndDispatchCreatedIssue(t *test
 			assert.Equal(t, "herd-worker.yml", workflow.dispatches[0].workflowFile)
 			assert.Equal(t, "herd/batch/106-hosted-app", workflow.dispatches[0].ref)
 			assert.Equal(t, "100", workflow.dispatches[0].inputs["issue_number"])
-			assert.Equal(t, "849", workflow.dispatches[0].inputs["pr_number"])
+			assert.NotContains(t, workflow.dispatches[0].inputs, "pr_number")
+			job, err := d.Dispatcher.Store.GetJob(context.Background(), workflow.dispatches[0].inputs["job_id"])
+			require.NoError(t, err)
+			assert.Equal(t, float64(849), numberFromMetadata(job.Metadata, "pr_number"))
 		})
 	}
 }
@@ -1185,6 +1193,15 @@ func stringFromMetadata(raw []byte, key string) string {
 		return ""
 	}
 	value, _ := values[key].(string)
+	return value
+}
+
+func numberFromMetadata(raw []byte, key string) float64 {
+	values := map[string]any{}
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return 0
+	}
+	value, _ := values[key].(float64)
 	return value
 }
 

@@ -42,6 +42,48 @@ func TestIntegratorCmd_RequiresHerdRunner(t *testing.T) {
 	}
 }
 
+func TestIntegratorCmd_ProductionRunnerWithoutLegacyTokenFailsBeforeGitHubClient(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+	}{
+		{name: "consolidate", args: []string{"integrator", "consolidate", "--run-id", "123"}},
+		{name: "advance", args: []string{"integrator", "advance", "--run-id", "123"}},
+		{name: "review", args: []string{"integrator", "review", "--run-id", "123"}},
+		{name: "merge", args: []string{"integrator", "merge", "--pr", "10"}},
+		{name: "cleanup", args: []string{"integrator", "cleanup", "--pr", "10"}},
+		{name: "check-ci", args: []string{"integrator", "check-ci", "--run-id", "123"}},
+		{
+			name: "handle-comment",
+			args: []string{"integrator", "handle-comment", "--comment-id", "1", "--issue-number", "10", "--author-association", "OWNER"},
+			env:  map[string]string{"COMMENT_BODY": "/herd help"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HERD_RUNNER", "true")
+			t.Setenv("GITHUB_TOKEN", "")
+			t.Setenv("GH_TOKEN", "")
+			t.Setenv("HERD_GITHUB_TOKEN", "")
+			t.Setenv("HERD_LOCAL_GITHUB_AUTH", "")
+			for key, value := range tt.env {
+				t.Setenv(key, value)
+			}
+
+			root := NewRootCmd()
+			root.SetArgs(tt.args)
+			err := root.Execute()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "legacy local/operator-only integrator command")
+			assert.Contains(t, err.Error(), "durable workflow events")
+			assert.NotContains(t, err.Error(), "creating GitHub client")
+		})
+	}
+}
+
 func TestIntegratorReviewCmd_RequiresRunIDOrPR(t *testing.T) {
 	t.Setenv("HERD_RUNNER", "true")
 	root := NewRootCmd()

@@ -28,15 +28,11 @@ func TestWorkflowInputs(t *testing.T) {
 				TimeoutMinutes:  45,
 			},
 			want: map[string]string{
-				"repository_owner":  "octo",
-				"repository_name":   "herd",
 				"repository":        "octo/herd",
 				"job_id":            "job-1",
 				"batch_number":      "12",
 				"issue_number":      "34",
 				"batch_branch":      "herd/batch/12",
-				"base_sha":          "abc123",
-				"head_sha":          "abc123",
 				"expected_head_sha": "abc123",
 				"runner_label":      "herd-worker",
 				"timeout_minutes":   "45",
@@ -47,6 +43,7 @@ func TestWorkflowInputs(t *testing.T) {
 			req: DispatchRequest{
 				Owner:           "octo",
 				Repo:            "herd",
+				Kind:            JobKindReview,
 				BatchNumber:     12,
 				PRNumber:        8,
 				BatchBranch:     "herd/batch/12",
@@ -57,17 +54,12 @@ func TestWorkflowInputs(t *testing.T) {
 				ReviewPrompt:    "focus on auth and retries",
 			},
 			want: map[string]string{
-				"repository_owner":  "octo",
-				"repository_name":   "herd",
 				"repository":        "octo/herd",
 				"job_id":            "job-1",
 				"batch_number":      "12",
 				"pr_number":         "8",
 				"batch_branch":      "herd/batch/12",
-				"base_sha":          "def456",
-				"head_sha":          "def456",
 				"expected_head_sha": "def456",
-				"reason":            "requested",
 				"review_prompt":     "focus on auth and retries",
 			},
 		},
@@ -81,14 +73,10 @@ func TestWorkflowInputs(t *testing.T) {
 				WorkflowFile: "herd-monitor.yml",
 			},
 			want: map[string]string{
-				"repository_owner":  "octo",
-				"repository_name":   "herd",
 				"repository":        "octo/herd",
 				"job_id":            "job-1",
 				"batch_number":      "12",
 				"batch_branch":      "herd/batch/12",
-				"base_sha":          "",
-				"head_sha":          "",
 				"expected_head_sha": "",
 			},
 		},
@@ -100,6 +88,82 @@ func TestWorkflowInputs(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestWorkflowInputsStayWithinGitHubLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		req  DispatchRequest
+	}{
+		{
+			name: "worker",
+			req: func() DispatchRequest {
+				req := validRequest()
+				req.Mode = "batch"
+				return req
+			}(),
+		},
+		{
+			name: "review",
+			req: func() DispatchRequest {
+				req := validRequest()
+				req.Kind = JobKindReview
+				req.WorkflowFile = "herd-review.yml"
+				req.IssueNumber = 0
+				req.PRNumber = 8
+				req.ReviewPrompt = "focus on auth and retries"
+				req.ManualReview = true
+				return req
+			}(),
+		},
+		{
+			name: "review fix worker",
+			req: func() DispatchRequest {
+				req := validRequest()
+				req.Kind = JobKindReviewFix
+				req.PRNumber = 8
+				req.IssueNumber = 34
+				req.ReviewPrompt = "packed in durable metadata only"
+				return req
+			}(),
+		},
+		{
+			name: "integrator",
+			req: func() DispatchRequest {
+				req := validRequest()
+				req.Kind = JobKindIntegrator
+				req.WorkflowFile = "herd-integrator.yml"
+				req.IssueNumber = 0
+				req.PRNumber = 0
+				return req
+			}(),
+		},
+		{
+			name: "monitor",
+			req: func() DispatchRequest {
+				req := validRequest()
+				req.Kind = JobKindMonitor
+				req.WorkflowFile = "herd-monitor.yml"
+				req.IssueNumber = 0
+				req.PRNumber = 0
+				return req
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := WorkflowInputs(tt.req, "job-1")
+
+			require.NoError(t, err)
+			assert.LessOrEqual(t, len(got), maxWorkflowDispatchInputs)
+			if tt.req.Kind != JobKindReview {
+				assert.NotContains(t, got, "pr_number")
+				assert.NotContains(t, got, "review_prompt")
+				assert.NotContains(t, got, "manual_review")
+			}
 		})
 	}
 }

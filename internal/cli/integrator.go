@@ -35,6 +35,22 @@ func newIntegratorCmd() *cobra.Command {
 	return cmd
 }
 
+func ensureLegacyIntegratorGitHubClientAllowed(command string) error {
+	if os.Getenv("HERD_RUNNER") == "true" && os.Getenv("HERD_LOCAL_GITHUB_AUTH") != "true" && firstNonEmptyEnv("GITHUB_TOKEN", "GH_TOKEN", "HERD_GITHUB_TOKEN") == "" {
+		return fmt.Errorf("%s is a legacy local/operator-only integrator command; hosted production runs must submit durable workflow events to the control plane instead of constructing a legacy GitHub client", command)
+	}
+	return nil
+}
+
+func firstNonEmptyEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func newConsolidateCmd() *cobra.Command {
 	var runID int64
 
@@ -46,6 +62,9 @@ func newConsolidateCmd() *cobra.Command {
 				return fmt.Errorf("herd integrator consolidate is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
 			if err := ensureProductionControlPlaneAuth("herd integrator consolidate"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator consolidate"); err != nil {
 				return err
 			}
 
@@ -108,6 +127,9 @@ func newAdvanceCmd() *cobra.Command {
 				return fmt.Errorf("either --run-id or --batch is required")
 			}
 			if err := ensureProductionControlPlaneAuth("herd integrator advance"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator advance"); err != nil {
 				return err
 			}
 
@@ -205,6 +227,9 @@ func newIntegratorReviewCmd() *cobra.Command {
 				return fmt.Errorf("--run-id, --pr, and --batch are mutually exclusive")
 			}
 			if err := ensureProductionControlPlaneAuth("herd integrator review"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator review"); err != nil {
 				return err
 			}
 
@@ -371,6 +396,9 @@ func newIntegratorMergeCmd() *cobra.Command {
 			if err := ensureProductionControlPlaneAuth("herd integrator merge"); err != nil {
 				return err
 			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator merge"); err != nil {
+				return err
+			}
 
 			cfg, err := config.Load(".")
 			if err != nil {
@@ -414,6 +442,9 @@ func newIntegratorCleanupCmd() *cobra.Command {
 				return fmt.Errorf("herd integrator cleanup is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
 			}
 			if err := ensureProductionControlPlaneAuth("herd integrator cleanup"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator cleanup"); err != nil {
 				return err
 			}
 
@@ -495,6 +526,9 @@ func newHandleCommentCmd() *cobra.Command {
 				}
 			}
 			if err := ensureProductionControlPlaneAuth("herd integrator handle-comment"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator handle-comment"); err != nil {
 				return err
 			}
 
@@ -587,6 +621,9 @@ func newIntegratorCheckCICmd() *cobra.Command {
 				return err
 			}
 			if err := ensureProductionControlPlaneAuth("herd integrator check-ci"); err != nil {
+				return err
+			}
+			if err := ensureLegacyIntegratorGitHubClientAllowed("herd integrator check-ci"); err != nil {
 				return err
 			}
 
