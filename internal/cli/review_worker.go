@@ -138,8 +138,9 @@ func runHostedReviewReadOnly(ctx context.Context, input reviewInputServices, ag 
 		fmt.Sprintf("Head: %s", data.PRHeadBranch),
 		fmt.Sprintf("CI status: %s", data.CIStatus),
 	}, "\n")
-	review, err := ag.Review(ctx, data.Diff, agent.ReviewOptions{
+	reviewOpts := agent.ReviewOptions{
 		RepoRoot:               params.RepoRoot,
+		SystemPrompt:           strings.TrimSpace(params.ExtraInstructions),
 		Strictness:             cfg.Integrator.ReviewStrictness,
 		MinFixSeverity:         cfg.Integrator.ReviewFixSeverity,
 		CurrentPRMetadata:      metadata,
@@ -151,7 +152,9 @@ func runHostedReviewReadOnly(ctx context.Context, input reviewInputServices, ag 
 		CoverageSummary:        data.CoverageSummary,
 		ChunkedReview:          data.TotalChunks > 1,
 		ChunkIncludedPathRange: "",
-	})
+		Manual:                 params.Manual,
+	}
+	review, err := ag.Review(ctx, data.Diff, reviewOpts)
 	if err != nil {
 		return hostedReviewWorkflowResult{}, err
 	}

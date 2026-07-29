@@ -94,7 +94,44 @@ func TestRunHostedReviewReadOnlyUsesReadServices(t *testing.T) {
 	assert.Equal(t, "approved", result.Summary)
 	require.Len(t, ag.reviewDiffs, 1)
 	assert.Contains(t, ag.reviewDiffs[0], "+change")
+	require.Len(t, ag.reviewOpts, 1)
 	assert.Equal(t, "success", checks.status)
+}
+
+func TestRunHostedReviewReadOnlyPassesPromptAndManualOptions(t *testing.T) {
+	tests := []struct {
+		name       string
+		manual     bool
+		wantManual bool
+	}{
+		{name: "automatic review remains automatic"},
+		{name: "manual review is preserved", manual: true, wantManual: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prs := hostedReviewTestPRReader{
+				pr:   &platform.PullRequest{Number: 42, Title: "Batch", URL: "https://github.test/pr/42", Base: "main", Head: "feature"},
+				diff: "diff --git a/a.go b/a.go\n+change\n",
+			}
+			ag := &hostedReviewTestAgent{result: &agent.ReviewResult{Approved: true, Summary: "approved"}}
+			cfg := config.Default()
+			cfg.Platform.Owner = "octo"
+			cfg.Platform.Repo = "widgets"
+			prompt := "focus on auth\n\nand session expiry"
+
+			_, err := runHostedReviewReadOnly(t.Context(), reviewInputServices{
+				Issues:       hostedReviewTestIssueReader{},
+				PullRequests: prs,
+				Checks:       hostedReviewTestCheckReader{status: "success"},
+			}, ag, cfg, reviewWorkerParams(42, t.TempDir(), prompt, tt.manual))
+
+			require.NoError(t, err)
+			require.Len(t, ag.reviewOpts, 1)
+			assert.Contains(t, ag.reviewOpts[0].SystemPrompt, prompt)
+			assert.Equal(t, tt.wantManual, ag.reviewOpts[0].Manual)
+		})
+	}
 }
 
 func TestHostedReviewReadTokenUsesControlPlaneWithoutLegacyGitHubToken(t *testing.T) {
@@ -339,6 +376,7 @@ type hostedReviewTestAgent struct {
 	result      *agent.ReviewResult
 	err         error
 	reviewDiffs []string
+	reviewOpts  []agent.ReviewOptions
 }
 
 func (a *hostedReviewTestAgent) Plan(context.Context, string, agent.PlanOptions) (*agent.Plan, error) {
@@ -349,8 +387,9 @@ func (a *hostedReviewTestAgent) Execute(context.Context, agent.TaskSpec, agent.E
 	return nil, nil
 }
 
-func (a *hostedReviewTestAgent) Review(_ context.Context, diff string, _ agent.ReviewOptions) (*agent.ReviewResult, error) {
+func (a *hostedReviewTestAgent) Review(_ context.Context, diff string, opts agent.ReviewOptions) (*agent.ReviewResult, error) {
 	a.reviewDiffs = append(a.reviewDiffs, diff)
+	a.reviewOpts = append(a.reviewOpts, opts)
 	return a.result, a.err
 }
 

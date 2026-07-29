@@ -363,6 +363,19 @@ func TestMemoryStore(t *testing.T) {
 	require.ErrorIs(t, s.RevokeRunnerBootstrapToken(ctx, 404, "missing"), ErrNotFound)
 	require.ErrorIs(t, s.MarkRunnerBootstrapTokenUsed(ctx, 404, time.Now().UTC()), ErrNotFound)
 
+	require.NoError(t, s.UpsertInstallation(ctx, Installation{ID: 2, AccountLogin: "octo"}))
+	oldRepo, err := s.UpsertRepository(ctx, Repository{GitHubID: 3003, InstallationID: 2, Owner: "octo", Name: "old", DefaultBranch: "main"})
+	require.NoError(t, err)
+	newRepo, err := s.UpsertRepository(ctx, Repository{GitHubID: 3003, InstallationID: 2, Owner: "octo", Name: "new", DefaultBranch: "main"})
+	require.NoError(t, err)
+	assert.Equal(t, oldRepo.ID, newRepo.ID)
+	_, err = s.GetRepository(ctx, "octo", "old")
+	require.ErrorIs(t, err, ErrNotFound)
+	gotRenamedRepo, err := s.GetRepository(ctx, "octo", "new")
+	require.NoError(t, err)
+	assert.Equal(t, oldRepo.ID, gotRenamedRepo.ID)
+	assert.Equal(t, int64(3003), gotRenamedRepo.GitHubID)
+
 	require.NoError(t, s.CreateJob(ctx, Job{JobID: "j1"}))
 	job, err := s.GetJob(ctx, "j1")
 	require.NoError(t, err)
@@ -606,6 +619,44 @@ func seedRepository(t *testing.T, ctx context.Context, s *PostgresStore, db *sql
 	var repoID int64
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT id FROM repositories WHERE owner = $1 AND name = $2", "octo", "repo").Scan(&repoID))
 	return repoID
+}
+
+func TestPostgresUpsertRepositoryUpdatesRenameByGitHubID(t *testing.T) {
+	ctx := context.Background()
+	db := newPostgresDB(t, ctx)
+	require.NoError(t, ApplyMigrations(ctx, db))
+	s := &PostgresStore{db: db}
+	require.NoError(t, s.UpsertInstallation(ctx, Installation{
+		ID:           1001,
+		AccountLogin: "octo",
+		AccountID:    2002,
+		TargetType:   "Organization",
+	}))
+
+	oldRepo, err := s.UpsertRepository(ctx, Repository{
+		GitHubID:       3003,
+		InstallationID: 1001,
+		Owner:          "octo",
+		Name:           "old",
+		DefaultBranch:  "main",
+	})
+	require.NoError(t, err)
+	newRepo, err := s.UpsertRepository(ctx, Repository{
+		GitHubID:       3003,
+		InstallationID: 1001,
+		Owner:          "octo",
+		Name:           "new",
+		DefaultBranch:  "main",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, oldRepo.ID, newRepo.ID)
+	_, err = s.GetRepository(ctx, "octo", "old")
+	require.ErrorIs(t, err, ErrNotFound)
+	got, err := s.GetRepository(ctx, "octo", "new")
+	require.NoError(t, err)
+	assert.Equal(t, oldRepo.ID, got.ID)
+	assert.Equal(t, int64(3003), got.GitHubID)
 }
 
 func isDockerUnavailable(err error) bool {

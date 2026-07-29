@@ -713,9 +713,13 @@ func assertCallbackOIDCTokenFetchRetries(t *testing.T, run, finalFailure, retryF
 
 	assert.Contains(t, run, `if ! OIDC_TOKEN="$(curl -fsSL`, "OIDC fetch failure must be handled inside the retry loop")
 	assert.Contains(t, run, `jq -er '.value // empty'`, "OIDC fetch must fail on missing or empty token values")
+	assert.Contains(t, run, `*\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;`, "OIDC URL builder must append audience to existing queries with &")
+	assert.Contains(t, run, `*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;`, "OIDC URL builder must append audience to query-less URLs with ?")
+	assert.Contains(t, run, `"$OIDC_REQUEST_URL"`, "OIDC fetch must use the robustly constructed URL")
 	assert.Contains(t, run, finalFailure)
 	assert.Contains(t, run, retryFailure)
 	assert.Contains(t, run, "continue", "OIDC fetch failures must advance to the next retry attempt before POSTing")
+	assert.NotContains(t, run, `curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane"`, "OIDC fetch must not assume the request URL already has a query string")
 	assert.NotContains(t, run, `jq -r '.value'`, "OIDC fetch must not accept empty token values")
 	assert.NotContains(t, run, "\n            OIDC_TOKEN=\"$(curl -fsSL", "OIDC fetch must not be a bare assignment")
 

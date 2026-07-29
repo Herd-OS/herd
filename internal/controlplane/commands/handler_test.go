@@ -617,7 +617,7 @@ func TestHandlerDispatchUnknownOutcomeRedeliveryDelegatesToDispatcher(t *testing
 	require.Error(t, retryErr)
 	assert.Contains(t, retryErr.Error(), "repair required")
 	assert.Len(t, gh.comments, 1)
-	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.dispatched, 2)
 	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	key := "repo:42:comment:123:command:review"
 	require.Contains(t, st.idempotencyKeys, key)
@@ -626,7 +626,7 @@ func TestHandlerDispatchUnknownOutcomeRedeliveryDelegatesToDispatcher(t *testing
 	assert.Equal(t, StatusDispatching, st.commandRecords[0].Status)
 }
 
-func TestHandlerDispatchingRecordBeforeDispatcherCallRedeliveryRequiresRepair(t *testing.T) {
+func TestHandlerDispatchingRecordBeforeDispatcherCallRedeliveryDispatchesOnce(t *testing.T) {
 	st := newFakeStore()
 	metadata := json.RawMessage(`{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`)
 	st.idempotencyKeys["repo:42:comment:123:command:review"] = store.IdempotencyKey{
@@ -653,18 +653,17 @@ func TestHandlerDispatchingRecordBeforeDispatcherCallRedeliveryRequiresRepair(t 
 	result, err := h.HandleIssueComment(context.Background(), validComment("OWNER", "@herd-os review"))
 	duplicate, duplicateErr := h.HandleIssueComment(context.Background(), validComment("OWNER", "@herd-os review"))
 
-	require.Error(t, err)
-	require.Error(t, duplicateErr)
-	assert.Contains(t, err.Error(), "repair required")
-	assert.Empty(t, result.Status)
-	assert.Empty(t, duplicate.Status)
+	require.NoError(t, err)
+	require.NoError(t, duplicateErr)
+	assert.Equal(t, StatusAcknowledged, result.Status)
+	assert.Equal(t, StatusAcknowledged, duplicate.Status)
 	assert.Empty(t, gh.comments)
-	assert.Empty(t, dispatcher.dispatched)
-	assert.Empty(t, dispatcher.underlyingDispatches)
+	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	require.Len(t, st.commandRecords, 1)
-	assert.Equal(t, StatusDispatching, st.commandRecords[0].Status)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
 	assert.Equal(t, "completed", st.idempotencyKeys["repo:42:comment:123:command:review"].Status)
-	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys["repo:42:comment:123:command:review"].ResultRef)
+	assert.Equal(t, "dispatch:completed", st.idempotencyKeys["repo:42:comment:123:command:review"].ResultRef)
 }
 
 func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(t *testing.T) {
@@ -801,17 +800,20 @@ func TestHandlerDispatchCompletionFailureRedeliveryDoesNotDispatchAgain(t *testi
 
 	_, err := h.HandleIssueComment(context.Background(), event)
 	_, retryErr := h.HandleIssueComment(context.Background(), event)
+	_, finalErr := h.HandleIssueComment(context.Background(), event)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "complete command idempotency key")
-	require.Error(t, retryErr)
-	assert.Contains(t, retryErr.Error(), "repair required")
+	require.NoError(t, retryErr)
+	require.NoError(t, finalErr)
 	assert.Len(t, gh.comments, 1)
-	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.dispatched, 2)
+	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	key := "repo:42:comment:123:command:review"
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
+	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
-	assert.Equal(t, StatusDispatching, st.commandRecords[0].Status)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
 }
 
 func TestHandlerRecordFailureRetryPostsOneAcknowledgement(t *testing.T) {
@@ -867,19 +869,20 @@ func TestHandlerDispatchStatusAndFallbackFailureRedeliveryDoesNotDispatchAgain(t
 
 	_, err := h.HandleIssueComment(context.Background(), event)
 	_, retryErr := h.HandleIssueComment(context.Background(), event)
+	_, finalErr := h.HandleIssueComment(context.Background(), event)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "complete command idempotency key")
-	require.Error(t, retryErr)
-	assert.Contains(t, retryErr.Error(), "repair required")
+	require.NoError(t, retryErr)
+	require.NoError(t, finalErr)
 	assert.Len(t, gh.comments, 1)
-	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.dispatched, 2)
 	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	key := "repo:42:comment:123:command:review"
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
-	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
+	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
-	assert.Equal(t, StatusDispatching, st.commandRecords[0].Status)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
 }
 
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {
@@ -1239,10 +1242,15 @@ type fakeDispatcher struct {
 	errs                 []error
 	dispatchThenErrs     []error
 	completed            map[string]bool
+	unknown              map[string]bool
 }
 
 func (d *fakeDispatcher) DispatchCommand(_ context.Context, cmd DispatchCommand) error {
 	d.dispatched = append(d.dispatched, cmd)
+	key := fmt.Sprintf("%d:%d:%s", cmd.RepositoryID, cmd.CommentID, cmd.Command.Kind)
+	if d.unknown != nil && d.unknown[key] {
+		return fmt.Errorf("workflow dispatch %q outcome is unknown after GitHub accepted dispatch; repair required", key)
+	}
 	if len(d.errs) > 0 {
 		err := d.errs[0]
 		d.errs = d.errs[1:]
@@ -1256,7 +1264,6 @@ func (d *fakeDispatcher) DispatchCommand(_ context.Context, cmd DispatchCommand)
 	if d.completed == nil {
 		d.completed = map[string]bool{}
 	}
-	key := fmt.Sprintf("%d:%d:%s", cmd.RepositoryID, cmd.CommentID, cmd.Command.Kind)
 	if d.completed[key] {
 		return nil
 	}
@@ -1266,6 +1273,10 @@ func (d *fakeDispatcher) DispatchCommand(_ context.Context, cmd DispatchCommand)
 		err := d.dispatchThenErrs[0]
 		d.dispatchThenErrs = d.dispatchThenErrs[1:]
 		if err != nil {
+			if d.unknown == nil {
+				d.unknown = map[string]bool{}
+			}
+			d.unknown[key] = true
 			return err
 		}
 	}

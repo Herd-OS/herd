@@ -191,7 +191,7 @@ func TestSubmitReviewResultRetryAfterStatusFailureDoesNotDuplicateReview(t *test
 	}
 }
 
-func TestSubmitPRReviewOnceChangedSummaryConflictsWithDurableSubmissionIdentity(t *testing.T) {
+func TestSubmitPRReviewOnceCompletedDuplicateIgnoresChangedSummary(t *testing.T) {
 	gh := &fakeReviewGitHub{}
 	mutations := newFakeReviewMutationStore()
 	svc := ReviewService{GitHub: gh, Mutations: mutations}
@@ -205,9 +205,8 @@ func TestSubmitPRReviewOnceChangedSummaryConflictsWithDurableSubmissionIdentity(
 	duplicateErr := svc.submitPRReviewOnce(context.Background(), repo, second, platform.ReviewApprove)
 
 	require.NoError(t, firstErr)
-	require.Error(t, secondErr)
-	require.Error(t, duplicateErr)
-	assert.Contains(t, secondErr.Error(), "conflicting duplicate review submission")
+	require.NoError(t, secondErr)
+	require.NoError(t, duplicateErr)
 	require.Len(t, gh.reviews, 1)
 	assert.Equal(t, "summary", gh.reviews[0].body)
 	assert.Equal(t, reviewSubmissionKey(repo, first, platform.ReviewApprove), reviewSubmissionKey(repo, second, platform.ReviewApprove))
@@ -315,6 +314,33 @@ func TestSubmitPRReviewOnceRetryAfterMutationCompletionFailureRepairsStartedAtte
 	secondErr := svc.submitPRReviewOnce(context.Background(), repo, redelivery, platform.ReviewApprove)
 
 	require.Error(t, firstErr)
+	require.NoError(t, secondErr)
+	assert.Len(t, gh.reviews, 1)
+	assert.Equal(t, "summary", gh.reviews[0].body)
+	record, err := mutations.GetIdempotencyKey(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", record.Status)
+	attempt, err := mutations.GetGitHubMutationAttempt(context.Background(), key)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", attempt.Status)
+}
+
+func TestSubmitPRReviewOnceChangedSummaryRepairsCompletedSideEffect(t *testing.T) {
+	gh := &fakeReviewGitHub{}
+	mutations := newFakeReviewMutationStore()
+	mutations.completeMutationErrs = []error{errors.New("database down"), nil}
+	svc := ReviewService{GitHub: gh, Mutations: mutations}
+	repo := testRepo(true)
+	first := reviewResult(ResultStatusApproved, "head")
+	second := first
+	second.Summary = "corrected summary"
+	key := reviewSubmissionKey(repo, first, platform.ReviewApprove)
+
+	firstErr := svc.submitPRReviewOnce(context.Background(), repo, first, platform.ReviewApprove)
+	secondErr := svc.submitPRReviewOnce(context.Background(), repo, second, platform.ReviewApprove)
+
+	require.Error(t, firstErr)
+	assert.Contains(t, firstErr.Error(), "complete review submission mutation attempt")
 	require.NoError(t, secondErr)
 	assert.Len(t, gh.reviews, 1)
 	assert.Equal(t, "summary", gh.reviews[0].body)

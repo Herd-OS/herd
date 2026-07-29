@@ -131,6 +131,33 @@ func TestCommandScopedAuthConfigDoesNotAppearInGitArgv(t *testing.T) {
 	assert.NotContains(t, strings.ToLower(captured), "password")
 }
 
+func TestGitEnvStripsInheritedCommandScopedConfig(t *testing.T) {
+	binDir := t.TempDir()
+	capturePath := filepath.Join(t.TempDir(), "env.txt")
+	fakeGit := filepath.Join(binDir, "git")
+	script := "#!/bin/sh\n" +
+		"env | sort | grep -E '^(GIT_CONFIG|HERD_GIT)_' > \"$HERD_GIT_ARGV_CAPTURE\"\n" +
+		"exit 1\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HERD_GIT_ARGV_CAPTURE", capturePath)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "http.https://github.com/.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer ghs_inherited_installation_token")
+
+	err := CloneWithConfig("https://github.com/acme/widgets.git", filepath.Join(t.TempDir(), "repo"),
+		"user.name=HerdOS")
+
+	require.Error(t, err)
+	captured := string(mustReadFile(t, capturePath))
+	assert.NotContains(t, captured, "ghs_inherited_installation_token")
+	assert.NotContains(t, captured, "http.https://github.com/.extraHeader")
+	assert.NotContains(t, strings.ToLower(captured), "authorization: bearer")
+	assert.Contains(t, captured, "GIT_CONFIG_COUNT=1")
+	assert.Contains(t, captured, "GIT_CONFIG_KEY_0=user.name")
+	assert.Contains(t, captured, "GIT_CONFIG_VALUE_0=HerdOS")
+}
+
 func TestCurrentBranch(t *testing.T) {
 	dir := initTestRepo(t)
 	g := New(dir)

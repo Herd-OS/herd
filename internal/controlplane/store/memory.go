@@ -139,6 +139,16 @@ func (s *MemoryStore) UpsertRepository(_ context.Context, r Repository) (Reposit
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := repoKey(r.Owner, r.Name)
+	if r.GitHubID != 0 {
+		for existingKey, existing := range s.repositories {
+			if existing.GitHubID == r.GitHubID {
+				r.ID = existing.ID
+				delete(s.repositories, existingKey)
+				s.repositories[key] = r
+				return r, nil
+			}
+		}
+	}
 	if existing, ok := s.repositories[key]; ok && r.ID == 0 {
 		r.ID = existing.ID
 	}

@@ -423,9 +423,6 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 				}
 				return repo, false, idempotencyKey, ackMetadata, nil
 			}
-			if dispatchable && commandRecord.Status == StatusDispatching {
-				return store.Repository{}, false, "", nil, fmt.Errorf("command dispatch %q outcome is unknown after dispatch started; repair required", idempotencyKey)
-			}
 			_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata)
 			if dispatchable {
 				return repo, true, idempotencyKey, ackMetadata, nil

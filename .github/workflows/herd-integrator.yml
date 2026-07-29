@@ -68,7 +68,11 @@ jobs:
           attempt=1
           delay=1
           while true; do
-            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -er '.value // empty')"; then
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
               if [ "$attempt" -ge 4 ]; then
                 echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
                 exit 1
@@ -155,7 +159,11 @@ jobs:
           attempt=1
           delay=1
           while true; do
-            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -er '.value // empty')"; then
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
               if [ "$attempt" -ge 4 ]; then
                 echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
                 exit 1
@@ -227,7 +235,11 @@ jobs:
           attempt=1
           delay=1
           while true; do
-            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -er '.value // empty')"; then
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
               if [ "$attempt" -ge 4 ]; then
                 echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
                 exit 1
@@ -305,7 +317,11 @@ jobs:
           attempt=1
           delay=1
           while true; do
-            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -er '.value // empty')"; then
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
               if [ "$attempt" -ge 4 ]; then
                 echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
                 exit 1
@@ -378,7 +394,11 @@ jobs:
           attempt=1
           delay=1
           while true; do
-            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" | jq -er '.value // empty')"; then
+            case "$ACTIONS_ID_TOKEN_REQUEST_URL" in
+              *\?*) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=herd-control-plane" ;;
+              *) OIDC_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=herd-control-plane" ;;
+            esac
+            if ! OIDC_TOKEN="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$OIDC_REQUEST_URL" | jq -er '.value // empty')"; then
               if [ "$attempt" -ge 4 ]; then
                 echo "Failed to fetch HerdOS workflow event OIDC token after ${attempt} attempt(s)." >&2
                 exit 1

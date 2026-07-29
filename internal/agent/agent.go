@@ -102,6 +102,7 @@ type ReviewOptions struct {
 	CoverageSummary        string
 	ChunkedReview          bool
 	PartialReview          bool
+	Manual                 bool
 	// WorkerNoOpVerdicts contains the bodies of structured verdict
 	// comments posted by fix workers on the batch PR in previous cycles.
 	// Each entry is one full verdict comment body (header + reasoning).

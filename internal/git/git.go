@@ -358,7 +358,13 @@ func gitArgs(args ...string) []string {
 }
 
 func gitEnv(config []string, env []string) []string {
-	out := append([]string{}, os.Environ()...)
+	out := make([]string, 0, len(os.Environ())+len(env)+len(config)*2+1)
+	for _, entry := range os.Environ() {
+		if inheritedGitConfigEnv(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
 	out = append(out, env...)
 	configIndex := 0
 	for _, entry := range config {
@@ -382,6 +388,14 @@ func gitEnv(config []string, env []string) []string {
 		out = append(out, fmt.Sprintf("GIT_CONFIG_COUNT=%d", configIndex))
 	}
 	return out
+}
+
+func inheritedGitConfigEnv(entry string) bool {
+	key, _, ok := strings.Cut(entry, "=")
+	if !ok {
+		key = entry
+	}
+	return key == "GIT_CONFIG_COUNT" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_")
 }
 
 func gitCommandDisplay(args []string) string {

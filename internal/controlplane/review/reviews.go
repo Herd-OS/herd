@@ -275,14 +275,14 @@ func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, 
 		if err != nil {
 			return fmt.Errorf("get review submission idempotency: %w", err)
 		}
-		if len(record.Metadata) > 0 && !sameReviewSubmissionRequest(record.Metadata, request) {
-			return fmt.Errorf("conflicting duplicate review submission for durable job/head %q", key)
-		}
 		if repaired, repairErr := s.repairCompletedReviewSubmission(ctx, key); repaired || repairErr != nil {
 			return repairErr
 		}
 		if repaired, repairErr := s.repairStartedReviewSubmission(ctx, key, repo, result, event); repaired || repairErr != nil {
 			return repairErr
+		}
+		if len(record.Metadata) > 0 && !sameReviewSubmissionRequest(record.Metadata, request) {
+			return fmt.Errorf("conflicting duplicate review submission for durable job/head %q", key)
 		}
 		if record.Status == "completed" {
 			return nil
