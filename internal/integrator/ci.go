@@ -101,7 +101,7 @@ func CheckCI(ctx context.Context, p platform.Platform, cfg *config.Config, param
 	if lockRunID == 0 && params.CIRun != nil {
 		lockRunID = params.CIRun.RunID
 	}
-	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), ms.Number, batchBranch, lockRunID, timeNowUTC())
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), ms.Number, batchBranch, lockRunID)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
 	}

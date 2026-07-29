@@ -385,10 +385,13 @@ Before opening the batch PR, the Integrator sanity-checks that the milestone's i
 
 ### Run-to-Milestone Resolution
 
-`herd integrator consolidate --run-id <N>` is a **milestone-wide, batch-level**
-operation, not a single-branch merge. The triggering run identifies which
-milestone to operate on; the Integrator then processes every eligible worker
-branch in that milestone in a single invocation.
+`herd integrator worker-cycle --run-id <N>` is the workflow-level worker
+completion entrypoint. It holds one durable batch lock across consolidation,
+advancement, review, and CI checking. Its consolidation phase remains a
+**milestone-wide, batch-level** operation, not a single-branch merge. The
+triggering run identifies which milestone to operate on; the Integrator then
+processes every eligible worker branch in that milestone in a single
+invocation.
 
 1. Query the run's workflow_dispatch inputs to extract the issue number, and
    read that issue's milestone — this is the only role the run ID plays. The
@@ -439,11 +442,14 @@ run logs `Integrator batch lock active; skipping` with the batch number, batch
 branch, run ID, and lock branch; the next workflow event, slash command, or
 Monitor patrol can retry safely.
 
-For completed worker runs, `herd integrator consolidate --run-id <N>` resolves
+For completed worker runs, `herd integrator worker-cycle --run-id <N>` resolves
 the run ID back to the worker issue and milestone instead of trusting
-`workflow_run.head_branch`. The diagnostic log starts with
-`resolved worker run context` and includes the resolved run ID, issue number,
-batch branch, worker branch, and lock key.
+`workflow_run.head_branch`. If a same-batch worker completion loses the batch
+lock, Herd marks it `herd/integrator-pending`; the active worker cycle drains
+that marker with a fresh broad consolidation scan before PR review or CI
+eligibility. The diagnostic log starts with `resolved worker run context` and
+includes the resolved run ID, issue number, batch branch, worker branch, and
+lock key.
 
 ### Post-Merge Failure Handling
 

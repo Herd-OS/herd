@@ -188,26 +188,17 @@ func TestIntegratorWorkflow_DefaultWorkerCompletionRunsReviewInIntegrateJob(t *t
 
 	var runScript string
 	for _, step := range integrate.Steps {
-		if strings.Contains(step.Run, "herd integrator consolidate --run-id") {
+		if strings.Contains(step.Run, "herd integrator worker-cycle --run-id") {
 			runScript = step.Run
 			break
 		}
 	}
-	require.NotEmpty(t, runScript, "integrate job should run worker completion commands")
-
-	expectedCommands := []string{
-		`herd integrator consolidate --run-id "$RUN_ID"`,
-		`herd integrator advance --run-id "$RUN_ID"`,
-		`herd integrator review --run-id "$RUN_ID"`,
-		`herd integrator check-ci --run-id "$RUN_ID"`,
-	}
-	previousIndex := -1
-	for _, command := range expectedCommands {
-		index := strings.Index(runScript, command)
-		require.NotEqual(t, -1, index, "integrate run script should contain %q", command)
-		assert.Greater(t, index, previousIndex, "%q should appear after the previous command", command)
-		previousIndex = index
-	}
+	require.NotEmpty(t, runScript, "integrate job should run the worker completion cycle")
+	assert.Contains(t, runScript, `herd integrator worker-cycle --run-id "$RUN_ID"`)
+	assert.NotContains(t, runScript, `herd integrator consolidate --run-id "$RUN_ID"`)
+	assert.NotContains(t, runScript, `herd integrator advance --run-id "$RUN_ID"`)
+	assert.NotContains(t, runScript, `herd integrator review --run-id "$RUN_ID"`)
+	assert.NotContains(t, runScript, `herd integrator check-ci --run-id "$RUN_ID"`)
 	assert.NotContains(t, runScript, "herd integrator review --batch")
 	assert.NotContains(t, runScript, "herd integrator review --pr")
 }

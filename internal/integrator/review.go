@@ -151,7 +151,7 @@ func Review(ctx context.Context, p platform.Platform, ag agent.Agent, g *git.Git
 		fmt.Printf("Batch already complete (milestone #%d closed), skipping.\n", ms.Number)
 		return &ReviewResult{BatchPRNumber: pr.Number}, nil
 	}
-	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), ms.Number, batchBranch, params.RunID, timeNowUTC())
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), ms.Number, batchBranch, params.RunID)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
 	}

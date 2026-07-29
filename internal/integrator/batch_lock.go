@@ -35,6 +35,13 @@ type BatchLockHandle struct {
 	state  BatchLockState
 }
 
+type heldBatchLockContextKey struct{}
+
+type heldBatchLockContext struct {
+	batchNumber int
+	batchBranch string
+}
+
 func BatchLockBranch(batchNumber int) string {
 	return fmt.Sprintf("herd/locks/batch/%d", batchNumber)
 }
@@ -83,6 +90,21 @@ func AcquireBatchLock(ctx context.Context, repoSvc platform.RepositoryService, b
 		return &BatchLockHandle{branch: lockBranch, state: lockedState}, true, nil
 	}
 	return nil, false, fmt.Errorf("acquiring batch lock %s: exceeded retry attempts", lockBranch)
+}
+
+func withHeldBatchLock(ctx context.Context, batchNumber int, batchBranch string) context.Context {
+	return context.WithValue(ctx, heldBatchLockContextKey{}, heldBatchLockContext{
+		batchNumber: batchNumber,
+		batchBranch: batchBranch,
+	})
+}
+
+func acquireBatchLockForOperation(ctx context.Context, repoSvc platform.RepositoryService, batchNumber int, batchBranch string, runID int64) (*BatchLockHandle, bool, error) {
+	if held, ok := ctx.Value(heldBatchLockContextKey{}).(heldBatchLockContext); ok &&
+		held.batchNumber == batchNumber && held.batchBranch == batchBranch {
+		return nil, true, nil
+	}
+	return AcquireBatchLock(ctx, repoSvc, batchNumber, batchBranch, runID, timeNowUTC())
 }
 
 func ReleaseBatchLock(ctx context.Context, repoSvc platform.RepositoryService, h *BatchLockHandle) error {

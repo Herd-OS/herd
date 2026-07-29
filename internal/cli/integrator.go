@@ -25,12 +25,69 @@ func newIntegratorCmd() *cobra.Command {
 		Hidden: true,
 	}
 	cmd.AddCommand(newConsolidateCmd())
+	cmd.AddCommand(newWorkerCycleCmd())
 	cmd.AddCommand(newAdvanceCmd())
 	cmd.AddCommand(newIntegratorReviewCmd())
 	cmd.AddCommand(newIntegratorMergeCmd())
 	cmd.AddCommand(newIntegratorCleanupCmd())
 	cmd.AddCommand(newIntegratorCheckCICmd())
 	cmd.AddCommand(newHandleCommentCmd())
+	return cmd
+}
+
+func newWorkerCycleCmd() *cobra.Command {
+	var runID int64
+
+	cmd := &cobra.Command{
+		Use:   "worker-cycle",
+		Short: "Run worker-completion integrate cycle under one batch lock",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if os.Getenv("HERD_RUNNER") != "true" {
+				return fmt.Errorf("herd integrator worker-cycle is intended to run inside GitHub Actions (set HERD_RUNNER=true)")
+			}
+
+			cfg, err := config.Load(".")
+			if err != nil {
+				return err
+			}
+			client, err := github.New(cfg.Platform.Owner, cfg.Platform.Repo)
+			if err != nil {
+				return fmt.Errorf("creating GitHub client: %w", err)
+			}
+			ag, err := factory.New(cfg.Agent.Resolve(config.AgentRoleWorkers))
+			if err != nil {
+				return err
+			}
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("getting current directory: %w", err)
+			}
+			g := git.New(cwd)
+
+			result, err := integrator.RunWorkerCompletionCycle(cmd.Context(), client, ag, g, cfg, integrator.WorkerCompletionCycleParams{
+				RunID:    runID,
+				RepoRoot: cwd,
+			})
+			if err != nil {
+				if issNum, lookupErr := issueNumberFromRun(cmd.Context(), client, runID); lookupErr == nil {
+					postIntegratorFailure(cmd.Context(), client.Issues(), issNum, "worker completion cycle", err)
+				}
+				return err
+			}
+
+			if result.BatchLockSkipped {
+				fmt.Printf("Skipped: %s\n", result.SkipReason)
+			} else if result.PendingDrained {
+				fmt.Println("Worker completion cycle finished after draining pending completions.")
+			} else {
+				fmt.Println("Worker completion cycle finished.")
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().Int64Var(&runID, "run-id", 0, "Workflow run ID (required)")
+	cmd.MarkFlagRequired("run-id")
 	return cmd
 }
 

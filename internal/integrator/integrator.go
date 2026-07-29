@@ -139,7 +139,7 @@ func Consolidate(ctx context.Context, p platform.Platform, g *git.Git, cfg *conf
 
 	triggerWorkerBranch := runCtx.WorkerBranch
 	batchBranch := runCtx.BatchBranch
-	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), issue.Milestone.Number, batchBranch, params.RunID, timeNowUTC())
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), issue.Milestone.Number, batchBranch, params.RunID)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", issue.Milestone.Number, err)
 	}
@@ -274,6 +274,7 @@ func consolidateWorkerBranch(ctx context.Context, p platform.Platform, g *git.Gi
 			if err := p.Repository().DeleteBranch(ctx, workerBranch); err != nil {
 				fmt.Printf("Warning: failed to delete already-merged worker branch %s: %v\n", workerBranch, err)
 			}
+			clearPendingWorkerCompletionLabel(ctx, p, iss)
 			return &ConsolidateResult{
 				IssueNumber:  iss.Number,
 				WorkerBranch: workerBranch,
@@ -359,6 +360,7 @@ func consolidateWorkerBranch(ctx context.Context, p platform.Platform, g *git.Gi
 	if err := p.Repository().DeleteBranch(ctx, workerBranch); err != nil {
 		fmt.Printf("Warning: failed to delete worker branch %s: %v\n", workerBranch, err)
 	}
+	clearPendingWorkerCompletionLabel(ctx, p, iss)
 
 	return &ConsolidateResult{
 		IssueNumber:  iss.Number,
@@ -386,7 +388,7 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 	}
 
 	batchBranch := runCtx.BatchBranch
-	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), ms.Number, batchBranch, params.RunID, timeNowUTC())
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), ms.Number, batchBranch, params.RunID)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
 	}
@@ -475,6 +477,10 @@ func Advance(ctx context.Context, p platform.Platform, g *git.Git, cfg *config.C
 		if !hasCompleteIssueList(allIssues, ms) {
 			fmt.Printf("Warning: milestone #%d has %d expected issues (%d open + %d closed) but only %d were returned by the API; skipping batch PR to avoid premature open\n",
 				ms.Number, ms.OpenIssues+ms.ClosedIssues, ms.OpenIssues, ms.ClosedIssues, len(allIssues))
+			return &AdvanceResult{TierComplete: true}, nil
+		}
+		if hasPendingWorkerCompletionInIssues(ctx, p, allIssues) {
+			fmt.Printf("Pending worker completion exists for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
 			return &AdvanceResult{TierComplete: true}, nil
 		}
 		// All tiers done — open batch PR
@@ -803,7 +809,7 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 	}
 
 	batchBranch := fmt.Sprintf("herd/batch/%d-%s", ms.Number, planner.Slugify(ms.Title))
-	batchLock, acquired, err := AcquireBatchLock(ctx, p.Repository(), ms.Number, batchBranch, 0, timeNowUTC())
+	batchLock, acquired, err := acquireBatchLockForOperation(ctx, p.Repository(), ms.Number, batchBranch, 0)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring batch lock for batch #%d: %w", ms.Number, err)
 	}
@@ -865,6 +871,10 @@ func AdvanceByBatch(ctx context.Context, p platform.Platform, g *git.Git, cfg *c
 		if !hasCompleteIssueList(allIssues, ms) {
 			fmt.Printf("Warning: milestone #%d has %d expected issues (%d open + %d closed) but only %d were returned by the API; skipping batch PR to avoid premature open\n",
 				ms.Number, ms.OpenIssues+ms.ClosedIssues, ms.OpenIssues, ms.ClosedIssues, len(allIssues))
+			return &AdvanceResult{TierComplete: true}, nil
+		}
+		if hasPendingWorkerCompletionInIssues(ctx, p, allIssues) {
+			fmt.Printf("Pending worker completion exists for batch #%d; skipping batch PR open until consolidation is refreshed.\n", ms.Number)
 			return &AdvanceResult{TierComplete: true}, nil
 		}
 		prNum, err := openBatchPR(ctx, p, g, cfg, ms, allIssues, tiers, batchBranch)

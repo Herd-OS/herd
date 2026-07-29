@@ -44,7 +44,7 @@ jobs:
           fetch-depth: 0
           token: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
 
-      - name: Consolidate, advance, and review
+      - name: Consolidate, advance, review, and check CI
         env:
           HERD_RUNNER: "true"
           GITHUB_TOKEN: ${{`{{`}} secrets.HERD_GITHUB_TOKEN || secrets.GITHUB_TOKEN {{`}}`}}
@@ -55,10 +55,7 @@ jobs:
           GEMINI_API_KEY: ${{`{{`}} secrets.GEMINI_API_KEY {{`}}`}}
           RUN_ID: ${{`{{`}} github.event.workflow_run.id {{`}}`}}
         run: |
-          herd integrator consolidate --run-id "$RUN_ID"
-          herd integrator advance --run-id "$RUN_ID"
-          herd integrator review --run-id "$RUN_ID"
-          herd integrator check-ci --run-id "$RUN_ID"
+          herd integrator worker-cycle --run-id "$RUN_ID"
 
 {{if .Integrator.CIWorkflows}}
   check-ci-workflow-completion:
