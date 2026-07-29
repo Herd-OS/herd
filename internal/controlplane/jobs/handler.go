@@ -47,6 +47,10 @@ type MutationReader interface {
 	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
 }
 
+type JobStatusUpdater interface {
+	UpdateJobStatus(ctx context.Context, jobID string, status string, metadata json.RawMessage, updatedAt time.Time) error
+}
+
 type ReadTokenSource interface {
 	InstallationTokenWithPermissions(ctx context.Context, installationID int64, repositoryIDs []int64, permissions gh.InstallationPermissions) (appauth.InstallationToken, error)
 }
@@ -441,7 +445,7 @@ func (h Handler) serveReadToken(w http.ResponseWriter, r *http.Request, jobID st
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
-	expected, err := StrictExpectedIdentityFromJob(job)
+	expected, err := ReadTokenExpectedIdentityFromJob(job)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
@@ -459,6 +463,14 @@ func (h Handler) serveReadToken(w http.ResponseWriter, r *http.Request, jobID st
 	if err := ValidateOIDCClaims(claims, expected, OIDCOptions{Audience: h.audience, Now: h.now}); err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
+	}
+	if expected.RunID == "" {
+		var bindErr error
+		job, expected, bindErr = h.bindReadTokenRunID(r.Context(), job, claims.RunID)
+		if bindErr != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": bindErr.Error()})
+			return
+		}
 	}
 	read := "read"
 	githubRepositoryID := hostedReviewGitHubRepositoryID(job)
@@ -487,6 +499,32 @@ func (h Handler) serveReadToken(w http.ResponseWriter, r *http.Request, jobID st
 		ExpiresAt:   minted.ExpiresAt,
 		Permissions: minted.Permissions,
 	})
+}
+
+func (h Handler) bindReadTokenRunID(ctx context.Context, job store.Job, runID string) (store.Job, ExpectedOIDCIdentity, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return store.Job{}, ExpectedOIDCIdentity{}, fmt.Errorf("OIDC run ID is required")
+	}
+	metadata := metadataMap(job.Metadata)
+	metadata["workflow_run_id"] = runID
+	updated, err := json.Marshal(metadata)
+	if err != nil {
+		return store.Job{}, ExpectedOIDCIdentity{}, fmt.Errorf("bind job OIDC run ID metadata: %w", err)
+	}
+	updater, ok := h.store.(JobStatusUpdater)
+	if !ok {
+		return store.Job{}, ExpectedOIDCIdentity{}, fmt.Errorf("job OIDC run ID binder is not configured")
+	}
+	if err := updater.UpdateJobStatus(ctx, job.JobID, job.Status, updated, h.now()); err != nil {
+		return store.Job{}, ExpectedOIDCIdentity{}, fmt.Errorf("bind job OIDC run ID: %w", err)
+	}
+	job.Metadata = updated
+	expected, err := StrictExpectedIdentityFromJob(job)
+	if err != nil {
+		return store.Job{}, ExpectedOIDCIdentity{}, err
+	}
+	return job, expected, nil
 }
 
 func validateHostedReviewReadTokenJob(job store.Job) error {

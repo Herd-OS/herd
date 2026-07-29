@@ -223,6 +223,57 @@ func TestHandlerMintsHostedReviewReadToken(t *testing.T) {
 	assert.JSONEq(t, `{"token":"ghs_read_token","expires_at":"2026-07-11T13:00:00Z","permissions":{"contents":"read","pull_requests":"read"}}`, rec.Body.String())
 }
 
+func TestHandlerBindsHostedReviewReadTokenRunIDOnFirstExchange(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	st := newResultStore()
+	source := &fakeAppTokenSource{token: appauth.InstallationToken{
+		Token:     "ghs_read_token",
+		ExpiresAt: now.Add(time.Hour),
+	}}
+	st.jobs["job-1"] = store.Job{
+		JobID:          "job-1",
+		RepositoryID:   7,
+		InstallationID: 9,
+		PRNumber:       42,
+		HeadSHA:        "head",
+		WorkerBranch:   "herd/worker/837",
+		Metadata:       json.RawMessage(`{"kind":"review","repository":"acme/widgets","github_repository_id":3003,"ref":"refs/heads/herd/worker/837","workflow_file":"herd-review.yml"}`),
+	}
+	claims := validReviewClaims(now)
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(claims),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		AppTokenSource: source,
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, readTokenRequest("job-1"))
+
+	require.Equal(t, http.StatusOK, first.Code)
+	updated, err := st.GetJob(context.Background(), "job-1")
+	require.NoError(t, err)
+	assert.Contains(t, string(updated.Metadata), `"workflow_run_id":"12345"`)
+
+	otherClaims := claims
+	otherClaims.RunID = "67890"
+	secondHandler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(otherClaims),
+		Audience:       "herd-control-plane",
+		Now:            func() time.Time { return now },
+		AppTokenSource: source,
+	})
+	second := httptest.NewRecorder()
+	secondHandler.ServeHTTP(second, readTokenRequest("job-1"))
+
+	require.Equal(t, http.StatusUnauthorized, second.Code)
+	assert.Contains(t, second.Body.String(), "run ID")
+	assert.Equal(t, int64(9), source.installationID)
+	assert.Equal(t, []int64{3003}, source.repositoryIDs)
+}
+
 func TestHandlerRejectsHostedReviewReadTokenWithoutRepositoryScope(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
@@ -253,6 +304,13 @@ func TestHandlerRejectsHostedReviewReadTokenWithoutRepositoryScope(t *testing.T)
 	assert.Contains(t, rec.Body.String(), "repository ID")
 	assert.Zero(t, source.installationID)
 	assert.Empty(t, source.repositoryIDs)
+}
+
+func readTokenRequest(jobID string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID+"/review-read-token", nil)
+	req.SetPathValue("job_id", jobID)
+	req.Header.Set("Authorization", "Bearer oidc")
+	return req
 }
 
 func TestHandlerRejectsHostedReviewReadTokenWithoutEligibleJob(t *testing.T) {
@@ -1637,6 +1695,20 @@ func (s *resultStore) GetJob(_ context.Context, jobID string) (store.Job, error)
 	}
 	job.Metadata = withDefaultJobRepositoryMetadata(job.Metadata)
 	return job, nil
+}
+
+func (s *resultStore) UpdateJobStatus(_ context.Context, jobID string, status string, metadata json.RawMessage, updatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	job.Status = status
+	job.Metadata = metadata
+	job.UpdatedAt = updatedAt
+	s.jobs[jobID] = job
+	return nil
 }
 
 func withDefaultJobRepositoryMetadata(raw json.RawMessage) json.RawMessage {

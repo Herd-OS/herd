@@ -171,12 +171,15 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		commentID := workflowEventCommentID(event, payload, claims)
 		idem, idemErr := h.store.GetIdempotencyKey(r.Context(), processKey)
 		idemPostCallUnknown := idemErr == nil && mutationspkg.IsPostCallUnknown(idem.Status)
+		legacyPreProcessorCallStarted := false
 		if record, recordErr := h.store.GetCommandRecord(r.Context(), repo.ID, commentID, commandKey); recordErr == nil {
-			if record.Status == "processing" || record.Status == "repair_required" {
+			legacyPreProcessorCallStarted = record.Status == "acknowledged" && idemErr == nil && idem.Status == mutationspkg.PhaseCallStarted
+			if legacyPreProcessorCallStarted {
+				shouldProcess = true
+			} else if record.Status == "processing" || record.Status == "repair_required" {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
 				return
-			}
-			if record.Status == "processed" {
+			} else if record.Status == "processed" {
 				if err := h.store.CompleteIdempotencyKey(r.Context(), processKey, commandKey); err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete workflow event idempotency"})
 					return
@@ -198,17 +201,23 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if idemPostCallUnknown {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
+		if legacyPreProcessorCallStarted {
+			// Fall through to the normal processing path. This repairs records
+			// written by older handlers that entered call_started before the
+			// command record was durably marked processing.
+		} else {
+			if idemPostCallUnknown {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
+				return
+			}
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"status":  "accepted",
+				"created": false,
+				"kind":    event.Kind,
+				"action":  event.Action,
+			})
 			return
 		}
-		writeJSON(w, http.StatusAccepted, map[string]any{
-			"status":  "accepted",
-			"created": false,
-			"kind":    event.Kind,
-			"action":  event.Action,
-		})
-		return
 	}
 	created, err := h.store.RecordCommand(r.Context(), store.CommandRecord{
 		RepositoryID: repo.ID,
@@ -247,6 +256,17 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
 		return
 	}
+	legacyPreProcessorCallStarted := h.workflowEventLegacyPreProcessorCallStarted(r.Context(), repo.ID, commentID, commandKey, processKey)
+	// Durable workflow-event boundaries are ordered by observable risk:
+	// acknowledged/intent_recorded and processing/intent_recorded are pre-call
+	// states that redelivery may retry. call_started is entered only at the
+	// ProcessWorkflowEvent boundary, so post-call-unknown states are never
+	// confused with crashes before processor side effects could begin.
+	if err := h.markWorkflowEventProcessing(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing"})
+		return
+	}
 	start, err := h.store.TryStartIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseCallStarted, mutationspkg.PhaseCallStarted, mutationspkg.PhaseFailedPreCall+":")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing started"})
@@ -262,13 +282,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
-		return
-	}
-	if err := h.markWorkflowEventProcessing(r.Context(), repo.ID, commentID, commandKey, metadata); err != nil {
-		_ = h.store.FailIdempotencyKey(r.Context(), processKey, mutationspkg.PhaseFailedPreCall+":"+err.Error())
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark workflow event processing"})
-		return
+		if !legacyPreProcessorCallStarted || start.Record.Status != mutationspkg.PhaseCallStarted {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow event processing outcome is unknown; retry after reconciliation"})
+			return
+		}
 	}
 	if h.processor != nil {
 		if err := h.processor.ProcessWorkflowEvent(r.Context(), repo, event); err != nil {
@@ -360,6 +377,15 @@ func (h Handler) workflowEventProcessingUnknown(ctx context.Context, repoID int6
 		return strings.HasPrefix(idem.ResultRef, mutationspkg.PhaseCallStarted) || strings.HasPrefix(idem.ResultRef, mutationspkg.PhaseRepairRequired)
 	}
 	return idem.Status != mutationspkg.PhaseIntentRecorded && idem.Status != mutationspkg.PhaseFailedPreCall
+}
+
+func (h Handler) workflowEventLegacyPreProcessorCallStarted(ctx context.Context, repoID int64, commentID int64, commandKey string, processKey string) bool {
+	record, err := h.store.GetCommandRecord(ctx, repoID, commentID, commandKey)
+	if err != nil || record.Status != "acknowledged" {
+		return false
+	}
+	idem, err := h.store.GetIdempotencyKey(ctx, processKey)
+	return err == nil && idem.Status == mutationspkg.PhaseCallStarted
 }
 
 func (h Handler) markWorkflowEventProcessing(ctx context.Context, repoID int64, commentID int64, commandKey string, metadata json.RawMessage) error {
