@@ -365,7 +365,12 @@ func gitEnv(config []string, env []string) []string {
 		}
 		out = append(out, entry)
 	}
-	out = append(out, env...)
+	for _, entry := range env {
+		if inheritedGitConfigEnv(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
 	configIndex := 0
 	for _, entry := range config {
 		if strings.TrimSpace(entry) == "" {

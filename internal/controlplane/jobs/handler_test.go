@@ -1618,7 +1618,7 @@ func TestHandlerRetriesReviewResultAfterProcessorPreCallFailure(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
 	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head"}
-	processor := &capturingReviewProcessor{errs: []error{mutationspkg.PreCallError{Op: "create client", Err: assert.AnError}, nil}}
+	processor := &capturingReviewProcessor{prepareErrs: []error{mutationspkg.PreCallError{Op: "create client", Err: assert.AnError}, nil}}
 	handler := NewHandler(HandlerOptions{
 		Store:           st,
 		Validator:       fixedOIDCValidator(validClaims(now)),
@@ -1636,11 +1636,10 @@ func TestHandlerRetriesReviewResultAfterProcessorPreCallFailure(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, first.Code)
 	require.Equal(t, http.StatusAccepted, second.Code)
 	assert.Len(t, processor.calls, 2)
-	require.Len(t, st.mutationCompletions, 4)
-	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[0].status)
-	assert.Equal(t, mutationspkg.PhaseFailedPreCall, st.mutationCompletions[1].status)
-	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[2].status)
-	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationCompletions[3].status)
+	require.Len(t, st.mutationCompletions, 3)
+	assert.Equal(t, mutationspkg.PhaseFailedPreCall, st.mutationCompletions[0].status)
+	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[1].status)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationCompletions[2].status)
 	require.Len(t, st.results, 1)
 	assert.Equal(t, StatusApproved, st.results[0].Status)
 }
@@ -2011,8 +2010,9 @@ type mutationCompletion struct {
 }
 
 type capturingReviewProcessor struct {
-	calls []reviewProcessorCall
-	errs  []error
+	calls       []reviewProcessorCall
+	prepareErrs []error
+	errs        []error
 }
 
 type reviewProcessorCall struct {
@@ -2020,8 +2020,36 @@ type reviewProcessorCall struct {
 	result review.ReviewCompletedResult
 }
 
-func (p *capturingReviewProcessor) SubmitReviewResult(_ context.Context, repo review.Repository, result review.ReviewCompletedResult) error {
+func (p *capturingReviewProcessor) PrepareSubmitReviewResult(_ context.Context, repo review.Repository, result review.ReviewCompletedResult) (review.PreparedReviewResultSubmission, error) {
 	p.calls = append(p.calls, reviewProcessorCall{repo: repo, result: result})
+	if len(p.prepareErrs) > 0 {
+		err := p.prepareErrs[0]
+		p.prepareErrs = p.prepareErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	return reviewSubmissionFunc(func(context.Context) error {
+		if len(p.errs) > 0 {
+			err := p.errs[0]
+			p.errs = p.errs[1:]
+			return err
+		}
+		return nil
+	}), nil
+}
+
+type reviewSubmissionFunc func(context.Context) error
+
+func (f reviewSubmissionFunc) Submit(ctx context.Context) error {
+	return f(ctx)
+}
+
+func (p *capturingReviewProcessor) SubmitReviewResult(_ context.Context, repo review.Repository, result review.ReviewCompletedResult) error {
+	_, err := p.PrepareSubmitReviewResult(context.Background(), repo, result)
+	if err != nil {
+		return err
+	}
 	if len(p.errs) > 0 {
 		err := p.errs[0]
 		p.errs = p.errs[1:]
@@ -2044,7 +2072,11 @@ func newBlockingReviewProcessor() *blockingReviewProcessor {
 	}
 }
 
-func (p *blockingReviewProcessor) SubmitReviewResult(_ context.Context, _ review.Repository, _ review.ReviewCompletedResult) error {
+func (p *blockingReviewProcessor) PrepareSubmitReviewResult(context.Context, review.Repository, review.ReviewCompletedResult) (review.PreparedReviewResultSubmission, error) {
+	return reviewSubmissionFunc(p.submit), nil
+}
+
+func (p *blockingReviewProcessor) submit(context.Context) error {
 	p.mu.Lock()
 	p.calls++
 	if p.calls == 1 {
@@ -2053,6 +2085,10 @@ func (p *blockingReviewProcessor) SubmitReviewResult(_ context.Context, _ review
 	p.mu.Unlock()
 	<-p.released
 	return nil
+}
+
+func (p *blockingReviewProcessor) SubmitReviewResult(ctx context.Context, _ review.Repository, _ review.ReviewCompletedResult) error {
+	return p.submit(ctx)
 }
 
 func (p *blockingReviewProcessor) CallCount() int {

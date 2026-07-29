@@ -61,9 +61,14 @@ func ParseMentionCommand(appLogin, body string) (ParsedCommand, bool, error) {
 	if strings.HasPrefix(afterCommand, "\"") {
 		rest := afterCommand[1:]
 		if end := strings.Index(rest, "\""); end >= 0 {
+			quotedPrompt := rest[:end]
+			trailingPrompt := strings.TrimSpace(rest[end+1:])
+			if trailingPrompt != "" {
+				quotedPrompt = strings.TrimSpace(quotedPrompt + " " + trailingPrompt)
+			}
 			return ParsedCommand{
 				Kind:   kind,
-				Prompt: commandPrompt(rest[:end], remainingBody),
+				Prompt: commandPrompt(quotedPrompt, remainingBody),
 				Raw:    line,
 			}, true, nil
 		}

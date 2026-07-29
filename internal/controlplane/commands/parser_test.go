@@ -138,6 +138,28 @@ func TestParseMentionCommand(t *testing.T) {
 			},
 		},
 		{
+			name:     "fix quoted prompt preserves trailing same-line text",
+			appLogin: "herd-os",
+			body:     "@herd-os fix \"update auth\" include tests",
+			wantOK:   true,
+			want: ParsedCommand{
+				Kind:   CommandFix,
+				Prompt: "update auth include tests",
+				Raw:    "@herd-os fix \"update auth\" include tests",
+			},
+		},
+		{
+			name:     "fix quoted prompt preserves trailing same-line text and remaining lines",
+			appLogin: "herd-os",
+			body:     "@herd-os fix \"update auth\" include tests\nkeep multiline context",
+			wantOK:   true,
+			want: ParsedCommand{
+				Kind:   CommandFix,
+				Prompt: "update auth include tests\nkeep multiline context",
+				Raw:    "@herd-os fix \"update auth\" include tests",
+			},
+		},
+		{
 			name:       "unterminated quoted prompt",
 			appLogin:   "herd-os",
 			body:       "@herd-os fix \"update auth handling",

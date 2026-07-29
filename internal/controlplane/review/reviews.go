@@ -98,6 +98,16 @@ type FixCoordinator interface {
 	DispatchReviewFixWorker(ctx context.Context, repo Repository, result ReviewCompletedResult, issueNumber int) (bool, error)
 }
 
+type PreparedReviewResultSubmission interface {
+	Submit(ctx context.Context) error
+}
+
+type preparedReviewResultSubmissionFunc func(context.Context) error
+
+func (f preparedReviewResultSubmissionFunc) Submit(ctx context.Context) error {
+	return f(ctx)
+}
+
 type ReviewService struct {
 	Status     StatusService
 	GitHub     PullRequestClient
@@ -200,46 +210,56 @@ func (s ReviewService) DispatchReview(ctx context.Context, repo Repository, req 
 }
 
 func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, result ReviewCompletedResult) error {
+	submission, err := s.PrepareSubmitReviewResult(ctx, repo, result)
+	if err != nil {
+		return err
+	}
+	return submission.Submit(ctx)
+}
+
+func (s ReviewService) PrepareSubmitReviewResult(ctx context.Context, repo Repository, result ReviewCompletedResult) (PreparedReviewResultSubmission, error) {
 	if !repo.ReviewEnabled {
-		return nil
+		return preparedReviewResultSubmissionFunc(func(context.Context) error { return nil }), nil
 	}
 	if s.GitHub == nil {
-		return fmt.Errorf("review GitHub client is required")
+		return nil, fmt.Errorf("review GitHub client is required")
 	}
 	if err := validateReviewResult(result); err != nil {
-		return err
+		return nil, err
 	}
 	current, err := s.GitHub.GetPullRequest(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber)
 	if err != nil {
-		return fmt.Errorf("get pull request head before Herd Review submission: %w", err)
+		return nil, fmt.Errorf("get pull request head before Herd Review submission: %w", err)
 	}
-	defer s.releaseReviewLock(ctx, repo, result.PRNumber, result.HeadSHA)
-	if current.HeadSHA != "" && current.HeadSHA != result.HeadSHA {
-		return nil
-	}
-
-	if result.Status == ResultStatusChangesRequested && repo.ReviewFixEnabled && s.Fixes != nil {
-		return s.handleChangesWithFixes(ctx, repo, result, current)
-	}
-
-	event, state, description := reviewEventAndStatus(result)
-	if event != "" {
-		if err := s.submitPRReviewOnce(ctx, repo, result, event); err != nil {
-			if errors.Is(err, ErrReviewSubmissionInProgress) {
-				return err
-			}
-			statusErr := s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review could not submit a PR review", targetURL(result, current.URL))
-			commentErr := s.submitReviewFailureCommentOnce(ctx, repo, result, err)
-			if statusErr != nil {
-				return statusErr
-			}
-			if commentErr != nil {
-				return commentErr
-			}
+	return preparedReviewResultSubmissionFunc(func(ctx context.Context) error {
+		defer s.releaseReviewLock(ctx, repo, result.PRNumber, result.HeadSHA)
+		if current.HeadSHA != "" && current.HeadSHA != result.HeadSHA {
 			return nil
 		}
-	}
-	return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, state, description, targetURL(result, current.URL))
+
+		if result.Status == ResultStatusChangesRequested && repo.ReviewFixEnabled && s.Fixes != nil {
+			return s.handleChangesWithFixes(ctx, repo, result, current)
+		}
+
+		event, state, description := reviewEventAndStatus(result)
+		if event != "" {
+			if err := s.submitPRReviewOnce(ctx, repo, result, event); err != nil {
+				if errors.Is(err, ErrReviewSubmissionInProgress) {
+					return err
+				}
+				statusErr := s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review could not submit a PR review", targetURL(result, current.URL))
+				commentErr := s.submitReviewFailureCommentOnce(ctx, repo, result, err)
+				if statusErr != nil {
+					return statusErr
+				}
+				if commentErr != nil {
+					return commentErr
+				}
+				return nil
+			}
+		}
+		return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, state, description, targetURL(result, current.URL))
+	}), nil
 }
 
 func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) error {

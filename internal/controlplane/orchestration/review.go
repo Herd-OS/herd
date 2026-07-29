@@ -18,6 +18,9 @@ func (s Service) EnsureReviewFixIssue(ctx context.Context, repo review.Repositor
 	if err := s.validate(); err != nil {
 		return 0, false, err
 	}
+	if err := s.validateReviewRepository(repo); err != nil {
+		return 0, false, err
+	}
 	if err := validateReviewFix(result, finding); err != nil {
 		return 0, false, err
 	}
@@ -125,6 +128,9 @@ func (s Service) DispatchReviewFixWorker(ctx context.Context, repo review.Reposi
 	if err := s.validate(); err != nil {
 		return false, err
 	}
+	if err := s.validateReviewRepository(repo); err != nil {
+		return false, err
+	}
 	if s.Dispatcher == nil {
 		return false, fmt.Errorf("dispatcher is required")
 	}
@@ -155,6 +161,18 @@ func (s Service) DispatchReviewFixWorker(ctx context.Context, repo review.Reposi
 		return false, err
 	}
 	return dispatch.Created, nil
+}
+
+func (s Service) validateReviewRepository(repo review.Repository) error {
+	if repo.ID != s.Repo.ID ||
+		repo.InstallationID != s.Repo.InstallationID ||
+		!strings.EqualFold(strings.TrimSpace(repo.Owner), strings.TrimSpace(s.Repo.Owner)) ||
+		!strings.EqualFold(strings.TrimSpace(repo.Name), strings.TrimSpace(s.Repo.Name)) {
+		return fmt.Errorf("review repository %d %s/%s installation %d does not match service repository %d %s/%s installation %d",
+			repo.ID, repo.Owner, repo.Name, repo.InstallationID,
+			s.Repo.ID, s.Repo.Owner, s.Repo.Name, s.Repo.InstallationID)
+	}
+	return nil
 }
 
 func validateReviewFix(result review.ReviewCompletedResult, finding review.Finding) error {

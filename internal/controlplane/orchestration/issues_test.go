@@ -237,7 +237,64 @@ func TestEnsureReviewFixIssueAndDispatchAreIdempotentByFingerprint(t *testing.T)
 	assert.False(t, secondDispatch)
 	assert.Len(t, fake.issues.created, 1)
 	assert.Len(t, dispatcher.requests, 1)
+	assert.Equal(t, int64(123), dispatcher.requests[0].RepoID)
+	assert.Equal(t, int64(456), dispatcher.requests[0].InstallationID)
+	assert.Equal(t, "owner", dispatcher.requests[0].Owner)
+	assert.Equal(t, "repo", dispatcher.requests[0].Repo)
 	assert.Equal(t, "head", dispatcher.requests[0].ExpectedHeadSHA)
+}
+
+func TestEnsureReviewFixIssueRejectsMismatchedRepository(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		repo review.Repository
+	}{
+		{name: "id", repo: review.Repository{ID: 999, InstallationID: 456, Owner: "owner", Name: "repo"}},
+		{name: "installation", repo: review.Repository{ID: 123, InstallationID: 999, Owner: "owner", Name: "repo"}},
+		{name: "owner", repo: review.Repository{ID: 123, InstallationID: 456, Owner: "other", Name: "repo"}},
+		{name: "name", repo: review.Repository{ID: 123, InstallationID: 456, Owner: "owner", Name: "other"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakePlatform()
+			st := newFakeStore()
+			svc := newTestService(fake, st, nil)
+			result := review.ReviewCompletedResult{BatchNumber: 9, PRNumber: 42, HeadSHA: "head"}
+			finding := review.Finding{Fingerprint: "fp-1", Severity: "high", Description: "fix it"}
+
+			issueNumber, created, err := svc.EnsureReviewFixIssue(ctx, tt.repo, result, finding)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "does not match service repository")
+			assert.Zero(t, issueNumber)
+			assert.False(t, created)
+			assert.Empty(t, fake.issues.created)
+			assert.Empty(t, st.keys)
+		})
+	}
+}
+
+func TestDispatchReviewFixWorkerRejectsMismatchedRepository(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	st := newFakeStore()
+	dispatcher := &fakeDispatcher{}
+	svc := newTestService(fake, st, dispatcher)
+	repo := review.Repository{ID: 999, InstallationID: 456, Owner: "owner", Name: "repo", DefaultBranch: "main"}
+	result := review.ReviewCompletedResult{
+		BatchNumber: 9,
+		PRNumber:    42,
+		BatchBranch: "herd/batch/9-demo",
+		HeadSHA:     "head",
+	}
+
+	dispatched, err := svc.DispatchReviewFixWorker(ctx, repo, result, 10)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not match service repository")
+	assert.False(t, dispatched)
+	assert.Empty(t, dispatcher.requests)
 }
 
 func TestEnsureReviewFixIssuePreCallIdempotencyIsRetryable(t *testing.T) {
