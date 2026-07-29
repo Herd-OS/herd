@@ -256,7 +256,7 @@ func TestHandlerInstallationRepositoriesAddRemove(t *testing.T) {
 	assert.JSONEq(t, `{"full_name":"","installation_repositories_action":"removed","removed":true,"repository_selection":"selected","selection_state":"removed"}`, string(store.repositories[1].Metadata))
 }
 
-func TestHandlerIssueCommentCommandSink(t *testing.T) {
+func TestHandlerIssueCommentQueuesCommandWithoutInlineExecution(t *testing.T) {
 	payload := []byte(`{
 		"action":"created",
 		"installation":{"id":42},
@@ -280,8 +280,7 @@ func TestHandlerIssueCommentCommandSink(t *testing.T) {
 	NewHandler("secret", store, log.New(io.Discard, "", 0), WithIssueCommentCommandHandler(commander)).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
-	require.Len(t, commander.events, 1)
-	assert.Equal(t, int64(123), commander.events[0].CommentID)
+	assert.Empty(t, commander.events)
 	require.Len(t, store.commands, 1)
 	command := store.commands[0]
 	assert.Equal(t, int64(10), command.RepositoryID)
@@ -292,7 +291,38 @@ func TestHandlerIssueCommentCommandSink(t *testing.T) {
 	assert.Equal(t, "mona", command.Actor)
 }
 
-func TestHandlerIssueCommentCommandHandlerNotInvokedForDuplicateDelivery(t *testing.T) {
+func TestHandlerIssueCommentCommanderFailureDoesNotRepairDeliveryAfterQueue(t *testing.T) {
+	payload := []byte(`{
+		"action":"created",
+		"installation":{"id":42},
+		"repository":{"id":99,"name":"herd","owner":{"login":"octo-org"},"default_branch":"main"},
+		"issue":{"number":7,"pull_request":{"url":"https://api.github.com/repos/octo-org/herd/pulls/7"}},
+		"comment":{"id":123,"body":"@herd-os review","author_association":"OWNER","user":{"login":"mona","type":"User"}},
+		"sender":{"login":"mona","type":"User"}
+	}`)
+	store := &fakeStore{
+		repositoriesByName: map[string]store.Repository{
+			"octo-org/herd": {ID: 10, Owner: "octo-org", Name: "herd", InstallationID: 42},
+		},
+	}
+	commander := &fakeIssueCommentCommander{err: errors.New("commander should not run inline")}
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Delivery", "delivery-issue-comment-command-failing-commander")
+	req.Header.Set("X-GitHub-Event", EventIssueComment)
+	req.Header.Set("X-Hub-Signature-256", sign("secret", payload))
+	rec := httptest.NewRecorder()
+
+	NewHandler("secret", store, log.New(io.Discard, "", 0), WithIssueCommentCommandHandler(commander)).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Empty(t, commander.events)
+	require.Len(t, store.deliveries, 1)
+	assert.Equal(t, "processed", store.deliveries[0].Status)
+	assert.Empty(t, store.deliveries[0].Error)
+	assert.Len(t, store.commands, 1)
+}
+
+func TestHandlerIssueCommentCommandQueuedOnceForDuplicateDelivery(t *testing.T) {
 	payload := []byte(`{
 		"action":"created",
 		"installation":{"id":42},
@@ -321,7 +351,7 @@ func TestHandlerIssueCommentCommandHandlerNotInvokedForDuplicateDelivery(t *test
 		require.Equal(t, http.StatusAccepted, rec.Code)
 	}
 
-	assert.Len(t, commander.events, 1)
+	assert.Empty(t, commander.events)
 	assert.Len(t, store.commands, 1)
 }
 

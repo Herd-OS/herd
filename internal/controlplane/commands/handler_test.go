@@ -433,7 +433,7 @@ func TestHandlerDispatchFailureOccursAfterAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestHandlerDispatchUnknownOutcomeRedeliveryDoesNotDispatchAgain(t *testing.T) {
+func TestHandlerDispatchUnknownOutcomeRedeliveryDelegatesToDispatcher(t *testing.T) {
 	st := newFakeStore()
 	gh := &fakeGitHub{}
 	dispatcher := &fakeDispatcher{dispatchThenErrs: []error{errors.New("workflow dispatch outcome unknown")}}
@@ -445,16 +445,55 @@ func TestHandlerDispatchUnknownOutcomeRedeliveryDoesNotDispatchAgain(t *testing.
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "workflow dispatch outcome unknown")
-	require.Error(t, retryErr)
-	assert.Contains(t, retryErr.Error(), "unknown outcome after started dispatcher call")
+	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
-	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.dispatched, 2)
 	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	key := "repo:42:comment:123:command:review"
 	require.Contains(t, st.idempotencyKeys, key)
 	assert.Equal(t, "completed", st.idempotencyKeys[key].Status)
 	require.Len(t, st.commandRecords, 1)
-	assert.Equal(t, "dispatching", st.commandRecords[0].Status)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
+}
+
+func TestHandlerDispatchingRecordBeforeDispatcherCallRedeliveryDispatchesOnce(t *testing.T) {
+	st := newFakeStore()
+	metadata := json.RawMessage(`{"ack_comment_id":1001,"action":"created","args":null,"prompt":"","author_association":"OWNER","issue_number":7,"pr_number":7,"raw":"@herd-os review"}`)
+	st.idempotencyKeys["repo:42:comment:123:command:review"] = store.IdempotencyKey{
+		Key:       "repo:42:comment:123:command:review",
+		Scope:     "issue_comment_command",
+		Status:    "completed",
+		ResultRef: "issue_comment:1001",
+		CreatedAt: time.Now().UTC(),
+	}
+	st.commandRecords = append(st.commandRecords, store.CommandRecord{
+		RepositoryID: 42,
+		CommentID:    123,
+		CommandKey:   "review",
+		CommandName:  "review",
+		Actor:        "mona",
+		Status:       "dispatching",
+		Metadata:     metadata,
+		CreatedAt:    time.Now().UTC(),
+	})
+	gh := &fakeGitHub{}
+	dispatcher := &fakeDispatcher{}
+	h := Handler{AppLogin: "herd-os", Store: st, GitHub: gh, Dispatcher: dispatcher}
+
+	result, err := h.HandleIssueComment(context.Background(), validComment("OWNER", "@herd-os review"))
+	duplicate, duplicateErr := h.HandleIssueComment(context.Background(), validComment("OWNER", "@herd-os review"))
+
+	require.NoError(t, err)
+	require.NoError(t, duplicateErr)
+	assert.Equal(t, StatusAcknowledged, result.Status)
+	assert.Equal(t, StatusAcknowledged, duplicate.Status)
+	assert.Empty(t, gh.comments)
+	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.underlyingDispatches, 1)
+	require.Len(t, st.commandRecords, 1)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
+	assert.Equal(t, "completed", st.idempotencyKeys["repo:42:comment:123:command:review"].Status)
+	assert.Equal(t, "dispatch:completed", st.idempotencyKeys["repo:42:comment:123:command:review"].ResultRef)
 }
 
 func TestHandlerAcknowledgementFailureRedeliveryDoesNotDispatchUntilAckRecorded(t *testing.T) {
@@ -629,16 +668,15 @@ func TestHandlerDispatchStatusAndFallbackFailureRedeliveryDoesNotDispatchAgain(t
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mark command dispatched")
-	require.Error(t, retryErr)
-	assert.Contains(t, retryErr.Error(), "unknown outcome after started dispatcher call")
+	require.NoError(t, retryErr)
 	assert.Len(t, gh.comments, 1)
-	assert.Len(t, dispatcher.dispatched, 1)
+	assert.Len(t, dispatcher.dispatched, 2)
 	assert.Len(t, dispatcher.underlyingDispatches, 1)
 	key := "repo:42:comment:123:command:review"
 	require.Equal(t, "completed", st.idempotencyKeys[key].Status)
-	assert.Equal(t, "issue_comment:1001", st.idempotencyKeys[key].ResultRef)
+	assert.Equal(t, "dispatch:completed", st.idempotencyKeys[key].ResultRef)
 	require.Len(t, st.commandRecords, 1)
-	assert.Equal(t, "dispatching", st.commandRecords[0].Status)
+	assert.Equal(t, "dispatched", st.commandRecords[0].Status)
 }
 
 func TestHandlerUnknownCommandReturnsErrorWithoutMutation(t *testing.T) {

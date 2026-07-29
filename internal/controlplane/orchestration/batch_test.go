@@ -182,6 +182,32 @@ func TestDispatchReadyWorkers_StatusTransitionKeysArePerDispatchIdentity(t *test
 	assert.Equal(t, []string{issues.StatusInProgress, issues.StatusInProgress}, fake.issues.added[1])
 }
 
+func TestDispatchReadyWorkers_SkipsIneligibleIssuesBeforeResolvingBatchHead(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branches["herd/batch/7-demo"] = "batch-head"
+	fake.repo.branchErrs = []error{nil, errors.New("extra branch lookup should not run")}
+	disp := &fakeDispatcher{}
+	svc := newTestService(fake, newFakeStore(), disp)
+
+	count, err := svc.DispatchReadyWorkers(ctx, DispatchReadyWorkersRequest{
+		BatchNumber: 7,
+		BatchBranch: "herd/batch/7-demo",
+		TierIssues:  []int{1, 2, 3},
+		AllIssues: []*platform.Issue{
+			{Number: 1, Title: "In progress", Labels: []string{issues.StatusInProgress}},
+			{Number: 2, Title: "Done", Labels: []string{issues.StatusDone}},
+			{Number: 3, Title: "Ready", Labels: []string{issues.StatusReady}},
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.Equal(t, []string{"herd/batch/7-demo"}, fake.repo.branchLookups)
+	require.Len(t, disp.requests, 1)
+	assert.Equal(t, 3, disp.requests[0].IssueNumber)
+}
+
 func TestAdvanceBatch_OpensPRWhenAllTiersComplete(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()
@@ -785,6 +811,8 @@ type fakeRepoService struct {
 	defaultBranch string
 	deleted       []string
 	updated       []string
+	branchErrs    []error
+	branchLookups []string
 }
 
 func (s *fakeRepoService) GetInfo(context.Context) (*platform.RepoInfo, error) {
@@ -803,6 +831,14 @@ func (s *fakeRepoService) DeleteBranch(_ context.Context, name string) error {
 	return nil
 }
 func (s *fakeRepoService) GetBranchSHA(_ context.Context, name string) (string, error) {
+	s.branchLookups = append(s.branchLookups, name)
+	if len(s.branchErrs) > 0 {
+		err := s.branchErrs[0]
+		s.branchErrs = s.branchErrs[1:]
+		if err != nil {
+			return "", err
+		}
+	}
 	sha, ok := s.branches[name]
 	if !ok {
 		return "", fmt.Errorf("branch not found")

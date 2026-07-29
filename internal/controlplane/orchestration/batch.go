@@ -156,6 +156,9 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			continue
 		}
 		status := issues.StatusLabel(iss.Labels)
+		if status != issues.StatusReady && status != issues.StatusBlocked && status != "" {
+			continue
+		}
 		batchHeadSHA, err := s.Platform.Repository().GetBranchSHA(ctx, req.BatchBranch)
 		if err != nil {
 			return dispatched, fmt.Errorf("resolve batch branch %s head before dispatching issue #%d: %w", req.BatchBranch, issueNumber, err)
@@ -180,7 +183,7 @@ func (s Service) DispatchReadyWorkers(ctx context.Context, req DispatchReadyWork
 			Reason:          req.Reason,
 		}
 		if status != issues.StatusReady && status != issues.StatusBlocked {
-			if status != "" || !s.workflowDispatchIntentExists(ctx, dispatchReq) {
+			if !s.workflowDispatchIntentExists(ctx, dispatchReq) {
 				continue
 			}
 		}

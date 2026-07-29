@@ -241,7 +241,16 @@ func EnqueueIssueCommentCommand(ctx context.Context, st QueueStore, appLogin str
 		if !isAuthorized(event.AuthorAssociation) {
 			return nil
 		}
-		return recordQueuedCommand(ctx, st, event, "migration", "migration", nil)
+		metadata, err := json.Marshal(map[string]any{
+			"raw":                event.CommentBody,
+			"author_association": event.AuthorAssociation,
+			"action":             event.Action,
+			"issue_number":       event.IssueNumber,
+		})
+		if err != nil {
+			return fmt.Errorf("marshal migration command metadata: %w", err)
+		}
+		return recordQueuedCommand(ctx, st, event, "migration", "migration", metadata)
 	}
 	cmd, ok, err := ParseMentionCommand(appLogin, event.CommentBody)
 	if err != nil {
@@ -367,9 +376,6 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 			}
 			return repo, false, idempotencyKey, commandRecord.Metadata, nil
 		}
-		if dispatchable && existing.Status != "completed" && h.commandDispatchOutcomeUnknown(ctx, repo.ID, event.CommentID, commandKey) {
-			return store.Repository{}, false, "", nil, fmt.Errorf("command dispatch %q has unknown outcome after started dispatcher call", idempotencyKey)
-		}
 		if dispatchable && existing.Status == "completed" && existing.ResultRef == "dispatch:completed" && !h.commandAlreadyDispatched(ctx, repo.ID, event.CommentID, commandKey) {
 			if err := h.markCommandDispatched(ctx, repo.ID, event.CommentID, commandKey, record.Metadata); err != nil {
 				return store.Repository{}, false, "", nil, err
@@ -399,9 +405,6 @@ func (h Handler) recordAndAck(ctx context.Context, event IssueComment, commandKe
 					return store.Repository{}, false, "", nil, fmt.Errorf("repair command idempotency key: %w", err)
 				}
 				return repo, false, idempotencyKey, ackMetadata, nil
-			}
-			if dispatchable && h.commandDispatchOutcomeUnknown(ctx, repo.ID, event.CommentID, commandKey) {
-				return store.Repository{}, false, "", nil, fmt.Errorf("command dispatch %q has unknown outcome after started dispatcher call", idempotencyKey)
 			}
 			_ = h.Store.UpdateCommandStatus(ctx, repo.ID, event.CommentID, commandKey, StatusAcknowledged, ackMetadata)
 			if dispatchable {
@@ -498,11 +501,6 @@ func (h Handler) markCommandDispatching(ctx context.Context, repoID int64, comme
 func (h Handler) commandAlreadyDispatched(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
 	record, err := h.Store.GetCommandRecord(ctx, repoID, commentID, commandKey)
 	return err == nil && record.Status == "dispatched"
-}
-
-func (h Handler) commandDispatchOutcomeUnknown(ctx context.Context, repoID int64, commentID int64, commandKey string) bool {
-	record, err := h.Store.GetCommandRecord(ctx, repoID, commentID, commandKey)
-	return err == nil && record.Status == "dispatching"
 }
 
 func prepareCommandRecord(repo store.Repository, event IssueComment, commandKey string, record store.CommandRecord) store.CommandRecord {
