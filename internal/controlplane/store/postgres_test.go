@@ -9,12 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 func TestPostgresMigrationsApplyFromEmptyDatabase(t *testing.T) {
@@ -545,7 +543,6 @@ func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
 	var container *postgres.PostgresContainer
 	var err error
-	const port nat.Port = "5432/tcp"
 	for attempt := 1; attempt <= 3; attempt++ {
 		container, err = postgres.Run(
 			ctx,
@@ -553,7 +550,7 @@ func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 			postgres.WithDatabase("herd"),
 			postgres.WithUsername("herd"),
 			postgres.WithPassword("herd"),
-			testcontainers.WithAdditionalWaitStrategy(wait.ForListeningPort(string(port)).WithStartupTimeout(60*time.Second)),
+			postgres.BasicWaitStrategies(),
 		)
 		if err == nil || !isTransientContainerStartError(err) || attempt == 3 {
 			break
@@ -577,7 +574,14 @@ func newPostgresDB(t *testing.T, ctx context.Context) *sql.DB {
 	t.Cleanup(func() {
 		require.NoError(t, db.Close())
 	})
-	require.NoError(t, db.PingContext(ctx))
+	for attempt := 1; attempt <= 5; attempt++ {
+		err = db.PingContext(ctx)
+		if err == nil || !isTransientContainerStartError(err) || attempt == 5 {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+	}
+	require.NoError(t, err)
 	return db
 }
 
