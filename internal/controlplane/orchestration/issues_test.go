@@ -173,6 +173,38 @@ func TestEnsureTaskIssue_UpdateAllowsChangedContent(t *testing.T) {
 	assert.Contains(t, fake.issues.added[3], issues.StatusBlocked)
 }
 
+func TestEnsureTaskIssueUpdateReconcilesStatusLabels(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.issues.items[3] = &platform.Issue{
+		Number: 3,
+		Title:  "Old",
+		Labels: []string{issues.StatusReady, issues.TypeFeature},
+	}
+	st := newFakeStore()
+	svc := newTestService(fake, st, nil)
+
+	_, err := svc.EnsureTaskIssue(ctx, TaskIssueRequest{
+		BatchNumber: 9,
+		IssueNumber: 3,
+		Title:       "Task",
+		Body:        "body",
+		Labels:      []string{issues.StatusBlocked, issues.TypeFeature},
+		Milestone:   9,
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, fake.issues.removed[3], issues.StatusReady)
+	assert.Contains(t, fake.issues.added[3], issues.StatusBlocked)
+	var durableRemove bool
+	for _, key := range st.keys {
+		if key.Scope == "issue_label_remove" && key.Status == mutationStatusCompleted {
+			durableRemove = true
+		}
+	}
+	assert.True(t, durableRemove)
+}
+
 func TestEnsureReviewFixIssueAndDispatchAreIdempotentByFingerprint(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakePlatform()

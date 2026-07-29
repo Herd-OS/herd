@@ -101,6 +101,36 @@ func TestHostedReviewReadTokenUsesControlPlaneWithoutLegacyGitHubToken(t *testin
 	assert.Equal(t, "ghs_hosted_read_token", token)
 }
 
+func TestHostedReviewReadTokenPrefersValidatedEnvControlPlaneURL(t *testing.T) {
+	t.Setenv("HERD_RUNNER", "true")
+	t.Setenv("HERD_JOB_ID", "job-1")
+	oidc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"value": "oidc-token"})
+	}))
+	t.Cleanup(oidc.Close)
+	calledEnvControlPlane := false
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calledEnvControlPlane = true
+		assert.Equal(t, "/api/v1/jobs/job-1/review-read-token", r.URL.Path)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      "ghs_env_read_token",
+			"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+	}))
+	t.Cleanup(cp.Close)
+	restore := replaceGitHubActionsOIDCHTTPClient(rewriteOIDCClient(t, oidc.URL))
+	t.Cleanup(restore)
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://pipelines.actions.githubusercontent.com/token")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "request-token")
+	t.Setenv("HERD_CONTROL_PLANE_URL", cp.URL)
+
+	token, err := hostedReviewReadToken(t.Context(), &config.Config{ControlPlaneURL: config.DefaultControlPlaneURL})
+
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_env_read_token", token)
+	assert.True(t, calledEnvControlPlane)
+}
+
 func TestGitHubActionsOIDCTokenRejectsMissingEnvironment(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")

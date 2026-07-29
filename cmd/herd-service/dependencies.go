@@ -23,6 +23,7 @@ import (
 	"github.com/herd-os/herd/internal/controlplane/jobs"
 	"github.com/herd-os/herd/internal/controlplane/mutationguard"
 	"github.com/herd-os/herd/internal/controlplane/mutations"
+	"github.com/herd-os/herd/internal/controlplane/orchestration"
 	"github.com/herd-os/herd/internal/controlplane/reconciler"
 	"github.com/herd-os/herd/internal/controlplane/review"
 	"github.com/herd-os/herd/internal/controlplane/runners"
@@ -126,7 +127,15 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		}
 	}
 	if opts.WorkflowEventProcessor == nil {
-		return service.Dependencies{}, fmt.Errorf("production workflow event processor is not configured")
+		opts.WorkflowEventProcessor = productionWorkflowEventProcessor{
+			Store:             st,
+			TokenSource:       tokenSource,
+			Dispatcher:        workflowDispatcher,
+			Config:            config.Config{ControlPlaneURL: cfg.PublicURL},
+			ControlPlaneURL:   cfg.PublicURL,
+			DefaultRunner:     config.Default().Workers.RunnerLabel,
+			DefaultTimeoutMin: config.Default().Workers.TimeoutMinutes,
+		}
 	}
 	if opts.ArtifactStore == nil {
 		opts.ArtifactStore = artifacts.GitHubActionsStore{TokenSource: tokenSource}
@@ -176,6 +185,93 @@ func buildServiceDependenciesWithOptions(cfg service.Config, st productionStore,
 		Handler: commandHandler,
 	}
 	return deps, nil
+}
+
+type productionWorkflowEventProcessor struct {
+	Store             orchestration.Store
+	TokenSource       appauth.TokenSource
+	Dispatcher        cpdispatch.Dispatcher
+	Config            config.Config
+	ControlPlaneURL   string
+	DefaultRunner     string
+	DefaultTimeoutMin int
+	PlatformFactory   func(context.Context, store.Repository) (platform.Platform, error)
+}
+
+func (p productionWorkflowEventProcessor) ProcessWorkflowEvent(ctx context.Context, repo store.Repository, event workflowevents.Event) error {
+	if event.Kind == workflowevents.KindMonitorEvent && event.Action == "patrol" {
+		return nil
+	}
+	if event.Kind != workflowevents.KindIntegratorEvent {
+		return fmt.Errorf("unsupported production workflow event kind %q", event.Kind)
+	}
+	pl, err := p.platform(ctx, repo)
+	if err != nil {
+		return err
+	}
+	svc := orchestration.Service{
+		Repo:       repo,
+		Platform:   pl,
+		Store:      p.Store,
+		Dispatcher: p.Dispatcher,
+	}
+	switch event.Action {
+	case "worker_completed", "ci_workflow_completed", "check_run_completed", "issue_closed":
+		if event.BatchNumber <= 0 {
+			return fmt.Errorf("workflow event batch_number is required for %s", event.Action)
+		}
+		_, err := svc.AdvanceBatch(ctx, event.BatchNumber, p.workflowConfig())
+		return err
+	case "review_submitted":
+		if event.ReviewState == "approved" {
+			_, err := svc.MergeApprovedBatchPR(ctx, event.PRNumber, event.HeadSHA, p.workflowConfig())
+			return err
+		}
+		return nil
+	case "pull_request_closed":
+		if event.PRNumber <= 0 {
+			return fmt.Errorf("workflow event pr_number is required for pull_request_closed")
+		}
+		merged := event.Merged != nil && *event.Merged
+		return svc.CleanupClosedBatchPR(ctx, event.PRNumber, merged)
+	default:
+		return fmt.Errorf("unsupported production workflow event action %q", event.Action)
+	}
+}
+
+func (p productionWorkflowEventProcessor) workflowConfig() *config.Config {
+	cfg := p.Config
+	if cfg.ControlPlaneURL == "" {
+		cfg.ControlPlaneURL = p.ControlPlaneURL
+	}
+	if cfg.Workers.RunnerLabel == "" {
+		cfg.Workers.RunnerLabel = p.DefaultRunner
+	}
+	if cfg.Workers.TimeoutMinutes == 0 {
+		cfg.Workers.TimeoutMinutes = p.DefaultTimeoutMin
+	}
+	return &cfg
+}
+
+func (p productionWorkflowEventProcessor) platform(ctx context.Context, repo store.Repository) (platform.Platform, error) {
+	if p.PlatformFactory != nil {
+		return p.PlatformFactory(ctx, repo)
+	}
+	if p.TokenSource == nil {
+		return nil, fmt.Errorf("production workflow event processor requires GitHub App token source")
+	}
+	if repo.InstallationID == 0 || strings.TrimSpace(repo.Owner) == "" || strings.TrimSpace(repo.Name) == "" {
+		return nil, fmt.Errorf("production workflow event processor requires durable repository context")
+	}
+	client, _, err := appauth.NewInstallationClient(ctx, p.TokenSource, repo.InstallationID)
+	if err != nil {
+		return nil, fmt.Errorf("create installation client for workflow event: %w", err)
+	}
+	pl, err := platformgithub.NewWithClient(repo.Owner, repo.Name, client)
+	if err != nil {
+		return nil, fmt.Errorf("create platform client for workflow event: %w", err)
+	}
+	return pl, nil
 }
 
 type productionCommandDispatcher struct {

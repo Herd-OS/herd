@@ -43,15 +43,15 @@ func TestBuildServiceDependenciesProductionWiresCommandDispatcher(t *testing.T) 
 	require.NotNil(t, deps.IssueCommentCommandHandler)
 }
 
-func TestBuildServiceDependenciesProductionRequiresWorkflowProcessor(t *testing.T) {
+func TestBuildServiceDependenciesProductionWiresDefaultWorkflowProcessor(t *testing.T) {
 	cfg := validProductionServiceConfig(t)
 	st := store.NewMemoryStore()
 
 	deps, err := buildServiceDependencies(cfg, st, log.New(io.Discard, "", 0))
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "production workflow event processor is not configured")
-	assert.Empty(t, deps)
+	require.NoError(t, err)
+	require.NotNil(t, deps.WorkflowEventProcessor)
+	require.NotNil(t, deps.WorkflowEventsRoute)
 }
 
 func TestBuildServiceDependenciesProductionRegistersRealRoutes(t *testing.T) {

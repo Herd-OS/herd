@@ -87,6 +87,13 @@ func (s Service) updateTaskIssue(ctx context.Context, req TaskIssueRequest, body
 	if !ok {
 		return nil, fmt.Errorf("invalid issue result ref %q", resultRef)
 	}
+	issue, err := s.Platform.Issues().Get(ctx, issueNumber)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.reconcileTaskIssueStatusLabels(ctx, issue, req.Labels); err != nil {
+		return nil, err
+	}
 	if len(req.Labels) > 0 {
 		if err := s.mutate(ctx, idempotencyKey("task-issue-labels", "repo", s.Repo.ID, "issue", issueNumber, taskIssueLabelsFingerprint(req.Labels)), "issue_label_add", func() (string, error) {
 			return "", s.Platform.Issues().AddLabels(ctx, issueNumber, req.Labels)
@@ -98,6 +105,40 @@ func (s Service) updateTaskIssue(ctx context.Context, req TaskIssueRequest, body
 		return nil, err
 	}
 	return s.Platform.Issues().Get(ctx, issueNumber)
+}
+
+func (s Service) reconcileTaskIssueStatusLabels(ctx context.Context, issue *platform.Issue, desired []string) error {
+	if issue == nil {
+		return nil
+	}
+	desiredStatus := map[string]struct{}{}
+	for _, label := range desired {
+		label = strings.TrimSpace(label)
+		if isTaskStatusLabel(label) {
+			desiredStatus[label] = struct{}{}
+		}
+	}
+	for _, label := range issue.Labels {
+		label = strings.TrimSpace(label)
+		if !isTaskStatusLabel(label) {
+			continue
+		}
+		if _, ok := desiredStatus[label]; ok {
+			continue
+		}
+		remove := label
+		key := idempotencyKey("task-issue-status-label", "repo", s.Repo.ID, "issue", issue.Number, "remove", remove, "desired", taskIssueLabelsFingerprint(desired))
+		if err := s.mutate(ctx, key, "issue_label_remove", func() (string, error) {
+			return "", s.Platform.Issues().RemoveLabels(ctx, issue.Number, []string{remove})
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isTaskStatusLabel(label string) bool {
+	return strings.HasPrefix(label, "herd/status:")
 }
 
 func (s Service) ensureOverflowComments(ctx context.Context, issueNumber int, phase string, overflow string) error {

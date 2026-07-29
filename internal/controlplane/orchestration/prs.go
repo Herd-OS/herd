@@ -107,8 +107,8 @@ type branchUpdater interface {
 	UpdateBranchToCommit(ctx context.Context, name, sha string, force bool) error
 }
 
-// ApplyBranchOperation performs create/update/delete keyed by
-// repo_id + branch_name + expected_head_sha + operation_kind.
+// ApplyBranchOperation performs create/update/delete keyed by repo, branch,
+// guarded head/source SHA, and operation kind.
 func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRequest) error {
 	if err := s.validate(); err != nil {
 		return err
@@ -122,8 +122,22 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 	if (req.OperationKind == "delete" || req.OperationKind == "update") && req.ExpectedHeadSHA == "" {
 		return fmt.Errorf("expected head SHA is required for branch %s", req.OperationKind)
 	}
-	key := idempotencyKey("branch", "repo", s.Repo.ID, req.BranchName, req.ExpectedHeadSHA, req.OperationKind)
+	identitySHA := req.ExpectedHeadSHA
+	if req.OperationKind == "create" {
+		identitySHA = req.FromSHA
+	}
+	key := idempotencyKey("branch", "repo", s.Repo.ID, req.BranchName, identitySHA, req.OperationKind)
 	preflight := func() error {
+		if req.OperationKind == "create" {
+			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)
+			if err != nil {
+				return nil
+			}
+			if current != req.FromSHA {
+				return fmt.Errorf("branch %s already exists at %s, expected create source %s", req.BranchName, current, req.FromSHA)
+			}
+			return nil
+		}
 		if req.ExpectedHeadSHA != "" {
 			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)
 			if err != nil && req.OperationKind != "create" {
@@ -140,6 +154,13 @@ func (s Service) ApplyBranchOperation(ctx context.Context, req BranchOperationRe
 		case "create":
 			if req.FromSHA == "" {
 				return "", fmt.Errorf("from SHA is required for branch create")
+			}
+			current, err := s.Platform.Repository().GetBranchSHA(ctx, req.BranchName)
+			if err == nil {
+				if current != req.FromSHA {
+					return "", fmt.Errorf("branch %s already exists at %s, expected create source %s", req.BranchName, current, req.FromSHA)
+				}
+				return "branch:" + req.BranchName, nil
 			}
 			return "branch:" + req.BranchName, s.Platform.Repository().CreateBranch(ctx, req.BranchName, req.FromSHA)
 		case "update":

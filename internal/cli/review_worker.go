@@ -125,7 +125,11 @@ func hostedReviewReadToken(ctx context.Context, cfg *config.Config) (string, err
 	if err != nil {
 		return "", err
 	}
-	cp, err := cpclient.New(cfg.EffectiveControlPlaneURL(), nil)
+	controlPlaneURL, err := runtimeControlPlaneURL(cfg)
+	if err != nil {
+		return "", err
+	}
+	cp, err := cpclient.New(controlPlaneURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -134,6 +138,16 @@ func hostedReviewReadToken(ctx context.Context, cfg *config.Config) (string, err
 		return "", fmt.Errorf("getting hosted review read token: %w", err)
 	}
 	return resp.Token, nil
+}
+
+func runtimeControlPlaneURL(cfg *config.Config) (string, error) {
+	if value := strings.TrimSpace(os.Getenv("HERD_CONTROL_PLANE_URL")); value != "" {
+		return validatedEffectiveControlPlaneURL(value)
+	}
+	if cfg == nil {
+		return validatedEffectiveControlPlaneURL("")
+	}
+	return validatedEffectiveControlPlaneURL(cfg.EffectiveControlPlaneURL())
 }
 
 func githubActionsOIDCToken(ctx context.Context) (string, error) {

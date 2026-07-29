@@ -161,6 +161,38 @@ func TestApplyBranchOperation_IdempotencyAndHeadGuard(t *testing.T) {
 	}
 }
 
+func TestApplyBranchOperationCreateIdentityIncludesFromSHA(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	svc := newTestService(fake, newFakeStore(), nil)
+	first := BranchOperationRequest{OperationKind: "create", BranchName: "herd/worker/1-task", FromSHA: "base-a"}
+	second := BranchOperationRequest{OperationKind: "create", BranchName: "herd/worker/1-task", FromSHA: "base-b"}
+
+	require.NoError(t, svc.ApplyBranchOperation(ctx, first))
+	err := svc.ApplyBranchOperation(ctx, second)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected create source")
+	assert.Equal(t, "base-a", fake.repo.branches[first.BranchName])
+}
+
+func TestApplyBranchOperationCreateRejectsExistingWrongSHARecovery(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakePlatform()
+	fake.repo.branches["herd/worker/1-task"] = "stale"
+	svc := newTestService(fake, newFakeStore(), nil)
+
+	err := svc.ApplyBranchOperation(ctx, BranchOperationRequest{
+		OperationKind: "create",
+		BranchName:    "herd/worker/1-task",
+		FromSHA:       "fresh",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected create source fresh")
+	assert.Equal(t, "stale", fake.repo.branches["herd/worker/1-task"])
+}
+
 func TestMergePR_RequiresExpectedHeadAndSuccessfulStatus(t *testing.T) {
 	ctx := context.Background()
 

@@ -273,6 +273,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	acceptedReviewKey, err := h.acquireReviewResultAcceptance(r.Context(), result, job, idempotencyKey)
+	if err != nil {
+		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := h.processReviewResult(r.Context(), result, job); err != nil {
 		_ = h.store.FailIdempotencyKey(r.Context(), callbackKey, err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process review result"})
@@ -301,6 +307,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete job result idempotency"})
 		return
 	}
+	if acceptedReviewKey != "" {
+		if err := h.store.CompleteIdempotencyKey(r.Context(), acceptedReviewKey, idempotencyKey); err != nil {
+			_ = h.store.FailIdempotencyKey(r.Context(), acceptedReviewKey, err.Error())
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "complete review result acceptance"})
+			return
+		}
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":          "accepted",
 		"created":         created,
@@ -308,6 +321,40 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"kind":            envelope.Kind,
 		"idempotency_key": idempotencyKey,
 	})
+}
+
+func (h Handler) acquireReviewResultAcceptance(ctx context.Context, result Result, job store.Job, resultKey string) (string, error) {
+	if _, ok := result.(ReviewCompletedResult); !ok {
+		return "", nil
+	}
+	key := reviewResultAcceptanceKey(job)
+	created, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "review_result_acceptance",
+		Status:    mutationspkg.PhaseIntentRecorded,
+		ResultRef: resultKey,
+		CreatedAt: h.now(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("acquire review result acceptance: %w", err)
+	}
+	if created {
+		return key, nil
+	}
+	record, err := h.store.GetIdempotencyKey(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("get review result acceptance: %w", err)
+	}
+	if record.ResultRef == resultKey {
+		return "", nil
+	}
+	if record.Status == mutationspkg.PhaseCompleted || record.Status == "completed" {
+		return "", fmt.Errorf("conflicting review result already accepted for job %q", job.JobID)
+	}
+	if mutationspkg.IsPostCallUnknown(record.Status) {
+		return "", fmt.Errorf("review result acceptance for job %q is pending repair", job.JobID)
+	}
+	return "", fmt.Errorf("conflicting review result is already pending for job %q", job.JobID)
 }
 
 type ReviewReadTokenResponse struct {
@@ -495,6 +542,17 @@ func reviewResultMutationKey(result Result, job store.Job) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return "review_result:" + hex.EncodeToString(sum[:])
+}
+
+func reviewResultAcceptanceKey(job store.Job) string {
+	parts := []string{
+		job.JobID,
+		fmt.Sprint(job.RepositoryID),
+		fmt.Sprint(job.PRNumber),
+		job.HeadSHA,
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "review_result_acceptance:" + hex.EncodeToString(sum[:])
 }
 
 func reviewRepositoryFromJob(job store.Job, fullName string) review.Repository {
@@ -823,7 +881,7 @@ func (h Handler) acquirePatchApply(ctx context.Context, idempotencyKey string, w
 	created, err := h.store.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
 		Key:       idempotencyKey,
 		Scope:     "patch_apply",
-		Status:    "started",
+		Status:    mutationspkg.PhaseIntentRecorded,
 		ResultRef: worker.JobID,
 		Metadata:  metadata,
 		CreatedAt: h.now(),

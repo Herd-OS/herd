@@ -313,7 +313,7 @@ func TestHandlerDuplicateReviewCallbackUsesStableIdentityAcrossJSONFormatting(t 
 	assert.Len(t, st.results, 1)
 }
 
-func TestHandlerProcessesChangedReviewVisibleOutputDistinctly(t *testing.T) {
+func TestHandlerRejectsChangedReviewResultAfterAcceptance(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	st := newResultStore()
 	st.jobs["job-1"] = store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 9, PRNumber: 42, HeadSHA: "head", Metadata: validJobMetadata()}
@@ -333,12 +333,11 @@ func TestHandlerProcessesChangedReviewVisibleOutputDistinctly(t *testing.T) {
 	handler.ServeHTTP(second, resultRequest("job-1", changedPayload))
 
 	require.Equal(t, http.StatusAccepted, first.Code)
-	require.Equal(t, http.StatusAccepted, second.Code)
-	assert.NotContains(t, second.Body.String(), `"created":false`)
-	require.Len(t, processor.calls, 2)
+	require.Equal(t, http.StatusConflict, second.Code)
+	assert.Contains(t, second.Body.String(), "conflicting review result")
+	require.Len(t, processor.calls, 1)
 	assert.Equal(t, "review summary", processor.calls[0].result.Summary)
-	assert.Equal(t, "corrected review summary", processor.calls[1].result.Summary)
-	assert.Len(t, st.results, 2)
+	assert.Len(t, st.results, 1)
 }
 
 func TestHandlerStartedCallbackDoesNotProcessAgain(t *testing.T) {
@@ -1067,6 +1066,46 @@ func TestHandlerRetryAfterPatchMutationAttemptRecordFailureRecordsBeforeApply(t 
 	assert.Len(t, st.mutationAttempts, 1)
 	assert.Len(t, st.results, 1)
 	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("9", 40))
+}
+
+func TestHandlerIntentRecordedPatchApplyWithoutMutationAttemptRecordsBeforeApply(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	patch := []byte("diff --git a/file.txt b/file.txt\n")
+	metadata := artifacts.BuildMetadata("acme/widgets", "job-1", "base", "head", "patches/job.patch", patch)
+	applier := &recordingPatchApplier{result: artifacts.ApplyResult{CommitSHA: strings.Repeat("7", 40)}}
+	st := newResultStore()
+	payload := validWorkerPayload("job-1", "head")
+	job := store.Job{JobID: "job-1", RepositoryID: 7, InstallationID: 99, HeadSHA: "head", BaseSHA: "base", WorkerBranch: "herd/worker/837"}
+	patchKey := patchApplyKeyForTest(t, payload, job)
+	st.idem[patchKey] = store.IdempotencyKey{
+		Key:       patchKey,
+		Scope:     "patch_apply",
+		Status:    mutationspkg.PhaseIntentRecorded,
+		ResultRef: "job-1",
+		CreatedAt: now,
+	}
+	st.jobs["job-1"] = job
+	handler := NewHandler(HandlerOptions{
+		Store:          st,
+		Validator:      fixedOIDCValidator(validClaims(now)),
+		Now:            func() time.Time { return now },
+		ArtifactStore:  artifactMap(t, metadata, patch),
+		PatchApplier:   applier,
+		AppTokenSource: fakeAppTokenSource{},
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, resultRequest("job-1", payload))
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Len(t, applier.requests, 1)
+	assert.Len(t, st.mutationAttempts, 1)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationAttempts[0].Status)
+	require.Len(t, st.mutationCompletions, 2)
+	assert.Equal(t, mutationspkg.PhaseCallStarted, st.mutationCompletions[0].status)
+	assert.Equal(t, mutationspkg.PhaseCompleted, st.mutationCompletions[1].status)
+	require.Len(t, st.results, 1)
+	assertJobResultCommitSHA(t, st.results[0], strings.Repeat("7", 40))
 }
 
 func TestHandlerRetryAfterRecordJobResultFailureDoesNotReapplyPatch(t *testing.T) {
