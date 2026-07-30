@@ -83,6 +83,28 @@ func TestRenderReviewVerificationPrompt_CompleteEvidenceCallsOutUncitedContradic
 	assert.Contains(t, rendered, "uncited finding contradicts")
 }
 
+func TestRenderReviewVerificationPrompt_PreservesMultibyteSourceBeyondLegacyExcerptBoundary(t *testing.T) {
+	contradiction := "現在のレビューは提案された再解釈と矛盾します🧭"
+	source := strings.Repeat("完全な権威ある証拠λ", 600) + contradiction
+	require.Greater(t, len(source)-len(contradiction), 4096)
+	input := agent.ReviewVerificationInput{
+		HeadSHA: "current-head",
+		EvidenceSources: []agent.ReviewEvidenceSource{{
+			ID: "cycle:4:finding:0", Kind: "review_finding", Cycle: 4, HeadSHA: "current-head", Excerpt: source,
+		}},
+		CitedEvidenceReferences: []string{"cycle:4:finding:0"},
+		Synthesis:               agent.ReviewSynthesisResult{ShouldEscalate: true},
+	}
+
+	rendered, err := RenderReviewVerificationPrompt(input)
+
+	require.NoError(t, err)
+	assert.Contains(t, rendered, source)
+	assert.Contains(t, rendered, contradiction)
+	assert.NotContains(t, rendered, ReviewPromptTruncationMarker)
+	assert.True(t, utf8.ValidString(rendered))
+}
+
 func TestParseReviewVerificationOutput_Strict(t *testing.T) {
 	tests := []struct {
 		name    string

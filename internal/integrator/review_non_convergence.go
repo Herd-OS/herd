@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/issues"
@@ -650,7 +649,7 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 				Kind:    "review_finding",
 				Cycle:   cycle.Cycle,
 				HeadSHA: cycle.HeadSHA,
-				Excerpt: boundedReviewEvidenceExcerpt(finding),
+				Excerpt: completeReviewEvidenceExcerpt(finding),
 			})
 		}
 	}
@@ -696,7 +695,7 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 			for _, source := range requirementSources {
 				if strings.TrimSpace(source.text) != "" {
 					input.EvidenceSources = append(input.EvidenceSources, agent.ReviewEvidenceSource{
-						ID: source.id, Kind: source.kind, Excerpt: boundedReviewEvidenceExcerpt(source.text),
+						ID: source.id, Kind: source.kind, Excerpt: completeReviewEvidenceExcerpt(source.text),
 					})
 				}
 			}
@@ -768,19 +767,8 @@ func buildReviewSynthesisInput(pr *platform.PullRequest, ms *platform.Milestone,
 	return input
 }
 
-const reviewEvidenceExcerptBudget = 4096
-
-func boundedReviewEvidenceExcerpt(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) <= reviewEvidenceExcerptBudget {
-		return value
-	}
-	const marker = "\n[TRUNCATED: deterministic review evidence budget reached]\n"
-	keep := reviewEvidenceExcerptBudget - len(marker)
-	for keep > 0 && !utf8.RuneStart(value[keep]) {
-		keep--
-	}
-	return value[:keep] + marker
+func completeReviewEvidenceExcerpt(value string) string {
+	return strings.TrimSpace(value)
 }
 
 func evaluateReviewSynthesis(result *agent.ReviewSynthesisResult, minConfidence float64, analysis reviewConvergenceAnalysis) (reviewSynthesisDecision, string) {

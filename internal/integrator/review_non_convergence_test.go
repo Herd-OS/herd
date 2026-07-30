@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/agent/prompt"
@@ -1629,14 +1628,25 @@ func reviewStrategyIssueBody(batchPR int) string {
 	})
 }
 
-func TestBoundedReviewEvidenceExcerptPreservesUnicode(t *testing.T) {
-	value := strings.Repeat("現在のレビュー証拠🧭", reviewEvidenceExcerptBudget)
+func TestCompleteReviewEvidenceExcerptPreservesAtomicSource(t *testing.T) {
+	contradiction := "現在のレビューは提案された不変条件と矛盾します🧭"
+	largeSource := strings.Repeat("安全な接頭辞λ", 700) + contradiction
+	require.Greater(t, len(largeSource)-len(contradiction), 4096)
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: "", want: ""},
+		{name: "surrounding whitespace", value: "  complete evidence  \n", want: "complete evidence"},
+		{name: "multibyte contradiction beyond legacy boundary", value: largeSource, want: largeSource},
+	}
 
-	got := boundedReviewEvidenceExcerpt(value)
-
-	assert.True(t, utf8.ValidString(got))
-	assert.LessOrEqual(t, len(got), reviewEvidenceExcerptBudget)
-	assert.Contains(t, got, "[TRUNCATED: deterministic review evidence budget reached]")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, completeReviewEvidenceExcerpt(test.value))
+		})
+	}
 }
 
 func reviewStrategyIssue(number int, state string, labels []string, body string) *platform.Issue {

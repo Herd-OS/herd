@@ -8128,6 +8128,53 @@ func TestReview_HighVolumeVerificationRetainsUncitedCurrentHeadContradictionUnde
 	assert.Equal(t, []int{9601}, result.FixIssues)
 }
 
+func TestReview_HighVolumeVerificationReceivesCompleteMultibyteCurrentHeadFinding(t *testing.T) {
+	currentFindings := reviewNonConvergenceCurrentFindings(28)
+	contradiction := "現在のレビューは提案された要件の再解釈と矛盾し、既存の安全性要件を維持すべきです🧭"
+	largeFinding := "internal/controlplane/dispatch/zz_complete.go: durable mutation idempotency evidence " +
+		strings.Repeat("完全な現在ヘッド証拠λ", 600) + contradiction
+	require.Greater(t, len(largeFinding)-len(contradiction), 4096)
+	currentFindings[len(currentFindings)-1].Description = largeFinding
+
+	fx := newReviewNonConvergenceIntegrationFixture(t, currentFindings)
+	fx.issueSvc.listResult[0].Title = "Preserve revoked grant safety"
+	fx.issueSvc.listResult[0].Body = "---\nherd:\n  version: 1\n  batch: 111\n---\n\n## Task\nUse an intent record across independent stores.\n\n## Acceptance Criteria\n\n- [ ] Revoked grants cannot be used.\n"
+	fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+	fx.ag.synthesisResult.RequirementReinterpretation = validReviewReinterpretation()
+	fx.ag.synthesisResult.RequirementReinterpretation.EvidenceReferences = []string{
+		"issue:42:criterion:0", "cycle:35:finding:0",
+	}
+	fx.ag.onVerification = func(context.Context) {
+		completeSourcePresent := false
+		for _, source := range fx.ag.verificationInput.EvidenceSources {
+			if source.HeadSHA == fx.headSHA && source.Excerpt == largeFinding {
+				completeSourcePresent = true
+				break
+			}
+		}
+		require.True(t, completeSourcePresent)
+		fx.ag.verificationResult = &agent.ReviewVerificationResult{
+			Approved: false, Confidence: .99, Reason: "the complete current-head finding contradicts the proposed reinterpretation",
+		}
+	}
+
+	result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, fx.ag.synthesisCalls)
+	assert.Equal(t, 1, fx.ag.verificationCalls)
+	require.Len(t, fx.createdIssues, 1)
+	assert.Equal(t, "Review strategy fix (cycle 39): control-plane post-call pre-call", fx.createdIssues[0].title)
+	assert.Contains(t, fx.createdIssues[0].body, "Solve the shared architecture/design problem")
+	assert.NotContains(t, fx.createdIssues[0].body, "Requirement reinterpretation")
+	assert.NotContains(t, fx.createdIssues[0].body, "Corrected invariant")
+	assert.NotContains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+	require.Len(t, fx.wf.dispatched, 1)
+	assert.Equal(t, "9601", fx.wf.dispatched[0]["issue_number"])
+	assert.Equal(t, []int{9601}, result.FixIssues)
+}
+
 func TestReview_NonConvergenceSynthesisGroupsDifferentlyWordedFindingsByRootCause(t *testing.T) {
 	descriptions := []string{
 		"retry path can emit a second workflow dispatch",
