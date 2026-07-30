@@ -123,6 +123,10 @@ func evaluateLowVolumeReviewSynthesis(result *agent.ReviewSynthesisResult, input
 		strings.TrimSpace(result.ProposedStrategy) == "" || len(trimBlankStrings(result.AcceptanceCriteria)) == 0 {
 		return reviewSynthesisDecisionFallback, "synthesis omitted required strategy fields"
 	}
+	rootCauseTitle := sanitizedReviewSynthesisRootCauseTitle(result.RootCauseTitle)
+	if !isMeaningfulLowVolumeRootCause(rootCauseTitle, result) {
+		return reviewSynthesisDecisionFallback, "synthesis root cause has unsafe, generic, or meaningless title"
+	}
 	if ok, reason := validateLowVolumeSynthesisProvenance(result, input, eligibility); !ok {
 		return reviewSynthesisDecisionFallback, reason
 	}
@@ -351,14 +355,7 @@ func validateHighVolumeSynthesisSourceExcerpts(result *agent.ReviewSynthesisResu
 		return false, reason
 	}
 	for _, symptom := range result.RecurringSymptoms {
-		if len(symptom.SourceExcerpts) == 0 {
-			continue
-		}
-		referenceCounts := make(map[string]int, len(symptom.EvidenceReferences))
-		for _, reference := range symptom.EvidenceReferences {
-			referenceCounts[reference]++
-		}
-		if ok, reason := validateReviewSourceExcerpts(referenceCounts, symptom.SourceExcerpts, sources); !ok {
+		if ok, reason := validateReviewEvidenceObject(symptom.EvidenceReferences, symptom.SourceExcerpts, sources); !ok {
 			return false, "synthesis symptom " + reason
 		}
 	}
@@ -651,12 +648,6 @@ func buildLowVolumeSynthesizedStrategyFixIssueTitle(result *agent.ReviewSynthesi
 	suffix := ""
 	if result != nil {
 		suffix = sanitizedReviewSynthesisRootCauseTitle(result.RootCauseTitle)
-		if !isMeaningfulLowVolumeRootCause(suffix, result) {
-			suffix = "recurring architectural invariant failure"
-		}
-	}
-	if suffix == "" {
-		suffix = "recurring architectural invariant failure"
 	}
 	return truncateReviewStrategyTitle("Review strategy fix: "+suffix, 120)
 }

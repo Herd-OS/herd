@@ -187,6 +187,24 @@ func TestEvaluateLowVolumeReviewSynthesis(t *testing.T) {
 		{name: "generic root", mutate: func(r *agent.ReviewSynthesisResult) {
 			r.RootCauseTitle, r.RootCauseSummary, r.ProposedStrategy = "review workflow", "", ""
 		}, want: reviewSynthesisDecisionFallback},
+		{name: "affected package title", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RootCauseTitle = "integrator package invariant"
+		}, want: reviewSynthesisDecisionFallback},
+		{name: "generic title", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RootCauseTitle = "durability"
+		}, want: reviewSynthesisDecisionFallback},
+		{name: "cycle-derived title", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RootCauseTitle = "cycle 39 publication invariant"
+		}, want: reviewSynthesisDecisionFallback},
+		{name: "chunk-derived title", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RootCauseTitle = "chunk 1/9 publication invariant"
+		}, want: reviewSynthesisDecisionFallback},
+		{name: "coverage-derived title", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RootCauseTitle = "diff coverage publication invariant"
+		}, want: reviewSynthesisDecisionFallback},
+		{name: "malformed path title", mutate: func(r *agent.ReviewSynthesisResult) {
+			r.RootCauseTitle = "internal/integrator/review.go"
+		}, want: reviewSynthesisDecisionFallback},
 		{name: "missing files", mutate: func(r *agent.ReviewSynthesisResult) {
 			for i := range r.RecurringSymptoms {
 				r.RecurringSymptoms[i].AffectedFiles = nil
@@ -589,36 +607,79 @@ func TestRepresentativeReviewVerificationEvidenceUsesCycleBreadth(t *testing.T) 
 func TestValidateHighVolumeSynthesisSourceExcerpts(t *testing.T) {
 	tests := []struct {
 		name      string
-		excerpts  []agent.ReviewSourceExcerpt
+		mutate    func(*agent.ReviewSynthesisResult, *agent.ReviewSynthesisInput)
 		wantValid bool
 	}{
-		{name: "omitted", wantValid: true},
+		{name: "omitted excerpts", mutate: func(*agent.ReviewSynthesisResult, *agent.ReviewSynthesisInput) {}, wantValid: true},
 		{
-			name: "exact",
-			excerpts: []agent.ReviewSourceExcerpt{{
-				Reference: "cycle:1:finding:0", Excerpt: "publication",
-			}},
+			name: "exact excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "cycle:1:finding:0", Excerpt: "publication",
+				}}
+			},
 			wantValid: true,
 		},
 		{
-			name: "unknown",
-			excerpts: []agent.ReviewSourceExcerpt{{
-				Reference: "cycle:99:finding:0", Excerpt: "unknown",
-			}},
+			name: "missing reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = ""
+			},
 		},
 		{
-			name: "unreferenced",
-			excerpts: []agent.ReviewSourceExcerpt{{
-				Reference: "issue:1:criterion:0", Excerpt: "Exclusive ownership",
-			}},
+			name: "foreign reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "issue:999:task"
+			},
+		},
+		{
+			name: "stale reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "cycle:99:finding:0"
+			},
+		},
+		{
+			name: "duplicate reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences = append(
+					result.RecurringSymptoms[0].EvidenceReferences,
+					result.RecurringSymptoms[0].EvidenceReferences[0],
+				)
+			},
+		},
+		{
+			name: "truncation marker reference",
+			mutate: func(result *agent.ReviewSynthesisResult, input *agent.ReviewSynthesisInput) {
+				input.EvidenceSources = append(input.EvidenceSources, agent.ReviewEvidenceSource{
+					ID: "truncation:finding", Kind: "truncation_marker", Excerpt: "[TRUNCATED]",
+				})
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "truncation:finding"
+			},
+		},
+		{
+			name: "unknown excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "cycle:99:finding:0", Excerpt: "unknown",
+				}}
+			},
+		},
+		{
+			name: "unreferenced excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "issue:1:criterion:0", Excerpt: "Exclusive ownership",
+				}}
+			},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			result := lowVolumeSynthesisResult()
-			result.RecurringSymptoms[0].SourceExcerpts = test.excerpts
+			input := validReviewSynthesisInput()
+			test.mutate(result, &input)
 
-			ok, reason := validateHighVolumeSynthesisSourceExcerpts(result, validReviewSynthesisInput())
+			ok, reason := validateHighVolumeSynthesisSourceExcerpts(result, input)
 
 			assert.Equal(t, test.wantValid, ok)
 			if test.wantValid {
@@ -800,12 +861,12 @@ func TestBuildLowVolumeSynthesizedStrategyFixIssueTitle(t *testing.T) {
 		want  string
 	}{
 		{name: "valid architectural title", title: "state machine publication invariant", want: "Review strategy fix: state machine publication invariant"},
-		{name: "arbitrary package path", title: "internal/state", want: "Review strategy fix: recurring architectural invariant failure"},
-		{name: "package path plus generic label", title: "pkg/scheduler invariant", want: "Review strategy fix: recurring architectural invariant failure"},
-		{name: "affected package name", title: "integrator package invariant", want: "Review strategy fix: recurring architectural invariant failure"},
-		{name: "arbitrary package name plus generic label", title: "scheduler invariant", want: "Review strategy fix: recurring architectural invariant failure"},
+		{name: "arbitrary package path is not rescued", title: "internal/state", want: "Review strategy fix: internal/state"},
+		{name: "package path plus generic label is not rescued", title: "pkg/scheduler invariant", want: "Review strategy fix: pkg/scheduler invariant"},
+		{name: "affected package name is not rescued", title: "integrator package invariant", want: "Review strategy fix: integrator package invariant"},
+		{name: "arbitrary package name plus generic label is not rescued", title: "scheduler invariant", want: "Review strategy fix: scheduler invariant"},
 		{name: "verified specific title is not lexically classified", title: "scheduler durability invariant", want: "Review strategy fix: scheduler durability invariant"},
-		{name: "generic architectural label", title: "durability", want: "Review strategy fix: recurring architectural invariant failure"},
+		{name: "generic architectural label is not rescued", title: "durability", want: "Review strategy fix: durability"},
 		{name: "valid specific cause", title: "durability ordering gap", want: "Review strategy fix: durability ordering gap"},
 	}
 	for _, test := range tests {

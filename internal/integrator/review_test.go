@@ -7723,6 +7723,54 @@ func TestReview_LowVolumeSynthesisAndVerificationFallbacks(t *testing.T) {
 			wantSynthesis: 1,
 		},
 		{
+			name: "package-only root cause title",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RootCauseTitle = "dispatch package invariant"
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "generic root cause title",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RootCauseTitle = "durability"
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "cycle-derived root cause title",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RootCauseTitle = "cycle 39 publication invariant"
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "chunk-derived root cause title",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RootCauseTitle = "chunk 1/9 publication invariant"
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "coverage-derived root cause title",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RootCauseTitle = "diff coverage publication invariant"
+			},
+			wantSynthesis: 1,
+		},
+		{
+			name: "malformed root cause title",
+			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
+				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+				fx.ag.synthesisResult.RootCauseTitle = "internal/controlplane/dispatch"
+			},
+			wantSynthesis: 1,
+		},
+		{
 			name: "missing evidence reference",
 			configure: func(_ *testing.T, fx *reviewNonConvergenceIntegrationFixture) {
 				fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
@@ -7943,6 +7991,86 @@ func TestReview_NonConvergenceSynthesisCreatesStrategyFixIssue(t *testing.T) {
 	assert.Contains(t, comment, "Strategy fix issue: #9601")
 	require.Len(t, fx.prSvc.reviews, 1)
 	assert.Contains(t, fx.prSvc.reviews[0].body, "Synthesized strategy-level fix worker dispatched -> #9601")
+}
+
+func TestReview_HighVolumeSymptomProvenance(t *testing.T) {
+	tests := []struct {
+		name            string
+		mutate          func(*agent.ReviewSynthesisResult)
+		wantSynthesized bool
+	}{
+		{
+			name:            "valid omitted excerpts",
+			mutate:          func(*agent.ReviewSynthesisResult) {},
+			wantSynthesized: true,
+		},
+		{
+			name: "valid exact excerpt",
+			mutate: func(result *agent.ReviewSynthesisResult) {
+				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
+					Reference: "cycle:35:finding:0", Excerpt: "durable mutation",
+				}}
+			},
+			wantSynthesized: true,
+		},
+		{
+			name: "missing reference",
+			mutate: func(result *agent.ReviewSynthesisResult) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = ""
+			},
+		},
+		{
+			name: "foreign reference",
+			mutate: func(result *agent.ReviewSynthesisResult) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "issue:9999:task"
+			},
+		},
+		{
+			name: "stale reference",
+			mutate: func(result *agent.ReviewSynthesisResult) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "cycle:1:finding:0"
+			},
+		},
+		{
+			name: "duplicate reference",
+			mutate: func(result *agent.ReviewSynthesisResult) {
+				result.RecurringSymptoms[0].EvidenceReferences = append(
+					result.RecurringSymptoms[0].EvidenceReferences,
+					result.RecurringSymptoms[0].EvidenceReferences[0],
+				)
+			},
+		},
+		{
+			name: "truncation-marker reference",
+			mutate: func(result *agent.ReviewSynthesisResult) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "truncation:finding"
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fx := newReviewNonConvergenceIntegrationFixture(t, reviewNonConvergenceCurrentFindings(28))
+			fx.ag.synthesisResult = highConfidenceReviewSynthesisResult()
+			test.mutate(fx.ag.synthesisResult)
+
+			result, err := Review(context.Background(), fx.mock, fx.ag, fx.g, fx.cfg, ReviewParams{PRNumber: 849, RepoRoot: fx.dir})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, 1, fx.ag.synthesisCalls)
+			assert.Zero(t, fx.ag.verificationCalls)
+			require.Len(t, fx.createdIssues, 1)
+			require.Len(t, fx.wf.dispatched, 1)
+			if test.wantSynthesized {
+				assert.Contains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+				assert.Equal(t, "Review strategy fix (cycle 39): Dispatch idempotency boundary is split across review paths", fx.createdIssues[0].title)
+			} else {
+				assert.NotContains(t, fx.createdIssues[0].body, "synthesized architectural/root-cause fix")
+				assert.Equal(t, "Review strategy fix (cycle 39): control-plane post-call pre-call", fx.createdIssues[0].title)
+			}
+		})
+	}
 }
 
 func TestReview_HighVolumeRequirementReinterpretationVerification(t *testing.T) {
