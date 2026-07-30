@@ -87,11 +87,6 @@ func RenderReviewVerificationPrompt(input agent.ReviewVerificationInput) (string
 
 func ParseReviewVerificationOutput(output string) (*agent.ReviewVerificationResult, error) {
 	output = strings.TrimSpace(output)
-	if idx := strings.Index(output, "{"); idx >= 0 {
-		if end := strings.LastIndex(output, "}"); end >= idx {
-			output = output[idx : end+1]
-		}
-	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(output), &fields); err != nil {
 		return nil, fmt.Errorf("parsing review verification JSON: %w", err)

@@ -308,21 +308,38 @@ func TestVerifyReviewNonConvergence_UsesStrictOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary not supported on Windows")
 	}
-	dir := t.TempDir()
-	script := dir + "/verify-opencode.sh"
-	require.NoError(t, os.WriteFile(script, []byte(`#!/bin/sh
-cat >/dev/null
-echo '{"approved":false,"confidence":0.98,"reason":"unrelated findings"}'
-`), 0o755))
+	tests := []struct {
+		name    string
+		output  string
+		wantErr bool
+	}{
+		{name: "strict JSON", output: `{"approved":false,"confidence":0.98,"reason":"unrelated findings"}`},
+		{name: "leading text falls back", output: `result: {"approved":true,"confidence":0.98,"reason":"coherent evidence"}`, wantErr: true},
+		{name: "trailing text falls back", output: `{"approved":true,"confidence":0.98,"reason":"coherent evidence"} approved`, wantErr: true},
+		{name: "multiple values fall back", output: `{"approved":true,"confidence":0.98,"reason":"coherent evidence"} {"approved":false,"confidence":0.99,"reason":"no"}`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			script := dir + "/verify-opencode.sh"
+			content := fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf '%%s\\n' '%s'\n", test.output)
+			require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
 
-	result, err := New(script, "").VerifyReviewNonConvergence(
-		context.Background(), agent.ReviewVerificationInput{}, agent.ReviewSynthesisOptions{RepoRoot: dir},
-	)
+			result, err := New(script, "").VerifyReviewNonConvergence(
+				context.Background(), agent.ReviewVerificationInput{}, agent.ReviewSynthesisOptions{RepoRoot: dir},
+			)
 
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.False(t, result.Approved)
-	assert.Equal(t, .98, result.Confidence)
+			if test.wantErr {
+				assert.ErrorContains(t, err, "parsing review verification output")
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.False(t, result.Approved)
+			assert.Equal(t, .98, result.Confidence)
+		})
+	}
 }
 
 func TestSynthesizeReviewNonConvergence_InvalidOutputReturnsError(t *testing.T) {

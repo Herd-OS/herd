@@ -206,23 +206,40 @@ echo '{"should_escalate":true,"confidence":0.88,"root_cause_title":"Shared invar
 }
 
 func TestVerifyReviewNonConvergence_UsesStrictOutput(t *testing.T) {
-	dir := t.TempDir()
-	script := dir + "/verify-agent.sh"
-	require.NoError(t, os.WriteFile(script, []byte(`#!/bin/sh
-cat >/dev/null
-echo '{"approved":true,"confidence":0.96,"reason":"coherent recurring invariant"}'
-`), 0o755))
+	tests := []struct {
+		name    string
+		output  string
+		wantErr bool
+	}{
+		{name: "strict JSON", output: `{"approved":true,"confidence":0.96,"reason":"coherent recurring invariant"}`},
+		{name: "leading text falls back", output: `approval: {"approved":true,"confidence":0.96,"reason":"coherent recurring invariant"}`, wantErr: true},
+		{name: "trailing text falls back", output: `{"approved":true,"confidence":0.96,"reason":"coherent recurring invariant"} approved`, wantErr: true},
+		{name: "multiple values fall back", output: `{"approved":true,"confidence":0.96,"reason":"coherent recurring invariant"} {"approved":false,"confidence":0.99,"reason":"no"}`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			script := dir + "/verify-agent.sh"
+			content := fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nprintf '%%s\\n' '%s'\n", test.output)
+			require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
 
-	result, err := New(script, "").VerifyReviewNonConvergence(
-		context.Background(),
-		agent.ReviewVerificationInput{EvidenceSources: []agent.ReviewEvidenceSource{{ID: "cycle:1:finding:0", Excerpt: "finding"}}},
-		agent.ReviewSynthesisOptions{RepoRoot: dir},
-	)
+			result, err := New(script, "").VerifyReviewNonConvergence(
+				context.Background(),
+				agent.ReviewVerificationInput{EvidenceSources: []agent.ReviewEvidenceSource{{ID: "cycle:1:finding:0", Excerpt: "finding"}}},
+				agent.ReviewSynthesisOptions{RepoRoot: dir},
+			)
 
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.True(t, result.Approved)
-	assert.Equal(t, .96, result.Confidence)
+			if test.wantErr {
+				assert.ErrorContains(t, err, "parsing review verification output")
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.True(t, result.Approved)
+			assert.Equal(t, .96, result.Confidence)
+		})
+	}
 }
 
 func TestSynthesizeReviewNonConvergence_InvalidOutputReturnsError(t *testing.T) {

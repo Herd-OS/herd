@@ -612,6 +612,18 @@ func TestValidateHighVolumeSynthesisSourceExcerpts(t *testing.T) {
 	}{
 		{name: "omitted excerpts", mutate: func(*agent.ReviewSynthesisResult, *agent.ReviewSynthesisInput) {}, wantValid: true},
 		{
+			name: "missing evidence references",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences = nil
+			},
+		},
+		{
+			name: "empty evidence references",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences = []string{}
+			},
+		},
+		{
 			name: "exact excerpt",
 			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
 				result.RecurringSymptoms[0].SourceExcerpts = []agent.ReviewSourceExcerpt{{
@@ -630,6 +642,12 @@ func TestValidateHighVolumeSynthesisSourceExcerpts(t *testing.T) {
 			name: "foreign reference",
 			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
 				result.RecurringSymptoms[0].EvidenceReferences[0] = "issue:999:task"
+			},
+		},
+		{
+			name: "resolved non-finding reference",
+			mutate: func(result *agent.ReviewSynthesisResult, _ *agent.ReviewSynthesisInput) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "issue:1:criterion:0"
 			},
 		},
 		{

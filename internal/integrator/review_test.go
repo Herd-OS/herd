@@ -8020,9 +8020,27 @@ func TestReview_HighVolumeSymptomProvenance(t *testing.T) {
 			},
 		},
 		{
+			name: "missing evidence references",
+			mutate: func(result *agent.ReviewSynthesisResult) {
+				result.RecurringSymptoms[0].EvidenceReferences = nil
+			},
+		},
+		{
+			name: "empty evidence references",
+			mutate: func(result *agent.ReviewSynthesisResult) {
+				result.RecurringSymptoms[0].EvidenceReferences = []string{}
+			},
+		},
+		{
 			name: "foreign reference",
 			mutate: func(result *agent.ReviewSynthesisResult) {
 				result.RecurringSymptoms[0].EvidenceReferences[0] = "issue:9999:task"
+			},
+		},
+		{
+			name: "resolved non-finding reference",
+			mutate: func(result *agent.ReviewSynthesisResult) {
+				result.RecurringSymptoms[0].EvidenceReferences[0] = "issue:42:criterion:0"
 			},
 		},
 		{

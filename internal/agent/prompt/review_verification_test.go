@@ -119,6 +119,9 @@ func TestParseReviewVerificationOutput_Strict(t *testing.T) {
 		{name: "empty reason", output: `{"approved":true,"confidence":0.94,"reason":""}`, wantErr: true},
 		{name: "confidence out of range", output: `{"approved":true,"confidence":1.1,"reason":"ok"}`, wantErr: true},
 		{name: "nil", output: `null`, wantErr: true},
+		{name: "leading text", output: `approval: {"approved":true,"confidence":0.94,"reason":"ok"}`, wantErr: true},
+		{name: "trailing text", output: `{"approved":true,"confidence":0.94,"reason":"ok"} approved`, wantErr: true},
+		{name: "multiple JSON values", output: `{"approved":true,"confidence":0.94,"reason":"ok"} {"approved":false,"confidence":0.99,"reason":"no"}`, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

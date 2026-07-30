@@ -270,6 +270,9 @@ func indexedReviewEvidenceSources(values []agent.ReviewEvidenceSource) (map[stri
 }
 
 func validateReviewEvidenceObject(references []string, excerpts []agent.ReviewSourceExcerpt, sources map[string]agent.ReviewEvidenceSource) (bool, string) {
+	if len(references) == 0 {
+		return false, "has no evidence references"
+	}
 	referenceCounts := make(map[string]int, len(references))
 	for _, reference := range references {
 		referenceCounts[reference]++
@@ -357,6 +360,11 @@ func validateHighVolumeSynthesisSourceExcerpts(result *agent.ReviewSynthesisResu
 	for _, symptom := range result.RecurringSymptoms {
 		if ok, reason := validateReviewEvidenceObject(symptom.EvidenceReferences, symptom.SourceExcerpts, sources); !ok {
 			return false, "synthesis symptom " + reason
+		}
+		for _, reference := range symptom.EvidenceReferences {
+			if sources[reference].Kind != "review_finding" {
+				return false, "synthesis symptom references non-finding evidence"
+			}
 		}
 	}
 	return true, ""
