@@ -23,7 +23,7 @@ func TestDefault(t *testing.T) {
 	assert.Equal(t, "dispatch-resolver", cfg.Integrator.OnConflict)
 	assert.Equal(t, true, cfg.Integrator.RequireCI)
 	assert.Equal(t, true, cfg.Integrator.Review)
-	assert.Equal(t, 0, cfg.Integrator.ReviewMaxFixCycles)
+	assert.Equal(t, 3, cfg.Integrator.ReviewMaxFixCycles)
 	assert.Equal(t, "standard", cfg.Integrator.ReviewStrictness)
 	assert.Equal(t, ReviewNonConvergence{
 		Enabled:                true,
@@ -38,7 +38,7 @@ func TestDefault(t *testing.T) {
 		MaxFilesPerChunk: 80,
 		MaxChunks:        8,
 	}, cfg.Integrator.ReviewDiff)
-	assert.Equal(t, 0, cfg.Integrator.CIMaxFixCycles)
+	assert.Equal(t, 2, cfg.Integrator.CIMaxFixCycles)
 	assert.Empty(t, cfg.Integrator.CIWorkflows)
 	assert.Nil(t, cfg.Integrator.CIWorkflows)
 	assert.Equal(t, 15, cfg.Monitor.PatrolIntervalMinutes)
