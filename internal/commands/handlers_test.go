@@ -1803,7 +1803,7 @@ func TestHandleReview_ExtraInstructions(t *testing.T) {
 
 	dir, g := initHandlerTestRepo(t)
 
-	// Create .herd/integrator.md so the system prompt is set before extra instructions
+	// Create .herd/integrator.md so role instructions stay separate from user focus.
 	require.NoError(t, os.MkdirAll(dir+"/.herd", 0755))
 	require.NoError(t, os.WriteFile(dir+"/.herd/integrator.md", []byte("Base instructions"), 0644))
 
@@ -1821,7 +1821,8 @@ func TestHandleReview_ExtraInstructions(t *testing.T) {
 
 	require.NoError(t, result.Error)
 	assert.Contains(t, capturedOpts.SystemPrompt, "Base instructions")
-	assert.Contains(t, capturedOpts.SystemPrompt, "Focus on security issues")
+	assert.NotContains(t, capturedOpts.SystemPrompt, "Focus on security issues")
+	assert.Equal(t, "Focus on security issues", capturedOpts.ExtraInstructions)
 }
 
 func TestHandleReview_SingleFixIssue(t *testing.T) {

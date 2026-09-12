@@ -145,6 +145,10 @@ func prReportsConflict(pr *platform.PullRequest) bool {
 	return false
 }
 
+func PRReportsConflict(pr *platform.PullRequest) bool {
+	return prReportsConflict(pr)
+}
+
 func prReportsClean(pr *platform.PullRequest) bool {
 	if pr == nil {
 		return false
@@ -157,6 +161,10 @@ func prReportsClean(pr *platform.PullRequest) bool {
 	return pr.MergeableKnown && pr.Mergeable
 }
 
+func PRReportsClean(pr *platform.PullRequest) bool {
+	return prReportsClean(pr)
+}
+
 func prMergeabilityKnown(pr *platform.PullRequest) bool {
 	if pr == nil {
 		return false
@@ -165,4 +173,8 @@ func prMergeabilityKnown(pr *platform.PullRequest) bool {
 		return true
 	}
 	return prReportsConflict(pr) || prReportsClean(pr)
+}
+
+func PRMergeabilityKnown(pr *platform.PullRequest) bool {
+	return prMergeabilityKnown(pr)
 }

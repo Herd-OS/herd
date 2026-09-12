@@ -1,0 +1,266 @@
+package orchestration
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/herd-os/herd/internal/issues"
+	"github.com/herd-os/herd/internal/platform"
+)
+
+// TaskIssueRequest describes a service-owned task issue mutation.
+type TaskIssueRequest struct {
+	BatchNumber int
+	IssueNumber int
+	Title       string
+	Body        string
+	Labels      []string
+	Milestone   int
+}
+
+// EnsureTaskIssue creates or updates a batch task issue with idempotency and
+// mutation audit records. Bodies are truncated using the shared issue helpers
+// so existing front matter remains parseable.
+func (s Service) EnsureTaskIssue(ctx context.Context, req TaskIssueRequest) (*platform.Issue, error) {
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
+	if req.Title == "" {
+		return nil, fmt.Errorf("issue title is required")
+	}
+	if req.Milestone <= 0 {
+		return nil, fmt.Errorf("milestone is required")
+	}
+	body, overflow := issues.TruncateIssueBody(req.Body)
+	if req.IssueNumber > 0 {
+		return s.updateTaskIssue(ctx, req, body, overflow)
+	}
+	return s.createTaskIssue(ctx, req, body, overflow)
+}
+
+func (s Service) createTaskIssue(ctx context.Context, req TaskIssueRequest, body, overflow string) (*platform.Issue, error) {
+	key := idempotencyKey("task-issue", "repo", s.Repo.ID, "batch", req.BatchNumber, "create", req.Title, taskIssueFingerprint(req, body, overflow))
+	marker := taskIssueCreateMarker(key)
+	markedBody := bodyWithMarker(body, marker)
+	resultRef, err := s.withIdempotencyRepair(ctx, key, "issue_create", func() (string, bool, error) {
+		found, err := s.findTaskIssueByMarker(ctx, req, marker)
+		if err != nil || found == nil {
+			return "", false, err
+		}
+		return fmt.Sprintf("issue:%d", found.Number), true, nil
+	}, func() (string, error) {
+		created, err := s.Platform.Issues().Create(ctx, req.Title, markedBody, req.Labels, &req.Milestone)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("issue:%d", created.Number), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	issueNumber, ok := parseIssueResult(resultRef)
+	if !ok {
+		return nil, fmt.Errorf("invalid issue result ref %q", resultRef)
+	}
+	if err := s.ensureOverflowComments(ctx, issueNumber, "create", overflow); err != nil {
+		return nil, err
+	}
+	return s.Platform.Issues().Get(ctx, issueNumber)
+}
+
+func (s Service) updateTaskIssue(ctx context.Context, req TaskIssueRequest, body, overflow string) (*platform.Issue, error) {
+	key := idempotencyKey("task-issue", "repo", s.Repo.ID, "batch", req.BatchNumber, "issue", req.IssueNumber, "update", taskIssueFingerprint(req, body, overflow))
+	resultRef, err := s.withIdempotency(ctx, key, "issue_update", func() (string, error) {
+		title := req.Title
+		milestone := req.Milestone
+		updated, err := s.Platform.Issues().Update(ctx, req.IssueNumber, platform.IssueUpdate{
+			Title:     &title,
+			Body:      &body,
+			Milestone: &milestone,
+		})
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("issue:%d", updated.Number), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	issueNumber, ok := parseIssueResult(resultRef)
+	if !ok {
+		return nil, fmt.Errorf("invalid issue result ref %q", resultRef)
+	}
+	issue, err := s.Platform.Issues().Get(ctx, issueNumber)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.reconcileTaskIssueStatusLabels(ctx, issue, req.Labels); err != nil {
+		return nil, err
+	}
+	if len(req.Labels) > 0 {
+		if err := s.mutate(ctx, idempotencyKey("task-issue-labels", "repo", s.Repo.ID, "issue", issueNumber, taskIssueLabelsFingerprint(req.Labels)), "issue_label_add", func() (string, error) {
+			return "", s.Platform.Issues().AddLabels(ctx, issueNumber, req.Labels)
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.ensureOverflowComments(ctx, issueNumber, "update", overflow); err != nil {
+		return nil, err
+	}
+	return s.Platform.Issues().Get(ctx, issueNumber)
+}
+
+func (s Service) reconcileTaskIssueStatusLabels(ctx context.Context, issue *platform.Issue, desired []string) error {
+	if issue == nil {
+		return nil
+	}
+	desiredStatus := map[string]struct{}{}
+	for _, label := range desired {
+		label = strings.TrimSpace(label)
+		if isTaskStatusLabel(label) {
+			desiredStatus[label] = struct{}{}
+		}
+	}
+	for _, label := range issue.Labels {
+		label = strings.TrimSpace(label)
+		if !isTaskStatusLabel(label) {
+			continue
+		}
+		if _, ok := desiredStatus[label]; ok {
+			continue
+		}
+		remove := label
+		key := idempotencyKey("task-issue-status-label", "repo", s.Repo.ID, "issue", issue.Number, "remove", remove, "desired", taskIssueLabelsFingerprint(desired))
+		if err := s.mutate(ctx, key, "issue_label_remove", func() (string, error) {
+			return "", s.Platform.Issues().RemoveLabels(ctx, issue.Number, []string{remove})
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isTaskStatusLabel(label string) bool {
+	return strings.HasPrefix(label, "herd/status:")
+}
+
+func (s Service) ensureOverflowComments(ctx context.Context, issueNumber int, phase string, overflow string) error {
+	for idx, comment := range issues.SplitOverflowComments(overflow) {
+		comment := comment
+		key := idempotencyKey("task-issue-overflow-comment", "repo", s.Repo.ID, "issue", issueNumber, phase, idx, taskIssueTextFingerprint(comment))
+		marker := taskIssueOverflowCommentMarker(key)
+		body := bodyWithMarker(comment, marker)
+		if _, err := s.withIdempotencyRepair(ctx, key, "issue_comment_create", func() (string, bool, error) {
+			found, err := s.findIssueCommentByMarker(ctx, issueNumber, marker)
+			if err != nil || found == nil {
+				return "", false, err
+			}
+			return fmt.Sprintf("issue_comment:%d", found.ID), true, nil
+		}, func() (string, error) {
+			commentID, err := s.Platform.Issues().AddCommentReturningID(ctx, issueNumber, body)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("issue_comment:%d", commentID), nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s Service) findTaskIssueByMarker(ctx context.Context, req TaskIssueRequest, marker string) (*platform.Issue, error) {
+	issues, err := s.Platform.Issues().List(ctx, platform.IssueFilters{State: "all", Milestone: &req.Milestone})
+	if err != nil {
+		return nil, fmt.Errorf("repair task issue lookup: %w", err)
+	}
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		if issue.Title == req.Title && strings.Contains(issue.Body, marker) {
+			return issue, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s Service) findIssueCommentByMarker(ctx context.Context, issueNumber int, marker string) (*platform.Comment, error) {
+	comments, err := s.Platform.Issues().ListComments(ctx, issueNumber)
+	if err != nil {
+		return nil, fmt.Errorf("repair issue comment lookup: %w", err)
+	}
+	for _, comment := range comments {
+		if comment != nil && strings.Contains(comment.Body, marker) {
+			return comment, nil
+		}
+	}
+	return nil, nil
+}
+
+func taskIssueCreateMarker(key string) string {
+	return "herd:task-issue-create " + key
+}
+
+func taskIssueOverflowCommentMarker(key string) string {
+	return "herd:task-issue-overflow-comment " + key
+}
+
+func bodyWithMarker(body string, marker string) string {
+	return strings.TrimRight(body, "\n") + "\n\n<!-- " + marker + " -->"
+}
+
+func taskIssueFingerprint(req TaskIssueRequest, body, overflow string) string {
+	labels := normalizedTaskIssueLabels(req.Labels)
+	payload, _ := json.Marshal(struct {
+		Title     string   `json:"title"`
+		Body      string   `json:"body"`
+		Overflow  string   `json:"overflow"`
+		Labels    []string `json:"labels"`
+		Milestone int      `json:"milestone"`
+	}{
+		Title:     req.Title,
+		Body:      body,
+		Overflow:  overflow,
+		Labels:    labels,
+		Milestone: req.Milestone,
+	})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizedTaskIssueLabels(labels []string) []string {
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label != "" {
+			out = append(out, label)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+func taskIssueLabelsFingerprint(labels []string) string {
+	payload, _ := json.Marshal(normalizedTaskIssueLabels(labels))
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func taskIssueTextFingerprint(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+func parseIssueResult(ref string) (int, bool) {
+	var number int
+	if _, err := fmt.Sscanf(ref, "issue:%d", &number); err != nil || number <= 0 {
+		return 0, false
+	}
+	return number, true
+}

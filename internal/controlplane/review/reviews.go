@@ -1,0 +1,725 @@
+package review
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	cpdispatch "github.com/herd-os/herd/internal/controlplane/dispatch"
+	"github.com/herd-os/herd/internal/controlplane/mutationguard"
+	mutationspkg "github.com/herd-os/herd/internal/controlplane/mutations"
+	"github.com/herd-os/herd/internal/controlplane/store"
+	"github.com/herd-os/herd/internal/platform"
+)
+
+var ErrReviewSubmissionInProgress = errors.New("review submission is already in progress")
+
+var sensitiveErrorTokenPattern = regexp.MustCompile(`\b(?:gh[opsru]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]+|[A-Za-z0-9+/]{20,}={0,2})\b`)
+
+const (
+	ResultStatusApproved         = "approved"
+	ResultStatusChangesRequested = "changes_requested"
+	ResultStatusFailure          = "failure"
+	ResultStatusTimedOut         = "timed_out"
+	ResultStatusUnparseable      = "unparseable"
+	ResultStatusMaxCyclesHit     = "max_cycles_hit"
+)
+
+type ReviewCompletedResult struct {
+	Repository  string
+	JobID       string
+	BatchNumber int
+	PRNumber    int
+	BatchBranch string
+	HeadSHA     string
+	Status      string
+	Summary     string
+	TargetURL   string
+	FixCycle    int
+	Findings    []Finding
+}
+
+type Finding struct {
+	Fingerprint string
+	Severity    string
+	Description string
+}
+
+type DispatchReviewRequest struct {
+	BatchNumber     int
+	PRNumber        int
+	BatchBranch     string
+	HeadSHA         string
+	WorkflowFile    string
+	Ref             string
+	RunnerLabel     string
+	TimeoutMinutes  int
+	ControlPlaneURL string
+	Reason          string
+	LockTTL         time.Duration
+}
+
+type ReviewDispatchResult struct {
+	Locked     bool
+	Dispatched bool
+	JobID      string
+	TargetURL  string
+}
+
+type PullRequestClient interface {
+	GetPullRequest(ctx context.Context, installationID int64, owner, repo string, number int) (*platform.PullRequest, error)
+	CreateReviewForCommit(ctx context.Context, installationID int64, owner, repo string, number int, body string, event platform.ReviewEvent, commitID string) error
+	AddPullRequestComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) error
+}
+
+type ReviewLookupClient interface {
+	FindReviewForCommit(ctx context.Context, installationID int64, owner, repo string, number int, body string, event platform.ReviewEvent, commitID string) (bool, error)
+}
+
+type PullRequestCommentLookupClient interface {
+	FindPullRequestComment(ctx context.Context, installationID int64, owner, repo string, number int, marker string) (bool, error)
+}
+
+type LockStore interface {
+	AcquireReviewLock(ctx context.Context, lock store.ReviewLock) (created bool, err error)
+	ReleaseReviewLock(ctx context.Context, repoID int64, prNumber int, headSHA string, holder string, releasedAt time.Time) error
+}
+
+type Dispatcher interface {
+	Dispatch(ctx context.Context, req cpdispatch.DispatchRequest) (cpdispatch.DispatchResult, error)
+}
+
+type FixCoordinator interface {
+	EnsureReviewFixIssue(ctx context.Context, repo Repository, result ReviewCompletedResult, finding Finding) (int, bool, error)
+	DispatchReviewFixWorker(ctx context.Context, repo Repository, result ReviewCompletedResult, issueNumber int) (bool, error)
+}
+
+type PreparedReviewResultSubmission interface {
+	Submit(ctx context.Context) error
+}
+
+type preparedReviewResultSubmissionFunc func(context.Context) error
+
+func (f preparedReviewResultSubmissionFunc) Submit(ctx context.Context) error {
+	return f(ctx)
+}
+
+type ReviewService struct {
+	Status     StatusService
+	GitHub     PullRequestClient
+	Mutations  ReviewMutationStore
+	Locks      LockStore
+	Dispatcher Dispatcher
+	Fixes      FixCoordinator
+	Now        func() time.Time
+}
+
+type ReviewMutationStore interface {
+	AcquireIdempotencyKey(ctx context.Context, key store.IdempotencyKey) (created bool, err error)
+	GetIdempotencyKey(ctx context.Context, key string) (store.IdempotencyKey, error)
+	CompleteIdempotencyKey(ctx context.Context, key string, resultRef string) error
+	FailIdempotencyKey(ctx context.Context, key string, errorMessage string) error
+	RecordGitHubMutationAttempt(ctx context.Context, a store.GitHubMutationAttempt) error
+	CompleteGitHubMutationAttempt(ctx context.Context, idempotencyKey string, status string, response json.RawMessage, errorMessage string, completedAt time.Time) error
+	GetGitHubMutationAttempt(ctx context.Context, idempotencyKey string) (store.GitHubMutationAttempt, error)
+	TryStartGitHubMutationAttempt(ctx context.Context, idempotencyKey string, allowedStatuses []string, completedAt time.Time) (store.GitHubMutationStartResult, error)
+}
+
+func (s ReviewService) MarkReviewPending(ctx context.Context, repo Repository, prNumber int, headSHA string, description, targetURL string) error {
+	return s.Status.SetHerdReviewStatus(ctx, repo, prNumber, headSHA, ReviewStatusPending, description, targetURL)
+}
+
+func (s ReviewService) DispatchReview(ctx context.Context, repo Repository, req DispatchReviewRequest) (ReviewDispatchResult, error) {
+	if !repo.ReviewEnabled {
+		return ReviewDispatchResult{}, nil
+	}
+	if s.Locks == nil {
+		return ReviewDispatchResult{}, fmt.Errorf("review lock store is required")
+	}
+	if s.Dispatcher == nil {
+		return ReviewDispatchResult{}, fmt.Errorf("review dispatcher is required")
+	}
+	if err := validateReviewDispatch(repo, req); err != nil {
+		return ReviewDispatchResult{}, err
+	}
+	now := s.now()
+	ttl := req.LockTTL
+	if ttl <= 0 {
+		ttl = 2 * time.Hour
+	}
+	holder := reviewLockHolder(repo.ID, req.PRNumber, req.HeadSHA)
+	locked, err := s.Locks.AcquireReviewLock(ctx, store.ReviewLock{
+		RepositoryID: repo.ID,
+		PRNumber:     req.PRNumber,
+		HeadSHA:      req.HeadSHA,
+		Holder:       holder,
+		ExpiresAt:    now.Add(ttl),
+		AcquiredAt:   now,
+	})
+	if err != nil {
+		return ReviewDispatchResult{}, fmt.Errorf("acquire review lock: %w", err)
+	}
+	if !locked {
+		return ReviewDispatchResult{Locked: false}, nil
+	}
+	workflowFile := strings.TrimSpace(req.WorkflowFile)
+	if workflowFile == "" {
+		workflowFile = "herd-review.yml"
+	}
+	ref := strings.TrimSpace(req.Ref)
+	if ref == "" {
+		ref = firstNonEmpty(repo.DefaultBranch, "main")
+	}
+	dispatched, err := s.Dispatcher.Dispatch(ctx, cpdispatch.DispatchRequest{
+		RepoID:          repo.ID,
+		Owner:           repo.Owner,
+		Repo:            repo.Name,
+		InstallationID:  repo.InstallationID,
+		Kind:            cpdispatch.JobKindReview,
+		WorkflowFile:    workflowFile,
+		Ref:             ref,
+		BatchNumber:     req.BatchNumber,
+		PRNumber:        req.PRNumber,
+		BatchBranch:     req.BatchBranch,
+		HeadSHA:         req.HeadSHA,
+		ExpectedHeadSHA: req.HeadSHA,
+		RunnerLabel:     req.RunnerLabel,
+		TimeoutMinutes:  req.TimeoutMinutes,
+		ControlPlaneURL: req.ControlPlaneURL,
+		Reason:          req.Reason,
+	})
+	if err != nil {
+		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
+		if statusErr := s.Status.SetHerdReviewStatus(ctx, repo, req.PRNumber, req.HeadSHA, ReviewStatusFailure, "Herd Review workflow dispatch failed", ""); statusErr != nil {
+			return ReviewDispatchResult{}, fmt.Errorf("dispatch review workflow failed and record failure status: %w", statusErr)
+		}
+		return ReviewDispatchResult{}, fmt.Errorf("dispatch review workflow: %w", err)
+	}
+	if err := s.MarkReviewPending(ctx, repo, req.PRNumber, req.HeadSHA, "Herd Review is running on a self-hosted worker", dispatched.URL); err != nil {
+		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
+		return ReviewDispatchResult{}, err
+	}
+	if !dispatched.Created {
+		_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, req.PRNumber, req.HeadSHA, holder, s.now())
+	}
+	return ReviewDispatchResult{Locked: true, Dispatched: dispatched.Created, JobID: dispatched.JobID, TargetURL: dispatched.URL}, nil
+}
+
+func (s ReviewService) SubmitReviewResult(ctx context.Context, repo Repository, result ReviewCompletedResult) error {
+	submission, err := s.PrepareSubmitReviewResult(ctx, repo, result)
+	if err != nil {
+		return err
+	}
+	return submission.Submit(ctx)
+}
+
+// RepairSubmittedReviewResult converges a job-level review_result_process
+// mutation after the outer boundary reached post-call-unknown. The review
+// service owns the GitHub-visible sub-mutations, so repair re-enters the same
+// idempotent submission path instead of letting the job callback submit a
+// second unguarded review/status update.
+func (s ReviewService) RepairSubmittedReviewResult(ctx context.Context, repo Repository, result ReviewCompletedResult) (bool, error) {
+	if err := s.SubmitReviewResult(ctx, repo, result); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s ReviewService) PrepareSubmitReviewResult(ctx context.Context, repo Repository, result ReviewCompletedResult) (PreparedReviewResultSubmission, error) {
+	if !repo.ReviewEnabled {
+		return preparedReviewResultSubmissionFunc(func(context.Context) error { return nil }), nil
+	}
+	if s.GitHub == nil {
+		return nil, fmt.Errorf("review GitHub client is required")
+	}
+	if err := validateReviewResult(result); err != nil {
+		return nil, err
+	}
+	return preparedReviewResultSubmissionFunc(func(ctx context.Context) error {
+		defer s.releaseReviewLock(ctx, repo, result.PRNumber, result.HeadSHA)
+		current, err := s.GitHub.GetPullRequest(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber)
+		if err != nil {
+			return fmt.Errorf("get pull request head immediately before Herd Review submission: %w", err)
+		}
+		if current.HeadSHA != "" && current.HeadSHA != result.HeadSHA {
+			return nil
+		}
+
+		if result.Status == ResultStatusChangesRequested && repo.ReviewFixEnabled && s.Fixes != nil {
+			return s.handleChangesWithFixes(ctx, repo, result, current)
+		}
+
+		event, state, description := reviewEventAndStatus(result)
+		if event != "" {
+			if err := s.submitPRReviewOnce(ctx, repo, result, event); err != nil {
+				if errors.Is(err, ErrReviewSubmissionInProgress) {
+					return err
+				}
+				statusErr := s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review could not submit a PR review", targetURL(result, current.URL))
+				commentErr := s.submitReviewFailureCommentOnce(ctx, repo, result, err)
+				if statusErr != nil {
+					return statusErr
+				}
+				if commentErr != nil {
+					return commentErr
+				}
+				return nil
+			}
+		}
+		return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, state, description, targetURL(result, current.URL))
+	}), nil
+}
+
+func (s ReviewService) submitPRReviewOnce(ctx context.Context, repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) error {
+	key := reviewSubmissionKey(repo, result, event)
+	if s.Mutations == nil {
+		return fmt.Errorf("review submission mutation store is required")
+	}
+	submission := reviewSubmissionRequest{
+		Repository: repo.Owner + "/" + repo.Name,
+		PRNumber:   result.PRNumber,
+		HeadSHA:    result.HeadSHA,
+		Status:     result.Status,
+		Event:      event,
+		JobID:      result.JobID,
+		ReviewBody: reviewBody(result),
+	}
+	request, err := json.Marshal(submission)
+	if err != nil {
+		return fmt.Errorf("marshal review submission request: %w", err)
+	}
+	created, err := s.Mutations.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "review_submission",
+		Status:    mutationspkg.PhaseIntentRecorded,
+		Metadata:  request,
+		CreatedAt: s.now(),
+	})
+	if err != nil {
+		return fmt.Errorf("acquire review submission idempotency: %w", err)
+	}
+	if !created {
+		record, err := s.Mutations.GetIdempotencyKey(ctx, key)
+		if err != nil {
+			return fmt.Errorf("get review submission idempotency: %w", err)
+		}
+		if repaired, repairErr := s.repairCompletedReviewSubmission(ctx, key); repaired || repairErr != nil {
+			return repairErr
+		}
+		if repaired, repairErr := s.repairStartedReviewSubmission(ctx, key, repo, result, event); repaired || repairErr != nil {
+			return repairErr
+		}
+		if len(record.Metadata) > 0 && !sameReviewSubmissionRequest(record.Metadata, request) {
+			return fmt.Errorf("conflicting duplicate review submission for durable job/head %q", key)
+		}
+		if record.Status == "completed" {
+			return nil
+		}
+		if mutationspkg.IsPreCallRetryable(record.Status) {
+			if attempt, attemptErr := s.Mutations.GetGitHubMutationAttempt(ctx, key); attemptErr == nil && !mutationspkg.IsPreCallRetryable(attempt.Status) && !mutationspkg.IsCompleted(attempt.Status) {
+				return fmt.Errorf("%w: %s has unknown outcome after mutation attempt", ErrReviewSubmissionInProgress, key)
+			} else if attemptErr != nil && !errors.Is(attemptErr, store.ErrNotFound) {
+				return fmt.Errorf("get review submission mutation attempt: %w", attemptErr)
+			}
+		}
+		if record.Status == "failed" && !mutationspkg.IsPreCallRetryableRecord(record.Status, record.ResultRef) {
+			if attempt, attemptErr := s.Mutations.GetGitHubMutationAttempt(ctx, key); attemptErr != nil && !errors.Is(attemptErr, store.ErrNotFound) {
+				return fmt.Errorf("get failed review submission mutation attempt: %w", attemptErr)
+			} else if errors.Is(attemptErr, store.ErrNotFound) {
+				return fmt.Errorf("%w: %s failed without pre-call mutation metadata; repair required", ErrReviewSubmissionInProgress, key)
+			} else if !mutationspkg.IsPreCallRetryable(attempt.Status) && !mutationspkg.IsCompleted(attempt.Status) {
+				return fmt.Errorf("%w: %s has unknown outcome after failed mutation attempt", ErrReviewSubmissionInProgress, key)
+			}
+		}
+		if record.Status != "failed" && !mutationspkg.IsPreCallRetryable(record.Status) {
+			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
+		}
+	}
+	response, _ := json.Marshal(map[string]any{"submitted": true, "event": submission.Event, "head_sha": submission.HeadSHA})
+	_, err = mutationguard.Run(ctx, s.Mutations, mutationguard.RunRequest{
+		Key:          key,
+		RepositoryID: repo.ID,
+		MutationType: "review_submission",
+		Request:      request,
+		ResultRef: func(raw json.RawMessage) string {
+			if len(raw) == 0 {
+				return ""
+			}
+			return string(raw)
+		},
+		Response: func(string) json.RawMessage {
+			return response
+		},
+		Mutate: func() (string, error) {
+			if err := s.GitHub.CreateReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, submission.PRNumber, submission.ReviewBody, submission.Event, submission.HeadSHA); err != nil {
+				return "", err
+			}
+			return string(response), nil
+		},
+		Now: s.now,
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "record mutation attempt") {
+			return fmt.Errorf("record review submission mutation attempt: %w", err)
+		}
+		if strings.Contains(err.Error(), "complete mutation attempt") {
+			return fmt.Errorf("complete review submission mutation attempt: %w", err)
+		}
+		if strings.Contains(err.Error(), "repair required before retry") {
+			return fmt.Errorf("%w: %s", ErrReviewSubmissionInProgress, key)
+		}
+		return err
+	}
+	return nil
+}
+
+type reviewSubmissionRequest struct {
+	Repository string               `json:"repository"`
+	PRNumber   int                  `json:"pr_number"`
+	HeadSHA    string               `json:"head_sha"`
+	Status     string               `json:"status"`
+	Event      platform.ReviewEvent `json:"event"`
+	JobID      string               `json:"job_id"`
+	ReviewBody string               `json:"review_body"`
+}
+
+func (s ReviewService) submitReviewFailureCommentOnce(ctx context.Context, repo Repository, result ReviewCompletedResult, submissionErr error) error {
+	if s.Mutations == nil {
+		return fmt.Errorf("review failure comment mutation store is required")
+	}
+	key := reviewSubmissionFailureCommentKey(repo, result)
+	marker := reviewSubmissionFailureCommentMarker(key)
+	body := reviewSubmissionFailureComment(submissionErr, marker)
+	request, err := json.Marshal(map[string]any{
+		"repository": repo.Owner + "/" + repo.Name,
+		"pr_number":  result.PRNumber,
+		"head_sha":   result.HeadSHA,
+		"job_id":     result.JobID,
+		"marker":     marker,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal review failure comment request: %w", err)
+	}
+	created, err := s.Mutations.AcquireIdempotencyKey(ctx, store.IdempotencyKey{
+		Key:       key,
+		Scope:     "review_submission_failure_comment",
+		Status:    mutationspkg.PhaseIntentRecorded,
+		Metadata:  request,
+		CreatedAt: s.now(),
+	})
+	if err != nil {
+		return fmt.Errorf("acquire review failure comment idempotency: %w", err)
+	}
+	if !created {
+		record, err := s.Mutations.GetIdempotencyKey(ctx, key)
+		if err != nil {
+			return fmt.Errorf("get review failure comment idempotency: %w", err)
+		}
+		if mutationspkg.IsCompleted(record.Status) {
+			return nil
+		}
+	}
+	_, err = mutationguard.Run(ctx, s.Mutations, mutationguard.RunRequest{
+		Key:          key,
+		RepositoryID: repo.ID,
+		MutationType: "review_submission_failure_comment",
+		Request:      request,
+		ResultRef: func(raw json.RawMessage) string {
+			var response struct {
+				ResultRef string `json:"result_ref"`
+			}
+			if len(raw) == 0 || json.Unmarshal(raw, &response) != nil {
+				return ""
+			}
+			return response.ResultRef
+		},
+		Response: func(resultRef string) json.RawMessage {
+			response, _ := json.Marshal(map[string]string{"result_ref": resultRef, "marker": marker})
+			return response
+		},
+		Mutate: func() (string, error) {
+			if err := s.GitHub.AddPullRequestComment(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, body); err != nil {
+				return "", err
+			}
+			return "pull_request_comment:" + marker, nil
+		},
+		Repair: func() (string, bool, error) {
+			lookup, ok := s.GitHub.(PullRequestCommentLookupClient)
+			if !ok {
+				return "", false, nil
+			}
+			found, err := lookup.FindPullRequestComment(ctx, repo.InstallationID, repo.Owner, repo.Name, result.PRNumber, marker)
+			if err != nil {
+				return "", false, fmt.Errorf("repair review failure comment lookup: %w", err)
+			}
+			return "pull_request_comment:" + marker, found, nil
+		},
+		Now: s.now,
+	})
+	if err != nil {
+		return fmt.Errorf("submit review failure comment: %w", err)
+	}
+	return nil
+}
+
+func (s ReviewService) repairCompletedReviewSubmission(ctx context.Context, key string) (bool, error) {
+	attempt, err := s.Mutations.GetGitHubMutationAttempt(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get review submission mutation attempt: %w", err)
+	}
+	if !mutationspkg.IsCompleted(attempt.Status) {
+		return false, nil
+	}
+	response := attempt.Response
+	if len(response) == 0 {
+		response = json.RawMessage(`{"submitted":true}`)
+	}
+	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
+		return false, fmt.Errorf("repair review submission idempotency: %w", err)
+	}
+	return true, nil
+}
+
+func (s ReviewService) repairStartedReviewSubmission(ctx context.Context, key string, repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) (bool, error) {
+	attempt, err := s.Mutations.GetGitHubMutationAttempt(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get review submission mutation attempt: %w", err)
+	}
+	if !mutationspkg.IsPostCallUnknown(attempt.Status) {
+		return false, nil
+	}
+	lookup, ok := s.GitHub.(ReviewLookupClient)
+	if !ok {
+		return false, nil
+	}
+	request := reviewSubmissionRequest{
+		Repository: repo.Owner + "/" + repo.Name,
+		PRNumber:   result.PRNumber,
+		HeadSHA:    result.HeadSHA,
+		Event:      event,
+		ReviewBody: reviewBody(result),
+	}
+	if len(attempt.Request) > 0 {
+		var persisted reviewSubmissionRequest
+		if err := json.Unmarshal(attempt.Request, &persisted); err != nil {
+			return false, fmt.Errorf("parse review submission request for repair: %w", err)
+		}
+		if persisted.PRNumber > 0 {
+			request.PRNumber = persisted.PRNumber
+		}
+		if strings.TrimSpace(persisted.HeadSHA) != "" {
+			request.HeadSHA = persisted.HeadSHA
+		}
+		if strings.TrimSpace(string(persisted.Event)) != "" {
+			request.Event = persisted.Event
+		}
+		if strings.TrimSpace(persisted.ReviewBody) != "" {
+			request.ReviewBody = persisted.ReviewBody
+		}
+	}
+	found, err := lookup.FindReviewForCommit(ctx, repo.InstallationID, repo.Owner, repo.Name, request.PRNumber, request.ReviewBody, request.Event, request.HeadSHA)
+	if err != nil {
+		return false, fmt.Errorf("repair review submission lookup: %w", err)
+	}
+	if !found {
+		return false, nil
+	}
+	response, _ := json.Marshal(map[string]any{"submitted": true, "event": request.Event, "head_sha": request.HeadSHA, "repaired": true})
+	if err := s.Mutations.CompleteGitHubMutationAttempt(ctx, key, mutationspkg.PhaseCompleted, response, "", s.now()); err != nil {
+		return true, fmt.Errorf("repair review submission mutation attempt: %w", err)
+	}
+	if err := s.Mutations.CompleteIdempotencyKey(ctx, key, string(response)); err != nil {
+		return true, fmt.Errorf("repair review submission idempotency: %w", err)
+	}
+	return true, nil
+}
+
+func (s ReviewService) handleChangesWithFixes(ctx context.Context, repo Repository, result ReviewCompletedResult, current *platform.PullRequest) error {
+	if repo.ReviewMaxFixCycles > 0 && result.FixCycle >= repo.ReviewMaxFixCycles {
+		return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review reached the maximum fix cycles", targetURL(result, current.URL))
+	}
+	findings := actionableFindings(result.Findings, repo.ReviewFixSeverity)
+	if len(findings) == 0 {
+		return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusFailure, "Herd Review requested changes but returned no actionable fix findings", targetURL(result, current.URL))
+	}
+	for _, finding := range findings {
+		issueNumber, _, err := s.Fixes.EnsureReviewFixIssue(ctx, repo, result, finding)
+		if err != nil {
+			return fmt.Errorf("ensure review fix issue: %w", err)
+		}
+		if _, err := s.Fixes.DispatchReviewFixWorker(ctx, repo, result, issueNumber); err != nil {
+			return fmt.Errorf("dispatch review fix worker: %w", err)
+		}
+	}
+	return s.Status.SetHerdReviewStatus(ctx, repo, result.PRNumber, result.HeadSHA, ReviewStatusPending, "Herd Review requested changes; fix workers are running", targetURL(result, current.URL))
+}
+
+func (s ReviewService) releaseReviewLock(ctx context.Context, repo Repository, prNumber int, headSHA string) {
+	if s.Locks == nil {
+		return
+	}
+	_ = s.Locks.ReleaseReviewLock(ctx, repo.ID, prNumber, headSHA, reviewLockHolder(repo.ID, prNumber, headSHA), s.now())
+}
+
+func validateReviewResult(result ReviewCompletedResult) error {
+	if result.PRNumber <= 0 {
+		return fmt.Errorf("PR number is required")
+	}
+	if strings.TrimSpace(result.HeadSHA) == "" {
+		return fmt.Errorf("head SHA is required")
+	}
+	if strings.TrimSpace(result.Summary) == "" {
+		return fmt.Errorf("review summary is required")
+	}
+	switch result.Status {
+	case ResultStatusApproved, ResultStatusChangesRequested, ResultStatusFailure, ResultStatusTimedOut, ResultStatusUnparseable, ResultStatusMaxCyclesHit:
+		return nil
+	default:
+		return fmt.Errorf("unsupported review result status %q", result.Status)
+	}
+}
+
+func validateReviewDispatch(repo Repository, req DispatchReviewRequest) error {
+	if err := validateStatusInput(repo, req.PRNumber, req.HeadSHA, ReviewStatusPending); err != nil {
+		return err
+	}
+	if req.BatchNumber <= 0 {
+		return fmt.Errorf("batch number is required")
+	}
+	return nil
+}
+
+func reviewEventAndStatus(result ReviewCompletedResult) (platform.ReviewEvent, ReviewStatusState, string) {
+	switch result.Status {
+	case ResultStatusApproved:
+		return platform.ReviewApprove, ReviewStatusSuccess, "Herd Review approved this PR head"
+	case ResultStatusChangesRequested:
+		return platform.ReviewRequestChanges, ReviewStatusFailure, "Herd Review requested changes"
+	case ResultStatusTimedOut:
+		return "", ReviewStatusFailure, "Herd Review timed out"
+	case ResultStatusUnparseable:
+		return "", ReviewStatusFailure, "Herd Review returned an unparseable result"
+	case ResultStatusMaxCyclesHit:
+		return "", ReviewStatusFailure, "Herd Review reached the maximum fix cycles"
+	default:
+		return "", ReviewStatusFailure, "Herd Review failed"
+	}
+}
+
+func reviewBody(result ReviewCompletedResult) string {
+	body := strings.TrimSpace(result.Summary)
+	if body == "" {
+		body = "Herd Review completed."
+	}
+	return body
+}
+
+func reviewSubmissionKey(repo Repository, result ReviewCompletedResult, event platform.ReviewEvent) string {
+	// Review submissions are GitHub-visible mutations. A durable job/PR/head can
+	// create at most one App-authored PR review; exact payload redeliveries
+	// replay this key, while materially different payloads conflict unless a
+	// future explicit supersede path records a new operation identity.
+	return fmt.Sprintf("review_submission:%d:%d:%s:%s:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.Status, event, result.JobID)
+}
+
+func sameReviewSubmissionRequest(left, right json.RawMessage) bool {
+	var leftBody reviewSubmissionRequest
+	var rightBody reviewSubmissionRequest
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	if json.Unmarshal(left, &leftBody) != nil || json.Unmarshal(right, &rightBody) != nil {
+		return false
+	}
+	return leftBody == rightBody
+}
+
+func reviewSubmissionFailureCommentKey(repo Repository, result ReviewCompletedResult) string {
+	return fmt.Sprintf("review_submission_failure_comment:%d:%d:%s:%s", repo.ID, result.PRNumber, result.HeadSHA, result.JobID)
+}
+
+func reviewSubmissionFailureCommentMarker(key string) string {
+	return "herd:review-submission-failure-comment " + key
+}
+
+func reviewSubmissionFailureComment(err error, marker string) string {
+	return "Herd Review could not submit an App-authored pull request review. The Herd Review commit status has been set to failure.\n\nError: " + sanitizeReviewSubmissionError(err) + "\n\n<!-- " + marker + " -->"
+}
+
+func sanitizeReviewSubmissionError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "unknown error"
+	}
+	return sensitiveErrorTokenPattern.ReplaceAllString(msg, "[REDACTED]")
+}
+
+func targetURL(result ReviewCompletedResult, prURL string) string {
+	if strings.TrimSpace(result.TargetURL) != "" {
+		return strings.TrimSpace(result.TargetURL)
+	}
+	return strings.TrimSpace(prURL)
+}
+
+func (s ReviewService) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func reviewLockHolder(repoID int64, prNumber int, headSHA string) string {
+	return fmt.Sprintf("herd-review:%d:%d:%s", repoID, prNumber, headSHA)
+}
+
+func actionableFindings(findings []Finding, minSeverity string) []Finding {
+	min := severityRank(minSeverity)
+	if min == 0 {
+		min = severityRank("medium")
+	}
+	out := make([]Finding, 0, len(findings))
+	for _, finding := range findings {
+		if strings.TrimSpace(finding.Fingerprint) == "" || strings.TrimSpace(finding.Description) == "" {
+			continue
+		}
+		if severityRank(finding.Severity) >= min {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+func severityRank(severity string) int {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "low":
+		return 1
+	case "medium":
+		return 2
+	case "high":
+		return 3
+	default:
+		return 0
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}

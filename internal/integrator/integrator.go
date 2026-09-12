@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/herd-os/herd/internal/agent"
 	"github.com/herd-os/herd/internal/batchmeta"
 	"github.com/herd-os/herd/internal/config"
 	"github.com/herd-os/herd/internal/dag"
@@ -65,6 +66,7 @@ type ReviewParams struct {
 // ReviewResult holds the result of a batch PR review.
 type ReviewResult struct {
 	Approved         bool
+	Findings         []agent.ReviewFinding
 	FixIssues        []int
 	FixCycle         int
 	MaxCyclesHit     bool

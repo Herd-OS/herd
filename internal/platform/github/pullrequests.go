@@ -112,10 +112,18 @@ func (s *pullRequestService) UpdateBranch(ctx context.Context, number int) error
 }
 
 func (s *pullRequestService) CreateReview(ctx context.Context, number int, body string, event platform.ReviewEvent) error {
-	_, _, err := s.c.gh.PullRequests.CreateReview(ctx, s.c.owner, s.c.repo, number, &gh.PullRequestReviewRequest{
+	return s.CreateReviewForCommit(ctx, number, body, event, "")
+}
+
+func (s *pullRequestService) CreateReviewForCommit(ctx context.Context, number int, body string, event platform.ReviewEvent, commitID string) error {
+	req := &gh.PullRequestReviewRequest{
 		Body:  gh.Ptr(body),
 		Event: gh.Ptr(string(event)),
-	})
+	}
+	if commitID != "" {
+		req.CommitID = gh.Ptr(commitID)
+	}
+	_, _, err := s.c.gh.PullRequests.CreateReview(ctx, s.c.owner, s.c.repo, number, req)
 	if err != nil {
 		return fmt.Errorf("creating review on pull request #%d: %w", number, err)
 	}
@@ -221,6 +229,8 @@ func mapPullRequest(pr *gh.PullRequest) *platform.PullRequest {
 		Base:             pr.GetBase().GetRef(),
 		HeadSHA:          pr.GetHead().GetSHA(),
 		BaseSHA:          pr.GetBase().GetSHA(),
+		Merged:           pr.GetMerged(),
+		MergeCommitSHA:   pr.GetMergeCommitSHA(),
 		Labels:           labels,
 		Mergeable:        pr.GetMergeable(),
 		MergeableKnown:   pr.Mergeable != nil,

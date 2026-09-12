@@ -23,7 +23,7 @@ type PrepareRequest struct {
 	HeadSHA      string
 	RepoRoot     string
 	Git          *git.Git
-	PullRequests platform.PullRequestService
+	PullRequests platform.PullRequestReader
 }
 
 type PreparedDiff struct {

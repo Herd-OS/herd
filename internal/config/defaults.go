@@ -1,5 +1,7 @@
 package config
 
+const DefaultControlPlaneURL = "https://api.herd-os.com"
+
 // Default returns a Config with all default values.
 func Default() *Config {
 	return &Config{
