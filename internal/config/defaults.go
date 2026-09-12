@@ -26,9 +26,9 @@ func Default() *Config {
 			MaxConflictResolutionAttempts: 2,
 			RequireCI:                     true,
 			Review:                        true,
-			ReviewMaxFixCycles:            0,
+			ReviewMaxFixCycles:            3,
 			ReviewStrictness:              "standard",
-			ReviewFixSeverity:             "low",
+			ReviewFixSeverity:             "medium",
 			ReviewNonConvergence: ReviewNonConvergence{
 				Enabled:                true,
 				Window:                 5,
@@ -42,7 +42,7 @@ func Default() *Config {
 				MaxFilesPerChunk: 80,
 				MaxChunks:        8,
 			},
-			CIMaxFixCycles: 0,
+			CIMaxFixCycles: 2,
 			CIWorkflows:    nil,
 		},
 		Monitor: Monitor{

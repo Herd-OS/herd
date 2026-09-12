@@ -49,9 +49,9 @@ integrator:
   require_ci: true
   ci_workflows: []              # explicit GitHub Actions CI workflow names for workflow_run self-heal
   review: true                   # agent reviews batch PRs before merge
-  review_max_fix_cycles: 0       # max fix-and-re-review cycles (0 = unlimited)
+  review_max_fix_cycles: 3       # max fix-and-re-review cycles (0 = unlimited, not recommended)
   review_strictness: "standard"  # standard | strict | lenient
-  review_fix_severity: "low"     # minimum severity to create fix workers: high | medium | low
+  review_fix_severity: "medium"  # minimum severity to create fix workers: high | medium | low
   review_diff:                   # bounded diff input for agent review
     max_chunk_bytes: 180000
     max_file_bytes: 40000
@@ -63,7 +63,7 @@ integrator:
     min_completed_cycles: 3
     synthesis_enabled: true
     synthesis_min_confidence: 0.75
-  ci_max_fix_cycles: 0           # max CI-failure fix cycles (0 = unlimited)
+  ci_max_fix_cycles: 2           # max CI-failure fix cycles (0 = unlimited, not recommended)
 
 monitor:
   patrol_interval_minutes: 15
@@ -322,7 +322,9 @@ Other thresholds, including the latest deduped finding-count floor and repeated 
 
 ## CI Fix Loop
 
-`integrator.require_ci` enables CI failure detection on the batch branch. `integrator.ci_max_fix_cycles` caps how many CI-failure fix cycles the Integrator will dispatch (0 = unlimited).
+`integrator.require_ci` enables CI failure detection on the batch branch. `integrator.ci_max_fix_cycles` caps how many CI-failure fix cycles the Integrator will dispatch; the default is `2`.
+
+Setting either `ci_max_fix_cycles` or `review_max_fix_cycles` to `0` means **unlimited**, not disabled. An unlimited fix loop paired with a low `review_fix_severity` lets cosmetic findings spawn fix workers indefinitely — each fix changes the diff, which triggers a re-review, which finds new low-severity findings. Keep both caps bounded.
 
 `integrator.ci_workflows` defaults to an empty list. When non-empty, `herd init` renders `workflow_run` triggers for those exact GitHub Actions workflow names, and failed completed runs on `herd/batch/` branches can self-heal without waiting for the Monitor. The strings are matched exactly and preserved as configured, including punctuation and Unicode dashes.
 
