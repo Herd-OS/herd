@@ -147,10 +147,19 @@ type testPRService struct {
 	getCalls     map[int]int
 	listResult   []*platform.PullRequest
 	comments     []string
+	created      []*platform.PullRequest
+	nextPRNum    int
 }
 
-func (m *testPRService) Create(_ context.Context, _, _, _, _ string) (*platform.PullRequest, error) {
-	return nil, nil
+func (m *testPRService) Create(_ context.Context, title, body, head, base string) (*platform.PullRequest, error) {
+	if m.nextPRNum == 0 {
+		m.nextPRNum = 100
+	}
+	pr := &platform.PullRequest{Number: m.nextPRNum, Title: title, Body: body, Head: head, Base: base}
+	m.nextPRNum++
+	m.created = append(m.created, pr)
+	m.listResult = append(m.listResult, pr)
+	return pr, nil
 }
 func (m *testPRService) Get(_ context.Context, number int) (*platform.PullRequest, error) {
 	if m.getCalls == nil {

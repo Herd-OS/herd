@@ -9,19 +9,42 @@ import (
 
 func TestAllLabels(t *testing.T) {
 	labels := AllLabels()
-	assert.Len(t, labels, 17)
+	assert.Len(t, labels, 18)
 
-	var cascadeFailed *LabelDef
-	for i := range labels {
-		if labels[i].Name == CascadeFailed {
-			cascadeFailed = &labels[i]
-			break
-		}
+	tests := []struct {
+		name        string
+		label       string
+		color       string
+		description string
+	}{
+		{
+			name:        "cascade failed",
+			label:       CascadeFailed,
+			color:       "B60205",
+			description: "Conflict resolution cascade exhausted — manual intervention required",
+		},
+		{
+			name:        "integrator pending",
+			label:       IntegratorPending,
+			color:       "D4C5F9",
+			description: "Completed worker is pending integrator consolidation",
+		},
 	}
-	require.NotNil(t, cascadeFailed, "AllLabels should include CascadeFailed")
-	assert.Equal(t, "herd/cascade-failed", cascadeFailed.Name)
-	assert.Equal(t, "B60205", cascadeFailed.Color)
-	assert.Equal(t, "Conflict resolution cascade exhausted — manual intervention required", cascadeFailed.Description)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var found *LabelDef
+			for i := range labels {
+				if labels[i].Name == tt.label {
+					found = &labels[i]
+					break
+				}
+			}
+			require.NotNil(t, found, "AllLabels should include %s", tt.label)
+			assert.Equal(t, tt.label, found.Name)
+			assert.Equal(t, tt.color, found.Color)
+			assert.Equal(t, tt.description, found.Description)
+		})
+	}
 }
 
 func TestStableDisagreementLabel(t *testing.T) {

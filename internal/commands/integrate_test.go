@@ -4,9 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/herd-os/herd/internal/agent"
+	"github.com/herd-os/herd/internal/git"
+	"github.com/herd-os/herd/internal/integrator"
 	"github.com/herd-os/herd/internal/issues"
 	"github.com/herd-os/herd/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -24,20 +30,23 @@ type integratePlatform struct {
 	checks     *testCheckService
 }
 
-func (m *integratePlatform) Issues() platform.IssueService            { return m.issues }
+func (m *integratePlatform) Issues() platform.IssueService             { return m.issues }
 func (m *integratePlatform) PullRequests() platform.PullRequestService { return m.prs }
-func (m *integratePlatform) Workflows() platform.WorkflowService      { return m.workflows }
+func (m *integratePlatform) Workflows() platform.WorkflowService       { return m.workflows }
 func (m *integratePlatform) Labels() platform.LabelService             { return nil }
 func (m *integratePlatform) Milestones() platform.MilestoneService     { return m.milestones }
 func (m *integratePlatform) Runners() platform.RunnerService           { return nil }
 func (m *integratePlatform) Repository() platform.RepositoryService    { return m.repo }
-func (m *integratePlatform) Checks() platform.CheckService            { return m.checks }
+func (m *integratePlatform) Checks() platform.CheckService             { return m.checks }
 
 // integrateRepoService provides per-branch SHA control for integrate tests.
 type integrateRepoService struct {
-	defaultBranch string
-	branchSHAs    map[string]string // branch→SHA; missing key → error
-	deleted       []string
+	defaultBranch  string
+	branchSHAs     map[string]string // branch→SHA; missing key → error
+	deleted        []string
+	commitMessages map[string]string
+	commitParents  map[string]string
+	commitSeq      int
 }
 
 func (m *integrateRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, error) {
@@ -46,7 +55,16 @@ func (m *integrateRepoService) GetInfo(_ context.Context) (*platform.RepoInfo, e
 func (m *integrateRepoService) GetDefaultBranch(_ context.Context) (string, error) {
 	return m.defaultBranch, nil
 }
-func (m *integrateRepoService) CreateBranch(_ context.Context, _, _ string) error { return nil }
+func (m *integrateRepoService) CreateBranch(_ context.Context, name, sha string) error {
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if _, exists := m.branchSHAs[name]; exists {
+		return fmt.Errorf("reference already exists")
+	}
+	m.branchSHAs[name] = sha
+	return nil
+}
 func (m *integrateRepoService) DeleteBranch(_ context.Context, name string) error {
 	m.deleted = append(m.deleted, name)
 	return nil
@@ -55,7 +73,49 @@ func (m *integrateRepoService) GetBranchSHA(_ context.Context, name string) (str
 	if sha, ok := m.branchSHAs[name]; ok {
 		return sha, nil
 	}
+	if strings.HasPrefix(name, "herd/batch/") {
+		return "batch-sha", nil
+	}
 	return "", fmt.Errorf("branch %s not found", name)
+}
+func (m *integrateRepoService) CreateBranchWithCommit(ctx context.Context, name, parentSHA, message string) (string, error) {
+	sha, err := m.CreateCommit(ctx, parentSHA, message)
+	if err != nil {
+		return "", err
+	}
+	if err := m.CreateBranch(ctx, name, sha); err != nil {
+		return "", err
+	}
+	return sha, nil
+}
+func (m *integrateRepoService) CreateCommit(_ context.Context, parentSHA, message string) (string, error) {
+	m.commitSeq++
+	sha := fmt.Sprintf("%s-lock-%d", parentSHA, m.commitSeq)
+	if m.commitMessages == nil {
+		m.commitMessages = make(map[string]string)
+	}
+	if m.commitParents == nil {
+		m.commitParents = make(map[string]string)
+	}
+	m.commitMessages[sha] = message
+	m.commitParents[sha] = parentSHA
+	return sha, nil
+}
+func (m *integrateRepoService) GetCommitMessage(_ context.Context, sha string) (string, error) {
+	if msg, ok := m.commitMessages[sha]; ok {
+		return msg, nil
+	}
+	return "", fmt.Errorf("commit %s not found", sha)
+}
+func (m *integrateRepoService) UpdateBranchToCommit(_ context.Context, name, sha string, _ bool) error {
+	if m.branchSHAs == nil {
+		m.branchSHAs = make(map[string]string)
+	}
+	if m.branchSHAs[name] != m.commitParents[sha] {
+		return platform.ErrRefUpdateConflict
+	}
+	m.branchSHAs[name] = sha
+	return nil
 }
 
 func TestHandleIntegrate(t *testing.T) {
@@ -93,9 +153,9 @@ func TestHandleIntegrate(t *testing.T) {
 			wantMsg:   "⚠️ This issue has no batch number in its frontmatter.",
 		},
 		{
-			name:   "non-batch PR",
-			isPR:   true,
-			prHead: "feature/my-feature",
+			name:    "non-batch PR",
+			isPR:    true,
+			prHead:  "feature/my-feature",
 			wantMsg: "⚠️ `/herd integrate` can only be used on batch PRs or issues with a batch frontmatter.",
 		},
 		{
@@ -252,6 +312,159 @@ func TestHandleIntegrate_WithConsolidation(t *testing.T) {
 	// encounter errors. The handler should not fail — it reports issues in summary.
 	require.NoError(t, result.Error)
 	assert.Contains(t, result.Message, "Integrator cycle for batch #1")
+}
+
+func TestHandleIntegrate_ReleasesConsolidationLockBeforeAdvanceAndReview(t *testing.T) {
+	dir, g := initIntegrateRemoteRepo(t)
+
+	batchBody := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 1},
+		Task:        "Test",
+	})
+
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Batch", Labels: []string{issues.StatusDone}},
+	}
+
+	repo := &integrateRepoService{
+		defaultBranch: "main",
+		branchSHAs: map[string]string{
+			"herd/batch/1-batch":   "batch-sha",
+			"herd/worker/10-batch": "worker-sha",
+		},
+	}
+	prSvc := &testPRService{}
+
+	cfg := baseConfig()
+	cfg.Integrator.Review = false
+
+	p := &integratePlatform{
+		issues:     issueSvc,
+		prs:        prSvc,
+		workflows:  &testWorkflowService{},
+		repo:       repo,
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch", State: "open", ClosedIssues: 1}}},
+		checks:     &testCheckService{status: "success"},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Git:         g,
+		Config:      cfg,
+		RepoRoot:    dir,
+		IssueNumber: 5,
+		IsPR:        false,
+		IssueBody:   batchBody,
+	}
+
+	result := handleIntegrate(hctx, Command{Name: "integrate"})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "Consolidated 1 worker branch(es)")
+	assert.Contains(t, result.Message, "All tiers complete")
+	assert.Contains(t, result.Message, "Review: completed")
+	assert.NotContains(t, result.Message, "Integrator batch lock active; skipping")
+	require.Len(t, prSvc.created, 1)
+	assert.Equal(t, "herd/batch/1-batch", prSvc.created[0].Head)
+	assert.Contains(t, repo.deleted, "herd/worker/10-batch")
+
+	state, ok, err := integrator.DescribeBatchLock(context.Background(), repo, 1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "unlocked", state.Status)
+	assert.False(t, integrator.IsBatchLockActive(state, time.Now().UTC()))
+}
+
+func TestHandleIntegrate_ReleasesBatchLockAfterConsolidationFailure(t *testing.T) {
+	dir, g := initHandlerTestRepo(t)
+
+	batchBody := issues.RenderBody(issues.IssueBody{
+		FrontMatter: issues.FrontMatter{Version: 1, Batch: 1},
+		Task:        "Test",
+	})
+
+	issueSvc := newTestIssueService()
+	issueSvc.listResult = []*platform.Issue{
+		{Number: 10, Title: "Batch", Labels: []string{issues.StatusDone}},
+	}
+
+	repo := &integrateRepoService{
+		defaultBranch: "main",
+		branchSHAs: map[string]string{
+			"herd/worker/10-batch": "abc123",
+		},
+	}
+
+	p := &integratePlatform{
+		issues: issueSvc,
+		prs: &testPRService{
+			listResult: []*platform.PullRequest{},
+		},
+		workflows:  &testWorkflowService{},
+		repo:       repo,
+		milestones: &testMilestoneService{getResult: map[int]*platform.Milestone{1: {Number: 1, Title: "Batch", State: "open"}}},
+		checks:     &testCheckService{status: "success"},
+	}
+
+	hctx := &HandlerContext{
+		Ctx:         context.Background(),
+		Platform:    p,
+		Git:         g,
+		Config:      baseConfig(),
+		RepoRoot:    dir,
+		IssueNumber: 5,
+		IsPR:        false,
+		IssueBody:   batchBody,
+	}
+
+	result := handleIntegrate(hctx, Command{Name: "integrate"})
+
+	require.NoError(t, result.Error)
+	assert.Contains(t, result.Message, "Consolidation skipped")
+
+	state, ok, err := integrator.DescribeBatchLock(context.Background(), repo, 1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "unlocked", state.Status)
+	assert.False(t, integrator.IsBatchLockActive(state, time.Now().UTC()))
+}
+
+func initIntegrateRemoteRepo(t *testing.T) (string, *git.Git) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "repo")
+	remote := filepath.Join(root, "remote.git")
+	cmds := [][]string{
+		{"git", "init", "--bare", "--initial-branch=main", remote},
+		{"git", "init", "-b", "main", dir},
+		{"git", "-C", dir, "config", "user.email", "test@test.com"},
+		{"git", "-C", dir, "config", "user.name", "Test"},
+		{"git", "-C", dir, "commit", "--allow-empty", "-m", "init"},
+		{"git", "-C", dir, "remote", "add", "origin", remote},
+		{"git", "-C", dir, "push", "-u", "origin", "main"},
+		{"git", "-C", dir, "checkout", "-b", "herd/batch/1-batch"},
+		{"git", "-C", dir, "push", "-u", "origin", "herd/batch/1-batch"},
+		{"git", "-C", dir, "checkout", "-b", "herd/worker/10-batch"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "cmd %v failed: %s", args, string(out))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "worker.txt"), []byte("worker change\n"), 0o644))
+	for _, args := range [][]string{
+		{"git", "-C", dir, "add", "worker.txt"},
+		{"git", "-C", dir, "commit", "-m", "worker change"},
+		{"git", "-C", dir, "push", "-u", "origin", "herd/worker/10-batch"},
+		{"git", "-C", dir, "checkout", "herd/batch/1-batch"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "cmd %v failed: %s", args, string(out))
+	}
+	return dir, git.New(dir)
 }
 
 func TestHandleIntegrate_ReviewRunsWithExistingPR(t *testing.T) {

@@ -44,6 +44,12 @@ const (
 	// ReviewNonConverging is added to a batch PR when repeated review/fix
 	// cycles are escalated to a strategy-level fix.
 	ReviewNonConverging = "herd/review-nonconverging"
+
+	// IntegratorPending is added to a completed worker issue when its
+	// worker-completion integrator run lost the batch lock. The active
+	// same-batch integrator drains this marker with a fresh broad
+	// consolidation scan before review or CI eligibility.
+	IntegratorPending = "herd/integrator-pending"
 )
 
 // Type labels
@@ -84,6 +90,7 @@ func AllLabels() []LabelDef {
 		{RebasePending, "FBCA04", "Rebase conflict resolution in progress for this batch PR"},
 		{StableDisagreement, "E11D48", "Reviewer and fix worker disagree — automatic review paused"},
 		{ReviewNonConverging, "FBCA04", "Review/fix loop is being handled by a strategy-level fix"},
+		{IntegratorPending, "D4C5F9", "Completed worker is pending integrator consolidation"},
 		{CascadeFailed, "B60205", "Conflict resolution cascade exhausted — manual intervention required"},
 	}
 }

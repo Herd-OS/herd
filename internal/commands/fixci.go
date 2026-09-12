@@ -49,6 +49,8 @@ func handleFixCI(hctx *HandlerContext, cmd Command) Result {
 
 	var msg string
 	switch {
+	case result.Skipped && result.SkipReason != "":
+		msg = result.SkipReason
 	case result.Skipped:
 		msg = "CI checking is disabled (`require_ci: false`)."
 	case result.Status == "success":

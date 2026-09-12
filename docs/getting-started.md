@@ -235,6 +235,19 @@ herd batch cancel 5
 # milestone, and deletes the branch.
 ```
 
+Herd supports multiple active batches in the same repository. A worker launched
+with `workflow_dispatch` may report GitHub's default branch (for example,
+`main`) as the completed workflow run's `head_branch`; Herd does not use that
+value to choose the batch. The Integrator resolves the worker issue from the run
+inputs, reads the issue's milestone, and derives the batch branch from that
+metadata.
+
+Integrator mutations for one batch are serialized by a batch-scoped Herd lock,
+including consolidation, tier advancement, review, and CI handling. Batches with
+different milestone numbers use different locks, so one active batch should not
+block another merely because their workers dispatched from `main`. Review and CI
+handling remain scoped to each batch PR and batch head branch.
+
 ## What Happens After Dispatch
 
 Once workers are dispatched, the system runs autonomously via GitHub Actions:
@@ -243,15 +256,15 @@ Once workers are dispatched, the system runs autonomously via GitHub Actions:
 
 2. **Integrator consolidates** — When a worker completes, the Integrator scans the batch's milestone for every `herd/status:done` issue whose worker branch is still on the remote and merges each into the batch branch (`herd/batch/<number>-<slug>`), deleting each worker branch after a successful merge. The scan is idempotent and self-healing: if a prior integrator run was cancelled mid-loop, the next successful run picks up any stranded worker branches automatically. If a merge conflict is detected on a candidate branch, the behavior depends on `integrator.on_conflict`: with `dispatch-resolver` (default), a conflict-resolution worker is automatically dispatched; with `notify`, a comment is posted for manual resolution instead. Conflicts on one branch do not abort the loop — other candidates still consolidate.
 
-3. **Integrator advances** — After consolidation, the Integrator checks if the current tier is complete. If so, it unblocks and dispatches the next tier. When all tiers are done, it rebases the batch branch onto `main` and opens a single batch PR.
+3. **Integrator advances** — After consolidation, the Integrator checks if the current tier is complete. If so, it unblocks and dispatches the next tier. When all tiers are done, it rebases the batch branch onto `main` and opens a single batch PR. PR opening is idempotent: Herd checks existing open PRs for the batch branch and also handles the GitHub "pull request already exists" race by returning the existing PR instead of creating a duplicate.
 
    Herd stores generated reviewer-summary context as milestone metadata, so reruns can reuse it while older batches remain compatible.
 
-4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. Large PRs are split into bounded chunks; each chunk is reviewed in strict output mode (no tool calls, JSON-only output — see [Configuration: Agent Review](configuration.md#agent-review)), then HerdOS deduplicates findings and posts one aggregated result. Duplicate findings are collapsed before the PR comment is posted and before review fix issues are created. If coverage is incomplete for material source files, HerdOS requests changes instead of approving. HerdOS uses live GitHub PR metadata as authoritative for current mergeability, conflict state, head SHA, labels, and CI state. If the batch PR changes while a review is running, HerdOS discards that review result so it does not act on an outdated diff; the next trigger or a manual `/herd review` reviews the updated diff. After Herd approves a PR head SHA, repeated automatic review triggers for that same current head are logged no-ops instead of spending another review session; a new commit or manual `/herd review` asks for a fresh pass. If issues are found, the Integrator creates fix issues and dispatches fix workers. When repeated completed fix cycles are not reducing findings and those findings share package/root-cause clusters, HerdOS creates one strategy-level fix issue instead of another large endpoint-level fix issue. This cycle repeats up to `review_max_fix_cycles` times.
+4. **Agent review** — If `integrator.review` is enabled, an agent reviews the batch PR diff against all acceptance criteria. Large PRs are split into bounded chunks; each chunk is reviewed in strict output mode (no tool calls, JSON-only output — see [Configuration: Agent Review](configuration.md#agent-review)), then HerdOS deduplicates findings and posts one aggregated result. Duplicate findings are collapsed before the PR comment is posted and before review fix issues are created. If coverage is incomplete for material source files, HerdOS requests changes instead of approving. HerdOS uses live GitHub PR metadata as authoritative for current mergeability, conflict state, head SHA, labels, and CI state. If the batch PR changes while a review is running, HerdOS discards that review result so it does not act on an outdated diff; the next trigger or a manual `/herd review` reviews the updated diff. After Herd approves a PR head SHA, repeated automatic review triggers for that same current head are logged no-ops instead of spending another review session; a new commit or manual `/herd review` asks for a fresh pass. If issues are found, the Integrator creates fix issues and dispatches fix workers. When repeated completed fix cycles are not reducing findings and those findings share package/root-cause clusters, HerdOS creates one strategy-level fix issue instead of another large endpoint-level fix issue. This cycle repeats up to `review_max_fix_cycles` times. If another Integrator already owns the same batch lock, duplicate review or CI triggers skip with an active-lock log and are retried by the next relevant event or Monitor patrol.
 
 5. **CI failure detection** — When `integrator.ci_workflows` lists your CI workflow names, `herd init` installs `workflow_run` self-heal triggers for those exact GitHub Actions workflows on batch branches. If configured CI fails, the Integrator re-runs checks once (transient failure filter), then dispatches fix workers up to `ci_max_fix_cycles`. CheckCI pauses dispatching a new CI fix worker if any fix-type worker — review fix, CI fix, or conflict resolution — is still in progress in the same batch milestone. The Monitor and `/herd fix-ci` remain fallback paths.
 
-6. **Monitor patrols** — A cron-triggered Action detects stale workers (in-progress with no active run), failed issues (auto-redispatches with exponential backoff), CI failures on batch PRs, and stuck PRs (open longer than `max_pr_age_hours`). It escalates to `notify_users` when retries are exhausted.
+6. **Monitor patrols** — A cron-triggered Action detects stale workers (in-progress with no active run), failed issues (auto-redispatches with exponential backoff), CI failures on batch PRs, stuck PRs (open longer than `max_pr_age_hours`), and completed batches that missed PR creation. For PR recovery, the Monitor looks for an open milestone where all tasks are complete, the batch branch exists, and no open or closed PR already exists for that batch branch. It then idempotently runs the normal batch-advance path to open the PR. If the same batch lock is active, recovery logs a skip and waits for a later patrol.
 
 7. **You review and merge** — The batch PR arrives with a reviewer-facing summary, major changes, validation notes, and then the task/tier table. If `pull_requests.auto_merge` is true and the agent review passed, it merges automatically. If you close the PR without merging, cleanup still runs: non-done issues are labelled `herd/status:cancelled`, the milestone is closed, and the branch is deleted.
 
@@ -275,6 +288,7 @@ These are loaded automatically when the respective role runs.
 - **Stale review result** — If the batch PR changes during agent review, HerdOS discards that result instead of creating fix workers or approving based on an outdated diff. The updated diff is reviewed on a later trigger, or you can run `/herd review` manually.
 - **Duplicate approved-head review** — If an automatic trigger fires after Herd has already approved the current PR head SHA, HerdOS logs the skip and does not start another review agent. Use `/herd review` when you want a fresh pass without pushing a new commit.
 - **Unparseable review output** — If the review agent returns output that can't be parsed, the Integrator retries once after a 5-second delay within the same invocation. If both attempts fail, it posts an agent-review failure comment on the batch PR. Run `/herd review` on the PR to retry — the Integrator does not silently drop the review.
+- **Multi-batch scheduling diagnostics** — In Integrator logs, look for `resolved worker run context` with `run_id`, `issue`, `batch_branch`, `worker_branch`, and `lock_key` to confirm Herd resolved the batch from issue and milestone metadata. If work is skipped because another same-batch Integrator owns the lock, look for `Integrator batch lock active; skipping`. In Monitor logs, stranded PR recovery appears as `Recovered stranded batch`, `Stranded batch recovery skipped`, or a warning about failed stranded-batch recovery.
 
 ### Manual Tasks
 

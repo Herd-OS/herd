@@ -1178,6 +1178,47 @@ func TestReview_ManualActiveLockSkipCommentsWithDiagnostics(t *testing.T) {
 	assert.Contains(t, comment, "sha-current")
 }
 
+func TestReview_ActiveBatchLockSkipsBeforeReviewLock(t *testing.T) {
+	issueSvc := newMockIssueService()
+	now := time.Now().UTC()
+	batchLockBranch := BatchLockBranch(1)
+	activeBatch := lockedBatchLockState(1, "herd/batch/1-batch", 99, "active-batch-lock", now)
+	activeBatch.Owner = "batch-owner"
+	repoSvc := &mockRepoService{
+		defaultBranch: "main",
+		branchExists: map[string]bool{
+			"herd/batch/1-batch": true,
+			batchLockBranch:      true,
+		},
+		branchSHAs: map[string]string{
+			"herd/batch/1-batch": "sha-current",
+			batchLockBranch:      "active-batch-sha",
+		},
+		commitMessages: map[string]string{
+			"active-batch-sha": mustBatchLockCommitMessage(t, activeBatch),
+		},
+	}
+	ag := &mockReviewAgent{reviewResult: &agent.ReviewResult{Approved: true, Summary: "LGTM"}}
+	dir, g := initTestRepo(t)
+	mock := newReviewLockTestPlatform(issueSvc)
+	mock.repo = repoSvc
+
+	out := captureIntegratorStdout(t, func() {
+		result, err := Review(context.Background(), mock, ag, g, &config.Config{
+			Integrator: config.Integrator{Review: true, ReviewMaxFixCycles: 3},
+		}, ReviewParams{PRNumber: 50, RepoRoot: dir})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.True(t, result.BatchLockSkipped)
+		assert.Contains(t, result.SkipReason, "Integrator batch lock active; skipping")
+	})
+
+	assert.Equal(t, 0, ag.calls)
+	assert.False(t, repoSvc.branchExists[reviewLockBranch(50)], "review lock should not be acquired when batch lock blocks")
+	assert.Contains(t, out, "Integrator batch lock active; skipping")
+	assert.Contains(t, out, "owner=batch-owner")
+}
+
 func TestReview_ManualStaleOldHeadLockReclaimsAndPostsInfoComment(t *testing.T) {
 	issueSvc := newMockIssueService()
 	now := time.Now().UTC()
@@ -6192,6 +6233,34 @@ func TestReviewStandalone_PostsComment(t *testing.T) {
 
 	require.Len(t, prSvc.reviews, 1)
 	assert.Equal(t, platform.ReviewRequestChanges, prSvc.reviews[0].event)
+}
+
+func TestReviewStandalone_NotBlockedByActiveBatchLock(t *testing.T) {
+	mock, prSvc, _, _ := newStandalonePlatform()
+	now := time.Now().UTC()
+	activeBatch := lockedBatchLockState(1, "herd/batch/1-batch", 99, "active-batch-lock", now)
+	lockBranch := BatchLockBranch(1)
+	mock.repo.branchExists[lockBranch] = true
+	mock.repo.branchSHAs = map[string]string{
+		"herd/batch/1-batch": "batch-sha",
+		lockBranch:           "active-batch-sha",
+	}
+	mock.repo.commitMessages = map[string]string{
+		"active-batch-sha": mustBatchLockCommitMessage(t, activeBatch),
+	}
+	ag := &mockReviewAgent{
+		reviewResult: &agent.ReviewResult{Approved: true, Summary: "Standalone looks good."},
+	}
+
+	result, err := ReviewStandalone(context.Background(), mock, ag, &config.Config{
+		Integrator: config.Integrator{Review: true},
+	}, ReviewStandaloneParams{PRNumber: 77, RepoRoot: t.TempDir()})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, ag.calls)
+	require.Len(t, prSvc.comments, 1)
+	assert.Contains(t, prSvc.comments[0], "Standalone looks good.")
 }
 
 func TestReviewStandalone_ReturnsErrorWhenRefetchedPRFails(t *testing.T) {
